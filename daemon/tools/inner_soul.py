@@ -265,18 +265,18 @@ def _propose_soul_change(
     
     Creates a proposed change file that must be manually approved.
     """
-    # Create proposed_changes directory
-    proposed_dir = agent_path / "proposed"
-    proposed_dir.mkdir(exist_ok=True)
+    # Create history directory for tracking
+    history_dir = agent_path / "history"
+    history_dir.mkdir(exist_ok=True)
     
     # Generate filename
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_soul_addition.md"
-    filepath = proposed_dir / filename
+    filename = f"{timestamp}_soul_proposal.md"
+    filepath = history_dir / filename
     
     # Write proposal
-    proposal_content = f"""# Proposed Soul Change
+    proposal_content = f"""# Soul Change Proposal
 
 **Created:** {now.strftime("%Y-%m-%d %H:%M:%S")}
 **Status:** PENDING APPROVAL
@@ -289,8 +289,7 @@ def _propose_soul_change(
 
 1. Review the content above
 2. If approved, manually add to soul.md
-3. Update SOUL_HISTORY table with this change
-4. Delete this file
+3. Delete this file
 
 ## To Reject
 
@@ -301,7 +300,7 @@ Delete this file.
     return (
         f"⚠ SOUL CHANGE PROPOSED (requires user approval):\n"
         f"```\n{content[:200]}{'...' if len(content) > 200 else ''}\n```\n\n"
-        f"Created: proposed/{filename}\n"
+        f"Created: history/{filename}\n"
         f"This change will NOT be applied automatically.\n"
         f"Review and manually apply if approved."
     )

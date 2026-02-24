@@ -78,17 +78,19 @@ agents/
 │   ├── workflow.md           # Minimal task loop
 │   ├── rule.md               # Basic constraints
 │   ├── tools.md              # Available tools (includes inner_soul)
-│   ├── memory.md             # Core knowledge placeholder
-│   └── memories/             # Event storage
+│   ├── memory.md             # Accumulated knowledge only
+│   ├── memories/             # Event storage
+│   └── history/              # Soul change proposals
 │
 ├── coder/                    # Example: code implementation agent
 │   ├── growth.md
-│   ├── soul.md               # + SOUL_HISTORY table
+│   ├── soul.md               # Identity only (no history table)
 │   ├── workflow.md
 │   ├── rule.md
 │   ├── tools.md
-│   ├── memory.md             # Core only
-│   └── memories/             # Timestamped files
+│   ├── memory.md             # Accumulated knowledge only
+│   ├── memories/             # Timestamped files
+│   └── history/              # Soul change proposals
 │
 └── leader/                   # Example: orchestration agent
     └── ... (same structure)
@@ -148,10 +150,10 @@ inner_soul(intent="learn", content="Iterative testing catches bugs earlier in de
 → After 3 similar patterns: proposes workflow change
 
 # Requesting identity change
-inner_soul(intent="change", content="I value iterative development after seeing consistent success")
+inner_soul(intent="change", target="soul", content="I value iterative development after seeing consistent success")
 → Validates against growth.md
-→ Requests user approval
-→ Appends to soul.md with SOUL_HISTORY entry
+→ Creates proposal in history/
+→ Requires user approval
 ```
 
 ---
@@ -185,31 +187,26 @@ inner_soul(intent="change", content="I value iterative development after seeing 
 
 ## Memory Architecture
 
-### `memory.md` — Core Knowledge
+### `memory.md` — Accumulated Knowledge
 
 ```markdown
-# Core Memory
+# Memory
 
-Only the most essential, stable knowledge belongs here.
+## Known Patterns
 
-## Identity
+(To be filled through experience)
 
-[Purpose and role]
+## Project Context
 
-## Key Traits
-
-- [Trait 1]
-- [Trait 2]
-
----
-
-*For events, observations, and learnings — use `inner_soul` tool.*
+(To be filled through experience)
 ```
 
 **Rules:**
 - Max ~500 words
-- Only identity and essential traits
-- Updated rarely, only for core changes
+- Only accumulated knowledge (patterns, context, facts)
+- No identity (belongs in soul.md)
+- No instructions (belongs in workflow.md or growth.md)
+- Updated through `inner_soul` tool
 
 ### `memories/` — Event Log
 
@@ -225,6 +222,21 @@ memories/
 - Filename format: `YYYYMMDD_HHMM_short_description.md`
 - Each file: max 1000 characters
 - Append-only (never delete)
+- Managed by `inner_soul`
+
+### `history/` — Soul Change Proposals
+
+```
+history/
+├── 20260225_160530_soul_proposal.md
+├── 20260226_091234_soul_proposal.md
+└── ...
+```
+
+**Rules:**
+- Filename format: `YYYYMMDD_HHMMSS_soul_proposal.md`
+- Contains proposed soul.md changes awaiting approval
+- Delete after applying or rejecting
 - Managed by `inner_soul`
 
 ---

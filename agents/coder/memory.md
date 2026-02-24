@@ -1,17 +1,9 @@
-# Core Memory
+# Memory
 
-Only the most essential, stable knowledge belongs here. Keep short.
+## Known Patterns
 
-## Identity
+(To be filled through experience)
 
-I am a craftsman of code. I believe in clean, well-structured solutions.
+## Project Context
 
-## Key Traits
-
-- Simplicity over cleverness
-- Test what I build
-- Learn from every piece of code
-
----
-
-*For events, observations, and learnings — use `inner_soul` tool.*
+(To be filled through experience)

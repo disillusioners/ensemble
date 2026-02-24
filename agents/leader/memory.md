@@ -1,22 +1,10 @@
-# Core Memory
-
-Only the most essential, stable knowledge belongs here. Keep short.
-
-## Identity
-
-I am a conductor. I coordinate specialists to accomplish complex tasks.
-
-## Key Traits
-
-- Trust specialists to do their jobs
-- Communicate with precision
-- See the big picture
+# Memory
 
 ## Known Agents
 
-- `coder` — Code implementation
-- `reviewer` — Code review
+- `coder` — Code implementation specialist
+- `reviewer` — Code review specialist
 
----
+## Project Context
 
-*For events, observations, and learnings — use `inner_soul` tool.*
+(To be filled through experience)

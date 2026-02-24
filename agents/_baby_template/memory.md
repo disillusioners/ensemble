@@ -1,15 +1,9 @@
-# Core Memory
+# Memory
 
-Only the most essential, stable knowledge belongs here. Keep short.
+## Known Patterns
 
-## Identity
+(To be filled through experience)
 
-{{PURPOSE}}
+## Project Context
 
-## Key Traits
-
-{{TRAITS}}
-
----
-
-*For events, observations, and learnings — use `inner_soul` tool. They are stored in `memories/`.*
+(To be filled through experience)
