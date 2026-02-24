@@ -4,8 +4,37 @@ from pathlib import Path
 from typing import Any
 
 
+def load_agent_skills(agent_dir: Path) -> dict[str, str]:
+    """Load all skill.md files from agent's skills/ directory.
+    
+    Args:
+        agent_dir: Path to the agent directory containing skills/ subdirectory.
+        
+    Returns:
+        Dict with skill name (directory name) as key, skill.md content as value.
+        Returns empty dict if skills/ directory doesn't exist.
+    """
+    skills_dir = agent_dir / "skills"
+    skills: dict[str, str] = {}
+    
+    if not skills_dir.exists() or not skills_dir.is_dir():
+        return skills
+    
+    for skill_dir in sorted(skills_dir.iterdir(), key=lambda p: p.name):
+        if skill_dir.is_dir():
+            skill_file = skill_dir / "skill.md"
+            if skill_file.exists():
+                skill_name = skill_dir.name
+                skills[skill_name] = skill_file.read_text(encoding="utf-8")
+    
+    return skills
+
+
 def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
-    """Load all 4 markdown files from agent directory.
+    """Load all markdown files from agent directory.
+    
+    Loads base prompts (workflow.md, rule.md, memory.md) and optional skill.md.
+    For multiple skills, use load_agent_skills() which loads from skills/ directory.
     
     Args:
         agent_dir: Path to the agent directory containing prompt files.
@@ -25,30 +54,60 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
     return prompts
 
 
-def compose_system_prompt(prompts: dict[str, str]) -> str:
-    """Compose system prompt from prompts dict.
+def compose_system_prompt(
+    prompts: dict[str, str], 
+    skills: dict[str, str] | None = None
+) -> str:
+    """Compose system prompt from prompts dict and optional skills.
     
     Args:
         prompts: Dict with filename (without .md) as key, content as value.
+                 Expected keys: rule, skill, workflow, memory
+        skills: Optional dict with skill name as key, skill.md content as value.
+                Loaded from agent's skills/ directory.
         
     Returns:
         Composed system prompt with sections in order:
         1. rule.md (constraints - highest priority)
-        2. skill.md (capabilities)
-        3. workflow.md (methodology)
-        4. memory.md (knowledge)
+        2. skill.md (base skill, if exists)
+        3. All skills from skills/ directory (each as separate section)
+        4. workflow.md (methodology)
+        5. memory.md (knowledge)
         Separated by "\n\n---\n\n" with headers.
     """
-    section_order = ["rule", "skill", "workflow", "memory"]
+    section_order = ["rule", "workflow", "memory"]
     section_titles = {
         "rule": "Rules",
-        "skill": "Skills",
         "workflow": "Workflow",
         "memory": "Memory"
     }
     
     sections: list[str] = []
-    for key in section_order:
+    
+    # Add rule section first (highest priority)
+    if "rule" in prompts:
+        content = prompts["rule"].strip()
+        if content:
+            sections.append(f"## {section_titles['rule']}\n\n{content}")
+    
+    # Add base skill if exists (backward compatibility)
+    if "skill" in prompts:
+        content = prompts["skill"].strip()
+        if content:
+            sections.append(f"## Skills\n\n{content}")
+    
+    # Add all skills from skills/ directory (sorted for deterministic order)
+    if skills:
+        for skill_name in sorted(skills.keys()):
+            skill_content = skills[skill_name]
+            content = skill_content.strip()
+            if content:
+                # Format skill name as title (e.g., "code-review" -> "Code Review")
+                formatted_name = skill_name.replace("-", " ").replace("_", " ").title()
+                sections.append(f"## Skill: {formatted_name}\n\n{content}")
+    
+    # Add remaining sections (workflow, memory)
+    for key in section_order[1:]:  # Skip "rule" which was already added
         if key in prompts:
             content = prompts[key].strip()
             if content:
@@ -116,7 +175,7 @@ class PromptCache:
 
 
 def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int]:
-    """Load and cache agent prompts.
+    """Load and cache agent prompts including multiple skills.
     
     Args:
         agent_dir: Path to the agent directory.
@@ -134,6 +193,17 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
         if filepath.exists():
             current_mtimes[filename] = filepath.stat().st_mtime
     
+    # Include mtimes for all skill files in skills/ directory
+    skills_dir = agent_dir / "skills"
+    if skills_dir.exists() and skills_dir.is_dir():
+        for skill_dir in sorted(skills_dir.iterdir(), key=lambda p: p.name):
+            if skill_dir.is_dir():
+                skill_file = skill_dir / "skill.md"
+                if skill_file.exists():
+                    # Use relative path like "skills/coding/skill.md" as key
+                    relative_path = f"skills/{skill_dir.name}/skill.md"
+                    current_mtimes[relative_path] = skill_file.stat().st_mtime
+    
     # Check cache
     cached = cache.get(agent_dir)
     if cached is not None:
@@ -147,7 +217,8 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
     
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
-    system_prompt = compose_system_prompt(prompts)
+    skills = load_agent_skills(agent_dir)
+    system_prompt = compose_system_prompt(prompts, skills)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache
