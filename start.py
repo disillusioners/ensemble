@@ -75,8 +75,9 @@ def main():
     print(f"  Model: {os.environ['OPENAI_MODEL']}")
     print(f"  API URL: {os.environ['OPENAI_BASE_URL']}")
     print(f"\nStarting server...")
-    print(f"  API Docs: http://localhost:{port}/docs")
-    print(f"  Health:   http://localhost:{port}/health\n")
+    print(f"  API Docs:   http://localhost:{port}/docs")
+    print(f"  Health:     http://localhost:{port}/health")
+    print(f"  UI:         http://localhost:{port}/ui\n")
 
     # Start uvicorn
     args = ["uvicorn", "daemon.api:app", "--host", host, "--port", str(port)]

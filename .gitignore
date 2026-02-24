@@ -23,6 +23,10 @@ htmlcov/
 .tox/
 .nox/
 
+# Frontend
+node_modules/
+
+
 # Environment variables
 .env
 .env.local

@@ -11,10 +11,13 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
+from pathlib import Path
+import os
 
 from .models import (
     SessionCreate,
@@ -29,6 +32,10 @@ from .models import (
 )
 from .manager import SessionManager
 from .config import Config, load_config
+
+# Determine the base path
+BASE_DIR = Path(__file__).parent.parent
+FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 # Global state
 manager: SessionManager = None
@@ -291,3 +298,32 @@ async def stream_events(session_id: str):
                 yield {"event": "message", "data": event}
 
     return EventSourceResponse(event_generator())
+
+
+# Static file serving for production UI
+@app.get("/ui")
+async def serve_ui():
+    """Serve the frontend UI."""
+    index_path = FRONTEND_DIST / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return JSONResponse(
+        status_code=404,
+        content={"error": "UI not built. Run 'npm run build' in frontend directory."}
+    )
+
+
+@app.get("/ui/{path:path}")
+async def serve_ui_assets(path: str):
+    """Serve frontend assets."""
+    asset_path = FRONTEND_DIST / path
+    if asset_path.exists():
+        return FileResponse(str(asset_path))
+    # For SPA routing, serve index.html
+    index_path = FRONTEND_DIST / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path))
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Asset not found"}
+    )

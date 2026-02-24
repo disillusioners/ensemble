@@ -73,7 +73,8 @@ echo ""
 # Start the server
 echo -e "${GREEN}Starting server...${NC}"
 echo -e "${GREEN}API Documentation: http://localhost:$PORT/docs${NC}"
-echo -e "${GREEN}Health Check: http://localhost:$PORT/health${NC}"
+echo -e "${GREEN}Health Check:     http://localhost:$PORT/health${NC}"
+echo -e "${GREEN}UI:                http://localhost:$PORT/ui${NC}"
 echo ""
 
 $PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT"
