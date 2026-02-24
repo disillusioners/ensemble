@@ -3,6 +3,9 @@
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING
 
+from .bash import bash
+from .filesystem import list_directory, read_file, glob_files
+
 if TYPE_CHECKING:
     from ..manager import SessionManager
 
@@ -81,4 +84,16 @@ def create_session_tools(manager: "SessionManager", current_session_id: str):
         """
         return manager.get_session_info(session_id)
     
-    return [spawn_session, send_message, terminate_session, list_sessions, get_session_info]
+    return [
+        # Static tools (available in all sessions)
+        bash,
+        list_directory,
+        read_file,
+        glob_files,
+        # Session management tools
+        spawn_session,
+        send_message,
+        terminate_session,
+        list_sessions,
+        get_session_info,
+    ]
