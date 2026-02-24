@@ -23,6 +23,9 @@ htmlcov/
 .tox/
 .nox/
 
+# Data directory
+data/
+
 # Frontend
 node_modules/
 
