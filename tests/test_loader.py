@@ -416,3 +416,80 @@ class TestLoadAndCachePromptWithSkills:
         # Should reload
         prompt2, _ = load_and_cache_prompt(agent_dir, cache)
         assert "Write better code" in prompt2
+
+
+class TestToolsLoading:
+    """Tests for tools.md loading."""
+
+    def test_load_agent_prompts_includes_tools(self, tmp_path):
+        """Test that tools.md is loaded as a prompt file."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "tools.md").write_text("# Tools\nAvailable tools")
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+        
+        prompts = load_agent_prompts(agent_dir)
+        
+        assert "tools" in prompts
+        assert prompts["tools"] == "# Tools\nAvailable tools"
+
+    def test_compose_includes_tools_section(self):
+        """Test that tools section is included in composed prompt."""
+        prompts = {
+            "rule": "# Rules\nFollow rules",
+            "tools": "# Tools\n- bash\n- read_file",
+            "workflow": "# Workflow\nDo work",
+        }
+        
+        result = compose_system_prompt(prompts)
+        
+        # Check order: rules → tools → workflow
+        rule_pos = result.find("## Rules")
+        tools_pos = result.find("## Tools")
+        workflow_pos = result.find("## Workflow")
+        
+        assert rule_pos != -1
+        assert tools_pos != -1
+        assert workflow_pos != -1
+        assert rule_pos < tools_pos < workflow_pos
+
+    def test_compose_order_with_skills_and_tools(self):
+        """Test full order: rule → skills → tools → workflow → memory."""
+        prompts = {
+            "rule": "# Rules",
+            "tools": "# Tools",
+            "workflow": "# Workflow",
+            "memory": "# Memory",
+        }
+        skills = {
+            "coding": "# Coding skill",
+        }
+        
+        result = compose_system_prompt(prompts, skills)
+        
+        rule_pos = result.find("## Rules")
+        skill_pos = result.find("## Skill: Coding")
+        tools_pos = result.find("## Tools")
+        workflow_pos = result.find("## Workflow")
+        memory_pos = result.find("## Memory")
+        
+        assert rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
+
+    def test_cache_invalidates_on_tools_change(self, tmp_path):
+        """Test that cache invalidates when tools.md changes."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "rule.md").write_text("# Rules\nTest")
+        tools_file = agent_dir / "tools.md"
+        tools_file.write_text("# Tools\n- bash")
+        
+        cache = PromptCache()
+        
+        prompt1, _ = load_and_cache_prompt(agent_dir, cache)
+        assert "bash" in prompt1
+        
+        time.sleep(0.1)
+        tools_file.write_text("# Tools\n- bash\n- read_file")
+        
+        prompt2, _ = load_and_cache_prompt(agent_dir, cache)
+        assert "read_file" in prompt2
