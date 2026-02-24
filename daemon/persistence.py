@@ -277,6 +277,26 @@ def delete_session(conn: sqlite3.Connection, session_id: str) -> None:
     logger.info(f"Deleted session: session_id={session_id}")
 
 
+def delete_all_sessions(conn: sqlite3.Connection) -> int:
+    """Delete all sessions from the database.
+    
+    Args:
+        conn: Database connection.
+        
+    Returns:
+        Number of sessions deleted.
+    """
+    cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+    count = cursor.fetchone()[0]
+    
+    conn.execute("DELETE FROM session_hierarchy")
+    conn.execute("DELETE FROM sessions")
+    conn.commit()
+    
+    logger.info(f"Deleted all {count} sessions from database")
+    return count
+
+
 def cleanup_old_checkpoints(
     conn: sqlite3.Connection,
     checkpointer: SqliteSaver,

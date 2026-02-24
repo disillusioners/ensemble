@@ -16,6 +16,7 @@ from .persistence import (
     save_session_metadata,
     update_session_status,
     get_session_metadata,
+    delete_all_sessions,
 )
 from .tools import create_session_tools
 
@@ -123,11 +124,8 @@ class SessionManager:
         Raises:
             KeyError: If session_id is not found.
         """
-        # Get session graph
-        if session_id not in self.sessions:
-            raise KeyError(f"Session not found: {session_id}")
-
-        graph, _ = self.sessions[session_id]
+        # Get session graph (will lazy-load from DB if needed)
+        graph = self.get_session(session_id)
 
         # Invoke with message
         config = {"configurable": {"thread_id": session_id}}
@@ -162,6 +160,9 @@ class SessionManager:
     def get_session(self, session_id: str) -> CompiledStateGraph:
         """Get a session graph instance.
 
+        Uses database as source of truth. If session exists in DB but not in memory,
+        it will be restored (lazy loading).
+
         Args:
             session_id: The ID of the session.
 
@@ -169,12 +170,60 @@ class SessionManager:
             The CompiledStateGraph instance for the session.
 
         Raises:
-            KeyError: If session_id is not found.
+            KeyError: If session_id is not found in database.
         """
-        if session_id not in self.sessions:
+        # Check in-memory cache first
+        if session_id in self.sessions:
+            graph, _ = self.sessions[session_id]
+            return graph
+
+        # Not in memory - check database and restore if found
+        meta = get_session_metadata(self.conn, session_id)
+        if meta is None:
             raise KeyError(f"Session not found: {session_id}")
 
-        graph, _ = self.sessions[session_id]
+        # Session exists in DB but not in memory - restore it
+        return self._restore_session(session_id, meta["agent_dir"])
+
+    def _restore_session(self, session_id: str, agent_dir: str) -> CompiledStateGraph:
+        """Restore a session from database into memory.
+
+        Rebuilds the graph with the same session_id. The checkpointer will
+        restore conversation state from LangGraph's checkpoint tables.
+
+        Args:
+            session_id: The ID of the session to restore.
+            agent_dir: Path to the agent directory.
+
+        Returns:
+            The restored CompiledStateGraph instance.
+        """
+        # Load and cache prompt
+        agent_path = Path(agent_dir)
+        system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
+
+        # Create tools with this manager reference
+        tools = create_session_tools(self, session_id)
+
+        # Build LLM config
+        llm_config = {
+            "base_url": self.config.llm.base_url,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "temperature": self.config.llm.temperature,
+        }
+
+        # Build graph with checkpointer (will restore state from checkpoints)
+        graph = build_session_graph(
+            tools=tools,
+            checkpointer=self.checkpointer,
+            llm_config=llm_config,
+            system_prompt=system_prompt,
+        )
+
+        # Store in sessions dict
+        self.sessions[session_id] = (graph, agent_dir)
+
         return graph
 
     def list_sessions(self) -> list[dict]:
@@ -201,3 +250,15 @@ class SessionManager:
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
         return meta
+
+    def clear_all_sessions(self) -> int:
+        """Clear all sessions from memory and database.
+
+        Returns:
+            Number of sessions deleted from database.
+        """
+        # Clear in-memory sessions
+        self.sessions.clear()
+
+        # Clear database sessions
+        return delete_all_sessions(self.conn)

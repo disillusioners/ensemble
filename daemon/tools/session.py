@@ -1,8 +1,10 @@
+"""Session management tools for multi-agent orchestration."""
+
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .manager import SessionManager
+    from ..manager import SessionManager
 
 
 def create_session_tools(manager: "SessionManager", current_session_id: str):

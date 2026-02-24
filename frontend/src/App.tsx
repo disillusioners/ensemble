@@ -1,6 +1,7 @@
 import { FunctionalComponent } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
 import { AgentSelector } from './components/AgentSelector';
+import { AgentSwitcher } from './components/AgentSwitcher';
 import { SessionList } from './components/SessionList';
 import { ChatInterface } from './components/ChatInterface';
 import { MessageInput } from './components/MessageInput';
@@ -243,6 +244,23 @@ export const App: FunctionalComponent = () => {
           
           {/* Chat area */}
           <div class="flex-1 flex flex-col">
+            {/* Chat header with agent switcher */}
+            <div class="h-14 flex items-center justify-between px-4 border-b border-dark-700 bg-dark-900 flex-shrink-0">
+              <div class="flex items-center gap-3">
+                <AgentSwitcher
+                  currentAgent={currentAgent ?? null}
+                  onAgentChange={handleSelectAgent}
+                />
+              </div>
+              <div class="flex items-center gap-2">
+                {currentSession && (
+                  <span class="text-xs text-dark-500 font-body">
+                    Session: {currentSession.session_id.slice(0, 8)}...
+                  </span>
+                )}
+              </div>
+            </div>
+            
             <ChatInterface
               messages={messages}
               isLoading={isSending}
