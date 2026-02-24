@@ -4,6 +4,32 @@ You have access to these tools for orchestrating work across specialized agents.
 
 ---
 
+## `inner_soul`
+
+Remember, learn, or change yourself. Just say what you want — I handle the rest.
+
+**Parameters:**
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `intent` | string | Yes | What you want: `remember`, `learn`, `change` |
+| `content` | string | Yes | What to remember/learn/change |
+
+**What happens:**
+| Intent | Action |
+|--------|--------|
+| `remember` | Stores as timestamped file in `memories/` |
+| `learn` | Stores in `memories/` + checks if pattern should evolve workflow |
+| `change` | Proposes change to `workflow.md` or `soul.md` (may need approval) |
+
+**Examples:**
+```
+inner_soul(intent="remember", content="Coder works best with specific requirements")
+inner_soul(intent="learn", content="Parallel spawning works well for independent tasks")
+inner_soul(intent="change", content="Add 'confirm understanding' step before delegating")
+```
+
+---
+
 ## `spawn_session`
 
 Create a new agent session to handle a subtask.

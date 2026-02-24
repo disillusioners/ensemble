@@ -5,17 +5,19 @@ from typing import TYPE_CHECKING
 
 from .bash import bash
 from .filesystem import list_directory, read_file, glob_files
+from .inner_soul import create_inner_soul_tool
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
 
 
-def create_session_tools(manager: "SessionManager", current_session_id: str):
+def create_session_tools(manager: "SessionManager", current_session_id: str, agent_dir: str = ""):
     """Create tools with injected manager reference.
     
     Args:
         manager: The SessionManager instance to use for operations
         current_session_id: The ID of the current session (used as parent for spawned sessions)
+        agent_dir: The path to the agent directory for self-modification tools
     
     Returns:
         List of tool functions
@@ -84,6 +86,9 @@ def create_session_tools(manager: "SessionManager", current_session_id: str):
         """
         return manager.get_session_info(session_id)
     
+    # Create inner_soul tool for self-modification
+    inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)
+    
     return [
         # Static tools (available in all sessions)
         bash,
@@ -96,4 +101,6 @@ def create_session_tools(manager: "SessionManager", current_session_id: str):
         terminate_session,
         list_sessions,
         get_session_info,
+        # Self-modification tool
+        inner_soul,
     ]

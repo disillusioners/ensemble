@@ -1,19 +1,15 @@
-# Memory
+# Core Memory
 
-Accumulated knowledge and observations.
+Only the most essential, stable knowledge belongs here. Keep short.
+
+## Identity
+
+{{PURPOSE}}
+
+## Key Traits
+
+{{TRAITS}}
 
 ---
 
-## Origin
-
-- **Created:** {{CREATED}}
-- **Purpose:** {{PURPOSE}}
-- **Domain:** {{DOMAIN}}
-
----
-
-## Observations
-
-Auto-updated after tasks. Format: `[YYYY-MM-DD] <observation>`
-
-<!-- Append observations below -->
+*For events, observations, and learnings — use `inner_soul` tool. They are stored in `memories/`.*

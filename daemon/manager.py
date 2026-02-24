@@ -1,8 +1,9 @@
 """Session manager orchestrating all agent sessions."""
 
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -19,6 +20,14 @@ from .persistence import (
     delete_all_sessions,
 )
 from .tools import create_session_tools
+
+
+@dataclass
+class MessageResult:
+    """Result of sending a message to a session."""
+    content: str
+    thinking: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class SessionManager:
@@ -80,7 +89,7 @@ class SessionManager:
         system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id)
+        tools = create_session_tools(self, session_id, agent_dir)
 
         # Build LLM config
         llm_config = {
@@ -111,7 +120,7 @@ class SessionManager:
 
         return session_id
 
-    def send_message(self, session_id: str, message: str) -> str:
+    def send_message(self, session_id: str, message: str) -> MessageResult:
         """Send a message to a session and get the response.
 
         Args:
@@ -119,7 +128,7 @@ class SessionManager:
             message: The message content to send.
 
         Returns:
-            The content of the last message in the response.
+            MessageResult with content, thinking, and tool_calls.
 
         Raises:
             KeyError: If session_id is not found.
@@ -131,11 +140,39 @@ class SessionManager:
         config = {"configurable": {"thread_id": session_id}}
         result = graph.invoke({"messages": [message]}, config)
 
-        # Return last message content
+        # Extract last message data
         messages = result.get("messages", [])
         if messages:
-            return messages[-1].content
-        return ""
+            last_message = messages[-1]
+            content = last_message.content or ""
+            
+            # Extract tool calls if present
+            tool_calls = None
+            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                tool_calls = [
+                    {
+                        "id": tc.get("id", ""),
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("args", {}),
+                    }
+                    for tc in last_message.tool_calls
+                ]
+            
+            # Extract thinking if present (for models that support extended thinking)
+            thinking = None
+            if hasattr(last_message, "thinking"):
+                thinking = last_message.thinking
+            elif hasattr(last_message, "response_metadata"):
+                # Some models store thinking in response_metadata
+                metadata = last_message.response_metadata or {}
+                thinking = metadata.get("thinking") or metadata.get("reasoning_content")
+            
+            return MessageResult(
+                content=content,
+                thinking=thinking,
+                tool_calls=tool_calls,
+            )
+        return MessageResult(content="")
 
     def terminate_session(self, session_id: str) -> bool:
         """Terminate a session.
@@ -203,7 +240,7 @@ class SessionManager:
         system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id)
+        tools = create_session_tools(self, session_id, agent_dir)
 
         # Build LLM config
         llm_config = {

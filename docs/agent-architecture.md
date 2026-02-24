@@ -4,6 +4,21 @@ A self-evolving multi-agent system where agents are born as templates and grow t
 
 ---
 
+## Implementation Status
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| Agent config files | ✅ Implemented | `agents/*/` |
+| `_baby_template/` | ✅ Implemented | `agents/_baby_template/` |
+| `_inner_soul/` | ✅ Implemented | `agents/_inner_soul/` |
+| `inner_soul` tool | ✅ Implemented | `daemon/tools/inner_soul.py` |
+| Tool integration | ✅ Implemented | `daemon/tools/session.py` |
+| Pattern tracking | 🔄 Pending | - |
+| Rate limiting | 🔄 Pending | - |
+| User approval flow | ⚠️ Partial | Creates `proposed/` files |
+
+---
+
 ## Overview
 
 ```

@@ -182,6 +182,7 @@ async def get_session(session_id: str):
 @app.delete("/sessions/{session_id}")
 async def terminate_session(session_id: str):
     """Terminate a session."""
+    # Check session exists
     try:
         manager.get_session(session_id)
     except KeyError:
@@ -194,6 +195,11 @@ async def terminate_session(session_id: str):
         )
 
     manager.terminate_session(session_id)
+    
+    # Clean up stored events for this session
+    if session_id in _session_events:
+        del _session_events[session_id]
+    
     return {"terminated": True}
 
 
@@ -214,7 +220,7 @@ async def send_message(session_id: str, message: MessageCreate):
         )
 
     try:
-        response_content = manager.send_message(session_id, message.content)
+        result = manager.send_message(session_id, message.content)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -235,15 +241,18 @@ async def send_message(session_id: str, message: MessageCreate):
         "type": "message",
         "message_id": message_id,
         "role": "assistant",
-        "content": response_content,
+        "content": result.content,
+        "thinking": result.thinking,
+        "tool_calls": result.tool_calls,
         "created_at": now.isoformat(),
     })
 
     return MessageResponse(
         message_id=message_id,
         role="assistant",
-        content=response_content,
-        tool_calls=None,
+        content=result.content,
+        thinking=result.thinking,
+        tool_calls=result.tool_calls,
         created_at=now,
     )
 
