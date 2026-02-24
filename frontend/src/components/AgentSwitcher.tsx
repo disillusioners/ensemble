@@ -3,7 +3,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import { AVAILABLE_AGENTS, type Agent } from '../types';
 
 interface AgentSwitcherProps {
-  currentAgent: Agent | null;
+  selectedAgent: Agent | null;
   onAgentChange: (agent: Agent) => void;
 }
 
@@ -13,16 +13,14 @@ const agentColorMap: Record<string, string> = {
   'reviewer': '#8b5cf6',
 };
 
-const STORAGE_KEY = 'auto-code-selected-agent';
-
 export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
-  currentAgent,
+  selectedAgent,
   onAgentChange,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const activeColor = currentAgent ? agentColorMap[currentAgent.id] : '#10a7f7';
+  const activeColor = selectedAgent ? agentColorMap[selectedAgent.id] : '#10a7f7';
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -36,21 +34,8 @@ export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Load saved agent from localStorage on mount
-  useEffect(() => {
-    const savedAgentId = localStorage.getItem(STORAGE_KEY);
-    if (savedAgentId && !currentAgent) {
-      const agent = AVAILABLE_AGENTS.find(a => a.id === savedAgentId);
-      if (agent) {
-        onAgentChange(agent);
-      }
-    }
-  }, []);
-
   const handleSelectAgent = (agent: Agent) => {
     onAgentChange(agent);
-    // Save to localStorage for persistence
-    localStorage.setItem(STORAGE_KEY, agent.id);
     setIsOpen(false);
   };
 
@@ -75,12 +60,12 @@ export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
           class="w-6 h-6 rounded-md flex items-center justify-center text-sm"
           style={{ backgroundColor: `${activeColor}20` }}
         >
-          {currentAgent?.icon || '🤖'}
+          {selectedAgent?.icon || '🤖'}
         </div>
         
         {/* Agent name */}
         <span class="font-body text-sm font-medium text-dark-200">
-          {currentAgent?.name || 'Select Agent'}
+          {selectedAgent?.name || 'Select Agent'}
         </span>
         
         {/* Chevron icon */}
@@ -106,7 +91,7 @@ export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
         >
           <div class="py-1">
             {AVAILABLE_AGENTS.map((agent) => {
-              const isSelected = currentAgent?.id === agent.id;
+              const isSelected = selectedAgent?.id === agent.id;
               const color = agentColorMap[agent.id];
 
               return (
@@ -122,45 +107,45 @@ export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
                     : 'text-dark-300 hover:bg-dark-700 hover:text-dark-100'
                   }
                 `}
+              >
+                {/* Agent icon */}
+                <div
+                  class="w-7 h-7 rounded-md flex items-center justify-center"
+                  style={{ backgroundColor: `${color}20` }}
                 >
-                  {/* Agent icon */}
-                  <div
-                    class="w-7 h-7 rounded-md flex items-center justify-center"
-                    style={{ backgroundColor: `${color}20` }}
+                  <span class="text-base">{agent.icon}</span>
+                </div>
+                
+                {/* Agent info */}
+                <div class="flex-1 min-w-0">
+                  <div 
+                    class="font-medium truncate"
+                    style={{ color: isSelected ? color : undefined }}
                   >
-                    <span class="text-base">{agent.icon}</span>
+                    {agent.name}
                   </div>
-                  
-                  {/* Agent info */}
-                  <div class="flex-1 min-w-0">
-                    <div 
-                      class="font-medium truncate"
-                      style={{ color: isSelected ? color : undefined }}
-                    >
-                      {agent.name}
-                    </div>
-                    <div class="text-xs text-dark-500 truncate">
-                      {agent.description}
-                    </div>
+                  <div class="text-xs text-dark-500 truncate">
+                    {agent.description}
                   </div>
+                </div>
 
-                  {/* Selection indicator */}
-                  {isSelected && (
-                    <svg
-                      class="w-4 h-4 flex-shrink-0"
-                      style={{ color }}
-                      fill="currentColor"
-                      viewBox="0 0 20 20"
-                    >
-                      <path
-                        fill-rule="evenodd"
-                        d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                        clip-rule="evenodd"
-                      />
-                    </svg>
-                  )}
-                </button>
-              );
+                {/* Selection indicator */}
+                {isSelected && (
+                  <svg
+                    class="w-4 h-4 flex-shrink-0"
+                    style={{ color }}
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path
+                      fill-rule="evenodd"
+                      d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                      clip-rule="evenodd"
+                    />
+                  </svg>
+                )}
+              </button>
+            );
             })}
           </div>
 

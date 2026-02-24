@@ -12,12 +12,18 @@ import { AVAILABLE_AGENTS } from './types';
 
 type AppView = 'select-agent' | 'chat';
 
+const NEXT_AGENT_STORAGE_KEY = 'auto-code-next-session-agent';
+
 export const App: FunctionalComponent = () => {
   const [view, setView] = useState<AppView>('select-agent');
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
+  const [nextSessionAgent, setNextSessionAgent] = useState<Agent | null>(() => {
+    // Initialize from localStorage
+    const saved = localStorage.getItem(NEXT_AGENT_STORAGE_KEY);
+    return saved ? AVAILABLE_AGENTS.find(a => a.id === saved) || null : null;
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [health, setHealth] = useState<{ status: string; uptime_seconds: number; version: string } | null>(null);
@@ -93,17 +99,17 @@ export const App: FunctionalComponent = () => {
     loadMessages();
   }, [currentSession]);
 
-  const handleSelectAgent = useCallback((agent: Agent) => {
-    setSelectedAgent(agent);
+  // Agent for next session (user can change via combobox)
+  const handleSetNextSessionAgent = useCallback((agent: Agent) => {
+    setNextSessionAgent(agent);
+    localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }, []);
 
-  const handleCreateSession = useCallback(async () => {
-    if (!selectedAgent) return;
-
+  const handleCreateSession = useCallback(async (agent: Agent) => {
     setIsLoading(true);
     try {
       // Convert agent name to path format expected by backend
-      const agentPath = `./agents/${selectedAgent.id}`;
+      const agentPath = `./agents/${agent.id}`;
       const session = await api.createSession(agentPath);
       
       setCurrentSession(session);
@@ -115,19 +121,18 @@ export const App: FunctionalComponent = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedAgent]);
+  }, []);
+
+  // Create session from AgentSelector
+  const handleCreateSessionFromSelector = useCallback(async () => {
+    if (!nextSessionAgent) return;
+    await handleCreateSession(nextSessionAgent);
+  }, [nextSessionAgent, handleCreateSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo) => {
     setCurrentSession(session);
-    
-    // Find agent based on session's agent_dir
-    const agentId = session.agent_dir.split('/').pop();
-    const agent = AVAILABLE_AGENTS.find(a => a.id === agentId);
-    if (agent) {
-      setSelectedAgent(agent);
-    }
-    
     setView('chat');
+    // Note: we don't change nextSessionAgent here - it's independent of current session
   }, []);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
@@ -144,11 +149,17 @@ export const App: FunctionalComponent = () => {
     }
   }, [currentSession]);
 
-  const handleNewSession = useCallback(() => {
+  const handleNewSession = useCallback(async () => {
+    if (!nextSessionAgent) {
+      // No agent selected, go to selector
+      setView('select-agent');
+      return;
+    }
+    
     setCurrentSession(null);
     setMessages([]);
-    setView('select-agent');
-  }, []);
+    await handleCreateSession(nextSessionAgent);
+  }, [nextSessionAgent, handleCreateSession]);
 
   const handleSendMessage = useCallback(async (content: string) => {
     if (!currentSession) return;
@@ -185,10 +196,10 @@ export const App: FunctionalComponent = () => {
     }
   }, [currentSession]);
 
-  // Get the current agent for the chat view
-  const currentAgent = selectedAgent || (currentSession 
-    ? AVAILABLE_AGENTS.find(a => currentSession.agent_dir.includes(a.id)) 
-    : null);
+  // Get the current session's agent (read-only, derived from session)
+  const sessionAgent = currentSession 
+    ? AVAILABLE_AGENTS.find(a => currentSession.agent_dir.includes(a.id)) || null
+    : null;
 
   return (
     <div class="h-screen flex flex-col bg-dark-950 font-body text-dark-100 overflow-hidden">
@@ -222,9 +233,9 @@ export const App: FunctionalComponent = () => {
         <div class="flex-1 flex items-center justify-center p-8 overflow-y-auto">
           <div class="max-w-4xl w-full">
             <AgentSelector
-              selectedAgent={selectedAgent}
-              onSelect={handleSelectAgent}
-              onCreateSession={handleCreateSession}
+              selectedAgent={nextSessionAgent}
+              onSelect={handleSetNextSessionAgent}
+              onCreateSession={handleCreateSessionFromSelector}
               isLoading={isLoading}
             />
           </div>
@@ -244,12 +255,12 @@ export const App: FunctionalComponent = () => {
           
           {/* Chat area */}
           <div class="flex-1 flex flex-col">
-            {/* Chat header with agent switcher */}
+            {/* Chat header with agent info */}
             <div class="h-14 flex items-center justify-between px-4 border-b border-dark-700 bg-dark-900 flex-shrink-0">
               <div class="flex items-center gap-3">
                 <AgentSwitcher
-                  currentAgent={currentAgent ?? null}
-                  onAgentChange={handleSelectAgent}
+                  selectedAgent={nextSessionAgent}
+                  onAgentChange={handleSetNextSessionAgent}
                 />
               </div>
               <div class="flex items-center gap-2">
@@ -264,7 +275,7 @@ export const App: FunctionalComponent = () => {
             <ChatInterface
               messages={messages}
               isLoading={isSending}
-              agent={currentAgent}
+              agent={sessionAgent}
               sessionId={currentSession?.session_id || null}
             />
             
@@ -272,7 +283,7 @@ export const App: FunctionalComponent = () => {
               <MessageInput
                 onSendMessage={handleSendMessage}
                 disabled={isSending}
-                agentColor={currentAgent?.id || 'coder'}
+                agentColor={sessionAgent?.id || 'coder'}
               />
             )}
           </div>
