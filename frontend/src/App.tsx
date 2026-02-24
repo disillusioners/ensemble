@@ -27,6 +27,21 @@ export const App: FunctionalComponent = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [health, setHealth] = useState<{ status: string; uptime_seconds: number; version: string } | null>(null);
+  const [showThinking, setShowThinking] = useState(() => 
+    localStorage.getItem('auto-code-show-thinking') === 'true'
+  );
+  const [showToolCalls, setShowToolCalls] = useState(() => 
+    localStorage.getItem('auto-code-show-toolcalls') === 'true'
+  );
+
+  // Persist toggle states
+  useEffect(() => {
+    localStorage.setItem('auto-code-show-thinking', String(showThinking));
+  }, [showThinking]);
+  
+  useEffect(() => {
+    localStorage.setItem('auto-code-show-toolcalls', String(showToolCalls));
+  }, [showToolCalls]);
 
   // SSE for real-time updates
   const { isStreaming, latestMessage } = useSSE(currentSession?.session_id || null);
@@ -184,6 +199,8 @@ export const App: FunctionalComponent = () => {
         message_id: response.message_id,
         role: 'assistant',
         content: response.content || '',
+        thinking: response.thinking || undefined,
+        tool_calls: (response.tool_calls as Array<{id: string; name: string; arguments: string | Record<string, unknown>}>) || undefined,
         created_at: response.created_at,
       };
       setMessages(prev => [...prev, assistantMessage]);
@@ -263,7 +280,32 @@ export const App: FunctionalComponent = () => {
                   onAgentChange={handleSetNextSessionAgent}
                 />
               </div>
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-3">
+                {/* Toggle buttons */}
+                <div class="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setShowThinking(!showThinking)}
+                    class={`px-2 py-1 text-xs rounded-md transition-colors ${
+                      showThinking 
+                        ? 'bg-accent-amber/20 text-accent-amber border border-accent-amber/30' 
+                        : 'bg-dark-800 text-dark-400 border border-dark-700 hover:text-dark-200'
+                    }`}
+                    title="Toggle thinking visibility"
+                  >
+                    💭 Think
+                  </button>
+                  <button
+                    onClick={() => setShowToolCalls(!showToolCalls)}
+                    class={`px-2 py-1 text-xs rounded-md transition-colors ${
+                      showToolCalls 
+                        ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/30' 
+                        : 'bg-dark-800 text-dark-400 border border-dark-700 hover:text-dark-200'
+                    }`}
+                    title="Toggle tool calls visibility"
+                  >
+                    🔧 Tools
+                  </button>
+                </div>
                 {currentSession && (
                   <span class="text-xs text-dark-500 font-body">
                     Session: {currentSession.session_id.slice(0, 8)}...
@@ -277,6 +319,8 @@ export const App: FunctionalComponent = () => {
               isLoading={isSending}
               agent={sessionAgent}
               sessionId={currentSession?.session_id || null}
+              showThinking={showThinking}
+              showToolCalls={showToolCalls}
             />
             
             {currentSession && (

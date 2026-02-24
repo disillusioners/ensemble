@@ -7,6 +7,8 @@ interface ChatInterfaceProps {
   isLoading: boolean;
   agent: Agent | null | undefined;
   sessionId: string | null;
+  showThinking: boolean;
+  showToolCalls: boolean;
 }
 
 const agentColorMap: Record<string, string> = {
@@ -15,10 +17,36 @@ const agentColorMap: Record<string, string> = {
   'reviewer': '#8b5cf6',
 };
 
-function MessageBubble({ message, agent }: { message: Message; agent?: Agent | null }) {
+function MessageBubble({ 
+  message, 
+  agent,
+  showThinking,
+  showToolCalls 
+}: { 
+  message: Message; 
+  agent?: Agent | null;
+  showThinking: boolean;
+  showToolCalls: boolean;
+}) {
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
   const color = agent ? agentColorMap[agent.id] : '#10a7f7';
+  
+  // Safely format tool call arguments
+  const formatArgs = (args: unknown): string => {
+    if (typeof args === 'string') return args;
+    try {
+      return JSON.stringify(args, null, 2);
+    } catch {
+      return '[Unable to display]';
+    }
+  };
+  
+  // Parse tool calls with safe formatting
+  const toolCalls = message.tool_calls?.map(tc => ({
+    ...tc,
+    formattedArgs: formatArgs(tc.arguments)
+  }));
   
   return (
     <div class={`flex gap-4 animate-slide-up ${isUser ? 'flex-row-reverse' : ''}`}>
@@ -38,6 +66,39 @@ function MessageBubble({ message, agent }: { message: Message; agent?: Agent | n
       
       {/* Message content */}
       <div class={`flex flex-col max-w-[70%] ${isUser ? 'items-end' : 'items-start'}`}>
+        {/* Thinking block - only for assistant messages */}
+        {isAssistant && message.thinking && showThinking && (
+          <div class="mb-2 w-full">
+            <div class="px-4 py-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-sm">
+              <div class="flex items-center gap-1.5 mb-1.5 text-amber-400 text-xs font-medium">
+                <span>💭</span>
+                <span>Thinking</span>
+              </div>
+              <pre class="text-dark-300 text-xs whitespace-pre-wrap font-mono overflow-x-auto">
+                {message.thinking}
+              </pre>
+            </div>
+          </div>
+        )}
+        
+        {/* Tool calls - only for assistant messages */}
+        {isAssistant && toolCalls && toolCalls.length > 0 && showToolCalls && (
+          <div class="mb-2 w-full space-y-1.5">
+            {toolCalls.map((tc, idx) => (
+              <div key={tc.id || idx} class="px-4 py-2 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-sm">
+                <div class="flex items-center gap-1.5 mb-1.5 text-cyan-400 text-xs font-medium">
+                  <span>🔧</span>
+                  <span>{tc.name}</span>
+                </div>
+                <pre class="text-dark-300 text-xs whitespace-pre-wrap font-mono overflow-x-auto">
+                  {tc.formattedArgs}
+                </pre>
+              </div>
+            ))}
+          </div>
+        )}
+        
+        {/* Main content */}
         <div 
           class="px-5 py-3 rounded-2xl font-body text-[15px] leading-relaxed whitespace-pre-wrap"
           style={{ 
@@ -94,6 +155,8 @@ export const ChatInterface: FunctionalComponent<ChatInterfaceProps> = ({
   isLoading,
   agent,
   sessionId,
+  showThinking,
+  showToolCalls,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agentColor = agent ? agentColorMap[agent.id] : '#10a7f7';
@@ -150,6 +213,8 @@ export const ChatInterface: FunctionalComponent<ChatInterfaceProps> = ({
             key={message.message_id || index} 
             message={message}
             agent={agent}
+            showThinking={showThinking}
+            showToolCalls={showToolCalls}
           />
         ))}
         

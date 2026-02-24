@@ -19,12 +19,13 @@ export interface Message {
   message_id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  created_at: string;
+  thinking?: string;
   tool_calls?: Array<{
     id: string;
     name: string;
-    arguments: string;
+    arguments: string | Record<string, unknown>;
   }>;
+  created_at: string;
 }
 
 export interface MessageCreate {
@@ -35,6 +36,7 @@ export interface MessageResponse {
   message_id: string;
   role: string;
   content: string | null;
+  thinking?: string | null;
   tool_calls: unknown[] | null;
   created_at: string;
 }
