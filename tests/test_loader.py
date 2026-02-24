@@ -454,8 +454,9 @@ class TestToolsLoading:
         assert rule_pos < tools_pos < workflow_pos
 
     def test_compose_order_with_skills_and_tools(self):
-        """Test full order: rule → skills → tools → workflow → memory."""
+        """Test full order: soul → rule → skills → tools → workflow → memory."""
         prompts = {
+            "soul": "# Who I Am",
             "rule": "# Rules",
             "tools": "# Tools",
             "workflow": "# Workflow",
@@ -467,13 +468,14 @@ class TestToolsLoading:
         
         result = compose_system_prompt(prompts, skills)
         
+        soul_pos = result.find("## Identity")
         rule_pos = result.find("## Rules")
         skill_pos = result.find("## Skill: Coding")
         tools_pos = result.find("## Tools")
         workflow_pos = result.find("## Workflow")
         memory_pos = result.find("## Memory")
         
-        assert rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
+        assert soul_pos < rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
 
     def test_cache_invalidates_on_tools_change(self, tmp_path):
         """Test that cache invalidates when tools.md changes."""
@@ -493,3 +495,82 @@ class TestToolsLoading:
         
         prompt2, _ = load_and_cache_prompt(agent_dir, cache)
         assert "read_file" in prompt2
+
+
+class TestSoulLoading:
+    """Tests for soul.md loading."""
+
+    def test_load_agent_prompts_includes_soul(self, tmp_path):
+        """Test that soul.md is loaded as a prompt file."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "soul.md").write_text("# Who I Am\nI am a helpful assistant.")
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+        
+        prompts = load_agent_prompts(agent_dir)
+        
+        assert "soul" in prompts
+        assert prompts["soul"] == "# Who I Am\nI am a helpful assistant."
+
+    def test_compose_includes_soul_section_first(self):
+        """Test that soul (Identity) section comes first in composed prompt."""
+        prompts = {
+            "soul": "# Who I Am\nI am a coder.",
+            "rule": "# Rules\nFollow rules",
+            "tools": "# Tools\n- bash",
+        }
+        
+        result = compose_system_prompt(prompts)
+        
+        # Check order: soul → rules → tools
+        soul_pos = result.find("## Identity")
+        rule_pos = result.find("## Rules")
+        tools_pos = result.find("## Tools")
+        
+        assert soul_pos != -1
+        assert rule_pos != -1
+        assert tools_pos != -1
+        assert soul_pos < rule_pos < tools_pos
+
+    def test_compose_full_order_with_soul(self):
+        """Test full order: soul → rule → skills → tools → workflow → memory."""
+        prompts = {
+            "soul": "# Who I Am",
+            "rule": "# Rules",
+            "tools": "# Tools",
+            "workflow": "# Workflow",
+            "memory": "# Memory",
+        }
+        skills = {
+            "coding": "# Coding skill",
+        }
+        
+        result = compose_system_prompt(prompts, skills)
+        
+        soul_pos = result.find("## Identity")
+        rule_pos = result.find("## Rules")
+        skill_pos = result.find("## Skill: Coding")
+        tools_pos = result.find("## Tools")
+        workflow_pos = result.find("## Workflow")
+        memory_pos = result.find("## Memory")
+        
+        assert soul_pos < rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
+
+    def test_cache_invalidates_on_soul_change(self, tmp_path):
+        """Test that cache invalidates when soul.md changes."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "rule.md").write_text("# Rules\nTest")
+        soul_file = agent_dir / "soul.md"
+        soul_file.write_text("# Who I Am\nI am helpful.")
+        
+        cache = PromptCache()
+        
+        prompt1, _ = load_and_cache_prompt(agent_dir, cache)
+        assert "helpful" in prompt1
+        
+        time.sleep(0.1)
+        soul_file.write_text("# Who I Am\nI am a craftsman of code.")
+        
+        prompt2, _ = load_and_cache_prompt(agent_dir, cache)
+        assert "craftsman" in prompt2

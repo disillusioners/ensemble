@@ -33,7 +33,7 @@ def load_agent_skills(agent_dir: Path) -> dict[str, str]:
 def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
     """Load all markdown files from agent directory.
     
-    Loads base prompts (tools.md, workflow.md, rule.md, memory.md) and optional skill.md.
+    Loads base prompts (soul.md, tools.md, workflow.md, rule.md, memory.md) and optional skill.md.
     For multiple skills, use load_agent_skills() which loads from skills/ directory.
     
     Args:
@@ -43,7 +43,7 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
         Dict with filename (without .md) as key, content as value.
         Skips missing files.
     """
-    prompt_files = ["skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
+    prompt_files = ["soul.md", "skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
     prompts: dict[str, str] = {}
     
     for filename in prompt_files:
@@ -62,21 +62,23 @@ def compose_system_prompt(
     
     Args:
         prompts: Dict with filename (without .md) as key, content as value.
-                 Expected keys: rule, skill, tools, workflow, memory
+                 Expected keys: soul, rule, skill, tools, workflow, memory
         skills: Optional dict with skill name as key, skill.md content as value.
                 Loaded from agent's skills/ directory.
         
     Returns:
         Composed system prompt with sections in order:
-        1. rule.md (constraints - highest priority)
-        2. skill.md (base skill, if exists - backward compat)
-        3. All skills from skills/ directory (each as separate section)
-        4. tools.md (available tools)
-        5. workflow.md (methodology)
-        6. memory.md (knowledge)
+        1. soul.md (identity/personality - who I am)
+        2. rule.md (constraints - highest priority)
+        3. skill.md (base skill, if exists - backward compat)
+        4. All skills from skills/ directory (each as separate section)
+        5. tools.md (available tools)
+        6. workflow.md (methodology)
+        7. memory.md (knowledge)
         Separated by "\n\n---\n\n" with headers.
     """
     section_titles = {
+        "soul": "Identity",
         "rule": "Rules",
         "tools": "Tools",
         "workflow": "Workflow",
@@ -85,19 +87,25 @@ def compose_system_prompt(
     
     sections: list[str] = []
     
-    # 1. Add rule section first (highest priority)
+    # 1. Add soul section first (identity - who I am)
+    if "soul" in prompts:
+        content = prompts["soul"].strip()
+        if content:
+            sections.append(f"## {section_titles['soul']}\n\n{content}")
+    
+    # 2. Add rule section (constraints - highest priority)
     if "rule" in prompts:
         content = prompts["rule"].strip()
         if content:
             sections.append(f"## {section_titles['rule']}\n\n{content}")
     
-    # 2. Add base skill if exists (backward compatibility)
+    # 3. Add base skill if exists (backward compatibility)
     if "skill" in prompts:
         content = prompts["skill"].strip()
         if content:
             sections.append(f"## Skills\n\n{content}")
     
-    # 3. Add all skills from skills/ directory (sorted for deterministic order)
+    # 4. Add all skills from skills/ directory (sorted for deterministic order)
     if skills:
         for skill_name in sorted(skills.keys()):
             skill_content = skills[skill_name]
@@ -107,13 +115,13 @@ def compose_system_prompt(
                 formatted_name = skill_name.replace("-", " ").replace("_", " ").title()
                 sections.append(f"## Skill: {formatted_name}\n\n{content}")
     
-    # 4. Add tools section
+    # 5. Add tools section
     if "tools" in prompts:
         content = prompts["tools"].strip()
         if content:
             sections.append(f"## {section_titles['tools']}\n\n{content}")
     
-    # 5-6. Add workflow and memory sections
+    # 6-7. Add workflow and memory sections
     for key in ["workflow", "memory"]:
         if key in prompts:
             content = prompts[key].strip()
@@ -192,7 +200,7 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
         Tuple of (system_prompt, token_count).
     """
     # Calculate current mtimes for all prompt files
-    prompt_files = ["skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
+    prompt_files = ["soul.md", "skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
     current_mtimes: dict[str, float] = {}
     
     for filename in prompt_files:
