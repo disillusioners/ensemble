@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from langgraph.graph import CompiledGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from .config import Config
 from .graph import build_session_graph
@@ -34,7 +34,7 @@ class SessionManager:
         self.checkpointer = get_checkpointer(self.conn)
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
-        self.sessions: dict[str, tuple[CompiledGraph, str]] = {}
+        self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
 
     def spawn_session(
         self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
@@ -159,14 +159,14 @@ class SessionManager:
 
         return True
 
-    def get_session(self, session_id: str) -> CompiledGraph:
+    def get_session(self, session_id: str) -> CompiledStateGraph:
         """Get a session graph instance.
 
         Args:
             session_id: The ID of the session.
 
         Returns:
-            The CompiledGraph instance for the session.
+            The CompiledStateGraph instance for the session.
 
         Raises:
             KeyError: If session_id is not found.

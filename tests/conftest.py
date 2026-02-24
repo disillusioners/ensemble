@@ -27,6 +27,9 @@ mock_langgraph_graph = create_mock_module("langgraph.graph", {
     "END": MagicMock(),
     "CompiledGraph": MagicMock(),  # Add CompiledGraph here since source code imports from here
 })
+mock_langgraph_graph_state = create_mock_module("langgraph.graph.state", {
+    "CompiledStateGraph": MagicMock(),
+})
 mock_langgraph_prebuilt = create_mock_module("langgraph.prebuilt", {
     "ToolNode": MagicMock()
 })
@@ -42,6 +45,7 @@ mock_langgraph_checkpoint_sqlite = create_mock_module("langgraph.checkpoint.sqli
 _mock_modules = {
     "langgraph": mock_langgraph,
     "langgraph.graph": mock_langgraph_graph,
+    "langgraph.graph.state": mock_langgraph_graph_state,
     "langgraph.prebuilt": mock_langgraph_prebuilt,
     "langgraph.constants": mock_langgraph_constants,
     "langgraph.checkpoint": mock_langgraph_checkpoint,

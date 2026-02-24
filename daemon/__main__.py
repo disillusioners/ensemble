@@ -1,5 +1,15 @@
 import signal
 import sys
+import warnings
+
+# Suppress langchain Pydantic V1 compatibility warning on Python 3.14+
+# This is safe: langchain still works, just uses deprecated Pydantic V1 shim
+warnings.filterwarnings(
+    "ignore",
+    message="Core Pydantic V1 functionality isn't compatible with Python 3.14",
+    category=UserWarning,
+)
+
 import uvicorn
 from pathlib import Path
 
