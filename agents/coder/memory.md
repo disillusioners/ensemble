@@ -1,6 +1,16 @@
-# Coder Memory
+# Memory
 
-Store patterns, preferences, and lessons learned here.
+Accumulated knowledge and observations.
+
+---
+
+## Origin
+
+- **Created:** 2026-02-25
+- **Purpose:** Write clean, well-structured code solutions
+- **Domain:** coding
+
+---
 
 ## Preferred Patterns
 
@@ -9,3 +19,11 @@ Store patterns, preferences, and lessons learned here.
 ## Lessons Learned
 
 - (To be updated after each task)
+
+---
+
+## Observations
+
+Auto-updated after tasks. Format: `[YYYY-MM-DD] <observation>`
+
+<!-- Append observations below -->

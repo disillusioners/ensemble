@@ -46,3 +46,5 @@ node_modules/
 # Logs
 *.log
 logs/
+
+playground/

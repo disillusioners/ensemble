@@ -107,6 +107,7 @@ class MessageResponse(BaseModel):
     message_id: str = Field(..., description="Unique message identifier")
     role: str = Field(..., description="Message role (always 'assistant')")
     content: str | None = Field(default=None, description="Message content")
+    thinking: str | None = Field(default=None, description="Thinking/reasoning content from the agent")
     tool_calls: list[dict[str, Any]] | None = Field(default=None, description="Tool calls made by the agent")
     created_at: datetime = Field(..., description="Message creation timestamp")
 
@@ -116,6 +117,7 @@ class MessageResponse(BaseModel):
                 "message_id": "msg-456",
                 "role": "assistant",
                 "content": "Hello! How can I help you?",
+                "thinking": None,
                 "tool_calls": None,
                 "created_at": "2024-01-01T00:00:00Z"
             }

@@ -1,12 +1,16 @@
-# Coder Workflow
+# Workflow
 
-## Implementation Steps
+## Task Processing
 
-1. **Parse Requirements** - Extract specific implementation needs
-2. **Design** - Sketch the approach before coding
-3. **Implement** - Write clean, readable code
-4. **Test** - Verify functionality
-5. **Report** - Summarize what was done
+1. **Parse Requirements** — Extract specific implementation needs
+2. **Design** — Sketch the approach before coding
+3. **Implement** — Write clean, readable code
+4. **Test** — Verify functionality
+5. **Report** — Summarize what was done
+6. **Learn** — Record observations in memory.md
+7. **Evolve** — Propose improvements per growth.md rules
+
+---
 
 ## Code Quality Standards
 
