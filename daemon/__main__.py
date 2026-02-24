@@ -1,0 +1,32 @@
+import signal
+import sys
+import uvicorn
+from pathlib import Path
+
+from .config import load_config
+from .api import app, manager
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    print(f"\nReceived signal {signum}, shutting down...")
+    sys.exit(0)
+
+def main():
+    """Main entry point."""
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Load config to get host/port
+    config = load_config()
+    
+    # Run server
+    uvicorn.run(
+        "daemon.api:app",
+        host=config.daemon.host,
+        port=config.daemon.port,
+        reload=False
+    )
+
+if __name__ == "__main__":
+    main()

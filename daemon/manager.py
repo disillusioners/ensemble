@@ -1,0 +1,203 @@
+"""Session manager orchestrating all agent sessions."""
+
+import uuid
+from pathlib import Path
+from typing import Optional
+
+from langgraph.graph import CompiledGraph
+
+from .config import Config
+from .graph import build_session_graph
+from .loader import PromptCache, load_and_cache_prompt
+from .persistence import (
+    get_checkpointer,
+    init_database,
+    list_all_sessions,
+    save_session_metadata,
+    update_session_status,
+    get_session_metadata,
+)
+from .tools import create_session_tools
+
+
+class SessionManager:
+    """Manages all agent sessions, their graphs, and lifecycle."""
+
+    def __init__(self, config: Config):
+        """Initialize the session manager.
+
+        Args:
+            config: Configuration object with LLM, limits, and persistence settings.
+        """
+        self.config = config
+        self.conn = init_database(Path(config.persistence.db_path))
+        self.checkpointer = get_checkpointer(self.conn)
+        self.prompt_cache = PromptCache()
+        # Maps session_id to tuple of (graph, agent_dir)
+        self.sessions: dict[str, tuple[CompiledGraph, str]] = {}
+
+    def spawn_session(
+        self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
+    ) -> str:
+        """Create a new agent session.
+
+        Args:
+            agent_dir: Path to the agent directory.
+            session_id: Optional session ID. Auto-generated if not provided.
+            parent_id: Optional parent session ID for hierarchical sessions.
+
+        Returns:
+            The session_id of the newly created session.
+
+        Raises:
+            ValueError: If max_sessions or max_children_per_session limit is exceeded.
+        """
+        # Generate session_id if not provided
+        if session_id is None:
+            session_id = str(uuid.uuid4())
+
+        # Check max_sessions limit
+        current_session_count = len(self.sessions)
+        if current_session_count >= self.config.limits.max_sessions:
+            raise ValueError(
+                f"Max sessions limit reached: {self.config.limits.max_sessions}"
+            )
+
+        # Check max_children_per_session limit if parent_id is provided
+        if parent_id is not None:
+            parent_meta = get_session_metadata(self.conn, parent_id)
+            if parent_meta and "children" in parent_meta:
+                child_count = len(parent_meta["children"])
+                if child_count >= self.config.limits.max_children_per_session:
+                    raise ValueError(
+                        f"Max children per session limit reached: "
+                        f"{self.config.limits.max_children_per_session}"
+                    )
+
+        # Load and cache prompt
+        agent_path = Path(agent_dir)
+        system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
+
+        # Create tools with this manager reference
+        tools = create_session_tools(self, session_id)
+
+        # Build LLM config
+        llm_config = {
+            "base_url": self.config.llm.base_url,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "temperature": self.config.llm.temperature,
+        }
+
+        # Build graph with checkpointer
+        graph = build_session_graph(
+            tools=tools,
+            checkpointer=self.checkpointer,
+            llm_config=llm_config,
+            system_prompt=system_prompt,
+        )
+
+        # Save metadata to DB
+        save_session_metadata(
+            conn=self.conn,
+            session_id=session_id,
+            agent_dir=agent_dir,
+            parent_id=parent_id,
+        )
+
+        # Store in sessions dict
+        self.sessions[session_id] = (graph, agent_dir)
+
+        return session_id
+
+    def send_message(self, session_id: str, message: str) -> str:
+        """Send a message to a session and get the response.
+
+        Args:
+            session_id: The ID of the session to send the message to.
+            message: The message content to send.
+
+        Returns:
+            The content of the last message in the response.
+
+        Raises:
+            KeyError: If session_id is not found.
+        """
+        # Get session graph
+        if session_id not in self.sessions:
+            raise KeyError(f"Session not found: {session_id}")
+
+        graph, _ = self.sessions[session_id]
+
+        # Invoke with message
+        config = {"configurable": {"thread_id": session_id}}
+        result = graph.invoke({"messages": [message]}, config)
+
+        # Return last message content
+        messages = result.get("messages", [])
+        if messages:
+            return messages[-1].content
+        return ""
+
+    def terminate_session(self, session_id: str) -> bool:
+        """Terminate a session.
+
+        Args:
+            session_id: The ID of the session to terminate.
+
+        Returns:
+            True if termination was successful, False if session was not found.
+        """
+        # Remove from sessions dict
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+        else:
+            return False
+
+        # Update DB status to terminated
+        update_session_status(self.conn, session_id, "terminated")
+
+        return True
+
+    def get_session(self, session_id: str) -> CompiledGraph:
+        """Get a session graph instance.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            The CompiledGraph instance for the session.
+
+        Raises:
+            KeyError: If session_id is not found.
+        """
+        if session_id not in self.sessions:
+            raise KeyError(f"Session not found: {session_id}")
+
+        graph, _ = self.sessions[session_id]
+        return graph
+
+    def list_sessions(self) -> list[dict]:
+        """List all sessions.
+
+        Returns:
+            List of session info dictionaries from the database.
+        """
+        return list_all_sessions(self.conn)
+
+    def get_session_info(self, session_id: str) -> dict:
+        """Get information about a specific session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            Session metadata dictionary from the database.
+
+        Raises:
+            KeyError: If session is not found.
+        """
+        meta = get_session_metadata(self.conn, session_id)
+        if meta is None:
+            raise KeyError(f"Session not found: {session_id}")
+        return meta
