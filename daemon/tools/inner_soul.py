@@ -30,7 +30,7 @@ def create_inner_soul_tool(
     def inner_soul(
         intent: Literal["remember", "learn", "change"],
         content: str,
-        target: Literal["memory", "workflow", "soul"] | None = None
+        target: Literal["memory", "workflow", "soul", "user"] | None = None
     ) -> str:
         """Remember, learn, or change yourself.
         
@@ -41,12 +41,13 @@ def create_inner_soul_tool(
             intent: What you want to do:
                 - "remember": Store an observation/event as a timestamped file
                 - "learn": Store a pattern (may trigger workflow evolution)
-                - "change": Propose a change to workflow or soul
+                - "change": Propose a change to workflow, soul, or user info
             content: What to remember/learn/change (max 1000 chars)
             target: For "change" intent - which file to modify:
                 - "memory": Add to core memory.md
                 - "workflow": Modify workflow.md
                 - "soul": Modify soul.md (requires approval)
+                - "user": Add user information to user.md
         
         Returns:
             Confirmation message or error description
@@ -55,6 +56,7 @@ def create_inner_soul_tool(
             inner_soul(intent="remember", content="User prefers TypeScript")
             inner_soul(intent="learn", content="Iterative testing catches bugs earlier")
             inner_soul(intent="change", target="workflow", content="Add self-review step")
+            inner_soul(intent="change", target="user", content="User prefers concise responses")
         """
         try:
             agent_path = Path(agent_dir)
@@ -181,7 +183,7 @@ def _handle_change(
     """Handle change request with validation."""
     
     if target is None:
-        return "ERROR: For 'change' intent, specify target: 'memory', 'workflow', or 'soul'"
+        return "ERROR: For 'change' intent, specify target: 'memory', 'workflow', 'soul', or 'user'"
     
     if target == "memory":
         return _change_memory(agent_path, content, rules, manager)
@@ -192,8 +194,11 @@ def _handle_change(
     elif target == "soul":
         return _propose_soul_change(agent_path, content, rules)
     
+    elif target == "user":
+        return _change_user(agent_path, content, manager)
+    
     else:
-        return f"ERROR: Unknown target '{target}'. Use 'memory', 'workflow', or 'soul'"
+        return f"ERROR: Unknown target '{target}'. Use 'memory', 'workflow', 'soul', or 'user'"
 
 
 def _change_memory(agent_path: Path, content: str, rules: dict, manager: "SessionManager") -> str:
@@ -254,6 +259,30 @@ def _change_workflow(
     manager.prompt_cache.invalidate(agent_path)
     
     return f"✓ Workflow updated with: {content[:100]}{'...' if len(content) > 100 else ''}"
+
+
+def _change_user(
+    agent_path: Path,
+    content: str,
+    manager: "SessionManager"
+) -> str:
+    """Add user information to user.md."""
+    user_file = agent_path / "user.md"
+    
+    current = user_file.read_text() if user_file.exists() else "# User\n\n"
+    
+    # Remove placeholder if present
+    if "(To be filled" in current:
+        current = current.split("(To be filled")[0].rstrip()
+    
+    # Append new user info
+    new_content = f"{current}\n- {content}"
+    user_file.write_text(new_content)
+    
+    # Invalidate prompt cache
+    manager.prompt_cache.invalidate(agent_path)
+    
+    return f"✓ User info added: {content[:100]}{'...' if len(content) > 100 else ''}"
 
 
 def _propose_soul_change(

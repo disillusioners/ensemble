@@ -140,32 +140,45 @@ class SessionManager:
         config = {"configurable": {"thread_id": session_id}}
         result = graph.invoke({"messages": [message]}, config)
 
-        # Extract last message data
+        # Extract message data - collect from ALL messages, not just last
         messages = result.get("messages", [])
         if messages:
             last_message = messages[-1]
             content = last_message.content or ""
             
-            # Extract tool calls if present
-            tool_calls = None
-            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                tool_calls = [
-                    {
-                        "id": tc.get("id", ""),
-                        "name": tc.get("name", ""),
-                        "arguments": tc.get("args", {}),
-                    }
-                    for tc in last_message.tool_calls
-                ]
+            # Collect ALL tool calls from AIMessages in the conversation
+            # (tool_calls exist on intermediate messages, not the final response)
+            all_tool_calls = []
+            for msg in messages:
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        # Handle both dict and object formats
+                        if isinstance(tc, dict):
+                            all_tool_calls.append({
+                                "id": tc.get("id", ""),
+                                "name": tc.get("name", ""),
+                                "arguments": tc.get("args", {}),
+                            })
+                        else:
+                            all_tool_calls.append({
+                                "id": getattr(tc, "id", ""),
+                                "name": getattr(tc, "name", ""),
+                                "arguments": getattr(tc, "args", {}),
+                            })
             
-            # Extract thinking if present (for models that support extended thinking)
+            tool_calls = all_tool_calls if all_tool_calls else None
+            
+            # Extract thinking from any message (for models that support extended thinking)
             thinking = None
-            if hasattr(last_message, "thinking"):
-                thinking = last_message.thinking
-            elif hasattr(last_message, "response_metadata"):
-                # Some models store thinking in response_metadata
-                metadata = last_message.response_metadata or {}
-                thinking = metadata.get("thinking") or metadata.get("reasoning_content")
+            for msg in messages:
+                if hasattr(msg, 'thinking') and msg.thinking:
+                    thinking = msg.thinking
+                    break
+                if hasattr(msg, 'response_metadata'):
+                    metadata = msg.response_metadata or {}
+                    if metadata.get("thinking") or metadata.get("reasoning_content"):
+                        thinking = metadata.get("thinking") or metadata.get("reasoning_content")
+                        break
             
             return MessageResult(
                 content=content,

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from .bash import bash
 from .filesystem import list_directory, read_file, glob_files
+from .time import time
 from .inner_soul import create_inner_soul_tool
 
 if TYPE_CHECKING:
@@ -95,6 +96,7 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         list_directory,
         read_file,
         glob_files,
+        time,
         # Session management tools
         spawn_session,
         send_message,

@@ -4,6 +4,21 @@ from pathlib import Path
 from typing import Any
 
 
+# Path to common tools file (shared across all agents)
+COMMON_TOOLS_FILE = Path(__file__).parent.parent / "agents" / "tools_common.md"
+
+
+def load_common_tools() -> str:
+    """Load common tools documentation shared by all agents.
+    
+    Returns:
+        Content of tools_common.md or empty string if not found.
+    """
+    if COMMON_TOOLS_FILE.exists():
+        return COMMON_TOOLS_FILE.read_text(encoding="utf-8")
+    return ""
+
+
 def load_agent_skills(agent_dir: Path) -> dict[str, str]:
     """Load all skill.md files from agent's skills/ directory.
     
@@ -56,7 +71,8 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
 
 def compose_system_prompt(
     prompts: dict[str, str], 
-    skills: dict[str, str] | None = None
+    skills: dict[str, str] | None = None,
+    common_tools: str = ""
 ) -> str:
     """Compose system prompt from prompts dict and optional skills.
     
@@ -65,6 +81,7 @@ def compose_system_prompt(
                  Expected keys: soul, rule, skill, tools, workflow, memory
         skills: Optional dict with skill name as key, skill.md content as value.
                 Loaded from agent's skills/ directory.
+        common_tools: Common tools content from tools_common.md (shared by all agents).
         
     Returns:
         Composed system prompt with sections in order:
@@ -72,7 +89,7 @@ def compose_system_prompt(
         2. rule.md (constraints - highest priority)
         3. skill.md (base skill, if exists - backward compat)
         4. All skills from skills/ directory (each as separate section)
-        5. tools.md (available tools)
+        5. tools_common.md + tools.md (available tools - only if content exists)
         6. workflow.md (methodology)
         7. memory.md (knowledge)
         Separated by "\n\n---\n\n" with headers.
@@ -115,11 +132,18 @@ def compose_system_prompt(
                 formatted_name = skill_name.replace("-", " ").replace("_", " ").title()
                 sections.append(f"## Skill: {formatted_name}\n\n{content}")
     
-    # 5. Add tools section
+    # 5. Add tools section (combine common + agent-specific, only if non-empty)
+    tools_parts = []
+    if common_tools.strip():
+        tools_parts.append(common_tools.strip())
     if "tools" in prompts:
-        content = prompts["tools"].strip()
-        if content:
-            sections.append(f"## {section_titles['tools']}\n\n{content}")
+        agent_tools = prompts["tools"].strip()
+        if agent_tools:
+            tools_parts.append(agent_tools)
+    
+    if tools_parts:
+        combined_tools = "\n\n---\n\n".join(tools_parts)
+        sections.append(f"## {section_titles['tools']}\n\n{combined_tools}")
     
     # 6-7. Add workflow and memory sections
     for key in ["workflow", "memory"]:
@@ -203,6 +227,10 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
     prompt_files = ["soul.md", "skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
     current_mtimes: dict[str, float] = {}
     
+    # Include common tools file mtime for cache invalidation
+    if COMMON_TOOLS_FILE.exists():
+        current_mtimes["tools_common.md"] = COMMON_TOOLS_FILE.stat().st_mtime
+    
     for filename in prompt_files:
         filepath = agent_dir / filename
         if filepath.exists():
@@ -233,7 +261,8 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir)
-    system_prompt = compose_system_prompt(prompts, skills)
+    common_tools = load_common_tools()
+    system_prompt = compose_system_prompt(prompts, skills, common_tools)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache
