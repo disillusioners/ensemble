@@ -411,7 +411,9 @@ def get_session_messages(
     if state is None:
         return []
     
-    messages = state.get("messages", [])
+    # LangGraph stores messages in channel_values
+    channel_values = state.get("channel_values", {})
+    messages = channel_values.get("messages", [])
     if not messages:
         return []
     

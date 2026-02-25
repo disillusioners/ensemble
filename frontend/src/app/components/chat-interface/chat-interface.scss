@@ -1,3 +1,12 @@
+// Host element takes full height
+:host {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 // Variables
 $bg-primary: #0f172a;
 $bg-secondary: #1e293b;
@@ -46,9 +55,12 @@ $cyan: #06b6d4;
 // Messages container
 .messages-container {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   background-color: $bg-primary;
   padding: 1.5rem;
+  min-height: 0;
 }
 
 .messages-wrapper {
