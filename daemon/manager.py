@@ -140,18 +140,24 @@ class SessionManager:
         config = {"configurable": {"thread_id": session_id}}
         result = graph.invoke({"messages": [message]}, config)
 
-        # Extract message data - collect from ALL messages, not just last
+        # Extract message data - only from the LAST AIMessage (current response)
         messages = result.get("messages", [])
         if messages:
-            last_message = messages[-1]
-            content = last_message.content or ""
+            # Find the last AIMessage (the current assistant response)
+            last_ai_message = None
+            for msg in reversed(messages):
+                if hasattr(msg, 'tool_calls') or hasattr(msg, 'content'):
+                    last_ai_message = msg
+                    break
             
-            # Collect ALL tool calls from AIMessages in the conversation
-            # (tool_calls exist on intermediate messages, not the final response)
-            all_tool_calls = []
-            for msg in messages:
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tc in msg.tool_calls:
+            if last_ai_message:
+                content = last_ai_message.content or ""
+                
+                # Extract tool_calls ONLY from the last AIMessage
+                tool_calls = None
+                if hasattr(last_ai_message, 'tool_calls') and last_ai_message.tool_calls:
+                    all_tool_calls = []
+                    for tc in last_ai_message.tool_calls:
                         # Handle both dict and object formats
                         if isinstance(tc, dict):
                             all_tool_calls.append({
@@ -165,26 +171,36 @@ class SessionManager:
                                 "name": getattr(tc, "name", ""),
                                 "arguments": getattr(tc, "args", {}),
                             })
-            
-            tool_calls = all_tool_calls if all_tool_calls else None
-            
-            # Extract thinking from any message (for models that support extended thinking)
-            thinking = None
-            for msg in messages:
-                if hasattr(msg, 'thinking') and msg.thinking:
-                    thinking = msg.thinking
-                    break
-                if hasattr(msg, 'response_metadata'):
-                    metadata = msg.response_metadata or {}
-                    if metadata.get("thinking") or metadata.get("reasoning_content"):
-                        thinking = metadata.get("thinking") or metadata.get("reasoning_content")
-                        break
-            
-            return MessageResult(
-                content=content,
-                thinking=thinking,
-                tool_calls=tool_calls,
-            )
+                    tool_calls = all_tool_calls if all_tool_calls else None
+                
+                # Extract thinking ONLY from the last AIMessage (for models that support extended thinking)
+                thinking = None
+                
+                # Check direct thinking attribute (some providers)
+                if hasattr(last_ai_message, 'thinking') and last_ai_message.thinking:
+                    thinking = last_ai_message.thinking
+                
+                # Check additional_kwargs (most common for OpenAI-compatible proxies like LiteLLM)
+                elif hasattr(last_ai_message, 'additional_kwargs'):
+                    kwargs = last_ai_message.additional_kwargs or {}
+                    if kwargs.get("thinking"):
+                        thinking = kwargs["thinking"]
+                    elif kwargs.get("reasoning_content"):
+                        thinking = kwargs["reasoning_content"]
+                
+                # Check response_metadata (fallback)
+                elif hasattr(last_ai_message, 'response_metadata'):
+                    metadata = last_ai_message.response_metadata or {}
+                    if metadata.get("thinking"):
+                        thinking = metadata["thinking"]
+                    elif metadata.get("reasoning_content"):
+                        thinking = metadata["reasoning_content"]
+                
+                return MessageResult(
+                    content=content,
+                    thinking=thinking,
+                    tool_calls=tool_calls,
+                )
         return MessageResult(content="")
 
     def terminate_session(self, session_id: str) -> bool:
