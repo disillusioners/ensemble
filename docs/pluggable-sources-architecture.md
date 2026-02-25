@@ -378,24 +378,24 @@ class MessageSourceAdapter(ABC):
 
 ```
 daemon/
-├── api.py                      # + /sources/* endpoints (~50 lines)
-├── manager.py                  # + dispatcher init (1-2 lines)
+├── api.py                      # + /sources/* endpoints (~100 lines)
+├── manager.py                  # + source field in event, source system init
 ├── queue.py                    # UNCHANGED
-├── events.py                   # UNCHANGED
+├── events.py                   # + subscribe_all() method (~15 lines)
 ├── graph.py                    # UNCHANGED
-├── persistence.py              # + new tables (~30 lines)
+├── persistence.py              # + new tables (~40 lines)
 │
-├── sources/                    # NEW MODULE
+├── sources/                    # NEW MODULE (~500+ lines total)
 │   ├── __init__.py             # Exports
 │   ├── base.py                 # Interfaces (IncomingMessage, Adapter ABC)
-│   ├── registry.py             # SourceRegistry, SourceManager
-│   ├── mapper.py               # SessionMapper
-│   ├── dispatcher.py           # ResponseDispatcher
+│   ├── registry.py             # SourceRegistry with supervisor pattern
+│   ├── mapper.py               # SessionMapper + deduplication
+│   ├── dispatcher.py           # ResponseDispatcher with per-user locks
 │   ├── persistence.py          # DB operations for sources
 │   │
 │   └── adapters/               # Concrete adapters
 │       ├── __init__.py
-│       ├── telegram.py         # TelegramAdapter
+│       ├── telegram.py         # TelegramAdapter (polling + webhook)
 │       └── webhook.py          # WebhookAdapter (future)
 │
 └── models.py                   # + SourceInfo, SourceCreateRequest
@@ -654,6 +654,19 @@ sources:
 2. **Webhook Verification**: Validate signatures on incoming webhooks
 3. **Rate Limiting**: Per-source rate limits to prevent abuse
 4. **Access Control**: User permissions for source configuration
+5. **Credential Rotation**: Support rotating credentials without downtime (support old + new during transition)
+
+---
+
+## Failure Modes & Mitigations
+
+| Failure | Impact | Mitigation |
+|---------|--------|------------|
+| Telegram API down | Lost inbound messages | Exponential backoff, dead letter queue for outbound |
+| Adapter crash | Could crash entire process | Supervisor pattern with isolation |
+| Database locked | Message processing delays | WAL mode, retry on lock, increase busy timeout |
+| Queue backup | Messages dropped | Per-source rate limiting, alerting |
+| Out-of-order responses | Confusing UX | Per-user send locks in dispatcher |
 
 ---
 
@@ -661,8 +674,9 @@ sources:
 
 1. **Unit Tests**: Each adapter, mapper, dispatcher
 2. **Integration Tests**: Full message flow (incoming + outgoing)
-3. **Mock External APIs**: Use recorded responses for Telegram API
+3. **Mock External APIs**: Use VCR.py or recorded responses for Telegram API
 4. **Load Tests**: Multiple concurrent sessions per source
+5. **Failure Tests**: Simulate API outages, database locks, adapter crashes
 
 ---
 
@@ -674,3 +688,20 @@ sources:
 - [ ] Message templates for common responses
 - [ ] Rich message support (images, files, buttons)
 - [ ] Conversation context persistence across restarts
+- [ ] PostgreSQL migration for scaling
+- [ ] Extract adapters to separate processes for isolation
+
+---
+
+## Estimated Timeline
+
+| Phase | Description | Effort | Dependencies |
+|-------|-------------|--------|--------------|
+| 0.5 | Critical Core Fixes | 1 day | None |
+| 1 | Foundation | 1-2 days | Phase 0.5 |
+| 2 | Core Components | 1-2 days | Phase 1 |
+| 3 | Telegram Adapter | 2-3 days | Phase 2 |
+| 4 | API Endpoints | 1-2 days | Phase 3 |
+| 5 | Frontend Integration | 2-3 days | Phase 4 |
+
+**Total: ~8-13 days** (backend only, excluding Phase 6 future adapters)
