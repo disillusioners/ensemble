@@ -362,13 +362,16 @@ class SessionManager:
                 if msg is None:
                     break
                 
+                # Extract retry flag from metadata
+                is_retry = msg.metadata.get("is_retry", False) if msg.metadata else False
+                
                 try:
-                    # Process with activity tracking (retry handled at LLM level in graph)
                     result = await asyncio.to_thread(
                         self._process_message_with_tracking,
                         session_id,
                         msg.content,
                         msg.message_id,
+                        is_retry=is_retry,
                     )
                     
                     self.queue.ack(msg.message_id)
@@ -399,8 +402,22 @@ class SessionManager:
         session_id: str, 
         message: str,
         message_id: str,
+        is_retry: bool = False,
     ) -> MessageResult:
-        """Process message with activity tracking (LLM retry handled in graph)."""
+        """Process message with activity tracking.
+        
+        On retry, resumes from checkpoint instead of re-sending message
+        to prevent duplicate execution.
+        
+        Args:
+            session_id: The session ID.
+            message: The message content.
+            message_id: The queue message ID.
+            is_retry: If True, attempt to resume from checkpoint.
+        
+        Returns:
+            MessageResult with response data.
+        """
         graph = self.get_session(session_id)
         
         # Create activity callback for this message
@@ -415,8 +432,13 @@ class SessionManager:
             "callbacks": [activity_callback]
         }
         
-        # Direct invoke - retry happens at LLM level inside the graph
-        result = graph.invoke({"messages": [message]}, config)
+        # On retry with checkpoint, resume instead of re-adding message
+        if is_retry and self._has_checkpoint(session_id):
+            logger.info(f"Resuming session {session_id} from checkpoint (retry)")
+            result = graph.invoke(None, config)
+        else:
+            # First attempt or no checkpoint - add message to conversation
+            result = graph.invoke({"messages": [message]}, config)
         
         # Extract message data from the current turn
         messages = result.get("messages", [])
@@ -509,6 +531,23 @@ class SessionManager:
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
         return self.queue.get_stats(session_id)
+
+    def _has_checkpoint(self, session_id: str) -> bool:
+        """Check if a checkpoint exists for this session.
+        
+        Args:
+            session_id: The session ID to check.
+            
+        Returns:
+            True if checkpoint exists, False otherwise.
+        """
+        try:
+            config = {"configurable": {"thread_id": session_id}}
+            # Get the current state from checkpointer
+            state = self.checkpointer.get(config)
+            return state is not None
+        except Exception:
+            return False
 
     def terminate_session(self, session_id: str) -> bool:
         """Terminate a session.

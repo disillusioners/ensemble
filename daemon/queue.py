@@ -308,12 +308,14 @@ class InputMessageQueue:
 
         next_retry = datetime.now(timezone.utc) + timedelta(seconds=backoff)
 
+        # Set is_retry flag in metadata using SQLite's json_set
         self._conn.execute("""
             UPDATE message_queue
             SET status = 'retrying',
                 retry_count = ?,
                 error_message = ?,
-                next_retry_at = ?
+                next_retry_at = ?,
+                metadata = json_set(COALESCE(metadata, '{}'), '$.is_retry', true)
             WHERE message_id = ?
         """, (retry_count, error, next_retry, message_id))
         self._conn.commit()
