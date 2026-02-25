@@ -26,6 +26,7 @@ export interface Message {
     arguments: string | Record<string, unknown>;
     output?: string;
   }>;
+  error?: string;
   created_at: string;
 }
 

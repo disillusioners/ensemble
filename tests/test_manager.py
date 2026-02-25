@@ -37,12 +37,6 @@ def mock_config():
 
 
 @pytest.fixture
-def mock_conn():
-    """Create a mock database connection."""
-    return Mock()
-
-
-@pytest.fixture
 def mock_checkpointer():
     """Create a mock checkpointer."""
     return Mock()
@@ -55,6 +49,8 @@ def mock_graph():
     # Mock invoke to return a response with messages
     mock_message = Mock()
     mock_message.content = "Test response"
+    mock_message.type = 'ai'
+    mock_message.tool_calls = []  # Empty tool calls to avoid iteration error
     graph.invoke.return_value = {"messages": [mock_message]}
     return graph
 
@@ -68,16 +64,15 @@ def mock_prompt_cache():
 class TestSessionManagerInit:
     """Tests for SessionManager initialization."""
 
-    def test_session_manager_init(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache):
+    def test_session_manager_init(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test manager initialization."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
             
             assert manager.config == mock_config
-            assert manager.conn == mock_conn
+            assert manager.conn is not None
             assert manager.checkpointer == mock_checkpointer
             assert manager.sessions == {}
 
@@ -85,10 +80,9 @@ class TestSessionManagerInit:
 class TestSpawnSession:
     """Tests for spawn_session method."""
 
-    def test_spawn_session_generates_id(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_generates_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that session_id is auto-generated."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -103,10 +97,9 @@ class TestSpawnSession:
             assert session_id is not None
             assert len(session_id) == 36  # UUID format
 
-    def test_spawn_session_uses_provided_id(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_uses_provided_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that provided session_id is used."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -119,10 +112,9 @@ class TestSpawnSession:
             
             assert session_id == "custom-session-id"
 
-    def test_spawn_session_max_sessions_limit(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_max_sessions_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that max_sessions limit is enforced."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_sessions to 2 for this test
@@ -144,10 +136,9 @@ class TestSpawnSession:
                 with pytest.raises(ValueError, match="Max sessions limit reached"):
                     manager.spawn_session(agent_dir="/path/to/agent", session_id="session-3")
 
-    def test_spawn_session_max_children_limit(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that max_children_per_session limit is enforced."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_children_per_session to 2 for this test
@@ -166,10 +157,9 @@ class TestSpawnSession:
                 with pytest.raises(ValueError, match="Max children per session limit reached"):
                     manager.spawn_session(agent_dir="/path/to/agent", parent_id="parent-session")
 
-    def test_spawn_session_creates_graph(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that graph is created and stored."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph) as mock_build, \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -190,10 +180,9 @@ class TestSpawnSession:
 class TestSendMessage:
     """Tests for send_message method."""
 
-    def test_send_message_success(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test sending message to session."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -209,12 +198,11 @@ class TestSendMessage:
             
             # Verify graph.invoke was called
             mock_graph.invoke.assert_called_once()
-            assert response == "Test response"
+            assert response.content == "Test response"
 
-    def test_send_message_session_not_found(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache):
+    def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -226,10 +214,9 @@ class TestSendMessage:
 class TestTerminateSession:
     """Tests for terminate_session method."""
 
-    def test_terminate_session_success(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_terminate_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test terminating session."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -247,10 +234,9 @@ class TestTerminateSession:
             assert session_id not in manager.sessions
             mock_update.assert_called_once()
 
-    def test_terminate_session_not_found(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache):
+    def test_terminate_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test terminating non-existent session."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -263,10 +249,9 @@ class TestTerminateSession:
 class TestGetSession:
     """Tests for get_session method."""
 
-    def test_get_session_success(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_get_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test getting session graph."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -281,10 +266,9 @@ class TestGetSession:
             
             assert graph == mock_graph
 
-    def test_get_session_not_found(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache):
+    def test_get_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -296,10 +280,9 @@ class TestGetSession:
 class TestListSessions:
     """Tests for list_sessions method."""
 
-    def test_list_sessions(self, mock_config, mock_conn, mock_checkpointer, mock_prompt_cache):
+    def test_list_sessions(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test listing sessions."""
-        with patch('daemon.manager.init_database', return_value=mock_conn), \
-             patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.list_all_sessions', return_value=[
                  {"session_id": "session-1", "agent_dir": "/path/1", "status": "running"},

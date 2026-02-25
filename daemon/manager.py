@@ -20,6 +20,7 @@ from .persistence import (
     delete_all_sessions,
 )
 from .tools import create_session_tools
+from .events import EventBroadcaster, Event
 
 import asyncio
 import logging
@@ -115,6 +116,9 @@ class SessionManager:
         self.circuit_breaker = SessionCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
         self._processing_lock = asyncio.Lock()
+        
+        # NEW: Event broadcaster for real-time SSE updates
+        self.broadcaster = EventBroadcaster()
 
         # Start watchdog
         self.watchdog.start()
@@ -335,14 +339,44 @@ class SessionManager:
             priority=priority
         )
         
-        # Trigger async processing
-        asyncio.create_task(self._process_queue(session_id))
+        # Broadcast message_queued event
+        await self.broadcaster.broadcast(Event(
+            type="message_queued",
+            session_id=session_id,
+            message_id=message_id,
+            data={
+                "content": message,
+                "source": source,
+                "priority": priority,
+                "status": "queued"
+            }
+        ))
+        
+        # Trigger async processing with error handling
+        task = asyncio.create_task(self._process_queue(session_id))
+        task.add_done_callback(lambda t: self._handle_queue_task_done(t, session_id))
         
         return AsyncMessageResult(
             message_id=message_id,
             session_id=session_id,
             status="queued"
         )
+
+    def _handle_queue_task_done(self, task: asyncio.Task, session_id: str) -> None:
+        """Callback for when _process_queue task completes.
+        
+        Logs any exceptions that occurred during processing.
+        
+        Args:
+            task: The completed task.
+            session_id: The session ID that was being processed.
+        """
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(f"Queue processing task failed for session {session_id}: {exc}")
+        except asyncio.CancelledError:
+            logger.debug(f"Queue processing task cancelled for session {session_id}")
 
     async def _process_queue(self, session_id: str) -> None:
         """Event-driven queue processor for a session."""
@@ -365,6 +399,14 @@ class SessionManager:
                 # Extract retry flag from metadata
                 is_retry = msg.metadata.get("is_retry", False) if msg.metadata else False
                 
+                # Broadcast status_changed event
+                await self.broadcaster.broadcast(Event(
+                    type="status_changed",
+                    session_id=session_id,
+                    message_id=msg.message_id,
+                    data={"status": "processing", "is_retry": is_retry}
+                ))
+                
                 try:
                     result = await asyncio.to_thread(
                         self._process_message_with_tracking,
@@ -377,6 +419,18 @@ class SessionManager:
                     self.queue.ack(msg.message_id)
                     self.circuit_breaker.record_success(session_id)
                     
+                    # Broadcast completed event
+                    await self.broadcaster.broadcast(Event(
+                        type="completed",
+                        session_id=session_id,
+                        message_id=msg.message_id,
+                        data={
+                            "content": result.content,
+                            "thinking": result.thinking,
+                            "tool_calls": result.tool_calls,
+                        }
+                    ))
+                    
                 except Exception as e:
                     logger.error(f"Error processing message {msg.message_id}: {e}")
                     self.circuit_breaker.record_failure(session_id)
@@ -387,8 +441,30 @@ class SessionManager:
                             msg.retry_count + 1,
                             str(e)
                         )
+                        # Broadcast retry scheduled event
+                        await self.broadcaster.broadcast(Event(
+                            type="status_changed",
+                            session_id=session_id,
+                            message_id=msg.message_id,
+                            data={
+                                "status": "retrying",
+                                "retry_count": msg.retry_count + 1,
+                                "error": str(e)
+                            }
+                        ))
                     else:
                         self.queue.fail(msg.message_id, str(e))
+                        # Broadcast error event
+                        await self.broadcaster.broadcast(Event(
+                            type="error",
+                            session_id=session_id,
+                            message_id=msg.message_id,
+                            data={
+                                "error": str(e),
+                                "status": "failed",
+                                "retry_count": msg.retry_count
+                            }
+                        ))
         finally:
             async with self._processing_lock:
                 self._processing.discard(session_id)
@@ -561,6 +637,9 @@ class SessionManager:
         # Remove from processing set
         self._processing.discard(session_id)
         
+        # Clean up event broadcaster
+        self.broadcaster.cleanup_session(session_id)
+
         # Remove from sessions dict
         if session_id in self.sessions:
             del self.sessions[session_id]

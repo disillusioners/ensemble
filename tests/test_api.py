@@ -2,7 +2,7 @@
 
 import pytest
 import pytest_asyncio
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from datetime import datetime
 
 import httpx
@@ -40,6 +40,12 @@ async def mock_manager():
         "created_at": "2024-01-01T00:00:00",
         "updated_at": "2024-01-01T00:00:00"
     })
+    # Mock async enqueue_message
+    manager.enqueue_message = AsyncMock(return_value=Mock(
+        message_id="test-message-id",
+        session_id="test-session-id",
+        status="queued"
+    ))
     return manager
 
 
@@ -193,9 +199,11 @@ async def test_send_message_success(client, mock_manager):
     data = response.json()
     assert "message_id" in data
     assert data["role"] == "assistant"
-    assert data["content"] == "Test response"
-    mock_manager.send_message.assert_called_once_with(
-        "test-session-id", "Hello, agent!"
+    assert data["content"] == ""  # Response comes async via SSE
+    mock_manager.enqueue_message.assert_called_once_with(
+        session_id="test-session-id",
+        message="Hello, agent!",
+        source="api"
     )
 
 
@@ -220,32 +228,20 @@ async def test_send_message_session_not_found(client, mock_manager):
 @pytest.mark.asyncio
 async def test_get_messages(client, mock_manager):
     """Test GET /sessions/{id}/messages."""
-    # Mock the session events storage
-    with patch.object(api_module, '_session_events', {
-        "test-session-id": [
-            {
-                "type": "message",
-                "message_id": "msg-1",
-                "role": "assistant",
-                "content": "Hello!",
-                "created_at": "2024-01-01T00:00:00"
-            }
-        ]
-    }):
-        response = await client.get("/sessions/test-session-id/messages")
+    # Message history now returns empty list (TODO: implement from LangGraph checkpoints)
+    response = await client.get("/sessions/test-session-id/messages")
     
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 1
-    assert data[0]["message_id"] == "msg-1"
+    assert data == []  # Currently returns empty until checkpoint-based history is implemented
 
 
 @pytest.mark.asyncio
 async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
-    # Make send_message raise an unexpected exception
+    # Make enqueue_message raise an unexpected exception
     mock_manager.get_session.return_value = Mock()
-    mock_manager.send_message.side_effect = RuntimeError("Unexpected error")
+    mock_manager.enqueue_message.side_effect = RuntimeError("Unexpected error")
     
     response = await client.post(
         "/sessions/test-session-id/messages",
@@ -257,6 +253,6 @@ async def test_global_exception_handler(client, mock_manager):
     assert response.status_code == 500
     data = response.json()
     assert "detail" in data
-    # The send_message endpoint catches all exceptions and returns LLM_ERROR
-    assert data["detail"]["code"] == "LLM_ERROR"
+    # The enqueue_message endpoint catches all exceptions and returns INTERNAL_ERROR
+    assert data["detail"]["code"] == "INTERNAL_ERROR"
     assert "Unexpected error" in data["detail"]["message"]

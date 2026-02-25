@@ -26,6 +26,7 @@ export const App: FunctionalComponent = () => {
   });
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [health, setHealth] = useState<{ status: string; uptime_seconds: number; version: string } | null>(null);
   const [showThinking, setShowThinking] = useState(() => 
     localStorage.getItem('ensemble-show-thinking') === 'true'
@@ -44,27 +45,36 @@ export const App: FunctionalComponent = () => {
   }, [showToolCalls]);
 
   // SSE for real-time updates
-  const { isStreaming, latestMessage } = useSSE(currentSession?.session_id || null);
+  const { isStreaming, latestCompletedMessage, latestError } = useSSE(currentSession?.session_id || null);
 
-  // Handle incoming SSE messages
+  // Handle incoming SSE completed messages
   useEffect(() => {
-    if (latestMessage && latestMessage.role === 'assistant') {
+    if (latestCompletedMessage && latestCompletedMessage.role === 'assistant') {
       setMessages(prev => {
         // Check if this is an update to an existing message or a new one
-        const existingIndex = prev.findIndex(m => m.message_id === latestMessage.message_id);
+        const existingIndex = prev.findIndex(m => m.message_id === latestCompletedMessage.message_id);
         if (existingIndex >= 0) {
           // Update existing message
           const updated = [...prev];
-          updated[existingIndex] = latestMessage;
+          updated[existingIndex] = latestCompletedMessage;
           return updated;
         } else {
           // Add new message
-          return [...prev, latestMessage];
+          return [...prev, latestCompletedMessage];
         }
       });
       setIsSending(false);
     }
-  }, [latestMessage]);
+  }, [latestCompletedMessage]);
+
+  // Handle SSE errors
+  useEffect(() => {
+    if (latestError) {
+      console.error('Message processing error:', latestError);
+      // Could show error toast/notification here
+      setIsSending(false);
+    }
+  }, [latestError]);
 
   // Load health status and sessions on mount
   useEffect(() => {
@@ -179,6 +189,9 @@ export const App: FunctionalComponent = () => {
   const handleSendMessage = useCallback(async (content: string) => {
     if (!currentSession) return;
 
+    // Clear any previous error
+    setSendError(null);
+
     // Add user message to UI immediately
     const userMessage: Message = {
       type: 'message',
@@ -193,22 +206,25 @@ export const App: FunctionalComponent = () => {
     try {
       const response = await api.sendMessage(currentSession.session_id, content);
       
-      // Add assistant response
-      const assistantMessage: Message = {
-        type: 'message',
-        message_id: response.message_id,
-        role: 'assistant',
-        content: response.content || '',
-        thinking: response.thinking || undefined,
-        tool_calls: (response.tool_calls as Array<{id: string; name: string; arguments: string | Record<string, unknown>}>) || undefined,
-        created_at: response.created_at,
-      };
-      setMessages(prev => [...prev, assistantMessage]);
+      // Update user message with real message_id from response
+      setMessages(prev => prev.map(m => 
+        m.message_id === userMessage.message_id 
+          ? { ...m, message_id: response.message_id }
+          : m
+      ));
+      
+      // The assistant response will come via SSE (completed event)
+      // isSending will be set to false when the completed event is received
     } catch (err) {
       console.error('Failed to send message:', err);
-      // Remove the temporary user message on error
-      setMessages(prev => prev.filter(m => m.message_id !== userMessage.message_id));
-    } finally {
+      // Show error feedback to user
+      setSendError(err instanceof Error ? err.message : 'Failed to send message');
+      // Keep the user message visible but mark it as failed
+      setMessages(prev => prev.map(m => 
+        m.message_id === userMessage.message_id 
+          ? { ...m, error: 'Failed to send' }
+          : m
+      ));
       setIsSending(false);
     }
   }, [currentSession]);
@@ -313,6 +329,19 @@ export const App: FunctionalComponent = () => {
                 )}
               </div>
             </div>
+            
+            {/* Error banner */}
+            {sendError && (
+              <div class="mx-4 mt-2 px-4 py-2 bg-accent-rose/20 border border-accent-rose/30 rounded-md flex items-center justify-between">
+                <span class="text-accent-rose text-sm">{sendError}</span>
+                <button 
+                  onClick={() => setSendError(null)}
+                  class="text-accent-rose hover:text-white"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
             
             <ChatInterface
               messages={messages}

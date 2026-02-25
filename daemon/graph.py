@@ -85,10 +85,13 @@ def should_continue(state: MessagesState) -> str:
     return END
 
 
-def create_agent_node(llm, tools, system_prompt: str):
-    """Create the agent node function."""
-    llm_with_tools = llm.bind_tools(tools)
+def create_agent_node(llm_with_tools, system_prompt: str):
+    """Create the agent node function.
     
+    Args:
+        llm_with_tools: LLM already bound with tools.
+        system_prompt: System prompt to prepend to messages.
+    """
     def agent_node(state: MessagesState) -> dict:
         messages = state["messages"]
         # Prepend system prompt
@@ -109,10 +112,13 @@ def build_session_graph(
     """Build and return a compiled session graph with LLM-level retry."""
     llm = ThinkingChatOpenAI(**llm_config)
 
-    # Wrap LLM with retry if config provided
+    # Bind tools BEFORE wrapping with retry (RunnableRetry doesn't have bind_tools)
+    llm_with_tools = llm.bind_tools(tools)
+
+    # Wrap with retry if config provided
     if retry_config:
         max_retries = retry_config.get("max_retries", 3)
-        llm = llm.with_retry(
+        llm_with_tools = llm_with_tools.with_retry(
             stop_after_attempt=max_retries,
             retry_if_exception_type=TRANSIENT_EXCEPTIONS,
             wait_exponential_jitter=True,
@@ -122,7 +128,7 @@ def build_session_graph(
     graph = StateGraph(MessagesState)
     
     # Add nodes
-    graph.add_node("agent", create_agent_node(llm, tools, system_prompt))
+    graph.add_node("agent", create_agent_node(llm_with_tools, system_prompt))
     graph.add_node("tools", ToolNode(tools))
     
     # Add edges

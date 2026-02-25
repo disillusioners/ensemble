@@ -8,6 +8,8 @@ warnings.filterwarnings(
 )
 
 import time
+import logging
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request
@@ -18,6 +20,8 @@ from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
 from pathlib import Path
 import os
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     SessionCreate,
@@ -32,6 +36,7 @@ from .models import (
 )
 from .manager import SessionManager
 from .config import Config, load_config
+from .events import event_to_sse
 
 # Determine the base path
 BASE_DIR = Path(__file__).parent.parent
@@ -41,15 +46,14 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 manager: SessionManager = None
 start_time: float = None
 
-# Event storage for SSE
-_session_events: dict[str, list[dict]] = {}
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global manager, start_time
     config = load_config()
     manager = SessionManager(config)
+    # Set the main event loop for thread-safe broadcasting
+    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     start_time = time.time()
     yield
 
@@ -196,10 +200,6 @@ async def terminate_session(session_id: str):
 
     manager.terminate_session(session_id)
     
-    # Clean up stored events for this session
-    if session_id in _session_events:
-        del _session_events[session_id]
-    
     return {"terminated": True}
 
 
@@ -220,26 +220,23 @@ async def send_message(session_id: str, message: MessageCreate):
         )
 
     # Enqueue the message (non-blocking)
-    result = await manager.enqueue_message(
-        session_id=session_id,
-        message=message.content,
-        source="api"
-    )
+    try:
+        result = await manager.enqueue_message(
+            session_id=session_id,
+            message=message.content,
+            source="api"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to enqueue message: {str(e)}"
+            ).model_dump()
+        )
 
     # Create response with queued status
     now = datetime.now(timezone.utc)
-
-    # Store event for SSE
-    if session_id not in _session_events:
-        _session_events[session_id] = []
-    _session_events[session_id].append({
-        "type": "message_queued",
-        "message_id": result.message_id,
-        "role": "user",
-        "content": message.content,
-        "status": "queued",
-        "created_at": now.isoformat(),
-    })
 
     return MessageResponse(
         message_id=result.message_id,
@@ -298,13 +295,13 @@ async def get_messages(session_id: str):
         )
 
     # Return stored events for this session (or empty list if not implemented)
-    messages = _session_events.get(session_id, [])
-    return messages
+    # TODO: Get message history from LangGraph checkpoints
+    return []
 
 
 # 9. GET /sessions/{session_id}/events - SSE stream
 @app.get("/sessions/{session_id}/events")
-async def stream_events(session_id: str):
+async def stream_events(session_id: str, request: Request):
     """SSE stream for session events."""
     # Check session exists
     try:
@@ -318,17 +315,68 @@ async def stream_events(session_id: str):
             ).model_dump()
         )
 
+    broadcaster = manager.broadcaster
+
     async def event_generator() -> AsyncGenerator[dict, None]:
         """Generate SSE events for the session."""
-        # Send initial connection event
-        yield {"event": "connected", "data": "Session connected"}
+        import asyncio
+        import json
+        
+        try:
+            # Send initial connection event
+            yield {"event": "connected", "data": json.dumps({"session_id": session_id})}
 
-        # For now, just yield any stored events
-        # In a real implementation, this would use a queue/async iterator
-        # to stream events as they happen
-        if session_id in _session_events:
-            for event in _session_events[session_id]:
-                yield {"event": "message", "data": event}
+            # Handle reconnection - get Last-Event-ID header
+            last_event_id = request.headers.get("Last-Event-ID")
+            if last_event_id:
+                try:
+                    last_id = int(last_event_id)
+                    # Send missed events for reconnection
+                    missed_events = broadcaster.get_events_since(session_id, last_id)
+                    for event in missed_events:
+                        yield event_to_sse(event)
+                    logger.debug(f"Replayed {len(missed_events)} events for session {session_id}")
+                except ValueError:
+                    logger.warning(f"Invalid Last-Event-ID header: {last_event_id}")
+
+            # Get the event queue for this session
+            queue = await broadcaster.get_queue(session_id)
+
+            while True:
+                # Check for client disconnect
+                if await request.is_disconnected():
+                    logger.debug(f"Client disconnected from session {session_id}")
+                    break
+
+                try:
+                    # Wait for events with timeout
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield event_to_sse(event)
+                except asyncio.TimeoutError:
+                    # Send keepalive to prevent connection timeout
+                    yield {"event": "keepalive", "data": "{}"}
+                except Exception as e:
+                    # Log the error but continue the stream for transient errors
+                    logger.error(f"Error retrieving event for session {session_id}: {e}")
+                    # Only break on fatal errors, not transient ones
+                    if isinstance(e, (asyncio.CancelledError, asyncio.InvalidStateError)):
+                        yield {
+                            "event": "error", 
+                            "data": json.dumps({"error": "Stream error", "details": str(e)})
+                        }
+                        break
+                    # For other errors, send an error event but continue streaming
+                    yield {
+                        "event": "error", 
+                        "data": json.dumps({"error": "Transient error", "details": str(e), "recoverable": True})
+                    }
+        except Exception as e:
+            # Catch-all for generator errors
+            logger.exception(f"Fatal error in event generator for session {session_id}")
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
+            }
 
     return EventSourceResponse(event_generator())
 
