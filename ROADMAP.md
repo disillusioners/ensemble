@@ -274,7 +274,7 @@ agents:
 ## File Structure
 
 ```
-auto-code/
+ensemble/
 ├── daemon/
 │   ├── __init__.py
 │   ├── api.py              # FastAPI routes

@@ -12,7 +12,7 @@ import { AVAILABLE_AGENTS } from './types';
 
 type AppView = 'select-agent' | 'chat';
 
-const NEXT_AGENT_STORAGE_KEY = 'auto-code-next-session-agent';
+const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
 
 export const App: FunctionalComponent = () => {
   const [view, setView] = useState<AppView>('select-agent');
@@ -28,19 +28,19 @@ export const App: FunctionalComponent = () => {
   const [isSending, setIsSending] = useState(false);
   const [health, setHealth] = useState<{ status: string; uptime_seconds: number; version: string } | null>(null);
   const [showThinking, setShowThinking] = useState(() => 
-    localStorage.getItem('auto-code-show-thinking') === 'true'
+    localStorage.getItem('ensemble-show-thinking') === 'true'
   );
   const [showToolCalls, setShowToolCalls] = useState(() => 
-    localStorage.getItem('auto-code-show-toolcalls') === 'true'
+    localStorage.getItem('ensemble-show-toolcalls') === 'true'
   );
 
   // Persist toggle states
   useEffect(() => {
-    localStorage.setItem('auto-code-show-thinking', String(showThinking));
+    localStorage.setItem('ensemble-show-thinking', String(showThinking));
   }, [showThinking]);
   
   useEffect(() => {
-    localStorage.setItem('auto-code-show-toolcalls', String(showToolCalls));
+    localStorage.setItem('ensemble-show-toolcalls', String(showToolCalls));
   }, [showToolCalls]);
 
   // SSE for real-time updates
@@ -226,7 +226,7 @@ export const App: FunctionalComponent = () => {
           <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-cyan to-accent-violet flex items-center justify-center">
             <span class="text-white font-bold text-sm">AC</span>
           </div>
-          <h1 class="font-display text-lg font-semibold text-dark-50">Auto-Code</h1>
+          <h1 class="font-display text-lg font-semibold text-dark-50">Ensemble</h1>
         </div>
         
         <div class="flex items-center gap-4">

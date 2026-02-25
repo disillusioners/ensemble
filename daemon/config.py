@@ -98,7 +98,7 @@ def load_config(config_path: Optional[str] = None) -> Config:
     Load configuration from YAML file with environment variable substitution.
 
     Args:
-        config_path: Path to config file. If None, uses AUTO_CODE_CONFIG env var
+        config_path: Path to config file. If None, uses ENSEMBLE_CONFIG env var
                     or defaults to ./config.yaml
 
     Returns:
@@ -110,14 +110,14 @@ def load_config(config_path: Optional[str] = None) -> Config:
     """
     # Determine config file path
     if config_path is None:
-        config_path = os.environ.get("AUTO_CODE_CONFIG", "./config.yaml")
+        config_path = os.environ.get("ENSEMBLE_CONFIG", "./config.yaml")
 
     config_file = Path(config_path)
 
     if not config_file.exists():
         raise FileNotFoundError(
             f"Config file not found: {config_path}. "
-            "Set AUTO_CODE_CONFIG environment variable or create config.yaml"
+            "Set ENSEMBLE_CONFIG environment variable or create config.yaml"
         )
 
     # Read and parse YAML

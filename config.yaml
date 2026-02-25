@@ -1,4 +1,4 @@
-# Auto-Code Daemon Configuration
+# Ensemble Daemon Configuration
 # Environment variables can be used with ${VAR:-default} syntax
 
 llm:

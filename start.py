@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Start script for Auto-Code Daemon.
+Start script for Ensemble Daemon.
 Works cross-platform (Windows, macOS, Linux).
 """
 
@@ -46,7 +46,7 @@ def check_dependencies():
 
 
 def main():
-    print("Starting Auto-Code Daemon...")
+    print("Starting Ensemble Daemon...")
 
     # Load .env file
     load_env_file()

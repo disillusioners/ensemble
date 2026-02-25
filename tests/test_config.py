@@ -90,14 +90,14 @@ class TestLoadConfig:
                 config_file.unlink()
 
     def test_load_config_custom_path(self, tmp_path, sample_config_yaml):
-        """Test loading config from custom path via AUTO_CODE_CONFIG env var."""
+        """Test loading config from custom path via ENSEMBLE_CONFIG env var."""
         # Create a temporary config file
         config_file = tmp_path / "custom_config.yaml"
         with open(config_file, "w") as f:
             f.write(sample_config_yaml)
         
         # Set the environment variable
-        os.environ["AUTO_CODE_CONFIG"] = str(config_file)
+        os.environ["ENSEMBLE_CONFIG"] = str(config_file)
         
         try:
             config = load_config()
@@ -106,7 +106,7 @@ class TestLoadConfig:
             assert config.daemon.port == 8080
         finally:
             # Cleanup env var
-            del os.environ["AUTO_CODE_CONFIG"]
+            del os.environ["ENSEMBLE_CONFIG"]
 
     def test_load_config_explicit_path(self, tmp_path, sample_config_yaml):
         """Test loading config from explicit path parameter."""
@@ -158,9 +158,9 @@ class TestLoadConfig:
 
     def test_missing_default_config_file(self):
         """Test error when default config file doesn't exist."""
-        # Make sure AUTO_CODE_CONFIG is not set and config.yaml doesn't exist
-        if "AUTO_CODE_CONFIG" in os.environ:
-            del os.environ["AUTO_CODE_CONFIG"]
+        # Make sure ENSEMBLE_CONFIG is not set and config.yaml doesn't exist
+        if "ENSEMBLE_CONFIG" in os.environ:
+            del os.environ["ENSEMBLE_CONFIG"]
         
         # Ensure ./config.yaml doesn't exist
         config_file = Path("./config.yaml")

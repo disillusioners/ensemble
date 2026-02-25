@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the Auto-Code Daemon in development mode with auto-reload
+# Start the Ensemble Daemon in development mode with auto-reload
 
 set -e
 
@@ -24,7 +24,7 @@ else
     PYTHON="python3"
 fi
 
-echo -e "${GREEN}Starting Auto-Code Daemon (Development Mode)...${NC}"
+echo -e "${GREEN}Starting Ensemble Daemon (Development Mode)...${NC}"
 
 # Load environment variables from .env if it exists
 if [ -f ".env" ]; then

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the Auto-Code Daemon
+# Start the Ensemble Daemon
 
 set -e
 
@@ -27,7 +27,7 @@ else
     echo -e "${YELLOW}Using system Python (no venv found)${NC}"
 fi
 
-echo -e "${GREEN}Starting Auto-Code Daemon...${NC}"
+echo -e "${GREEN}Starting Ensemble Daemon...${NC}"
 
 # Check if .env file exists
 if [ ! -f ".env" ]; then

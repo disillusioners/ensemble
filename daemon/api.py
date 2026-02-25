@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Auto-Code Daemon",
+    title="Ensemble Daemon",
     version="0.1.0",
     lifespan=lifespan
 )

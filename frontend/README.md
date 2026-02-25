@@ -1,4 +1,4 @@
-# Auto-Code Frontend
+# Ensemble Frontend
 
 A Preact-based chatbot UI for the multi-agent orchestration system.
 

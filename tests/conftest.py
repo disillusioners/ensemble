@@ -198,11 +198,11 @@ def clean_env():
     
     yield
     
-    # Restore original env (but don't restore AUTO_CODE_CONFIG as tests may modify it)
+    # Restore original env (but don't restore ENSEMBLE_CONFIG as tests may modify it)
     for key in os.environ:
         if key not in original_env:
             del os.environ[key]
     
     for key, value in original_env.items():
-        if key != "AUTO_CODE_CONFIG" and os.environ.get(key) != value:
+        if key != "ENSEMBLE_CONFIG" and os.environ.get(key) != value:
             os.environ[key] = value
