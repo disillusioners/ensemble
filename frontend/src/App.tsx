@@ -8,6 +8,7 @@ import { ChatInterface } from './components/ChatInterface';
 import { MessageInput } from './components/MessageInput';
 import { useSSE } from './hooks/useSSE';
 import { api } from './utils/api';
+import type { AgentCreate } from './utils/api';
 import type { SessionInfo, Message, Agent } from './types';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
@@ -20,6 +21,8 @@ interface HomeProps {
   onSetNextSessionAgent: (agent: Agent) => void;
   onCreateSession: (agent: Agent) => Promise<void>;
   onContinueSession: (sessionId: string) => void;
+  onAddAgent: (agent: AgentCreate) => Promise<Agent | null>;
+  onDeleteAgent: (agentId: string) => Promise<void>;
   isLoading: boolean;
 }
 
@@ -30,6 +33,8 @@ const Home: FunctionalComponent<HomeProps> = ({
   onSetNextSessionAgent,
   onCreateSession,
   onContinueSession,
+  onAddAgent,
+  onDeleteAgent,
   isLoading,
 }) => {
   return (
@@ -41,6 +46,8 @@ const Home: FunctionalComponent<HomeProps> = ({
           onSelect={onSetNextSessionAgent}
           onCreateSession={() => nextSessionAgent && onCreateSession(nextSessionAgent)}
           onContinueSession={onContinueSession}
+          onAddAgent={onAddAgent}
+          onDeleteAgent={onDeleteAgent}
           hasSessions={sessions.length > 0}
           isLoading={isLoading}
         />
@@ -450,6 +457,34 @@ export const App: FunctionalComponent = () => {
     setShowToolCalls(prev => !prev);
   }, []);
 
+  const handleAddAgent = useCallback(async (agentCreate: AgentCreate): Promise<Agent | null> => {
+    try {
+      const newAgent = await api.createAgent(agentCreate);
+      // Add to agents list
+      setAgents(prev => [...prev, newAgent]);
+      return newAgent;
+    } catch (err) {
+      console.error('Failed to create agent:', err);
+      throw err;
+    }
+  }, []);
+
+  const handleDeleteAgent = useCallback(async (agentId: string) => {
+    try {
+      await api.deleteAgent(agentId);
+      // Remove from agents list
+      setAgents(prev => prev.filter(a => a.id !== agentId));
+      // Clear selection if deleted agent was selected
+      if (nextSessionAgent?.id === agentId) {
+        setNextSessionAgent(null);
+        localStorage.removeItem(NEXT_AGENT_STORAGE_KEY);
+      }
+    } catch (err) {
+      console.error('Failed to delete agent:', err);
+      alert(`Failed to delete agent: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  }, [nextSessionAgent]);
+
   return (
     <div class="h-screen flex flex-col bg-dark-950 font-body text-dark-100 overflow-hidden">
       {/* Header */}
@@ -497,6 +532,8 @@ export const App: FunctionalComponent = () => {
                   navigate(`/sessions/${sessionId}`);
                 }
               }}
+              onAddAgent={handleAddAgent}
+              onDeleteAgent={handleDeleteAgent}
               isLoading={isLoading}
             />
           } 

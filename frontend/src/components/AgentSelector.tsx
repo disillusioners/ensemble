@@ -1,5 +1,8 @@
 import { FunctionalComponent } from 'preact';
+import { useState } from 'preact/hooks';
 import type { Agent } from '../types';
+import type { AgentCreate } from '../utils/api';
+import { AddAgentModal } from './AddAgentModal';
 
 interface AgentSelectorProps {
   agents: Agent[];
@@ -7,6 +10,8 @@ interface AgentSelectorProps {
   onSelect: (agent: Agent) => void;
   onCreateSession: () => void;
   onContinueSession: (sessionId: string) => void;
+  onAddAgent: (agent: AgentCreate) => Promise<Agent | null>;
+  onDeleteAgent: (agentId: string) => Promise<void>;
   hasSessions: boolean;
   isLoading?: boolean;
 }
@@ -31,9 +36,12 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
   onSelect,
   onCreateSession,
   onContinueSession,
+  onAddAgent,
+  onDeleteAgent,
   hasSessions,
   isLoading,
 }) => {
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const activeColor = selectedAgent ? getAgentColor(selectedAgent) : '#10a7f7';
 
   return (
@@ -86,9 +94,41 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
                   style={{ backgroundColor: color }}
                 />
               )}
+
+              {/* Delete button */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (confirm(`Delete agent "${agent.name}"? This will move it to trash.`)) {
+                    onDeleteAgent(agent.id);
+                  }
+                }}
+                class="absolute bottom-3 right-3 p-1.5 rounded-lg bg-dark-900/80 text-dark-500 
+                       opacity-0 group-hover:opacity-100 transition-opacity
+                       hover:bg-accent-rose/20 hover:text-accent-rose"
+                title="Delete agent"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
             </button>
           );
         })}
+        
+        {/* Add new agent card */}
+        <button
+          onClick={() => setIsAddModalOpen(true)}
+          class="p-6 rounded-2xl border-2 border-dashed border-dark-600 bg-dark-800/30
+                 hover:border-dark-500 hover:bg-dark-800/50 transition-all duration-300
+                 flex flex-col items-center justify-center gap-2 text-dark-400
+                 hover:text-dark-300"
+        >
+          <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+          </svg>
+          <span class="font-display font-medium">Add New Agent</span>
+        </button>
       </div>
 
       <div class="flex justify-center gap-4">
@@ -128,6 +168,13 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
           )}
         </button>
       </div>
+
+      {/* Add Agent Modal */}
+      <AddAgentModal
+        isOpen={isAddModalOpen}
+        onClose={() => setIsAddModalOpen(false)}
+        onAdd={onAddAgent}
+      />
     </div>
   );
 };

@@ -215,3 +215,24 @@ class AgentListResponse(BaseModel):
             }
         }
     )
+
+
+class AgentCreate(BaseModel):
+    """Request for creating a new agent."""
+    id: str = Field(..., description="Unique agent identifier (directory name)")
+    name: str = Field(..., description="Display name of the agent")
+    description: str = Field(default="", description="Description of what the agent does")
+    icon: str = Field(default="🤖", description="Emoji icon for the agent")
+    color: str = Field(default="accent-blue", description="Color theme for the agent")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "my-agent",
+                "name": "My Agent",
+                "description": "A custom agent",
+                "icon": "🚀",
+                "color": "accent-emerald"
+            }
+        }
+    )

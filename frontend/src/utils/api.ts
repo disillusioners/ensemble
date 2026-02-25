@@ -1,4 +1,12 @@
-import type { SessionInfo, SessionListResponse, MessageResponse, Message, HealthResponse, AgentListResponse } from '../types';
+import type { SessionInfo, SessionListResponse, MessageResponse, Message, HealthResponse, AgentListResponse, Agent } from '../types';
+
+export interface AgentCreate {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  color?: string;
+}
 
 const API_BASE = import.meta.env.PROD ? '' : '/api';
 
@@ -28,6 +36,19 @@ export const api = {
   // Agents
   async listAgents(): Promise<AgentListResponse> {
     return fetchApi('/agents');
+  },
+
+  async createAgent(agent: AgentCreate): Promise<Agent> {
+    return fetchApi('/agents', {
+      method: 'POST',
+      body: JSON.stringify(agent),
+    });
+  },
+
+  async deleteAgent(agentId: string): Promise<{ deleted: boolean; agent_id: string }> {
+    return fetchApi(`/agents/${agentId}`, {
+      method: 'DELETE',
+    });
   },
 
   // Sessions
