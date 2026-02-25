@@ -21,7 +21,11 @@ except ImportError:
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
-    """Custom ChatOpenAI that captures reasoning_content from OpenAI-compatible APIs."""
+    """Custom ChatOpenAI that captures reasoning_content from OpenAI-compatible APIs.
+    
+    Note: This class does NOT make duplicate requests. The thinking extraction
+    is done from the response metadata if available, without additional API calls.
+    """
     
     def _generate(
         self,
@@ -30,48 +34,31 @@ class ThinkingChatOpenAI(ChatOpenAI):
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """Override to capture reasoning_content from raw response."""
-        # Call parent implementation
+        """Override to capture reasoning_content from response metadata."""
+        # Call parent implementation (this is the ONLY HTTP request)
         result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
         
-        # Try to get raw response with reasoning_content
+        # Try to extract reasoning_content from the result's additional_kwargs
+        # (no additional HTTP request needed)
         try:
-            # Get the bound client
-            client = self.client
-            
-            # Convert messages to dict format
-            message_dicts = [
-                {"role": "system" if m.type == "system" else "user" if m.type == "human" else "assistant", 
-                 "content": m.content}
-                for m in messages
-            ]
-            
-            # Build params
-            params = dict(self._default_params)
-            if stop:
-                params["stop"] = stop
-            params.update(kwargs)
-            
-            # Make raw request
-            raw_response = client.create(
-                messages=message_dicts,
-                **params,
-            )
-            
-            # Extract reasoning_content from raw response
-            if raw_response.choices:
-                raw_message = raw_response.choices[0].message
-                reasoning_content = getattr(raw_message, 'reasoning_content', None)
-                
-                if reasoning_content and result.generations:
-                    # Store in the first generation's message additional_kwargs
-                    gen_message = result.generations[0].message
-                    if hasattr(gen_message, 'additional_kwargs'):
-                        gen_message.additional_kwargs['reasoning_content'] = reasoning_content
+            if result.generations:
+                gen_message = result.generations[0].message
+                if hasattr(gen_message, 'additional_kwargs'):
+                    # Check for reasoning_content in various places
+                    reasoning = gen_message.additional_kwargs.get('reasoning_content')
+                    if not reasoning:
+                        reasoning = gen_message.additional_kwargs.get('reasoning')
+                    if not reasoning and hasattr(gen_message, 'response_metadata'):
+                        meta = gen_message.response_metadata or {}
+                        reasoning = meta.get('reasoning_content') or meta.get('reasoning')
+                    
+                    if reasoning and hasattr(gen_message, 'additional_kwargs'):
+                        gen_message.additional_kwargs['reasoning_content'] = reasoning
+                        logger.debug(f"[LLM] Extracted reasoning: {reasoning[:100] if reasoning else 'none'}...")
                         
         except Exception as e:
             # Don't fail the whole request if thinking extraction fails
-            print(f"[DEBUG] Failed to extract reasoning_content: {e}")
+            logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
         
         return result
 
@@ -92,11 +79,22 @@ def create_agent_node(llm_with_tools, system_prompt: str):
         llm_with_tools: LLM already bound with tools.
         system_prompt: System prompt to prepend to messages.
     """
+    # Create a counter for this agent node
+    call_counter = [0]  # Use list to allow mutation in nested function
+    
     def agent_node(state: MessagesState) -> dict:
+        import traceback
+        call_counter[0] += 1
         messages = state["messages"]
         # Prepend system prompt
         full_messages = [SystemMessage(content=system_prompt)] + messages
+        logger.info(f"[LLM] ⚡ Invoking LLM (call #{call_counter[0]}) with {len(full_messages)} messages")
+        logger.debug(f"[LLM] Stack trace:\n{''.join(traceback.format_stack()[-6:-1])}")
         response = llm_with_tools.invoke(full_messages)
+        tool_calls_info = ""
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            tool_calls_info = f", tool_calls: {[tc.get('name', tc.name if hasattr(tc, 'name') else 'unknown') for tc in response.tool_calls]}"
+        logger.info(f"[LLM] ✅ Response received (call #{call_counter[0]}): {response.content[:100] if response.content else 'empty'}...{tool_calls_info}")
         return {"messages": [response]}
     
     return agent_node

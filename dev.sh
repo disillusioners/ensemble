@@ -47,9 +47,11 @@ mkdir -p data
 
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
+LOG_LEVEL="${LOG_LEVEL:-debug}"
 
 echo -e "${GREEN}Starting server with auto-reload...${NC}"
 echo -e "${GREEN}API Documentation: http://localhost:$PORT/docs${NC}"
+echo -e "${YELLOW}Log level: $LOG_LEVEL${NC}"
 echo ""
 
-$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload
+$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL"

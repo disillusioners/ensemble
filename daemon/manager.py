@@ -1,11 +1,15 @@
 """Session manager orchestrating all agent sessions."""
 
 import uuid
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
 
 from langgraph.graph.state import CompiledStateGraph
+
+# Create logger for this module
+logger = logging.getLogger(__name__)
 
 from .config import Config
 from .graph import build_session_graph
@@ -352,6 +356,8 @@ class SessionManager:
             }
         ))
         
+        logger.info(f"[QUEUE] Enqueued message {message_id} for session {session_id}")
+        
         # Trigger async processing with error handling
         task = asyncio.create_task(self._process_queue(session_id))
         task.add_done_callback(lambda t: self._handle_queue_task_done(t, session_id))
@@ -380,11 +386,15 @@ class SessionManager:
 
     async def _process_queue(self, session_id: str) -> None:
         """Event-driven queue processor for a session."""
+        import traceback
+        
         # Check if already processing
         async with self._processing_lock:
             if session_id in self._processing:
+                logger.info(f"[QUEUE] Session {session_id} already being processed, skipping")
                 return
             self._processing.add(session_id)
+            logger.info(f"[QUEUE] Started processing for session {session_id}")
         
         try:
             if not self.circuit_breaker.can_execute(session_id):
@@ -394,7 +404,10 @@ class SessionManager:
             while True:
                 msg = self.queue.dequeue(session_id, timeout=0)
                 if msg is None:
+                    logger.info(f"[QUEUE] No more messages for session {session_id}")
                     break
+                
+                logger.info(f"[QUEUE] Processing message {msg.message_id} for session {session_id} (retry={msg.retry_count})")
                 
                 # Extract retry flag from metadata
                 is_retry = msg.metadata.get("is_retry", False) if msg.metadata else False
@@ -407,6 +420,8 @@ class SessionManager:
                     data={"status": "processing", "is_retry": is_retry}
                 ))
                 
+                logger.info(f"[QUEUE] About to call _process_message_with_tracking for {msg.message_id}")
+                
                 try:
                     result = await asyncio.to_thread(
                         self._process_message_with_tracking,
@@ -415,6 +430,8 @@ class SessionManager:
                         msg.message_id,
                         is_retry=is_retry,
                     )
+                    
+                    logger.info(f"[QUEUE] _process_message_with_tracking completed for {msg.message_id}")
                     
                     self.queue.ack(msg.message_id)
                     self.circuit_breaker.record_success(session_id)
@@ -494,7 +511,11 @@ class SessionManager:
         Returns:
             MessageResult with response data.
         """
+        logger.info(f"[PROCESS] _process_message_with_tracking called for {message_id}")
+        
         graph = self.get_session(session_id)
+        
+        logger.info(f"[PROCESS] Got graph for session {session_id}")
         
         # Create activity callback for this message
         activity_callback = ActivityCallbackHandler(
@@ -508,13 +529,18 @@ class SessionManager:
             "callbacks": [activity_callback]
         }
         
+        logger.info(f"[PROCESS] About to invoke graph for message {message_id}")
+        
         # On retry with checkpoint, resume instead of re-adding message
         if is_retry and self._has_checkpoint(session_id):
             logger.info(f"Resuming session {session_id} from checkpoint (retry)")
             result = graph.invoke(None, config)
         else:
             # First attempt or no checkpoint - add message to conversation
+            logger.info(f"[PROCESS] Invoking graph with message: {message[:50]}...")
             result = graph.invoke({"messages": [message]}, config)
+        
+        logger.info(f"[PROCESS] Graph invoke completed for {message_id}")
         
         # Extract message data from the current turn
         messages = result.get("messages", [])
