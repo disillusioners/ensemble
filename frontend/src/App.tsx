@@ -1,6 +1,6 @@
 import { FunctionalComponent } from 'preact';
 import { useState, useEffect, useCallback } from 'preact/hooks';
-import { Routes, Route, useNavigate, useParams, Link } from 'react-router-dom';
+import { Routes, Route, useNavigate, useLocation, Link } from 'react-router-dom';
 import { AgentSelector } from './components/AgentSelector';
 import { AgentSwitcher } from './components/AgentSwitcher';
 import { SessionList } from './components/SessionList';
@@ -221,7 +221,13 @@ const Chat: FunctionalComponent<ChatProps> = ({
 
 export const App: FunctionalComponent = () => {
   const navigate = useNavigate();
-  const { sessionId } = useParams<{ sessionId: string }>();
+  const location = useLocation();
+  
+  // Extract sessionId from URL pathname (more reliable than useParams with Preact)
+  const sessionId = (() => {
+    const match = location.pathname.match(/\/sessions\/(.+)$/);
+    return match ? match[1] : null;
+  })();
   
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -335,16 +341,18 @@ export const App: FunctionalComponent = () => {
     }
   }, [sessionId, sessions, navigate]);
 
-  // Load messages when session changes
+  // Load messages when sessionId changes (direct trigger, not via currentSession)
   useEffect(() => {
-    if (!currentSession) {
+    if (!sessionId) {
       setMessages([]);
       return;
     }
 
     const loadMessages = async () => {
       try {
-        const msgs = await api.getMessages(currentSession.session_id);
+        console.log('Loading messages for session:', sessionId);
+        const msgs = await api.getMessages(sessionId);
+        console.log('Loaded messages:', msgs.length);
         setMessages(msgs);
       } catch (err) {
         console.error('Failed to load messages:', err);
@@ -352,7 +360,7 @@ export const App: FunctionalComponent = () => {
     };
 
     loadMessages();
-  }, [currentSession]);
+  }, [sessionId]);
 
   // Agent for next session (user can change via combobox)
   const handleSetNextSessionAgent = useCallback((agent: Agent) => {
@@ -515,7 +523,7 @@ export const App: FunctionalComponent = () => {
             <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-accent-cyan to-accent-violet flex items-center justify-center">
               <span class="text-white font-bold text-sm">AC</span>
             </div>
-            <h1 class="font-display text-lg font-semibold text-dark-50">Ensemble</h1>
+            <h1 class="font-display text-lg font-semibold text-dark-50">Agents Ensemble</h1>
           </Link>
         </div>
         

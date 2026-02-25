@@ -385,3 +385,105 @@ def cleanup_message_queue(
         logger.info(f"Cleaned up {deleted} old queue messages")
     
     return deleted
+
+
+def get_session_messages(
+    conn: sqlite3.Connection,
+    session_id: str
+) -> list[dict[str, Any]]:
+    """Get message history from LangGraph checkpoints.
+    
+    Args:
+        conn: Database connection.
+        session_id: Session identifier to retrieve messages for.
+        
+    Returns:
+        List of message dictionaries with role, content, thinking, tool_calls.
+    """
+    from datetime import datetime, timezone
+    import uuid
+    
+    checkpointer = SqliteSaver(conn)
+    config = {"configurable": {"thread_id": session_id}}
+    
+    # Get the current state from checkpointer
+    state = checkpointer.get(config)
+    if state is None:
+        return []
+    
+    messages = state.get("messages", [])
+    if not messages:
+        return []
+    
+    result = []
+    
+    # Build a map of tool_call_id -> output from ToolMessages
+    tool_outputs = {}
+    for msg in messages:
+        if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
+            tool_outputs[msg.tool_call_id] = msg.content
+    
+    for msg in messages:
+        msg_type = getattr(msg, 'type', 'unknown')
+        
+        # Map message types to roles
+        role_map = {
+            'human': 'user',
+            'ai': 'assistant',
+            'system': 'system',
+            'tool': 'tool',
+        }
+        role = role_map.get(msg_type, msg_type)
+        
+        # Skip tool messages in the main list (they're included in tool_calls)
+        if msg_type == 'tool':
+            continue
+        
+        content = getattr(msg, 'content', '') or ''
+        
+        # Extract thinking from additional_kwargs
+        thinking = None
+        if hasattr(msg, 'additional_kwargs'):
+            kwargs = msg.additional_kwargs or {}
+            if kwargs.get("thinking"):
+                thinking = kwargs["thinking"]
+            elif kwargs.get("reasoning_content"):
+                thinking = kwargs["reasoning_content"]
+        
+        # Extract tool_calls for AI messages
+        tool_calls = None
+        if msg_type == 'ai' and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            tool_calls = []
+            for tc in msg.tool_calls:
+                # Handle both dict and object formats
+                if isinstance(tc, dict):
+                    tc_id = tc.get("id", "")
+                    tool_calls.append({
+                        "id": tc_id,
+                        "name": tc.get("name", ""),
+                        "arguments": tc.get("args", {}),
+                        "output": tool_outputs.get(tc_id),
+                    })
+                else:
+                    tc_id = getattr(tc, "id", "")
+                    tool_calls.append({
+                        "id": tc_id,
+                        "name": getattr(tc, "name", ""),
+                        "arguments": getattr(tc, "args", {}),
+                        "output": tool_outputs.get(tc_id),
+                    })
+        
+        # Generate a message ID based on content hash (for consistency)
+        msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{session_id}:{role}:{content[:100]}"))
+        
+        result.append({
+            "message_id": msg_id,
+            "type": msg_type,
+            "role": role,
+            "content": content,
+            "thinking": thinking,
+            "tool_calls": tool_calls,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    
+    return result

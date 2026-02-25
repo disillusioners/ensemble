@@ -492,9 +492,8 @@ async def get_messages(session_id: str):
             ).model_dump()
         )
 
-    # Return stored events for this session (or empty list if not implemented)
-    # TODO: Get message history from LangGraph checkpoints
-    return []
+    # Get message history from LangGraph checkpoints
+    return manager.get_messages(session_id)
 
 
 # 9. GET /sessions/{session_id}/events - SSE stream

@@ -22,6 +22,7 @@ from .persistence import (
     update_session_status,
     get_session_metadata,
     delete_all_sessions,
+    get_session_messages,
 )
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
@@ -759,6 +760,23 @@ class SessionManager:
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
         return meta
+
+    def get_messages(self, session_id: str) -> list[dict]:
+        """Get message history for a session.
+
+        Args:
+            session_id: The ID of the session.
+
+        Returns:
+            List of message dictionaries from LangGraph checkpoints.
+
+        Raises:
+            KeyError: If session is not found.
+        """
+        # Verify session exists
+        self.get_session(session_id)  # raises KeyError if not found
+        
+        return get_session_messages(self.conn, session_id)
 
     def clear_all_sessions(self) -> int:
         """Clear all sessions from memory and database.
