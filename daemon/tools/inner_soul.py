@@ -9,7 +9,7 @@ This is the core intelligence for agent growth. It understands:
 from datetime import datetime
 from pathlib import Path
 from langchain_core.tools import tool
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 import re
 
 if TYPE_CHECKING:
@@ -317,7 +317,7 @@ def _execute_update(
     elif target == "memory":
         return _update_memory_md(agent_path, request, rules, manager)
     elif target == "soul":
-        return _update_soul(agent_path, request, rules)
+        return _update_soul(agent_path, request, rules, manager)
     elif target == "user":
         return _update_user(agent_path, request, manager)
     elif target == "workflow":
@@ -406,47 +406,94 @@ def _update_memory_md(agent_path: Path, request: str, rules: dict, manager: "Ses
     }
 
 
-def _update_soul(agent_path: Path, request: str, rules: dict) -> dict:
-    """Propose soul.md change - requires approval."""
+def _update_soul(agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
+    """Apply soul.md change directly - identity updates are applied immediately."""
+    soul_file = agent_path / "soul.md"
     history_dir = agent_path / "history"
     history_dir.mkdir(exist_ok=True)
     
     now = datetime.now()
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_soul_proposal.md"
-    filepath = history_dir / filename
     
-    proposal_content = f"""# Soul Change Proposal
+    # Read current soul
+    if soul_file.exists():
+        current = soul_file.read_text()
+    else:
+        current = "# Who I Am\n\n"
+    
+    # Check size constraints
+    max_chars = rules.get("max_soul_chars", 2000)
+    if len(current) >= max_chars:
+        return {
+            "success": False,
+            "target": "soul",
+            "error": f"soul.md at {len(current)} chars (max {max_chars}). Cannot add more."
+        }
+    
+    # Determine where to add the change
+    lines = current.rstrip().split('\n')
+    
+    # Format the change based on request type
+    request_lower = request.lower()
+    is_name_change = any(p in request_lower for p in ["my name is", "i am called", "call me", "remember my name", "remember your name"])
+    
+    if is_name_change:
+        # Extract name and format nicely
+        name = request.split('name is')[-1].split('called')[-1].strip().rstrip('.')
+        formatted = f"**My name is {name}**"
+        # Insert right after main header
+        insert_idx = 1  # After first line (header)
+        while insert_idx < len(lines) and lines[insert_idx].strip() == "":
+            insert_idx += 1
+        # Check if name already exists and update it
+        for i, line in enumerate(lines):
+            if line.startswith("**My name is"):
+                lines[i] = formatted
+                formatted = None  # Flag that we updated, not inserted
+                break
+    else:
+        formatted = f"- {request}"
+        # Append at the end
+        insert_idx = len(lines)
+    
+    # Insert the change (if not already updated)
+    if formatted:
+        lines.insert(insert_idx, formatted)
+    new_content = '\n'.join(lines)
+    
+    # Write updated soul
+    soul_file.write_text(new_content)
+    
+    # Invalidate cache if manager provided
+    if manager:
+        manager.prompt_cache.invalidate(agent_path)
+    
+    # Log to history for audit trail
+    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    history_file = history_dir / f"{timestamp}_soul_change.md"
+    history_content = f"""# Soul Change Applied
 
-**Created:** {now.strftime("%Y-%m-%d %H:%M:%S")}
-**Status:** PENDING APPROVAL
+**Applied:** {now.strftime("%Y-%m-%d %H:%M:%S")}
+**Status:** APPLIED
 
-## Proposed Change
+## Change
 
 {request}
 
-## Why This Matters
+## Previous State
 
-This is a change to your core identity. It affects who you ARE.
-
-## To Apply
-
-1. Review the content above
-2. If approved, add to soul.md in an appropriate section
-3. Delete this file
-
-## To Reject
-
-Simply delete this file.
+```
+{current[:500]}{'...' if len(current) > 500 else ''}
+```
 """
-    filepath.write_text(proposal_content)
+    history_file.write_text(history_content)
     
     return {
         "success": True,
         "target": "soul",
-        "file": f"history/{filename}",
-        "status": "pending_approval",
-        "message": "Soul changes require user approval"
+        "file": "soul.md",
+        "status": "applied",
+        "chars": f"{len(new_content)}/{max_chars}",
+        "message": "Soul change applied directly"
     }
 
 
@@ -504,14 +551,12 @@ def _format_response(request: str, results: list, classification: dict) -> str:
             file = r.get("file", "")
             status = r.get("status", "")
             
-            if status == "pending_approval":
-                lines.append(f"  📝 {target}: {file}")
-                lines.append(f"     → Awaiting user approval")
-            else:
-                msg = f"  ✓ {target}: {file}"
-                if "words" in r:
-                    msg += f" ({r['words']} words)"
-                lines.append(msg)
+            msg = f"  ✓ {target}: {file}"
+            if "chars" in r:
+                msg += f" ({r['chars']} chars)"
+            if "words" in r:
+                msg += f" ({r['words']} words)"
+            lines.append(msg)
         else:
             lines.append(f"  ⚠ {r.get('target', 'unknown')}: {r.get('error', 'Unknown error')}")
     
