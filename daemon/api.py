@@ -9,7 +9,7 @@ warnings.filterwarnings(
 
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -128,8 +128,8 @@ async def create_session(session_create: SessionCreate):
         status=SessionStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
         children=session_meta.get("children", []),
-        created_at=datetime.fromisoformat(session_meta["created_at"]) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
-        updated_at=datetime.fromisoformat(session_meta["updated_at"]) if session_meta.get("updated_at") and isinstance(session_meta["updated_at"], str) else session_meta.get("updated_at"),
+        created_at=datetime.fromisoformat(session_meta["created_at"]).replace(tzinfo=timezone.utc) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
+        updated_at=datetime.fromisoformat(session_meta["updated_at"]).replace(tzinfo=timezone.utc) if session_meta.get("updated_at") and isinstance(session_meta["updated_at"], str) else session_meta.get("updated_at"),
     )
 
 
@@ -146,8 +146,8 @@ async def list_sessions():
             status=SessionStatus(sess["status"]),
             parent_id=sess.get("parent_id"),
             children=sess.get("children", []),
-            created_at=datetime.fromisoformat(sess["created_at"]) if isinstance(sess["created_at"], str) else sess["created_at"],
-            updated_at=datetime.fromisoformat(sess["updated_at"]) if sess.get("updated_at") and isinstance(sess["updated_at"], str) else sess.get("updated_at"),
+            created_at=datetime.fromisoformat(sess["created_at"]).replace(tzinfo=timezone.utc) if isinstance(sess["created_at"], str) else sess["created_at"],
+            updated_at=datetime.fromisoformat(sess["updated_at"]).replace(tzinfo=timezone.utc) if sess.get("updated_at") and isinstance(sess["updated_at"], str) else sess.get("updated_at"),
         ))
     return SessionListResponse(sessions=sessions)
 
@@ -231,7 +231,7 @@ async def send_message(session_id: str, message: MessageCreate):
         )
 
     # Create response message
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     message_id = f"msg-{int(now.timestamp() * 1000)}"
 
     # Store event for SSE

@@ -1,6 +1,6 @@
-# Auto-Code Daemon
+# Agents Ensemble
 
-A **persistent multi-session agent daemon** built with LangGraph. Agents are defined by markdown files, not code.
+A **persistent multi-agent daemon** built with LangGraph. Agents are defined by markdown files, not code.
 
 ## Features
 
@@ -123,7 +123,7 @@ python -m pytest tests/ -v
 ## Project Structure
 
 ```
-auto-code/
+ensemble/
 ├── daemon/
 │   ├── api.py         # FastAPI routes
 │   ├── graph.py       # LangGraph definition
