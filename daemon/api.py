@@ -22,15 +22,12 @@ from pathlib import Path
 import os
 
 # Configure logging for daemon modules
-# This ensures our debug/info logs are visible when running via uvicorn
+# This ensures our logs are visible when running via uvicorn
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
-
-# Enable DEBUG for daemon modules specifically (can be changed to INFO for production)
-logging.getLogger('daemon').setLevel(logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 

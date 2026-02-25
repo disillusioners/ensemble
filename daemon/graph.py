@@ -79,22 +79,17 @@ def create_agent_node(llm_with_tools, system_prompt: str):
         llm_with_tools: LLM already bound with tools.
         system_prompt: System prompt to prepend to messages.
     """
-    # Create a counter for this agent node
-    call_counter = [0]  # Use list to allow mutation in nested function
-    
     def agent_node(state: MessagesState) -> dict:
-        import traceback
-        call_counter[0] += 1
         messages = state["messages"]
         # Prepend system prompt
         full_messages = [SystemMessage(content=system_prompt)] + messages
-        logger.info(f"[LLM] ⚡ Invoking LLM (call #{call_counter[0]}) with {len(full_messages)} messages")
-        logger.debug(f"[LLM] Stack trace:\n{''.join(traceback.format_stack()[-6:-1])}")
+        logger.debug(f"Invoking LLM with {len(full_messages)} messages")
         response = llm_with_tools.invoke(full_messages)
-        tool_calls_info = ""
+        tool_info = ""
         if hasattr(response, 'tool_calls') and response.tool_calls:
-            tool_calls_info = f", tool_calls: {[tc.get('name', tc.name if hasattr(tc, 'name') else 'unknown') for tc in response.tool_calls]}"
-        logger.info(f"[LLM] ✅ Response received (call #{call_counter[0]}): {response.content[:100] if response.content else 'empty'}...{tool_calls_info}")
+            tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
+            tool_info = f", tools: {tool_names}"
+        logger.info(f"LLM response: {response.content[:80] if response.content else 'empty'}...{tool_info}")
         return {"messages": [response]}
     
     return agent_node
