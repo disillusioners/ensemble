@@ -235,7 +235,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.messages.set([]);
     this.sseService.disconnect();
 
-    this.isSending.set(true);
     const agentPath = `./agents/${agent.id}`;
     
     this.api.createSession(agentPath).subscribe({
@@ -245,7 +244,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         console.error('Failed to create session:', err);
-        this.isSending.set(false);
       }
     });
   }
