@@ -21,6 +21,12 @@ from .persistence import (
 )
 from .tools import create_session_tools
 
+import asyncio
+import logging
+from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class MessageResult:
@@ -28,6 +34,14 @@ class MessageResult:
     content: str
     thinking: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+
+
+@dataclass
+class AsyncMessageResult:
+    """Result of async message enqueue."""
+    message_id: str
+    session_id: str
+    status: str = "queued"
 
 
 class SessionManager:
@@ -45,6 +59,16 @@ class SessionManager:
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
+
+        # NEW: Message queue system
+        self.queue = InputMessageQueue(self.conn)
+        self.watchdog = SessionWatchdog(self.queue, self.conn)
+        self.circuit_breaker = SessionCircuitBreaker()
+        self._processing: set[str] = set()  # sessions currently processing
+        self._processing_lock = asyncio.Lock()
+
+        # Start watchdog
+        self.watchdog.start()
 
     def spawn_session(
         self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
@@ -227,6 +251,104 @@ class SessionManager:
                 )
         return MessageResult(content="")
 
+    async def enqueue_message(
+        self, 
+        session_id: str, 
+        message: str, 
+        source: str = "api",
+        priority: int = 1
+    ) -> AsyncMessageResult:
+        """Enqueue a message for a session (non-blocking).
+        
+        Args:
+            session_id: The ID of the target session.
+            message: The message content.
+            source: Source identifier (e.g., "api", "web", "agent:<id>").
+            priority: Message priority (0=system, 1=user).
+        
+        Returns:
+            AsyncMessageResult with message_id and status.
+        """
+        # Check session exists
+        self.get_session(session_id)  # raises KeyError if not found
+        
+        # Enqueue the message
+        message_id = self.queue.enqueue(
+            session_id=session_id,
+            content=message,
+            source=source,
+            priority=priority
+        )
+        
+        # Trigger async processing
+        asyncio.create_task(self._process_queue(session_id))
+        
+        return AsyncMessageResult(
+            message_id=message_id,
+            session_id=session_id,
+            status="queued"
+        )
+
+    async def _process_queue(self, session_id: str) -> None:
+        """Event-driven queue processor for a session.
+        
+        When current work completes, check for next message.
+        """
+        # Check if already processing
+        async with self._processing_lock:
+            if session_id in self._processing:
+                return  # Already processing, message will be picked up
+            self._processing.add(session_id)
+        
+        try:
+            # Check circuit breaker
+            if not self.circuit_breaker.can_execute(session_id):
+                logger.warning(f"Circuit breaker open for session {session_id}")
+                return
+            
+            # Process all available messages
+            while True:
+                msg = self.queue.dequeue(session_id, timeout=0)
+                if msg is None:
+                    break  # No more messages
+                
+                try:
+                    # Process the message using existing send_message logic
+                    result = await asyncio.to_thread(
+                        self._process_message_sync,
+                        session_id,
+                        msg.content
+                    )
+                    
+                    # Mark as completed
+                    self.queue.ack(msg.message_id)
+                    self.circuit_breaker.record_success(session_id)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing message {msg.message_id}: {e}")
+                    self.circuit_breaker.record_failure(session_id)
+                    
+                    # Schedule retry if under max retries
+                    if msg.retry_count < 5:  # MAX_RETRIES
+                        self.queue.schedule_retry(
+                            msg.message_id,
+                            msg.retry_count + 1,
+                            str(e)
+                        )
+                    else:
+                        self.queue.fail(msg.message_id, str(e))
+        finally:
+            async with self._processing_lock:
+                self._processing.discard(session_id)
+
+    def _process_message_sync(self, session_id: str, message: str) -> MessageResult:
+        """Synchronous message processing (wraps existing send_message logic)."""
+        return self.send_message(session_id, message)
+
+    def get_queue_stats(self, session_id: str):
+        """Get queue statistics for a session."""
+        return self.queue.get_stats(session_id)
+
     def terminate_session(self, session_id: str) -> bool:
         """Terminate a session.
 
@@ -236,6 +358,9 @@ class SessionManager:
         Returns:
             True if termination was successful, False if session was not found.
         """
+        # Remove from processing set
+        self._processing.discard(session_id)
+        
         # Remove from sessions dict
         if session_id in self.sessions:
             del self.sessions[session_id]
@@ -347,6 +472,9 @@ class SessionManager:
         Returns:
             Number of sessions deleted from database.
         """
+        # Clear processing set
+        self._processing.clear()
+
         # Clear in-memory sessions
         self.sessions.clear()
 

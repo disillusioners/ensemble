@@ -43,16 +43,36 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     
     @tool
     def send_message(session_id: str, message: str) -> str:
-        """Send a message to another session and get the response.
+        """Send a message to another session's input queue.
+        
+        The message is queued and will be processed when the target
+        session is ready. Returns immediately with message_id.
         
         Args:
             session_id: The ID of the target session to send the message to
             message: The message content to send
         
         Returns:
-            The response content from the session
+            The message_id for tracking (queue is async, response comes later)
         """
-        return manager.send_message(session_id, message)
+        import asyncio
+        try:
+            # Try to get running event loop
+            loop = asyncio.get_running_loop()
+            # We're in an async context, need to use the sync wrapper
+            # Since LangGraph tools run sync, we use the sync enqueue
+            return manager.queue.enqueue(
+                session_id=session_id,
+                content=message,
+                source=f"agent:{current_session_id}"
+            )
+        except RuntimeError:
+            # No running loop, create one
+            return manager.queue.enqueue(
+                session_id=session_id,
+                content=message,
+                source=f"agent:{current_session_id}"
+            )
     
     @tool
     def terminate_session(session_id: str) -> bool:

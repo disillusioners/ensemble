@@ -206,7 +206,7 @@ async def terminate_session(session_id: str):
 # 6. POST /sessions/{session_id}/messages - Send message
 @app.post("/sessions/{session_id}/messages", response_model=MessageResponse)
 async def send_message(session_id: str, message: MessageCreate):
-    """Send a message to a session."""
+    """Send a message to a session (async via queue)."""
     # Check session exists
     try:
         manager.get_session(session_id)
@@ -219,45 +219,69 @@ async def send_message(session_id: str, message: MessageCreate):
             ).model_dump()
         )
 
-    try:
-        result = manager.send_message(session_id, message.content)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=ErrorResponse(
-                code=ErrorCodes.LLM_ERROR,
-                message=f"Error processing message: {str(e)}"
-            ).model_dump()
-        )
+    # Enqueue the message (non-blocking)
+    result = await manager.enqueue_message(
+        session_id=session_id,
+        message=message.content,
+        source="api"
+    )
 
-    # Create response message
+    # Create response with queued status
     now = datetime.now(timezone.utc)
-    message_id = f"msg-{int(now.timestamp() * 1000)}"
 
     # Store event for SSE
     if session_id not in _session_events:
         _session_events[session_id] = []
     _session_events[session_id].append({
-        "type": "message",
-        "message_id": message_id,
-        "role": "assistant",
-        "content": result.content,
-        "thinking": result.thinking,
-        "tool_calls": result.tool_calls,
+        "type": "message_queued",
+        "message_id": result.message_id,
+        "role": "user",
+        "content": message.content,
+        "status": "queued",
         "created_at": now.isoformat(),
     })
 
     return MessageResponse(
-        message_id=message_id,
+        message_id=result.message_id,
         role="assistant",
-        content=result.content,
-        thinking=result.thinking,
-        tool_calls=result.tool_calls,
+        content="",  # Response will come async
+        thinking=None,
+        tool_calls=None,
         created_at=now,
     )
 
 
-# 7. GET /sessions/{session_id}/messages - Get message history
+# 7. GET /sessions/{session_id}/messages/{message_id} - Get message status
+@app.get("/sessions/{session_id}/messages/{message_id}")
+async def get_message_status(session_id: str, message_id: str):
+    """Get the status of a queued message."""
+    # Check session exists
+    try:
+        manager.get_session(session_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
+            ).model_dump()
+        )
+    
+    # Get queue stats
+    stats = manager.get_queue_stats(session_id)
+    
+    return {
+        "message_id": message_id,
+        "session_id": session_id,
+        "queue_stats": {
+            "pending_count": stats.pending_count,
+            "processing_count": stats.processing_count,
+            "oldest_message_age_seconds": stats.oldest_message_age_seconds,
+        }
+    }
+
+
+# 8. GET /sessions/{session_id}/messages - Get message history
 @app.get("/sessions/{session_id}/messages")
 async def get_messages(session_id: str):
     """Get message history for a session."""
@@ -278,7 +302,7 @@ async def get_messages(session_id: str):
     return messages
 
 
-# 8. GET /sessions/{session_id}/events - SSE stream
+# 9. GET /sessions/{session_id}/events - SSE stream
 @app.get("/sessions/{session_id}/events")
 async def stream_events(session_id: str):
     """SSE stream for session events."""

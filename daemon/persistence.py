@@ -53,6 +53,31 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         )
     """)
     
+    # Create message_queue table for input message queue system
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_queue (
+            message_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT DEFAULT 'ready',
+            priority INTEGER DEFAULT 1,
+            retry_count INTEGER DEFAULT 0,
+            max_retries INTEGER DEFAULT 5,
+            error_message TEXT,
+            metadata JSON,
+            enqueued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            processing_started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            next_retry_at TIMESTAMP
+    )
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_queue_session_status 
+        ON message_queue(session_id, status, priority, enqueued_at)
+    """)
+    
     conn.commit()
     logger.info(f"Database initialized at {db_path}")
     return conn
@@ -332,3 +357,31 @@ def cleanup_old_checkpoints(
         "remaining_count": 0,
         "note": "Placeholder implementation - checkpoint cleanup not yet fully implemented"
     }
+
+
+def cleanup_message_queue(
+    conn: sqlite3.Connection,
+    max_age_hours: int = 24
+) -> int:
+    """Remove old completed/failed messages from the queue.
+    
+    Args:
+        conn: Database connection.
+        max_age_hours: Maximum age of completed messages to keep.
+        
+    Returns:
+        Number of messages deleted.
+    """
+    cursor = conn.execute("""
+        DELETE FROM message_queue
+        WHERE status IN ('completed', 'failed')
+          AND completed_at < datetime('now', ? || ' hours')
+    """, (f'-{max_age_hours}',))
+    
+    deleted = cursor.rowcount
+    conn.commit()
+    
+    if deleted > 0:
+        logger.info(f"Cleaned up {deleted} old queue messages")
+    
+    return deleted

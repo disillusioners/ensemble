@@ -73,6 +73,20 @@ class PersistenceConfig(BaseSettings):
     checkpoint_max_count: int = Field(default=1000)
 
 
+class QueueConfig(BaseSettings):
+    """Message queue configuration settings."""
+
+    model_config = SettingsConfigDict(env_prefix="QUEUE_")
+
+    max_queue_size: int = Field(default=100)
+    message_timeout_seconds: int = Field(default=600)
+    max_retries: int = Field(default=5)
+    watchdog_check_interval_seconds: int = Field(default=30)
+    cleanup_completed_age_hours: int = Field(default=24)
+    circuit_breaker_failure_threshold: int = Field(default=5)
+    circuit_breaker_recovery_timeout_seconds: int = Field(default=300)
+
+
 class AgentsConfig(BaseSettings):
     """Agents directory configuration."""
 
@@ -91,6 +105,7 @@ class Config(BaseSettings):
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
+    queue: QueueConfig = Field(default_factory=QueueConfig)
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -146,6 +161,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         config_dict["persistence"] = processed_config["persistence"]
     if "agents" in processed_config:
         config_dict["agents"] = processed_config["agents"]
+    if "queue" in processed_config:
+        config_dict["queue"] = processed_config["queue"]
 
     # Create and validate config
     return Config(**config_dict)
