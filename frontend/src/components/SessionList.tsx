@@ -1,11 +1,11 @@
 import { FunctionalComponent } from 'preact';
+import { Link } from 'react-router-dom';
 import type { SessionInfo, Agent } from '../types';
 import { AVAILABLE_AGENTS } from '../types';
 
 interface SessionListProps {
   sessions: SessionInfo[];
   currentSessionId: string | null;
-  onSelectSession: (session: SessionInfo) => void;
   onDeleteSession: (sessionId: string) => void;
   onNewSession: () => void;
 }
@@ -54,7 +54,6 @@ function StatusBadge({ status }: { status: string }) {
 export const SessionList: FunctionalComponent<SessionListProps> = ({
   sessions,
   currentSessionId,
-  onSelectSession,
   onDeleteSession,
   onNewSession,
 }) => {
@@ -84,12 +83,12 @@ export const SessionList: FunctionalComponent<SessionListProps> = ({
         {sessions.length === 0 ? (
           <div class="p-4 text-center">
             <p class="text-dark-500 font-body text-sm">No active sessions</p>
-            <button
-              onClick={onNewSession}
-              class="mt-3 text-accent-cyan text-sm font-medium hover:underline"
+            <Link
+              to="/"
+              class="mt-3 text-accent-cyan text-sm font-medium hover:underline inline-block"
             >
               Start a new chat
-            </button>
+            </Link>
           </div>
         ) : (
           <div class="p-2 space-y-1">
@@ -98,11 +97,11 @@ export const SessionList: FunctionalComponent<SessionListProps> = ({
               const isActive = session.session_id === currentSessionId;
               
               return (
-                <button
+                <Link
                   key={session.session_id}
-                  onClick={() => onSelectSession(session)}
+                  to={`/sessions/${session.session_id}`}
                   class={`
-                    w-full p-3 rounded-xl text-left transition-all duration-200
+                    block w-full p-3 rounded-xl text-left transition-all duration-200
                     group relative
                     ${isActive ? 'bg-dark-800' : 'hover:bg-dark-800/50'}
                   `}
@@ -134,6 +133,7 @@ export const SessionList: FunctionalComponent<SessionListProps> = ({
                   {/* Delete button */}
                   <button
                     onClick={(e) => {
+                      e.preventDefault();
                       e.stopPropagation();
                       if (confirm('Delete this session?')) {
                         onDeleteSession(session.session_id);
@@ -148,7 +148,7 @@ export const SessionList: FunctionalComponent<SessionListProps> = ({
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                     </svg>
                   </button>
-                </button>
+                </Link>
               );
             })}
           </div>

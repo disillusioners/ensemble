@@ -5,6 +5,8 @@ interface AgentSelectorProps {
   selectedAgent: Agent | null;
   onSelect: (agent: Agent) => void;
   onCreateSession: () => void;
+  onContinueSession: (sessionId: string) => void;
+  hasSessions: boolean;
   isLoading?: boolean;
 }
 
@@ -18,6 +20,8 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
   selectedAgent,
   onSelect,
   onCreateSession,
+  onContinueSession,
+  hasSessions,
   isLoading,
 }) => {
   const activeColor = selectedAgent ? agentColorMap[selectedAgent.id] : '#10a7f7';
@@ -77,7 +81,17 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
         })}
       </div>
 
-      <div class="flex justify-center">
+      <div class="flex justify-center gap-4">
+        {hasSessions && (
+          <button
+            onClick={() => onContinueSession('latest')}
+            class="px-6 py-4 rounded-xl font-display font-semibold text-lg
+                   bg-dark-700 text-dark-200 border border-dark-600
+                   hover:bg-dark-600 hover:border-dark-500 transition-all duration-300"
+          >
+            Continue Session
+          </button>
+        )}
         <button
           onClick={onCreateSession}
           disabled={!selectedAgent || isLoading}
@@ -100,7 +114,7 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
               Creating Session...
             </span>
           ) : (
-            'Start Chat'
+            'Start New Chat'
           )}
         </button>
       </div>

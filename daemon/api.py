@@ -389,8 +389,8 @@ async def stream_events(session_id: str, request: Request):
     return EventSourceResponse(event_generator())
 
 
-# Static file serving for production UI
-@app.get("/ui")
+# Static file serving for production UI (served at root)
+@app.get("/")
 async def serve_ui():
     """Serve the frontend UI."""
     index_path = FRONTEND_DIST / "index.html"
@@ -402,9 +402,16 @@ async def serve_ui():
     )
 
 
-@app.get("/ui/{path:path}")
+@app.get("/{path:path}")
 async def serve_ui_assets(path: str):
-    """Serve frontend assets."""
+    """Serve frontend assets and SPA routing."""
+    # Skip API routes
+    if path.startswith('api') or path.startswith('ws'):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Not found"}
+        )
+    
     asset_path = FRONTEND_DIST / path
     if asset_path.exists():
         return FileResponse(str(asset_path))

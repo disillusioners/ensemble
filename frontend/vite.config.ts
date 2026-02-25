@@ -3,7 +3,7 @@ import preact from '@preact/preset-vite'
 
 export default defineConfig({
   plugins: [preact()],
-  base: '/ui/',
+  base: '/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,
@@ -16,6 +16,11 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      // Proxy WebSocket connections
+      '/ws': {
+        target: 'ws://localhost:8080',
+        ws: true,
       },
     },
   },
