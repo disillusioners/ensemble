@@ -45,7 +45,8 @@ function MessageBubble({
   // Parse tool calls with safe formatting
   const toolCalls = message.tool_calls?.map(tc => ({
     ...tc,
-    formattedArgs: formatArgs(tc.arguments)
+    formattedArgs: formatArgs(tc.arguments),
+    formattedOutput: tc.output ? (typeof tc.output === 'string' ? tc.output : JSON.stringify(tc.output, null, 2)) : null
   }));
   
   return (
@@ -90,9 +91,22 @@ function MessageBubble({
                   <span>🔧</span>
                   <span>{tc.name}</span>
                 </div>
-                <pre class="text-dark-300 text-xs whitespace-pre-wrap font-mono overflow-x-auto">
-                  {tc.formattedArgs}
-                </pre>
+                {tc.formattedArgs && (
+                  <div class="mb-2">
+                    <div class="text-dark-500 text-xs mb-1">Input:</div>
+                    <pre class="text-dark-300 text-xs whitespace-pre-wrap font-mono overflow-x-auto">
+                      {tc.formattedArgs}
+                    </pre>
+                  </div>
+                )}
+                {tc.formattedOutput && (
+                  <div>
+                    <div class="text-dark-500 text-xs mb-1">Output:</div>
+                    <pre class="text-green-400 text-xs whitespace-pre-wrap font-mono overflow-x-auto">
+                      {tc.formattedOutput}
+                    </pre>
+                  </div>
+                )}
               </div>
             ))}
           </div>

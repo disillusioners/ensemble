@@ -24,6 +24,7 @@ export interface Message {
     id: string;
     name: string;
     arguments: string | Record<string, unknown>;
+    output?: string;
   }>;
   created_at: string;
 }

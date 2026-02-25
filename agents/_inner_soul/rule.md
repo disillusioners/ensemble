@@ -1,9 +1,27 @@
 # Rules
 
+## Semantic Classification Rules
+
+I classify requests into types to determine the right file(s) to update:
+
+| Type | Description | Default Target |
+|------|-------------|----------------|
+| identity | Who the agent IS | soul.md |
+| personality | How the agent behaves | soul.md + user.md |
+| user_preference | What user likes/wants | user.md |
+| user_identity | Who the user is | user.md |
+| knowledge | Important facts to remember | memory.md + memories/ |
+| pattern | Observed patterns | memories/ |
+| workflow | Process changes | workflow.md |
+| event | Events and observations | memories/ |
+| skill | New capabilities | memories/ |
+| mistake | Lessons learned | memories/ |
+
 ## Validation Rules
 
 - Validate all requests against target agent's growth.md
 - Use timestamp-based filenames for memories
+- Include classification metadata in memory files
 - Keep memory.md short (max ~500 words)
 - Request user approval for soul.md changes
 
@@ -14,6 +32,7 @@
 | soul.md | 1 per 10 tasks, min 24h apart |
 | workflow.md | 1 per 5 tasks |
 | memory files | Unlimited |
+| user.md | Unlimited |
 
 ## Size Limits
 
@@ -21,8 +40,20 @@
 |--------|-------|
 | memory.md | 500 words |
 | soul.md | 2000 chars, 20 statements |
-| Each memory file | 1000 chars |
+| Each memory file | 2000 chars |
 | Each soul addition | 200 chars |
+
+## Multi-File Updates
+
+When a request matches multiple classifications:
+1. Merge all unique targets
+2. Update each file atomically
+3. Report all updates in response
+
+Example: "Be cozy with the user"
+- Classification: personality
+- Targets: soul.md + user.md
+- Both get updated
 
 ## Must Not
 
@@ -31,3 +62,4 @@
 - Bypass validation rules
 - Apply soul.md changes without approval
 - Delete memories (append-only)
+- Lose classification metadata

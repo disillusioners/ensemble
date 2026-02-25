@@ -140,38 +140,62 @@ class SessionManager:
         config = {"configurable": {"thread_id": session_id}}
         result = graph.invoke({"messages": [message]}, config)
 
-        # Extract message data - only from the LAST AIMessage (current response)
+        # Extract message data from the current turn
         messages = result.get("messages", [])
+        
         if messages:
-            # Find the last AIMessage (the current assistant response)
-            last_ai_message = None
-            for msg in reversed(messages):
-                if hasattr(msg, 'tool_calls') or hasattr(msg, 'content'):
-                    last_ai_message = msg
-                    break
+            # Find where the current turn starts (last HumanMessage from this invoke)
+            # We only want to process messages from the current turn, not history
+            current_turn_start = 0
+            for i, msg in enumerate(messages):
+                # HumanMessage is the user's input
+                if hasattr(msg, 'type') and msg.type == 'human':
+                    current_turn_start = i
             
-            if last_ai_message:
-                content = last_ai_message.content or ""
-                
-                # Extract tool_calls ONLY from the last AIMessage
-                tool_calls = None
-                if hasattr(last_ai_message, 'tool_calls') and last_ai_message.tool_calls:
-                    all_tool_calls = []
-                    for tc in last_ai_message.tool_calls:
+            # Get messages from current turn only
+            current_turn_messages = messages[current_turn_start:]
+            
+            # Build map of tool_call_id -> output from ToolMessages in current turn
+            tool_outputs = {}
+            for msg in current_turn_messages:
+                if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
+                    tool_outputs[msg.tool_call_id] = msg.content
+            
+            # Collect all tool_calls from AIMessages in current turn
+            all_tool_calls = []
+            for msg in current_turn_messages:
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
                         # Handle both dict and object formats
+                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                        output = tool_outputs.get(tc_id)
+                        
                         if isinstance(tc, dict):
                             all_tool_calls.append({
                                 "id": tc.get("id", ""),
                                 "name": tc.get("name", ""),
                                 "arguments": tc.get("args", {}),
+                                "output": output,
                             })
                         else:
                             all_tool_calls.append({
                                 "id": getattr(tc, "id", ""),
                                 "name": getattr(tc, "name", ""),
                                 "arguments": getattr(tc, "args", {}),
+                                "output": output,
                             })
-                    tool_calls = all_tool_calls if all_tool_calls else None
+            
+            tool_calls = all_tool_calls if all_tool_calls else None
+            
+            # Find the last AIMessage (the current assistant response) for content and thinking
+            last_ai_message = None
+            for msg in reversed(messages):
+                if hasattr(msg, 'type') and msg.type == 'ai':
+                    last_ai_message = msg
+                    break
+            
+            if last_ai_message:
+                content = last_ai_message.content or ""
                 
                 # Extract thinking ONLY from the last AIMessage (for models that support extended thinking)
                 thinking = None
