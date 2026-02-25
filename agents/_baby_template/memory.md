@@ -1,9 +1,17 @@
 # Memory
 
+*Empty — waiting to be filled through experience*
+
+---
+
 ## Known Patterns
 
-(To be filled through experience)
+(Will be filled as I learn from tasks)
 
 ## Project Context
 
-(To be filled through experience)
+(Will be filled as I work with you)
+
+## Important Facts
+
+(Will be filled as you teach me)

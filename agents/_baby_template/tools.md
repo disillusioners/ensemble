@@ -1,5 +1,22 @@
 # Tools
 
-Agent-specific tools go here.
+*Specific tools will be assigned based on purpose*
 
-*Common tools (bash, time, read_file, list_directory, glob_files, inner_soul) are automatically loaded from `agents/tools_common.md`.*
+---
+
+## Always Available
+
+These tools are always available from `agents/tools_common.md`:
+
+- **bash** — Execute terminal commands
+- **time** — Get current time/date
+- **read_file** — Read file contents
+- **list_directory** — List directory contents
+- **glob_files** — Find files by pattern
+- **inner_soul** — Remember and evolve (essential for learning)
+
+## To Be Added
+
+After learning my purpose, I may be given additional tools:
+
+(Tools will be listed here after first conversation)
