@@ -1,5 +1,6 @@
 """Session management tools for multi-agent orchestration."""
 
+from pathlib import Path
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING
 
@@ -7,6 +8,7 @@ from .bash import bash
 from .filesystem import list_directory, read_file, glob_files
 from .time import time
 from .inner_soul import create_inner_soul_tool
+from .agent_mother import create_mother_tools
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
@@ -110,8 +112,8 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     # Create inner_soul tool for self-modification
     inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)
     
-    return [
-        # Static tools (available in all sessions)
+    # Base tools (available in all sessions)
+    tools = [
         bash,
         list_directory,
         read_file,
@@ -126,3 +128,10 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         # Self-modification tool
         inner_soul,
     ]
+    
+    # Add mother tools if this is the _mother agent
+    if agent_dir and Path(agent_dir).name == "_mother":
+        mother_tools = create_mother_tools(manager, current_session_id)
+        tools.extend(mother_tools)
+    
+    return tools

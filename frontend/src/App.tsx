@@ -23,6 +23,7 @@ interface HomeProps {
   onContinueSession: (sessionId: string) => void;
   onAddAgent: (agent: AgentCreate) => Promise<Agent | null>;
   onDeleteAgent: (agentId: string) => Promise<void>;
+  onStartMother: () => void;
   isLoading: boolean;
 }
 
@@ -35,6 +36,7 @@ const Home: FunctionalComponent<HomeProps> = ({
   onContinueSession,
   onAddAgent,
   onDeleteAgent,
+  onStartMother,
   isLoading,
 }) => {
   return (
@@ -48,6 +50,7 @@ const Home: FunctionalComponent<HomeProps> = ({
           onContinueSession={onContinueSession}
           onAddAgent={onAddAgent}
           onDeleteAgent={onDeleteAgent}
+          onStartMother={onStartMother}
           hasSessions={sessions.length > 0}
           isLoading={isLoading}
         />
@@ -485,6 +488,24 @@ export const App: FunctionalComponent = () => {
     }
   }, [nextSessionAgent]);
 
+  const handleStartMother = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // Create a session with the _mother agent
+      const agentPath = './agents/_mother';
+      const session = await api.createSession(agentPath);
+      
+      setCurrentSession(session);
+      setSessions(prev => [session, ...prev]);
+      navigate(`/sessions/${session.session_id}`);
+    } catch (err) {
+      console.error('Failed to start Mother session:', err);
+      alert(`Failed to start Mother session: ${err}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [navigate]);
+
   return (
     <div class="h-screen flex flex-col bg-dark-950 font-body text-dark-100 overflow-hidden">
       {/* Header */}
@@ -534,6 +555,7 @@ export const App: FunctionalComponent = () => {
               }}
               onAddAgent={handleAddAgent}
               onDeleteAgent={handleDeleteAgent}
+              onStartMother={handleStartMother}
               isLoading={isLoading}
             />
           } 

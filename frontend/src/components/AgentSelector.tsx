@@ -12,6 +12,7 @@ interface AgentSelectorProps {
   onContinueSession: (sessionId: string) => void;
   onAddAgent: (agent: AgentCreate) => Promise<Agent | null>;
   onDeleteAgent: (agentId: string) => Promise<void>;
+  onStartMother: () => void;
   hasSessions: boolean;
   isLoading?: boolean;
 }
@@ -38,6 +39,7 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
   onContinueSession,
   onAddAgent,
   onDeleteAgent,
+  onStartMother,
   hasSessions,
   isLoading,
 }) => {
@@ -53,6 +55,31 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
         <p class="text-dark-400 font-body">
           Choose an agent to start a new conversation
         </p>
+      </div>
+
+      {/* Mother Agent - Special System Button */}
+      <div class="mb-6">
+        <button
+          onClick={onStartMother}
+          class="w-full p-4 rounded-2xl border-2 border-dashed border-accent-violet/50 bg-gradient-to-r from-accent-violet/10 to-accent-cyan/10
+                 hover:border-accent-violet hover:from-accent-violet/20 hover:to-accent-cyan/20 transition-all duration-300
+                 flex items-center gap-4 group"
+        >
+          <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-accent-violet to-accent-cyan flex items-center justify-center flex-shrink-0">
+            <span class="text-2xl">🧬</span>
+          </div>
+          <div class="flex-1 text-left">
+            <div class="font-display text-lg font-semibold text-dark-100 group-hover:text-white transition-colors">
+              Mother — Create New Agent
+            </div>
+            <p class="text-dark-400 text-sm">
+              Quickly create, modify, or delete agents through guided conversation
+            </p>
+          </div>
+          <svg class="w-5 h-5 text-dark-400 group-hover:text-accent-violet group-hover:translate-x-1 transition-all" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
