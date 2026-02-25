@@ -5,8 +5,10 @@
       [agents]="agents()"
       [sessions]="sessions()"
       [currentSessionId]="currentSession()?.session_id || null"
+      [selectedAgent]="selectedAgent()"
       (deleteSession)="onDeleteSession($event)"
       (newSession)="onNewSession()"
+      (agentChange)="onAgentChange($event)"
     ></app-session-list>
   </div>
 
@@ -25,11 +27,13 @@
           <mat-icon>arrow_back</mat-icon>
         </button>
         
-        <app-agent-switcher
-          [agents]="agents()"
-          [selectedAgent]="selectedAgent()"
-          (agentChange)="onAgentChange($event)"
-        ></app-agent-switcher>
+        <!-- Session info -->
+        @if (currentSession()) {
+          <div class="session-info">
+            <span class="agent-icon">{{ sessionAgent()?.icon || '🤖' }}</span>
+            <span class="agent-name">{{ sessionAgent()?.name || 'Agent' }}</span>
+          </div>
+        }
       </div>
       
       <!-- Breadcrumb / Session info -->

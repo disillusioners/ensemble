@@ -18,6 +18,12 @@
   margin-bottom: 12px;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .title {
   font-size: 18px;
   font-weight: 600;
@@ -46,6 +52,25 @@
     font-size: 20px;
     width: 20px;
     height: 20px;
+  }
+}
+
+::ng-deep .agent-switcher-container {
+  .dropdown-trigger {
+    padding: 6px 10px;
+    min-width: auto;
+    height: 36px;
+    font-size: 13px;
+  }
+
+  .agent-icon {
+    width: 24px;
+    height: 24px;
+    font-size: 14px;
+  }
+
+  .agent-name {
+    max-width: 80px;
   }
 }
 

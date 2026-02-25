@@ -3,13 +3,20 @@
   <div class="header">
     <div class="header-top">
       <h2 class="title">Sessions</h2>
-      <button
-        class="new-session-btn"
-        (click)="onNewSession()"
-        title="New Session"
-      >
-        <mat-icon>add</mat-icon>
-      </button>
+      <div class="header-actions">
+        <app-agent-switcher
+          [agents]="agents"
+          [selectedAgent]="selectedAgent"
+          (agentChange)="onAgentChange($event)"
+        ></app-agent-switcher>
+        <button
+          class="new-session-btn"
+          (click)="onNewSession()"
+          title="New Session"
+        >
+          <mat-icon>add</mat-icon>
+        </button>
+      </div>
     </div>
     <p class="subtitle">
       {{ sessions.length }} active session{{ sessions.length !== 1 ? 's' : '' }}

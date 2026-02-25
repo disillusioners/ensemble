@@ -5,11 +5,12 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { Agent, SessionInfo } from '../../models';
+import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 
 @Component({
   selector: 'app-session-list',
   standalone: true,
-  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule],
+  imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, AgentSwitcherComponent],
   templateUrl: './session-list.html',
   styleUrl: './session-list.scss'
 })
@@ -17,8 +18,10 @@ export class SessionListComponent {
   @Input() agents: Agent[] = [];
   @Input() sessions: SessionInfo[] = [];
   @Input() currentSessionId: string | null = null;
+  @Input() selectedAgent: Agent | null = null;
   @Output() deleteSession = new EventEmitter<string>();
   @Output() newSession = new EventEmitter<void>();
+  @Output() agentChange = new EventEmitter<Agent>();
 
   readonly statusColors: Record<string, { bg: string; text: string }> = {
     idle: { bg: '#4d4d5c', text: '#c5c5d2' },
@@ -66,6 +69,10 @@ export class SessionListComponent {
 
   onNewSession(): void {
     this.newSession.emit();
+  }
+
+  onAgentChange(agent: Agent): void {
+    this.agentChange.emit(agent);
   }
 
   getSessionIdShort(sessionId: string): string {

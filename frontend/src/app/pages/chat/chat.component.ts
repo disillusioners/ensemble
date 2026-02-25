@@ -8,7 +8,6 @@ import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { SessionListComponent } from '../../components/session-list/session-list.component';
-import { AgentSwitcherComponent } from '../../components/agent-switcher/agent-switcher.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent } from '../../components/message-input/message-input.component';
 import type { Agent, SessionInfo, Message } from '../../models';
@@ -25,7 +24,6 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
     MatIconModule,
     MatProgressSpinnerModule,
     SessionListComponent,
-    AgentSwitcherComponent,
     ChatInterfaceComponent,
     MessageInputComponent
   ],
@@ -273,14 +271,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.isSending.set(true);
     
     this.api.sendMessage(session.session_id, content).subscribe({
-      next: (response) => {
-        // Update user message with real message_id from response
-        this.messages.update(prev => prev.map(m => 
-          m.message_id === userMessage.message_id 
-            ? { ...m, message_id: response.message_id }
-            : m
-        ));
+      next: (_response) => {
         // The assistant response will come via SSE
+        // Note: We don't need to update the user message's ID since the queue message_id
+        // is different from the message IDs used in the UI
       },
       error: (err) => {
         console.error('Failed to send message:', err);
