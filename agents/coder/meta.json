@@ -1,0 +1,8 @@
+{
+  "id": "coder",
+  "name": "Coder",
+  "description": "Specializes in code generation and debugging",
+  "icon": "💻",
+  "color": "accent-cyan",
+  "version": "1.0.0"
+}

@@ -41,6 +41,8 @@ from .models import (
     SessionStatus,
     HealthResponse,
     SessionListResponse,
+    AgentInfo,
+    AgentListResponse,
 )
 from .manager import SessionManager
 from .config import Config, load_config
@@ -102,6 +104,42 @@ async def health_check():
         uptime_seconds=time.time() - start_time,
         version="0.1.0"
     )
+
+
+# 1.5. GET /agents - List available agents
+@app.get("/agents", response_model=AgentListResponse)
+async def list_agents():
+    """List all available agents by scanning the agents directory."""
+    import json
+    
+    agents_dir = BASE_DIR / "agents"
+    agents = []
+    
+    if agents_dir.exists():
+        for agent_path in sorted(agents_dir.iterdir()):
+            # Skip hidden/internal directories (starting with _)
+            if not agent_path.is_dir() or agent_path.name.startswith("_"):
+                continue
+            
+            meta_path = agent_path / "meta.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path, "r") as f:
+                        meta = json.load(f)
+                    
+                    agents.append(AgentInfo(
+                        id=meta.get("id", agent_path.name),
+                        name=meta.get("name", agent_path.name.title()),
+                        description=meta.get("description", ""),
+                        icon=meta.get("icon", "🤖"),
+                        color=meta.get("color", "accent-blue"),
+                        version=meta.get("version"),
+                        agent_dir=f"./agents/{agent_path.name}",
+                    ))
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed to load meta.json for {agent_path.name}: {e}")
+    
+    return AgentListResponse(agents=agents)
 
 
 # 2. POST /sessions - Spawn session

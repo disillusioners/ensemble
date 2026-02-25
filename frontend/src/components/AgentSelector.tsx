@@ -1,7 +1,8 @@
 import { FunctionalComponent } from 'preact';
-import { AVAILABLE_AGENTS, type Agent } from '../types';
+import type { Agent } from '../types';
 
 interface AgentSelectorProps {
+  agents: Agent[];
   selectedAgent: Agent | null;
   onSelect: (agent: Agent) => void;
   onCreateSession: () => void;
@@ -10,13 +11,22 @@ interface AgentSelectorProps {
   isLoading?: boolean;
 }
 
-const agentColorMap: Record<string, string> = {
-  'leader': '#f59e0b',
-  'coder': '#10a7f7',
-  'reviewer': '#8b5cf6',
+// Color mapping for known accent colors
+const colorMap: Record<string, string> = {
+  'accent-amber': '#f59e0b',
+  'accent-cyan': '#10a7f7',
+  'accent-violet': '#8b5cf6',
+  'accent-emerald': '#10b981',
+  'accent-rose': '#f43f5e',
+  'accent-blue': '#3b82f6',
+};
+
+const getAgentColor = (agent: Agent): string => {
+  return colorMap[agent.color] || agent.color || '#10a7f7';
 };
 
 export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
+  agents,
   selectedAgent,
   onSelect,
   onCreateSession,
@@ -24,7 +34,7 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
   hasSessions,
   isLoading,
 }) => {
-  const activeColor = selectedAgent ? agentColorMap[selectedAgent.id] : '#10a7f7';
+  const activeColor = selectedAgent ? getAgentColor(selectedAgent) : '#10a7f7';
 
   return (
     <div class="animate-fade-in">
@@ -38,9 +48,9 @@ export const AgentSelector: FunctionalComponent<AgentSelectorProps> = ({
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-        {AVAILABLE_AGENTS.map((agent) => {
+        {agents.map((agent) => {
           const isSelected = selectedAgent?.id === agent.id;
-          const color = agentColorMap[agent.id];
+          const color = getAgentColor(agent);
           
           return (
             <button

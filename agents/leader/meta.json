@@ -1,0 +1,8 @@
+{
+  "id": "leader",
+  "name": "Leader",
+  "description": "Coordinates tasks and manages workflow delegation",
+  "icon": "👑",
+  "color": "accent-amber",
+  "version": "1.0.0"
+}

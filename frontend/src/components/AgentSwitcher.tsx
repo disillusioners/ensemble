@@ -1,26 +1,36 @@
 import { FunctionalComponent } from 'preact';
 import { useState, useEffect, useRef } from 'preact/hooks';
-import { AVAILABLE_AGENTS, type Agent } from '../types';
+import type { Agent } from '../types';
 
 interface AgentSwitcherProps {
+  agents: Agent[];
   selectedAgent: Agent | null;
   onAgentChange: (agent: Agent) => void;
 }
 
-const agentColorMap: Record<string, string> = {
-  'leader': '#f59e0b',
-  'coder': '#10a7f7',
-  'reviewer': '#8b5cf6',
+// Color mapping for known accent colors
+const colorMap: Record<string, string> = {
+  'accent-amber': '#f59e0b',
+  'accent-cyan': '#10a7f7',
+  'accent-violet': '#8b5cf6',
+  'accent-emerald': '#10b981',
+  'accent-rose': '#f43f5e',
+  'accent-blue': '#3b82f6',
+};
+
+const getAgentColor = (agent: Agent): string => {
+  return colorMap[agent.color] || agent.color || '#10a7f7';
 };
 
 export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
+  agents,
   selectedAgent,
   onAgentChange,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const activeColor = selectedAgent ? agentColorMap[selectedAgent.id] : '#10a7f7';
+  const activeColor = selectedAgent ? getAgentColor(selectedAgent) : '#10a7f7';
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -90,9 +100,9 @@ export const AgentSwitcher: FunctionalComponent<AgentSwitcherProps> = ({
           "
         >
           <div class="py-1">
-            {AVAILABLE_AGENTS.map((agent) => {
+            {agents.map((agent) => {
               const isSelected = selectedAgent?.id === agent.id;
-              const color = agentColorMap[agent.id];
+              const color = getAgentColor(agent);
 
               return (
               <button

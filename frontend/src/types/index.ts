@@ -55,28 +55,10 @@ export interface Agent {
   description: string;
   icon: string;
   color: string;
+  version?: string;
+  agent_dir: string;
 }
 
-export const AVAILABLE_AGENTS: Agent[] = [
-  {
-    id: 'leader',
-    name: 'Leader',
-    description: 'Coordinates tasks and manages workflow delegation',
-    icon: '👑',
-    color: 'accent-amber',
-  },
-  {
-    id: 'coder',
-    name: 'Coder',
-    description: 'Specializes in code generation and debugging',
-    icon: '💻',
-    color: 'accent-cyan',
-  },
-  {
-    id: 'reviewer',
-    name: 'Reviewer',
-    description: 'Provides code review and quality assurance',
-    icon: '🔍',
-    color: 'accent-violet',
-  },
-];
+export interface AgentListResponse {
+  agents: Agent[];
+}

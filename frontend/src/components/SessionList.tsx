@@ -1,18 +1,18 @@
 import { FunctionalComponent } from 'preact';
 import { Link } from 'react-router-dom';
 import type { SessionInfo, Agent } from '../types';
-import { AVAILABLE_AGENTS } from '../types';
 
 interface SessionListProps {
+  agents: Agent[];
   sessions: SessionInfo[];
   currentSessionId: string | null;
   onDeleteSession: (sessionId: string) => void;
   onNewSession: () => void;
 }
 
-function getAgentInfo(agentDir: string): Agent | undefined {
+function getAgentInfo(agentDir: string, agents: Agent[]): Agent | undefined {
   const agentId = agentDir.split('/').pop() || agentDir;
-  return AVAILABLE_AGENTS.find(a => a.id === agentId);
+  return agents.find(a => a.id === agentId);
 }
 
 function formatDate(dateString: string): string {
@@ -52,6 +52,7 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export const SessionList: FunctionalComponent<SessionListProps> = ({
+  agents,
   sessions,
   currentSessionId,
   onDeleteSession,
@@ -93,7 +94,7 @@ export const SessionList: FunctionalComponent<SessionListProps> = ({
         ) : (
           <div class="p-2 space-y-1">
             {sessions.map((session) => {
-              const agent = getAgentInfo(session.agent_dir);
+              const agent = getAgentInfo(session.agent_dir, agents);
               const isActive = session.session_id === currentSessionId;
               
               return (

@@ -9,12 +9,12 @@ import { MessageInput } from './components/MessageInput';
 import { useSSE } from './hooks/useSSE';
 import { api } from './utils/api';
 import type { SessionInfo, Message, Agent } from './types';
-import { AVAILABLE_AGENTS } from './types';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
 
 // Home page component - Agent selection
 interface HomeProps {
+  agents: Agent[];
   sessions: SessionInfo[];
   nextSessionAgent: Agent | null;
   onSetNextSessionAgent: (agent: Agent) => void;
@@ -24,6 +24,7 @@ interface HomeProps {
 }
 
 const Home: FunctionalComponent<HomeProps> = ({
+  agents,
   sessions,
   nextSessionAgent,
   onSetNextSessionAgent,
@@ -35,6 +36,7 @@ const Home: FunctionalComponent<HomeProps> = ({
     <div class="flex-1 flex items-center justify-center p-8 overflow-y-auto">
       <div class="max-w-4xl w-full">
         <AgentSelector
+          agents={agents}
           selectedAgent={nextSessionAgent}
           onSelect={onSetNextSessionAgent}
           onCreateSession={() => nextSessionAgent && onCreateSession(nextSessionAgent)}
@@ -49,6 +51,7 @@ const Home: FunctionalComponent<HomeProps> = ({
 
 // Chat page component
 interface ChatProps {
+  agents: Agent[];
   sessions: SessionInfo[];
   currentSession: SessionInfo | null;
   messages: Message[];
@@ -67,6 +70,7 @@ interface ChatProps {
 }
 
 const Chat: FunctionalComponent<ChatProps> = ({
+  agents,
   sessions,
   currentSession,
   messages,
@@ -87,7 +91,7 @@ const Chat: FunctionalComponent<ChatProps> = ({
   
   // Get current session's agent
   const sessionAgent = currentSession 
-    ? AVAILABLE_AGENTS.find(a => currentSession.agent_dir.includes(a.id)) || null
+    ? agents.find(a => currentSession.agent_dir.includes(a.id)) || null
     : null;
 
   const handleBackToHome = () => {
@@ -96,15 +100,16 @@ const Chat: FunctionalComponent<ChatProps> = ({
 
   return (
     <div class="flex-1 flex overflow-hidden">
-      {/* Session sidebar */}
-      <div class="w-72 flex-shrink-0">
-        <SessionList
-          sessions={sessions}
-          currentSessionId={currentSession?.session_id || null}
-          onDeleteSession={onDeleteSession}
-          onNewSession={onNewSession}
-        />
-      </div>
+        {/* Session sidebar */}
+        <div class="w-72 flex-shrink-0">
+          <SessionList
+            agents={agents}
+            sessions={sessions}
+            currentSessionId={currentSession?.session_id || null}
+            onDeleteSession={onDeleteSession}
+            onNewSession={onNewSession}
+          />
+        </div>
       
       {/* Chat area */}
       <div class="flex-1 flex flex-col">
@@ -123,6 +128,7 @@ const Chat: FunctionalComponent<ChatProps> = ({
             </button>
             
             <AgentSwitcher
+              agents={agents}
               selectedAgent={nextSessionAgent}
               onAgentChange={onSetNextSessionAgent}
             />
@@ -207,14 +213,11 @@ export const App: FunctionalComponent = () => {
   const navigate = useNavigate();
   const { sessionId } = useParams<{ sessionId: string }>();
   
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [currentSession, setCurrentSession] = useState<SessionInfo | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [nextSessionAgent, setNextSessionAgent] = useState<Agent | null>(() => {
-    // Initialize from localStorage
-    const saved = localStorage.getItem(NEXT_AGENT_STORAGE_KEY);
-    return saved ? AVAILABLE_AGENTS.find(a => a.id === saved) || null : null;
-  });
+  const [nextSessionAgent, setNextSessionAgent] = useState<Agent | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -267,12 +270,24 @@ export const App: FunctionalComponent = () => {
     }
   }, [latestError]);
 
-  // Load health status and sessions on mount
+  // Load health status, agents, and sessions on mount
   useEffect(() => {
     const init = async () => {
       try {
         const healthData = await api.health();
         setHealth(healthData);
+        
+        const agentsData = await api.listAgents();
+        setAgents(agentsData.agents);
+        
+        // Initialize nextSessionAgent from localStorage after agents are loaded
+        const saved = localStorage.getItem(NEXT_AGENT_STORAGE_KEY);
+        if (saved && agentsData.agents.length > 0) {
+          const savedAgent = agentsData.agents.find(a => a.id === saved);
+          if (savedAgent) {
+            setNextSessionAgent(savedAgent);
+          }
+        }
         
         const sessionsData = await api.listSessions();
         setSessions(sessionsData.sessions);
@@ -470,6 +485,7 @@ export const App: FunctionalComponent = () => {
           path="/" 
           element={
             <Home
+              agents={agents}
               sessions={sessions}
               nextSessionAgent={nextSessionAgent}
               onSetNextSessionAgent={handleSetNextSessionAgent}
@@ -489,6 +505,7 @@ export const App: FunctionalComponent = () => {
           path="/sessions/:sessionId" 
           element={
             <Chat
+              agents={agents}
               sessions={sessions}
               currentSession={currentSession}
               messages={messages}

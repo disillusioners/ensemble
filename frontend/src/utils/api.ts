@@ -1,4 +1,4 @@
-import type { SessionInfo, SessionListResponse, MessageResponse, Message, HealthResponse } from '../types';
+import type { SessionInfo, SessionListResponse, MessageResponse, Message, HealthResponse, AgentListResponse } from '../types';
 
 const API_BASE = import.meta.env.PROD ? '' : '/api';
 
@@ -23,6 +23,11 @@ export const api = {
   // Health check
   async health(): Promise<HealthResponse> {
     return fetchApi('/health');
+  },
+
+  // Agents
+  async listAgents(): Promise<AgentListResponse> {
+    return fetchApi('/agents');
   },
 
   // Sessions
