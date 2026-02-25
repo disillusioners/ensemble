@@ -1,0 +1,100 @@
+<div class="chat-container">
+  <!-- Session sidebar -->
+  <div class="session-sidebar">
+    <app-session-list
+      [agents]="agents()"
+      [sessions]="sessions()"
+      [currentSessionId]="currentSession()?.session_id || null"
+      (deleteSession)="onDeleteSession($event)"
+      (newSession)="onNewSession()"
+    ></app-session-list>
+  </div>
+
+  <!-- Chat area -->
+  <div class="chat-area">
+    <!-- Chat header with agent info -->
+    <div class="chat-header">
+      <div class="header-left">
+        <!-- Back to home button -->
+        <button
+          mat-icon-button
+          (click)="onBackToHome()"
+          title="Back to home"
+          class="back-button"
+        >
+          <mat-icon>arrow_back</mat-icon>
+        </button>
+        
+        <app-agent-switcher
+          [agents]="agents()"
+          [selectedAgent]="selectedAgent()"
+          (agentChange)="onAgentChange($event)"
+        ></app-agent-switcher>
+      </div>
+      
+      <!-- Breadcrumb / Session info -->
+      <div class="header-right">
+        <a 
+          routerLink="/"
+          class="home-link"
+        >
+          ← Home
+        </a>
+        <!-- Toggle buttons -->
+        <div class="toggle-buttons">
+          <button
+            (click)="onToggleThinking()"
+            [class.active]="showThinking()"
+            class="toggle-btn think-btn"
+            title="Toggle thinking visibility"
+          >
+            💭 Think
+          </button>
+          <button
+            (click)="onToggleToolCalls()"
+            [class.active]="showToolCalls()"
+            class="toggle-btn tools-btn"
+            title="Toggle tool calls visibility"
+          >
+            🔧 Tools
+          </button>
+        </div>
+        @if (currentSession()) {
+          <span class="session-id">
+            {{ currentSession()!.session_id.slice(0, 8) }}...
+          </span>
+        }
+      </div>
+    </div>
+    
+    <!-- Error banner -->
+    @if (sendError()) {
+      <div class="error-banner">
+        <span class="error-message">{{ sendError() }}</span>
+        <button 
+          (click)="onClearError()"
+          class="error-close"
+        >
+          ✕
+        </button>
+      </div>
+    }
+    
+    <app-chat-interface
+      [messages]="messages()"
+      [isLoading]="isSending()"
+      [agent]="sessionAgent()"
+      [sessionId]="currentSession()?.session_id || null"
+      [showThinking]="showThinking()"
+      [showToolCalls]="showToolCalls()"
+    ></app-chat-interface>
+    
+    @if (currentSession()) {
+      <app-message-input
+        (sendMessage)="onSendMessage($event)"
+        [disabled]="isSending()"
+        [agentColor]="sessionAgent()?.id || 'coder'"
+      ></app-message-input>
+    }
+  </div>
+</div>

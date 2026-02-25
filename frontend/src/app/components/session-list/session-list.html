@@ -1,0 +1,73 @@
+<div class="session-list-container">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-top">
+      <h2 class="title">Sessions</h2>
+      <button
+        class="new-session-btn"
+        (click)="onNewSession()"
+        title="New Session"
+      >
+        <mat-icon>add</mat-icon>
+      </button>
+    </div>
+    <p class="subtitle">
+      {{ sessions.length }} active session{{ sessions.length !== 1 ? 's' : '' }}
+    </p>
+  </div>
+
+  <!-- Session List -->
+  <div class="session-list">
+    @if (sessions.length === 0) {
+      <div class="empty-state">
+        <p>No active sessions</p>
+        <a routerLink="/" class="new-chat-link">Start a new chat</a>
+      </div>
+    } @else {
+      <div class="sessions">
+        @for (session of sessions; track session.session_id) {
+          @let agent = getAgentInfo(session.agent_dir);
+          @let isActive = session.session_id === currentSessionId;
+          
+          <a
+            [routerLink]="['/sessions', session.session_id]"
+            class="session-item"
+            [class.active]="isActive"
+          >
+            <div class="session-content">
+              <div class="session-info">
+                <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
+                <div class="session-details">
+                  <p class="agent-name">{{ agent?.name || 'Agent' }}</p>
+                  <p class="session-id">{{ getSessionIdShort(session.session_id) }}</p>
+                </div>
+              </div>
+              
+              <div class="session-meta">
+                <span 
+                  class="status-badge"
+                  [style.background-color]="getStatusStyle(session.status).backgroundColor"
+                  [style.color]="getStatusStyle(session.status).color"
+                >
+                  {{ session.status }}
+                </span>
+                <span class="timestamp">
+                  {{ formatDate(session.created_at) }}
+                </span>
+              </div>
+            </div>
+            
+            <!-- Delete button -->
+            <button
+              class="delete-btn"
+              (click)="onDeleteSession(session.session_id, $event)"
+              title="Delete session"
+            >
+              <mat-icon>close</mat-icon>
+            </button>
+          </a>
+        }
+      </div>
+    }
+  </div>
+</div>

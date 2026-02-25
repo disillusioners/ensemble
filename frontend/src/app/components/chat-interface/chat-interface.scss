@@ -1,0 +1,298 @@
+// Variables
+$bg-primary: #0f172a;
+$bg-secondary: #1e293b;
+$bg-tertiary: #334155;
+$text-primary: #ececf1;
+$text-secondary: #9ca3af;
+$text-muted: #6b7280;
+$border-color: #374151;
+$amber: #f59e0b;
+$cyan: #06b6d4;
+
+// Empty state
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: $bg-primary;
+  padding: 2rem;
+
+  &-icon {
+    width: 5rem;
+    height: 5rem;
+    border-radius: 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 1.5rem;
+  }
+
+  &-title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: $text-primary;
+    margin-bottom: 0.5rem;
+  }
+
+  &-description {
+    color: $text-muted;
+    text-align: center;
+    max-width: 24rem;
+  }
+}
+
+// Messages container
+.messages-container {
+  flex: 1;
+  overflow-y: auto;
+  background-color: $bg-primary;
+  padding: 1.5rem;
+}
+
+.messages-wrapper {
+  max-width: 48rem;
+  margin: 0 auto;
+}
+
+// Welcome message
+.welcome-message {
+  text-align: center;
+  padding: 3rem 0;
+  animation: fadeIn 0.3s ease-in;
+
+  .welcome-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 4rem;
+    height: 4rem;
+    border-radius: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .welcome-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: $text-primary;
+    margin-bottom: 0.5rem;
+  }
+
+  .welcome-description {
+    color: $text-muted;
+    font-size: 0.875rem;
+  }
+}
+
+// Message row
+.message-row {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+  animation: slideUp 0.3s ease-out;
+
+  &.user-message {
+    flex-direction: row-reverse;
+
+    .message-content {
+      align-items: flex-end;
+    }
+
+    .timestamp {
+      text-align: right;
+    }
+  }
+
+  &.assistant-message {
+    .message-content {
+      align-items: flex-start;
+    }
+  }
+}
+
+// Avatar
+.avatar {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  .avatar-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    color: $text-secondary;
+  }
+
+  .agent-icon {
+    font-size: 1.25rem;
+  }
+}
+
+// Message content
+.message-content {
+  display: flex;
+  flex-direction: column;
+  max-width: 70%;
+
+  &.align-right {
+    align-items: flex-end;
+  }
+}
+
+// Thinking block
+.thinking-block {
+  margin-bottom: 0.5rem;
+  width: 100%;
+  padding: 0.5rem 1rem;
+  border-radius: 0.75rem;
+  background-color: rgba($amber, 0.1);
+  border: 1px solid rgba($amber, 0.2);
+
+  .thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin-bottom: 0.375rem;
+    color: $amber;
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+
+  .thinking-content {
+    color: $text-secondary;
+    font-size: 0.75rem;
+    font-family: monospace;
+    white-space: pre-wrap;
+    overflow-x: auto;
+    margin: 0;
+  }
+}
+
+// Tool calls
+.tool-calls {
+  margin-bottom: 0.5rem;
+  width: 100%;
+
+  .tool-call {
+    padding: 0.5rem 1rem;
+    border-radius: 0.75rem;
+    background-color: rgba($cyan, 0.1);
+    border: 1px solid rgba($cyan, 0.2);
+    margin-bottom: 0.375rem;
+
+    &:last-child {
+      margin-bottom: 0;
+    }
+
+    .tool-call-header {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      margin-bottom: 0.375rem;
+      color: $cyan;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .tool-input,
+    .tool-output {
+      margin-bottom: 0.5rem;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+    }
+
+    .tool-label {
+      color: $text-muted;
+      font-size: 0.75rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .tool-content {
+      color: $text-secondary;
+      font-size: 0.75rem;
+      font-family: monospace;
+      white-space: pre-wrap;
+      overflow-x: auto;
+      margin: 0;
+
+      &.output {
+        color: #4ade80;
+      }
+    }
+  }
+}
+
+// Message bubble
+.message-bubble {
+  padding: 0.75rem 1.25rem;
+  border-radius: 1rem;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: $text-primary;
+}
+
+// Timestamp
+.timestamp {
+  color: $text-muted;
+  font-size: 0.75rem;
+  margin-top: 0.375rem;
+  padding: 0 0.25rem;
+}
+
+// Typing indicator
+.typing-indicator {
+  padding: 0.75rem 1.25rem;
+  border-radius: 1rem;
+  display: flex;
+  gap: 0.375rem;
+
+  .dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background-color: $text-muted;
+    animation: pulse 1s infinite;
+  }
+}
+
+// Agent icon helper
+.agent-icon {
+  font-size: 1.25rem;
+}
+
+// Animations
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
+}

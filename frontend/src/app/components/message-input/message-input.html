@@ -1,0 +1,33 @@
+<form class="input-container" (submit)="handleSubmit($event)">
+  <div class="input-wrapper">
+    <textarea
+      #textarea
+      [value]="message()"
+      (input)="onInput($event)"
+      (keydown)="onKeyDown($event)"
+      [disabled]="disabled"
+      placeholder="Type your message..."
+      rows="1"
+      class="input-textarea"
+      [class.active]="canSend"
+    ></textarea>
+    
+    <button
+      type="submit"
+      [disabled]="!canSend"
+      class="send-button"
+      [style.backgroundColor]="canSend ? color : '#343541'"
+      [style.color]="canSend ? 'white' : '#6e6e80'"
+      [style.cursor]="canSend ? 'pointer' : 'not-allowed'"
+    >
+      <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+      </svg>
+    </button>
+  </div>
+  
+  <p class="input-hint">
+    Press <kbd class="kbd">Enter</kbd> to send, 
+    <kbd class="kbd">Shift + Enter</kbd> for new line
+  </p>
+</form>

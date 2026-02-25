@@ -1,0 +1,26 @@
+.home-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+.home-content {
+  max-width: 64rem;
+  width: 100%;
+}
+
+.loading-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+::ng-deep .dark-modal-panel {
+  .mat-mdc-dialog-container {
+    --mdc-dialog-container-color: #1e293b;
+  }
+}

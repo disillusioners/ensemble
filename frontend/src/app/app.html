@@ -1,0 +1,37 @@
+<div class="app-container">
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <a routerLink="/" class="logo-link">
+        <div class="logo">
+          <span class="logo-text">AC</span>
+        </div>
+        <h1 class="app-title">Agents Ensemble</h1>
+      </a>
+    </div>
+    
+    <div class="header-right">
+      @if (health()) {
+        <div class="health-status">
+          <span 
+            class="status-dot" 
+            [class.healthy]="health()!.status === 'healthy'"
+            [class.unhealthy]="health()!.status !== 'healthy'"
+          ></span>
+          <span class="version">v{{ health()!.version }}</span>
+        </div>
+      }
+      @if (isStreaming()) {
+        <div class="streaming-indicator">
+          <span class="live-dot"></span>
+          <span class="live-text">Live</span>
+        </div>
+      }
+    </div>
+  </header>
+
+  <!-- Main content -->
+  <main class="app-main">
+    <router-outlet></router-outlet>
+  </main>
+</div>

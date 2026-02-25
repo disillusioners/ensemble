@@ -1,0 +1,22 @@
+<div class="home-container">
+  <div class="home-content">
+    @if (isLoading()) {
+      <div class="loading-container">
+        <mat-spinner diameter="40"></mat-spinner>
+      </div>
+    } @else {
+      <app-agent-selector
+        [agents]="agents()"
+        [selectedAgent]="selectedAgent()"
+        [hasSessions]="hasSessions()"
+        [isLoading]="isLoading()"
+        (selectAgent)="onSelectAgent($event)"
+        (createSession)="onCreateSession()"
+        (continueSession)="onContinueSession($event)"
+        (addAgent)="onAddAgent($event)"
+        (deleteAgent)="onDeleteAgent($event)"
+        (startMother)="onStartMother()"
+      ></app-agent-selector>
+    }
+  </div>
+</div>
