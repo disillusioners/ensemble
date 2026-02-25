@@ -18,7 +18,7 @@ logger = logging.getLogger("daemon.queue")
 
 # Configuration constants
 MAX_QUEUE_SIZE = 100
-MESSAGE_TIMEOUT_SECONDS = 600  # 10 minutes
+MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
 MAX_RETRIES = 5
 CHECK_INTERVAL_SECONDS = 30
 
@@ -54,6 +54,7 @@ class QueuedMessage:
     metadata: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     processing_started_at: Optional[datetime] = None
+    last_activity_at: Optional[datetime] = None  # NEW
     status: str = "ready"
     error_message: Optional[str] = None
 
@@ -78,7 +79,7 @@ class InputMessageQueue:
         self._initialize_tables()
 
     def _initialize_tables(self) -> None:
-        """Create database tables if they don't exist."""
+        """Create database tables if they don't exist and run migrations."""
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS message_queue (
                 message_id TEXT PRIMARY KEY,
@@ -93,10 +94,19 @@ class InputMessageQueue:
                 metadata JSON,
                 enqueued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 processing_started_at TIMESTAMP,
+                last_activity_at TIMESTAMP,
                 completed_at TIMESTAMP,
                 next_retry_at TIMESTAMP
             )
         """)
+        
+        # Migration: Add last_activity_at column if it doesn't exist
+        cursor = self._conn.execute("PRAGMA table_info(message_queue)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'last_activity_at' not in columns:
+            self._conn.execute("ALTER TABLE message_queue ADD COLUMN last_activity_at TIMESTAMP")
+            logger.info("Added last_activity_at column to message_queue")
+        
         self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_message_queue_session_status 
             ON message_queue(session_id, status, priority, enqueued_at)
@@ -195,7 +205,8 @@ class InputMessageQueue:
             cursor = self._conn.execute("""
                 UPDATE message_queue
                 SET status = 'processing', 
-                    processing_started_at = ?
+                    processing_started_at = ?,
+                    last_activity_at = ?  -- NEW
                 WHERE message_id = (
                     SELECT message_id FROM message_queue
                     WHERE session_id = ?
@@ -206,8 +217,8 @@ class InputMessageQueue:
                 )
                 RETURNING message_id, session_id, content, source, priority, 
                          retry_count, metadata, enqueued_at, processing_started_at,
-                         status, error_message
-            """, (now, session_id, now))
+                         last_activity_at, status, error_message
+            """, (now, now, session_id, now))
             
             row = cursor.fetchone()
             self._conn.commit()
@@ -225,8 +236,9 @@ class InputMessageQueue:
                 metadata=json.loads(row[6]) if row[6] else {},
                 created_at=datetime.fromisoformat(row[7].replace("Z", "+00:00")) if row[7] else now,
                 processing_started_at=datetime.fromisoformat(row[8].replace("Z", "+00:00")) if row[8] else now,
-                status=row[9],
-                error_message=row[10]
+                last_activity_at=datetime.fromisoformat(row[9].replace("Z", "+00:00")) if row[9] else None,  # NEW
+                status=row[10],
+                error_message=row[11]
             )
 
     def _peek_ready_message(self, session_id: str) -> Optional[str]:
@@ -254,6 +266,24 @@ class InputMessageQueue:
         """, (now, message_id))
         self._conn.commit()
         logger.debug(f"Message {message_id} acknowledged")
+
+    def update_activity(self, message_id: str) -> None:
+        """Update last_activity_at timestamp for a processing message.
+        
+        This is called during message processing to indicate the session
+        is still active (not stuck), even if processing takes a long time.
+        
+        Args:
+            message_id: The message ID to update.
+        """
+        now = datetime.now(timezone.utc)
+        self._conn.execute("""
+            UPDATE message_queue
+            SET last_activity_at = ?
+            WHERE message_id = ? AND status = 'processing'
+        """, (now, message_id))
+        self._conn.commit()  # Changed: Now commits
+        logger.debug(f"Updated activity for message {message_id}")
 
     def fail(self, message_id: str, error: str) -> None:
         """Mark a message as permanently failed."""
@@ -489,8 +519,11 @@ class SessionWatchdog:
             SELECT message_id, session_id, retry_count, max_retries
             FROM message_queue
             WHERE status = 'processing'
-            AND processing_started_at < ?
-        """, (timeout_threshold,))
+            AND (
+                (last_activity_at IS NULL AND processing_started_at < ?)
+                OR last_activity_at < ?
+            )
+        """, (timeout_threshold, timeout_threshold))
         
         stuck_messages = cursor.fetchall()
         

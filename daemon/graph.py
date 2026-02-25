@@ -4,6 +4,20 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, AIMessage, BaseMessage
 from langchain_core.outputs import ChatResult
 from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Define transient exceptions for LLM retry
+try:
+    import openai
+    TRANSIENT_EXCEPTIONS = (
+        openai.RateLimitError,
+        openai.APITimeoutError,
+        openai.APIConnectionError,
+    )
+except ImportError:
+    TRANSIENT_EXCEPTIONS = ()
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -89,10 +103,21 @@ def build_session_graph(
     tools: list,
     checkpointer,
     llm_config: dict,
-    system_prompt: str
+    system_prompt: str,
+    retry_config: dict | None = None,  # NEW: optional retry config
 ):
-    """Build and return a compiled session graph."""
+    """Build and return a compiled session graph with LLM-level retry."""
     llm = ThinkingChatOpenAI(**llm_config)
+
+    # Wrap LLM with retry if config provided
+    if retry_config:
+        max_retries = retry_config.get("max_retries", 3)
+        llm = llm.with_retry(
+            stop_after_attempt=max_retries,
+            retry_if_exception_type=TRANSIENT_EXCEPTIONS,
+            wait_exponential_jitter=True,
+        )
+        logger.debug(f"LLM configured with {max_retries} retries")
     
     graph = StateGraph(MessagesState)
     

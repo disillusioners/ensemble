@@ -25,7 +25,56 @@ import asyncio
 import logging
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 
+import time
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
+
 logger = logging.getLogger(__name__)
+
+
+class ActivityCallbackHandler(BaseCallbackHandler):
+    """Callback to update message activity during LLM/graph execution.
+    
+    This ensures long-running tasks are not incorrectly marked as "stuck"
+    by the watchdog, as long as there's recent activity.
+    """
+    
+    def __init__(self, queue, message_id: str, update_interval_seconds: float = 5.0):
+        self.queue = queue
+        self.message_id = message_id
+        self.update_interval = update_interval_seconds
+        self._last_update = time.monotonic()
+    
+    def _maybe_update(self) -> None:
+        """Throttled activity update to avoid excessive DB writes."""
+        now = time.monotonic()
+        if now - self._last_update >= self.update_interval:
+            try:
+                self.queue.update_activity(self.message_id)
+            except Exception as e:
+                logger.warning(f"Failed to update activity for {self.message_id}: {e}")
+            self._last_update = now
+    
+    def on_llm_start(self, serialized, prompts, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_llm_end(self, response: LLMResult, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_tool_start(self, serialized, input_str, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_tool_end(self, output, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_chain_start(self, serialized, inputs, **kwargs) -> None:
+        self._maybe_update()
+    
+    def on_chain_end(self, outputs, **kwargs) -> None:
+        self._maybe_update()
 
 
 @dataclass
@@ -123,12 +172,18 @@ class SessionManager:
             "temperature": self.config.llm.temperature,
         }
 
+        # Build retry config from queue settings
+        retry_config = {
+            "max_retries": self.config.queue.llm_max_retries,
+        }
+
         # Build graph with checkpointer
         graph = build_session_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
             system_prompt=system_prompt,
+            retry_config=retry_config,
         )
 
         # Save metadata to DB
@@ -290,37 +345,32 @@ class SessionManager:
         )
 
     async def _process_queue(self, session_id: str) -> None:
-        """Event-driven queue processor for a session.
-        
-        When current work completes, check for next message.
-        """
+        """Event-driven queue processor for a session."""
         # Check if already processing
         async with self._processing_lock:
             if session_id in self._processing:
-                return  # Already processing, message will be picked up
+                return
             self._processing.add(session_id)
         
         try:
-            # Check circuit breaker
             if not self.circuit_breaker.can_execute(session_id):
                 logger.warning(f"Circuit breaker open for session {session_id}")
                 return
             
-            # Process all available messages
             while True:
                 msg = self.queue.dequeue(session_id, timeout=0)
                 if msg is None:
-                    break  # No more messages
+                    break
                 
                 try:
-                    # Process the message using existing send_message logic
+                    # Process with activity tracking (retry handled at LLM level in graph)
                     result = await asyncio.to_thread(
-                        self._process_message_sync,
+                        self._process_message_with_tracking,
                         session_id,
-                        msg.content
+                        msg.content,
+                        msg.message_id,
                     )
                     
-                    # Mark as completed
                     self.queue.ack(msg.message_id)
                     self.circuit_breaker.record_success(session_id)
                     
@@ -328,8 +378,7 @@ class SessionManager:
                     logger.error(f"Error processing message {msg.message_id}: {e}")
                     self.circuit_breaker.record_failure(session_id)
                     
-                    # Schedule retry if under max retries
-                    if msg.retry_count < 5:  # MAX_RETRIES
+                    if msg.retry_count < self.config.queue.max_retries:
                         self.queue.schedule_retry(
                             msg.message_id,
                             msg.retry_count + 1,
@@ -344,6 +393,118 @@ class SessionManager:
     def _process_message_sync(self, session_id: str, message: str) -> MessageResult:
         """Synchronous message processing (wraps existing send_message logic)."""
         return self.send_message(session_id, message)
+
+    def _process_message_with_tracking(
+        self, 
+        session_id: str, 
+        message: str,
+        message_id: str,
+    ) -> MessageResult:
+        """Process message with activity tracking (LLM retry handled in graph)."""
+        graph = self.get_session(session_id)
+        
+        # Create activity callback for this message
+        activity_callback = ActivityCallbackHandler(
+            self.queue, 
+            message_id,
+            update_interval_seconds=5.0
+        )
+        
+        config = {
+            "configurable": {"thread_id": session_id},
+            "callbacks": [activity_callback]
+        }
+        
+        # Direct invoke - retry happens at LLM level inside the graph
+        result = graph.invoke({"messages": [message]}, config)
+        
+        # Extract message data from the current turn
+        messages = result.get("messages", [])
+        
+        if messages:
+            # Find where the current turn starts (last HumanMessage from this invoke)
+            # We only want to process messages from the current turn, not history
+            current_turn_start = 0
+            for i, msg in enumerate(messages):
+                # HumanMessage is the user's input
+                if hasattr(msg, 'type') and msg.type == 'human':
+                    current_turn_start = i
+            
+            # Get messages from current turn only
+            current_turn_messages = messages[current_turn_start:]
+            
+            # Build map of tool_call_id -> output from ToolMessages in current turn
+            tool_outputs = {}
+            for msg in current_turn_messages:
+                if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
+                    tool_outputs[msg.tool_call_id] = msg.content
+            
+            # Collect all tool_calls from AIMessages in current turn
+            all_tool_calls = []
+            for msg in current_turn_messages:
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        # Handle both dict and object formats
+                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                        output = tool_outputs.get(tc_id)
+                        
+                        if isinstance(tc, dict):
+                            all_tool_calls.append({
+                                "id": tc.get("id", ""),
+                                "name": tc.get("name", ""),
+                                "arguments": tc.get("args", {}),
+                                "output": output,
+                            })
+                        else:
+                            all_tool_calls.append({
+                                "id": getattr(tc, "id", ""),
+                                "name": getattr(tc, "name", ""),
+                                "arguments": getattr(tc, "args", {}),
+                                "output": output,
+                            })
+            
+            tool_calls = all_tool_calls if all_tool_calls else None
+            
+            # Find the last AIMessage (the current assistant response) for content and thinking
+            last_ai_message = None
+            for msg in reversed(messages):
+                if hasattr(msg, 'type') and msg.type == 'ai':
+                    last_ai_message = msg
+                    break
+            
+            if last_ai_message:
+                content = last_ai_message.content or ""
+                
+                # Extract thinking ONLY from the last AIMessage (for models that support extended thinking)
+                thinking = None
+                
+                # Check direct thinking attribute (some providers)
+                if hasattr(last_ai_message, 'thinking') and last_ai_message.thinking:
+                    thinking = last_ai_message.thinking
+                
+                # Check additional_kwargs (most common for OpenAI-compatible proxies like LiteLLM)
+                elif hasattr(last_ai_message, 'additional_kwargs'):
+                    kwargs = last_ai_message.additional_kwargs or {}
+                    if kwargs.get("thinking"):
+                        thinking = kwargs["thinking"]
+                    elif kwargs.get("reasoning_content"):
+                        thinking = kwargs["reasoning_content"]
+                
+                # Check response_metadata (fallback)
+                elif hasattr(last_ai_message, 'response_metadata'):
+                    metadata = last_ai_message.response_metadata or {}
+                    if metadata.get("thinking"):
+                        thinking = metadata["thinking"]
+                    elif metadata.get("reasoning_content"):
+                        thinking = metadata["reasoning_content"]
+                
+                return MessageResult(
+                    content=content,
+                    thinking=thinking,
+                    tool_calls=tool_calls,
+                )
+        
+        return MessageResult(content="")
 
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
@@ -428,12 +589,18 @@ class SessionManager:
             "temperature": self.config.llm.temperature,
         }
 
+        # Build retry config from queue settings
+        retry_config = {
+            "max_retries": self.config.queue.llm_max_retries,
+        }
+
         # Build graph with checkpointer (will restore state from checkpoints)
         graph = build_session_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
             system_prompt=system_prompt,
+            retry_config=retry_config,
         )
 
         # Store in sessions dict

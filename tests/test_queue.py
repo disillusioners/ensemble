@@ -568,11 +568,11 @@ class TestSessionWatchdog:
         # Dequeue to set status to processing
         queue.dequeue(session_id)
         
-        # Manually set processing_started_at to be old
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+        # Manually set processing_started_at and last_activity_at to be old
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ? WHERE message_id = ?",
-            (old_time, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
+            (old_time, old_time, message_id)
         )
         queue._conn.commit()
         
@@ -595,10 +595,10 @@ class TestSessionWatchdog:
         queue.dequeue(session_id)
         
         # Make it stuck
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ? WHERE message_id = ?",
-            (old_time, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
+            (old_time, old_time, message_id)
         )
         queue._conn.commit()
         
@@ -620,10 +620,10 @@ class TestSessionWatchdog:
         queue.dequeue(session_id)
         
         # Set retry count to max and make it stuck
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, retry_count = ? WHERE message_id = ?",
-            (old_time, MAX_RETRIES, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ?, retry_count = ? WHERE message_id = ?",
+            (old_time, old_time, MAX_RETRIES, message_id)
         )
         queue._conn.commit()
         
@@ -674,10 +674,10 @@ class TestSessionWatchdog:
         queue.dequeue(session_id)
         
         # Make it stuck
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ? WHERE message_id = ?",
-            (old_time, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
+            (old_time, old_time, message_id)
         )
         queue._conn.commit()
         
@@ -784,8 +784,8 @@ class TestQueueIntegration:
         # Simulate stuck by setting old processing time
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ? WHERE message_id = ?",
-            (old_time, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
+            (old_time, old_time, message_id)
         )
         queue._conn.commit()
         
@@ -816,10 +816,10 @@ class TestQueueIntegration:
             assert msg is not None
             
             # Simulate stuck
-            old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+            old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
             queue._conn.execute(
-                "UPDATE message_queue SET processing_started_at = ? WHERE message_id = ?",
-                (old_time, message_id)
+                "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
+                (old_time, old_time, message_id)
             )
             queue._conn.commit()
             
@@ -835,10 +835,10 @@ class TestQueueIntegration:
         
         # After max retries, message should be failed on next stuck check
         msg = queue.dequeue(session_id)
-        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 10)
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
         queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, retry_count = ? WHERE message_id = ?",
-            (old_time, MAX_RETRIES, message_id)
+            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ?, retry_count = ? WHERE message_id = ?",
+            (old_time, old_time, MAX_RETRIES, message_id)
         )
         queue._conn.commit()
         
