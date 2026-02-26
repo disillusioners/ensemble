@@ -21,6 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 from typing import AsyncGenerator
 from pathlib import Path
 import os
+import secrets
 
 # Configure logging for daemon modules
 # This ensures our logs are visible when running via uvicorn
@@ -62,14 +63,76 @@ from .models import (
 from .manager import SessionManager
 from .config import Config, load_config
 from .events import event_to_sse
+from .sources.credentials import CredentialManager
+
+
+def validate_agent_dir(agent_dir: str) -> Path:
+    """Validate agent_dir is within allowed base directory.
+    
+    Args:
+        agent_dir: Relative path to agent directory (e.g., "./agents/my-agent")
+        
+    Returns:
+        Resolved absolute Path if valid.
+        
+    Raises:
+        HTTPException: If path is invalid or outside allowed directory.
+    """
+    base_dir = Path(__file__).parent.parent  # project root
+    agents_base = (base_dir / "agents").resolve()
+    
+    # Handle relative paths like "./agents/my-agent"
+    if agent_dir.startswith("./"):
+        agent_path = (base_dir / agent_dir).resolve()
+    else:
+        agent_path = (agents_base / agent_dir).resolve()
+    
+    # Check path is within agents directory
+    try:
+        agent_path.relative_to(agents_base)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Invalid agent_dir: must be within agents directory"
+            ).model_dump()
+        )
+
+    # Check for symlink attack
+    if agent_path.is_symlink():
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="Symlinks not allowed in agent paths"
+            ).model_dump()
+        )
+
+    # Check agent exists
+    if not agent_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Agent directory not found: {agent_dir}"
+            ).model_dump()
+        )
+    
+    return agent_path
+
 
 # Determine the base path
 BASE_DIR = Path(__file__).parent.parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
+# Max size in bytes for credentials JSON
+MAX_CREDENTIALS_SIZE = 4096
+
 # Global state
 manager: SessionManager = None
 start_time: float = None
+credential_manager = CredentialManager()
 
 
 @asynccontextmanager
@@ -646,8 +709,20 @@ async def create_source(source_create: SourceCreate):
             ).model_dump()
         )
     
-    # Save to database
-    credentials_json = json.dumps(source_create.credentials) if source_create.credentials else None
+    # Validate and encrypt credentials
+    credentials_json = None
+    if source_create.credentials:
+        # Validate credentials size
+        cred_str = json.dumps(source_create.credentials)
+        if len(cred_str) > MAX_CREDENTIALS_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message=f"Credentials too large (max {MAX_CREDENTIALS_SIZE} bytes)"
+                ).model_dump()
+            )
+        credentials_json = credential_manager.encrypt(source_create.credentials)
     save_source_config(
         conn=manager.conn,
         source_id=source_create.source_id,
@@ -724,8 +799,19 @@ async def update_source(source_id: str, source_update: SourceUpdate):
     updated_credentials = source_update.credentials if source_update.credentials is not None else existing.get("credentials", {})
     updated_enabled = source_update.enabled if source_update.enabled is not None else existing["enabled"]
     
-    # Serialize credentials to JSON
-    credentials_json = json.dumps(updated_credentials) if updated_credentials else None
+    # Validate and encrypt credentials
+    credentials_json = None
+    if updated_credentials:
+        cred_str = json.dumps(updated_credentials)
+        if len(cred_str) > MAX_CREDENTIALS_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message=f"Credentials too large (max {MAX_CREDENTIALS_SIZE} bytes)"
+                ).model_dump()
+            )
+        credentials_json = credential_manager.encrypt(updated_credentials)
     
     # Save updated config
     save_source_config(
@@ -907,6 +993,9 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     from .sources.persistence import get_source_config, get_session_mapping, save_session_mapping
     import uuid
     
+    # Validate agent_dir is within allowed directory
+    validate_agent_dir(mapping_create.agent_dir)
+    
     # Check source exists
     source = get_source_config(manager.conn, source_id)
     if not source:
@@ -948,16 +1037,30 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
             ).model_dump()
         )
     
-    # Save the mapping
-    save_session_mapping(
-        conn=manager.conn,
-        mapping_id=mapping_id,
-        source_id=source_id,
-        external_user_id=mapping_create.external_user_id,
-        agent_session_id=session_id,
-        agent_dir=mapping_create.agent_dir,
-        metadata=mapping_create.metadata,
-    )
+    # Save the mapping with rollback on failure
+    try:
+        save_session_mapping(
+            conn=manager.conn,
+            mapping_id=mapping_id,
+            source_id=source_id,
+            external_user_id=mapping_create.external_user_id,
+            agent_session_id=session_id,
+            agent_dir=mapping_create.agent_dir,
+            metadata=mapping_create.metadata,
+        )
+    except Exception as e:
+        # Rollback: terminate the orphaned session
+        try:
+            manager.terminate_session(session_id)
+        except Exception:
+            pass  # Best effort cleanup
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to save mapping: {str(e)}"
+            ).model_dump()
+        )
     
     # Get the saved mapping
     saved = get_session_mapping(manager.conn, source_id, mapping_create.external_user_id)
@@ -1025,6 +1128,21 @@ async def receive_webhook(source_id: str, request: Request):
             ).model_dump()
         )
     
+    # Verify webhook secret if configured
+    source_config = source.get("config", {}) if isinstance(source.get("config"), dict) else json.loads(source.get("config", "{}"))
+    configured_secret = source_config.get("webhook_secret")
+
+    if configured_secret:
+        provided_secret = request.headers.get("X-Webhook-Secret")
+        if not provided_secret or not secrets.compare_digest(provided_secret, configured_secret):
+            raise HTTPException(
+                status_code=401,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message="Invalid or missing webhook secret"
+                ).model_dump()
+            )
+
     # Get the adapter from registry
     if not manager.source_registry:
         raise HTTPException(

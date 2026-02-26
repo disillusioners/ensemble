@@ -156,16 +156,13 @@ class TestLoadConfig:
         
         assert "Config file not found" in str(exc_info.value)
 
-    def test_missing_default_config_file(self):
+    def test_missing_default_config_file(self, tmp_path, monkeypatch):
         """Test error when default config file doesn't exist."""
-        # Make sure ENSEMBLE_CONFIG is not set and config.yaml doesn't exist
-        if "ENSEMBLE_CONFIG" in os.environ:
-            del os.environ["ENSEMBLE_CONFIG"]
+        # Change to temp directory where config.yaml doesn't exist
+        monkeypatch.chdir(tmp_path)
         
-        # Ensure ./config.yaml doesn't exist
-        config_file = Path("./config.yaml")
-        if config_file.exists():
-            config_file.unlink()
+        # Make sure ENSEMBLE_CONFIG is not set
+        monkeypatch.delenv("ENSEMBLE_CONFIG", raising=False)
         
         with pytest.raises(FileNotFoundError) as exc_info:
             load_config()

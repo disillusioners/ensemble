@@ -348,6 +348,9 @@ def _row_to_dict(cursor: sqlite3.Cursor, row: sqlite3.Row) -> dict[str, Any]:
     if result.get("metadata") and isinstance(result["metadata"], str):
         result["metadata"] = json.loads(result["metadata"])
     if result.get("credentials") and isinstance(result["credentials"], str):
-        result["credentials"] = json.loads(result["credentials"])
+        # Decrypt credentials using CredentialManager
+        from .credentials import CredentialManager
+        cm = CredentialManager()
+        result["credentials"] = cm.decrypt(result["credentials"])
     
     return result
