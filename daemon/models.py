@@ -25,6 +25,11 @@ class ErrorCodes(str, Enum):
     MAX_SESSIONS_EXCEEDED = "MAX_SESSIONS_EXCEEDED"
     LLM_ERROR = "LLM_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND"
+    SOURCE_ALREADY_EXISTS = "SOURCE_ALREADY_EXISTS"
+    SOURCE_TYPE_NOT_SUPPORTED = "SOURCE_TYPE_NOT_SUPPORTED"
+    MAPPING_NOT_FOUND = "MAPPING_NOT_FOUND"
+    MAPPING_ALREADY_EXISTS = "MAPPING_ALREADY_EXISTS"
 
 
 class ErrorResponse(BaseModel):
@@ -233,6 +238,246 @@ class AgentCreate(BaseModel):
                 "description": "A custom agent",
                 "icon": "🚀",
                 "color": "accent-emerald"
+            }
+        }
+    )
+
+
+# ==================== Source Models ====================
+
+
+class SourceStatus(str, Enum):
+    """Status of a message source adapter."""
+
+    stopped = "stopped"
+    starting = "starting"
+    running = "running"
+    error = "error"
+
+
+class SourceType(str, Enum):
+    """Supported message source types."""
+
+    telegram = "telegram"
+    webhook = "webhook"
+    whatsapp = "whatsapp"
+    discord = "discord"
+
+
+class SourceCreate(BaseModel):
+    """Request for creating a new message source."""
+
+    source_id: str = Field(
+        ..., 
+        description="Unique source identifier (alphanumeric, hyphens, underscores only)", 
+        min_length=1, 
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9_-]+$"
+    )
+    source_type: SourceType = Field(..., description="Type of message source")
+    name: str = Field(..., description="Display name for the source", min_length=1, max_length=128)
+    config: dict[str, Any] = Field(default_factory=dict, description="Source-specific configuration")
+    credentials: dict[str, Any] = Field(default_factory=dict, description="Credentials (bot tokens, API keys)")
+    enabled: bool = Field(default=True, description="Whether the source is enabled")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_id": "telegram-main",
+                "source_type": "telegram",
+                "name": "Customer Support Bot",
+                "config": {
+                    "polling_enabled": True,
+                    "polling_timeout": 30,
+                    "default_agent": "coder"
+                },
+                "credentials": {
+                    "bot_token": "123456:ABC-DEF"
+                },
+                "enabled": True
+            }
+        }
+    )
+
+
+class SourceUpdate(BaseModel):
+    """Request for updating a message source."""
+
+    name: str | None = Field(default=None, description="Display name for the source", min_length=1, max_length=128)
+    config: dict[str, Any] | None = Field(default=None, description="Source-specific configuration")
+    credentials: dict[str, Any] | None = Field(default=None, description="Credentials (bot tokens, API keys)")
+    enabled: bool | None = Field(default=None, description="Whether the source is enabled")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "Updated Bot Name",
+                "config": {"polling_enabled": False},
+                "enabled": True
+            }
+        }
+    )
+
+
+class SourceInfo(BaseModel):
+    """Response for source information."""
+
+    source_id: str = Field(..., description="Unique source identifier")
+    source_type: SourceType = Field(..., description="Type of message source")
+    name: str = Field(..., description="Display name for the source")
+    config: dict[str, Any] = Field(..., description="Source-specific configuration")
+    enabled: bool = Field(..., description="Whether the source is enabled")
+    status: SourceStatus = Field(..., description="Current adapter status")
+    error_message: str | None = Field(default=None, description="Error message if status is 'error'")
+    created_at: datetime = Field(..., description="Source creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Last update timestamp")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_id": "telegram-main",
+                "source_type": "telegram",
+                "name": "Customer Support Bot",
+                "config": {"polling_enabled": True, "default_agent": "coder"},
+                "enabled": True,
+                "status": "running",
+                "error_message": None,
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:01:00Z"
+            }
+        }
+    )
+
+
+class SourceListResponse(BaseModel):
+    """Response for listing message sources."""
+
+    sources: list[SourceInfo] = Field(..., description="List of configured sources")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "sources": [
+                    {
+                        "source_id": "telegram-main",
+                        "source_type": "telegram",
+                        "name": "Customer Support Bot",
+                        "config": {"polling_enabled": True},
+                        "enabled": True,
+                        "status": "running",
+                        "error_message": None,
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "updated_at": "2024-01-01T00:01:00Z"
+                    }
+                ]
+            }
+        }
+    )
+
+
+class SourceActionResponse(BaseModel):
+    """Response for source actions (start/stop)."""
+
+    source_id: str = Field(..., description="Source identifier")
+    status: SourceStatus = Field(..., description="Current status after action")
+    message: str = Field(..., description="Status message")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_id": "telegram-main",
+                "status": "running",
+                "message": "Source started successfully"
+            }
+        }
+    )
+
+
+# ==================== Session Mapping Models ====================
+
+
+class SessionMappingCreate(BaseModel):
+    """Request for creating a session mapping."""
+
+    external_user_id: str = Field(..., description="External user ID (e.g., Telegram chat_id)", min_length=1, max_length=256)
+    agent_dir: str = Field(..., description="Agent directory to use for this user")
+    metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "external_user_id": "123456789",
+                "agent_dir": "./agents/coder",
+                "metadata": {"username": "john_doe"}
+            }
+        }
+    )
+
+
+class SessionMappingInfo(BaseModel):
+    """Response for session mapping information."""
+
+    mapping_id: str = Field(..., description="Unique mapping identifier")
+    source_id: str = Field(..., description="Source this mapping belongs to")
+    external_user_id: str = Field(..., description="External user ID")
+    agent_session_id: str = Field(..., description="Agent session handling this user")
+    agent_dir: str = Field(..., description="Agent directory used")
+    metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
+    last_message_at: datetime | None = Field(default=None, description="Last message timestamp")
+    created_at: datetime = Field(..., description="Mapping creation timestamp")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mapping_id": "telegram-main:123456789",
+                "source_id": "telegram-main",
+                "external_user_id": "123456789",
+                "agent_session_id": "session-abc",
+                "agent_dir": "./agents/coder",
+                "metadata": {"username": "john_doe"},
+                "last_message_at": "2024-01-01T00:01:00Z",
+                "created_at": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
+
+
+class SessionMappingListResponse(BaseModel):
+    """Response for listing session mappings."""
+
+    mappings: list[SessionMappingInfo] = Field(..., description="List of session mappings")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mappings": [
+                    {
+                        "mapping_id": "telegram-main:123456789",
+                        "source_id": "telegram-main",
+                        "external_user_id": "123456789",
+                        "agent_session_id": "session-abc",
+                        "agent_dir": "./agents/coder",
+                        "metadata": None,
+                        "last_message_at": "2024-01-01T00:01:00Z",
+                        "created_at": "2024-01-01T00:00:00Z"
+                    }
+                ]
+            }
+        }
+    )
+
+
+class DeleteResponse(BaseModel):
+    """Generic delete response."""
+
+    deleted: bool = Field(..., description="Whether the resource was deleted")
+    message: str = Field(..., description="Status message")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "deleted": True,
+                "message": "Resource deleted successfully"
             }
         }
     )

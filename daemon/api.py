@@ -10,6 +10,7 @@ warnings.filterwarnings(
 import time
 import logging
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request
@@ -44,6 +45,19 @@ from .models import (
     AgentInfo,
     AgentListResponse,
     AgentCreate,
+    # Source models
+    SourceCreate,
+    SourceUpdate,
+    SourceInfo,
+    SourceListResponse,
+    SourceActionResponse,
+    SourceStatus,
+    SourceType,
+    # Mapping models
+    SessionMappingCreate,
+    SessionMappingInfo,
+    SessionMappingListResponse,
+    DeleteResponse,
 )
 from .manager import SessionManager
 from .config import Config, load_config
@@ -576,6 +590,500 @@ async def stream_events(session_id: str, request: Request):
             }
 
     return EventSourceResponse(event_generator())
+
+
+# ==================== Source Management Endpoints ====================
+
+
+# GET /sources - List all sources
+@app.get("/sources", response_model=SourceListResponse)
+async def list_sources():
+    """List all configured message sources."""
+    from .sources.persistence import list_source_configs
+    
+    sources_data = list_source_configs(manager.conn)
+    sources = []
+    for src in sources_data:
+        sources.append(SourceInfo(
+            source_id=src["source_id"],
+            source_type=SourceType(src["source_type"]),
+            name=src["name"],
+            config=src["config"],
+            enabled=src["enabled"],
+            status=SourceStatus(src.get("status", "stopped")),
+            error_message=src.get("error_message"),
+            created_at=datetime.fromisoformat(src["created_at"]).replace(tzinfo=timezone.utc) if isinstance(src["created_at"], str) else src["created_at"],
+            updated_at=datetime.fromisoformat(src["updated_at"]).replace(tzinfo=timezone.utc) if src.get("updated_at") and isinstance(src["updated_at"], str) else src.get("updated_at"),
+        ))
+    return SourceListResponse(sources=sources)
+
+
+# POST /sources - Create new source
+@app.post("/sources", response_model=SourceInfo, status_code=201)
+async def create_source(source_create: SourceCreate):
+    """Create a new message source."""
+    from .sources.persistence import save_source_config, get_source_config
+    
+    # Check if source already exists
+    existing = get_source_config(manager.conn, source_create.source_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_ALREADY_EXISTS,
+                message=f"Source already exists: {source_create.source_id}"
+            ).model_dump()
+        )
+    
+    # Validate source type is supported
+    supported_types = {"telegram", "webhook", "whatsapp", "discord"}
+    if source_create.source_type.value not in supported_types:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_TYPE_NOT_SUPPORTED,
+                message=f"Source type not supported: {source_create.source_type}. Supported: {supported_types}"
+            ).model_dump()
+        )
+    
+    # Save to database
+    credentials_json = json.dumps(source_create.credentials) if source_create.credentials else None
+    save_source_config(
+        conn=manager.conn,
+        source_id=source_create.source_id,
+        source_type=source_create.source_type.value,
+        name=source_create.name,
+        config=source_create.config,
+        credentials=credentials_json,
+        enabled=source_create.enabled,
+    )
+    
+    # Get the saved config
+    saved = get_source_config(manager.conn, source_create.source_id)
+    return SourceInfo(
+        source_id=saved["source_id"],
+        source_type=SourceType(saved["source_type"]),
+        name=saved["name"],
+        config=saved["config"],
+        enabled=saved["enabled"],
+        status=SourceStatus(saved.get("status", "stopped")),
+        error_message=saved.get("error_message"),
+        created_at=datetime.fromisoformat(saved["created_at"]).replace(tzinfo=timezone.utc),
+        updated_at=datetime.fromisoformat(saved["updated_at"]).replace(tzinfo=timezone.utc) if saved.get("updated_at") else None,
+    )
+
+
+# GET /sources/{source_id} - Get source info
+@app.get("/sources/{source_id}", response_model=SourceInfo)
+async def get_source(source_id: str):
+    """Get a specific message source."""
+    from .sources.persistence import get_source_config
+    
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    return SourceInfo(
+        source_id=source["source_id"],
+        source_type=SourceType(source["source_type"]),
+        name=source["name"],
+        config=source["config"],
+        enabled=source["enabled"],
+        status=SourceStatus(source.get("status", "stopped")),
+        error_message=source.get("error_message"),
+        created_at=datetime.fromisoformat(source["created_at"]).replace(tzinfo=timezone.utc),
+        updated_at=datetime.fromisoformat(source["updated_at"]).replace(tzinfo=timezone.utc) if source.get("updated_at") else None,
+    )
+
+
+# PUT /sources/{source_id} - Update source
+@app.put("/sources/{source_id}", response_model=SourceInfo)
+async def update_source(source_id: str, source_update: SourceUpdate):
+    """Update a message source configuration."""
+    from .sources.persistence import get_source_config, save_source_config
+    
+    existing = get_source_config(manager.conn, source_id)
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    # Merge updates
+    updated_name = source_update.name if source_update.name is not None else existing["name"]
+    updated_config = source_update.config if source_update.config is not None else existing["config"]
+    updated_credentials = source_update.credentials if source_update.credentials is not None else existing.get("credentials", {})
+    updated_enabled = source_update.enabled if source_update.enabled is not None else existing["enabled"]
+    
+    # Serialize credentials to JSON
+    credentials_json = json.dumps(updated_credentials) if updated_credentials else None
+    
+    # Save updated config
+    save_source_config(
+        conn=manager.conn,
+        source_id=source_id,
+        source_type=existing["source_type"],
+        name=updated_name,
+        config=updated_config,
+        credentials=credentials_json,
+        enabled=updated_enabled,
+    )
+    
+    # Get the updated config
+    updated = get_source_config(manager.conn, source_id)
+    return SourceInfo(
+        source_id=updated["source_id"],
+        source_type=SourceType(updated["source_type"]),
+        name=updated["name"],
+        config=updated["config"],
+        enabled=updated["enabled"],
+        status=SourceStatus(updated.get("status", "stopped")),
+        error_message=updated.get("error_message"),
+        created_at=datetime.fromisoformat(updated["created_at"]).replace(tzinfo=timezone.utc),
+        updated_at=datetime.fromisoformat(updated["updated_at"]).replace(tzinfo=timezone.utc),
+    )
+
+
+# DELETE /sources/{source_id} - Delete source
+@app.delete("/sources/{source_id}", response_model=DeleteResponse)
+async def delete_source(source_id: str):
+    """Delete a message source."""
+    from .sources.persistence import delete_source_config
+    
+    deleted = delete_source_config(manager.conn, source_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    return DeleteResponse(deleted=True, message=f"Source {source_id} deleted")
+
+
+# POST /sources/{source_id}/start - Start a source
+@app.post("/sources/{source_id}/start", response_model=SourceActionResponse)
+async def start_source(source_id: str):
+    """Start a message source adapter."""
+    from .sources.persistence import get_source_config, update_source_status
+    
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    if not source["enabled"]:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {source_id} is disabled. Enable it first."
+            ).model_dump()
+        )
+    
+    # Check if registry has the source
+    if manager.source_registry:
+        try:
+            await manager.source_registry.start_source(source_id)
+            update_source_status(manager.conn, source_id, "running")
+            return SourceActionResponse(
+                source_id=source_id,
+                status=SourceStatus.running,
+                message=f"Source {source_id} started successfully"
+            )
+        except Exception as e:
+            update_source_status(manager.conn, source_id, "error", str(e))
+            return SourceActionResponse(
+                source_id=source_id,
+                status=SourceStatus.error,
+                message=f"Failed to start source: {str(e)}"
+            )
+    
+    return SourceActionResponse(
+        source_id=source_id,
+        status=SourceStatus.stopped,
+        message="Source registry not available"
+    )
+
+
+# POST /sources/{source_id}/stop - Stop a source
+@app.post("/sources/{source_id}/stop", response_model=SourceActionResponse)
+async def stop_source(source_id: str):
+    """Stop a message source adapter."""
+    from .sources.persistence import get_source_config, update_source_status
+    
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    # Check if registry has the source
+    if manager.source_registry:
+        try:
+            await manager.source_registry.stop_source(source_id)
+            update_source_status(manager.conn, source_id, "stopped")
+            return SourceActionResponse(
+                source_id=source_id,
+                status=SourceStatus.stopped,
+                message=f"Source {source_id} stopped successfully"
+            )
+        except Exception as e:
+            update_source_status(manager.conn, source_id, "error", str(e))
+            return SourceActionResponse(
+                source_id=source_id,
+                status=SourceStatus.error,
+                message=f"Failed to stop source: {str(e)}"
+            )
+    
+    update_source_status(manager.conn, source_id, "stopped")
+    return SourceActionResponse(
+        source_id=source_id,
+        status=SourceStatus.stopped,
+        message=f"Source {source_id} marked as stopped"
+    )
+
+
+# ==================== Session Mapping Endpoints ====================
+
+
+# GET /sources/{source_id}/mappings - List mappings for a source
+@app.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
+async def list_mappings(source_id: str):
+    """List all session mappings for a source."""
+    from .sources.persistence import get_source_config, list_session_mappings
+    
+    # Check source exists
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    mappings_data = list_session_mappings(manager.conn, source_id)
+    mappings = []
+    for m in mappings_data:
+        mappings.append(SessionMappingInfo(
+            mapping_id=m["mapping_id"],
+            source_id=m["source_id"],
+            external_user_id=m["external_user_id"],
+            agent_session_id=m["agent_session_id"],
+            agent_dir=m["agent_dir"],
+            metadata=m.get("metadata"),
+            last_message_at=datetime.fromisoformat(m["last_message_at"]).replace(tzinfo=timezone.utc) if m.get("last_message_at") and isinstance(m["last_message_at"], str) else m.get("last_message_at"),
+            created_at=datetime.fromisoformat(m["created_at"]).replace(tzinfo=timezone.utc) if isinstance(m["created_at"], str) else m["created_at"],
+        ))
+    return SessionMappingListResponse(mappings=mappings)
+
+
+# POST /sources/{source_id}/mappings - Create or update a mapping
+@app.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
+async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
+    """Create a session mapping for an external user."""
+    from .sources.persistence import get_source_config, get_session_mapping, save_session_mapping
+    import uuid
+    
+    # Check source exists
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    # Check if mapping already exists
+    existing = get_session_mapping(manager.conn, source_id, mapping_create.external_user_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=ErrorResponse(
+                code=ErrorCodes.MAPPING_ALREADY_EXISTS,
+                message=f"Mapping already exists for user {mapping_create.external_user_id}"
+            ).model_dump()
+        )
+    
+    # Generate IDs
+    mapping_id = f"{source_id}:{mapping_create.external_user_id}"
+    session_id = f"ext-{uuid.uuid4().hex[:12]}"
+    
+    # Spawn the agent session
+    try:
+        manager.spawn_session(
+            agent_dir=mapping_create.agent_dir,
+            session_id=session_id,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to spawn session: {str(e)}"
+            ).model_dump()
+        )
+    
+    # Save the mapping
+    save_session_mapping(
+        conn=manager.conn,
+        mapping_id=mapping_id,
+        source_id=source_id,
+        external_user_id=mapping_create.external_user_id,
+        agent_session_id=session_id,
+        agent_dir=mapping_create.agent_dir,
+        metadata=mapping_create.metadata,
+    )
+    
+    # Get the saved mapping
+    saved = get_session_mapping(manager.conn, source_id, mapping_create.external_user_id)
+    return SessionMappingInfo(
+        mapping_id=saved["mapping_id"],
+        source_id=saved["source_id"],
+        external_user_id=saved["external_user_id"],
+        agent_session_id=saved["agent_session_id"],
+        agent_dir=saved["agent_dir"],
+        metadata=saved.get("metadata"),
+        last_message_at=datetime.fromisoformat(saved["last_message_at"]).replace(tzinfo=timezone.utc) if saved.get("last_message_at") and isinstance(saved["last_message_at"], str) else saved.get("last_message_at"),
+        created_at=datetime.fromisoformat(saved["created_at"]).replace(tzinfo=timezone.utc),
+    )
+
+
+# DELETE /sources/{source_id}/mappings/{mapping_id} - Delete a mapping
+@app.delete("/sources/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
+async def delete_mapping(source_id: str, mapping_id: str):
+    """Delete a session mapping."""
+    from .sources.persistence import delete_session_mapping, get_session_mapping
+    
+    # URL decode the mapping_id if needed
+    # mapping_id format is "source_id:external_user_id"
+    
+    deleted = delete_session_mapping(manager.conn, mapping_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.MAPPING_NOT_FOUND,
+                message=f"Mapping not found: {mapping_id}"
+            ).model_dump()
+        )
+    
+    return DeleteResponse(deleted=True, message=f"Mapping {mapping_id} deleted")
+
+
+# ==================== Webhook Receiver Endpoint ====================
+
+
+# POST /webhooks/{source_id} - Receive webhook from external source
+@app.post("/webhooks/{source_id}")
+async def receive_webhook(source_id: str, request: Request):
+    """Receive a webhook from an external message source."""
+    from .sources.persistence import get_source_config
+    
+    # Check source exists
+    source = get_source_config(manager.conn, source_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Source not found: {source_id}"
+            ).model_dump()
+        )
+    
+    # Check source type is webhook-compatible
+    if source["source_type"] not in ("webhook", "telegram"):
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source type {source['source_type']} does not support webhooks"
+            ).model_dump()
+        )
+    
+    # Get the adapter from registry
+    if not manager.source_registry:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message="Source registry not available"
+            ).model_dump()
+        )
+    
+    adapter = manager.source_registry.get(source_id)
+    if not adapter:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Source adapter not running: {source_id}"
+            ).model_dump()
+        )
+    
+    # Check if adapter supports webhooks
+    if not hasattr(adapter, 'handle_webhook'):
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source adapter does not support webhooks"
+            ).model_dump()
+        )
+    
+    # Parse the webhook payload
+    try:
+        payload = await request.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Invalid JSON payload: {str(e)}"
+            ).model_dump()
+        )
+    
+    # Get headers
+    headers = dict(request.headers)
+    
+    # Forward to adapter
+    try:
+        await adapter.handle_webhook(payload, headers)
+        return {"received": True, "source_id": source_id}
+    except Exception as e:
+        # Log but don't expose internal errors
+        logger.error(f"Webhook processing error for {source_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Webhook processing failed"
+            ).model_dump()
+        )
 
 
 # Static file serving for production UI (served at root)

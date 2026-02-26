@@ -97,14 +97,24 @@ def update_source_status(
 
 
 def delete_source_config(conn: sqlite3.Connection, source_id: str) -> bool:
-    """Delete a source configuration. Returns True if deleted, False if not found."""
+    """Delete a source configuration and all associated mappings.
+    
+    Returns True if deleted, False if not found.
+    """
+    # First delete all mappings for this source (cascade)
+    conn.execute(
+        "DELETE FROM session_mappings WHERE source_id = ?",
+        (source_id,),
+    )
+    
+    # Then delete the source config
     cursor = conn.execute(
         "DELETE FROM source_configs WHERE source_id = ?",
         (source_id,),
     )
     conn.commit()
     if cursor.rowcount > 0:
-        logger.info(f"Deleted source config: source_id={source_id}")
+        logger.info(f"Deleted source config and associated mappings: source_id={source_id}")
         return True
     logger.warning(f"Source config not found for deletion: source_id={source_id}")
     return False
