@@ -51,17 +51,35 @@ class EventBroadcaster:
     def __init__(self):
         # ... existing ...
         self._global_subscribers: list[asyncio.Queue] = []  # NEW
+        self._subscriber_refs: dict[str, asyncio.Queue] = {}  # Track by ID for cleanup
+        # Reuse existing _lock from EventBroadcaster
     
-    async def subscribe_all(self) -> asyncio.Queue:
-        """Subscribe to ALL events across all sessions."""
+    async def subscribe_all(self, subscriber_id: str) -> asyncio.Queue:
+        """Subscribe to ALL events across all sessions.
+        
+        Args:
+            subscriber_id: Unique identifier for cleanup (e.g., "response_dispatcher")
+        
+        Returns:
+            Queue that will receive all broadcast events
+        """
         q = asyncio.Queue(maxsize=1000)
-        self._global_subscribers.append(q)
+        with self._lock:
+            self._global_subscribers.append(q)
+            self._subscriber_refs[subscriber_id] = q
         return q
+    
+    def unsubscribe_all(self, subscriber_id: str) -> None:
+        """Unsubscribe from all events. Call during shutdown to prevent memory leak."""
+        with self._lock:
+            q = self._subscriber_refs.pop(subscriber_id, None)
+            if q and q in self._global_subscribers:
+                self._global_subscribers.remove(q)
     
     async def broadcast(self, event: Event) -> None:
         # ... existing session queue logic ...
         
-        # NEW: Also push to global subscribers
+        # Push to global subscribers
         for q in self._global_subscribers:
             try:
                 q.put_nowait(event)
@@ -97,16 +115,38 @@ await self.broadcaster.broadcast(Event(
 
 **Problem**: Telegram and other platforms can deliver the same message multiple times (network retries, webhook redelivery). No deduplication = duplicate responses to users.
 
-**Required Fix**: Add deduplication table:
+**Required Fix**: Add deduplication with atomic check-and-insert:
 
 ```sql
 -- Track processed external messages
 CREATE TABLE processed_external_messages (
     source_id TEXT,
     external_message_id TEXT,  -- Telegram message_id
-    processed_at TIMESTAMP,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (source_id, external_message_id)
 );
+
+-- Index for cleanup queries
+CREATE INDEX idx_processed_msg_cleanup ON processed_external_messages(processed_at);
+```
+
+```python
+# daemon/sources/mapper.py
+class SessionMapper:
+    async def is_duplicate(self, source_id: str, external_msg_id: str) -> bool:
+        """Check and mark as processed atomically. Returns True if duplicate.
+        
+        Uses INSERT with UNIQUE constraint to ensure atomicity.
+        """
+        try:
+            self._conn.execute("""
+                INSERT INTO processed_external_messages (source_id, external_message_id)
+                VALUES (?, ?)
+            """, (source_id, external_msg_id))
+            self._conn.commit()
+            return False  # Successfully inserted = new message
+        except sqlite3.IntegrityError:
+            return True  # UNIQUE constraint violated = already processed
 ```
 
 ---
@@ -130,40 +170,170 @@ CREATE TABLE processed_external_messages (
 
 **Problem**: All components share ONE SQLite connection. With multiple adapters, write contention becomes a bottleneck at ~10-20 concurrent sessions.
 
+**Required Fix**: Enable WAL mode with optimized settings:
+
+```python
+# daemon/persistence.py
+def init_database(db_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    
+    # Enable WAL mode BEFORE any tables are created
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")   # 30 second timeout
+    conn.execute("PRAGMA synchronous=NORMAL")   # Faster writes (safe with WAL)
+    conn.execute("PRAGMA cache_size=-64000")    # 64MB cache
+    conn.execute("PRAGMA foreign_keys=ON")
+    
+    # ... rest of table creation
+    return conn
+```
+
 **Mitigations**:
-1. Increase SQLite busy timeout
-2. Use WAL mode: `PRAGMA journal_mode=WAL`
-3. Plan for PostgreSQL migration if scaling
+1. ✅ Enable WAL mode (shown above)
+2. ✅ Increase busy timeout to 30s
+3. Plan for PostgreSQL migration if scaling beyond 100 concurrent sessions
 
 ### Adapter Crash Isolation
 
 **Problem**: Adapters run in the same process. One crash can take down the entire system.
 
-**Required Fix**: Add supervisor pattern:
+**Required Fix**: Add supervisor pattern with exponential backoff (see section above).
+
+### Circuit Breaker for External APIs
+
+**Problem**: External APIs (Telegram, WhatsApp) can become unavailable. Without protection, failing calls will block the event loop and cause cascading failures.
+
+**Required Fix**: Add per-adapter circuit breaker:
 
 ```python
-class SourceRegistry:
-    async def _run_adapter_safe(self, adapter: MessageSourceAdapter):
-        while True:
-            try:
-                await adapter.start()
-            except Exception as e:
-                logger.error(f"Adapter {adapter.source_id} crashed: {e}")
-                adapter._status = SourceStatus.ERROR
-                await asyncio.sleep(self._backoff)  # Exponential backoff
-                await adapter.start()
+# daemon/sources/circuit_breaker.py
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+import time
+
+class CircuitState(Enum):
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"          # Failing, reject all calls
+    HALF_OPEN = "half_open"  # Testing recovery
+
+@dataclass
+class CircuitBreaker:
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0  # seconds
+    state: CircuitState = CircuitState.CLOSED
+    failure_count: int = 0
+    last_failure_time: float = 0.0
+    
+    def can_execute(self) -> bool:
+        """Check if call should be allowed."""
+        if self.state == CircuitState.CLOSED:
+            return True
+        if self.state == CircuitState.OPEN:
+            # Check if recovery timeout passed
+            if time.monotonic() - self.last_failure_time >= self.recovery_timeout:
+                self.state = CircuitState.HALF_OPEN
+                return True
+            return False
+        # HALF_OPEN: allow one test call
+        return True
+    
+    def record_success(self) -> None:
+        """Record successful call."""
+        self.failure_count = 0
+        self.state = CircuitState.CLOSED
+    
+    def record_failure(self) -> None:
+        """Record failed call."""
+        self.failure_count += 1
+        self.last_failure_time = time.monotonic()
+        if self.failure_count >= self.failure_threshold:
+            self.state = CircuitState.OPEN
+
+# Usage in adapter:
+class MessageSourceAdapter(ABC):
+    def __init__(self, config: SourceConfig, on_message: Callable):
+        # ... existing ...
+        self._circuit_breaker = CircuitBreaker()
+    
+    async def send(self, message: OutgoingMessage) -> bool:
+        if not self._circuit_breaker.can_execute():
+            logger.warning(f"Circuit OPEN for {self.source_id}, dropping message")
+            return False
+        
+        try:
+            result = await self._do_send(message)
+            self._circuit_breaker.record_success()
+            return result
+        except Exception as e:
+            self._circuit_breaker.record_failure()
+            raise
 ```
 
 ### Message Ordering
 
 **Problem**: Rapid messages (A, B, C) may be delivered out of order if responses fail/retry.
 
-**Required Fix**: Add per-user send locks:
+**Required Fix**: Add per-user send locks with thread-safe access (see ResponseDispatcher section above).
+
+### Rate Limiting per Source
+
+**Problem**: A single spammy user or burst can overwhelm an adapter. Each platform has different rate limits (Telegram: 30 msg/sec to same chat).
+
+**Required Fix**: Add token bucket rate limiter:
 
 ```python
-class ResponseDispatcher:
-    def __init__(self):
-        self._send_locks: dict[str, asyncio.Lock] = {}  # per external_user_id
+# daemon/sources/rate_limiter.py
+import time
+import asyncio
+
+@dataclass
+class RateLimit:
+    messages_per_second: float
+    burst_size: int
+
+# Platform-specific defaults
+DEFAULT_RATE_LIMITS = {
+    "telegram": RateLimit(messages_per_second=30, burst_size=30),
+    "webhook": RateLimit(messages_per_second=100, burst_size=100),
+    "whatsapp": RateLimit(messages_per_second=10, burst_size=20),
+}
+
+class TokenBucketLimiter:
+    """Token bucket rate limiter for per-source throttling."""
+    
+    def __init__(self, rate: RateLimit):
+        self._rate = rate
+        self._tokens = float(rate.burst_size)
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self) -> bool:
+        """Try to acquire a token. Returns True if allowed."""
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            
+            # Refill tokens
+            self._tokens = min(
+                self._rate.burst_size,
+                self._tokens + elapsed * self._rate.messages_per_second
+            )
+            self._last_refill = now
+            
+            if self._tokens >= 1:
+                self._tokens -= 1
+                return True
+            return False
+    
+    async def wait_and_acquire(self, max_wait: float = 5.0) -> bool:
+        """Wait up to max_wait for a token."""
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            if await self.acquire():
+                return True
+            await asyncio.sleep(0.1)
+        return False
 ```
 
 ### Telegram Polling vs Webhook
@@ -343,6 +513,120 @@ class MessageSourceAdapter(ABC):
         await self._on_message(msg)
 ```
 
+### `daemon/sources/dispatcher.py`
+
+```python
+import asyncio
+from typing import Optional
+
+class ResponseDispatcher:
+    """Routes agent responses back to external sources.
+    
+    Listens to EventBroadcaster for completed events and dispatches
+    responses to the appropriate adapter.
+    """
+    
+    def __init__(self, broadcaster: EventBroadcaster, registry: "SourceRegistry",
+                 subscriber_id: str = "response_dispatcher"):
+        self.broadcaster = broadcaster
+        self.registry = registry
+        self._subscriber_id = subscriber_id
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._event_queue: Optional[asyncio.Queue] = None
+        
+        # Per-user send locks for ordering
+        self._send_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+    
+    def start(self) -> None:
+        """Start listening for events."""
+        self._running = True
+        self._task = asyncio.create_task(self._event_loop())
+    
+    async def stop(self, timeout: float = 30.0) -> None:
+        """Graceful shutdown with timeout for pending messages."""
+        self._running = False
+        if self._task:
+            try:
+                await asyncio.wait_for(self._task, timeout=timeout)
+            except asyncio.TimeoutError:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+        
+        # Cleanup broadcaster subscription to prevent memory leak
+        self.broadcaster.unsubscribe_all(self._subscriber_id)
+    
+    async def _get_send_lock(self, external_user_id: str) -> asyncio.Lock:
+        """Get or create send lock for user (thread-safe)."""
+        if external_user_id not in self._send_locks:
+            async with self._locks_guard:
+                if external_user_id not in self._send_locks:
+                    self._send_locks[external_user_id] = asyncio.Lock()
+        return self._send_locks[external_user_id]
+    
+    async def _event_loop(self) -> None:
+        """Main event processing loop."""
+        self._event_queue = await self.broadcaster.subscribe_all(self._subscriber_id)
+        
+        while self._running:
+            try:
+                event = await asyncio.wait_for(
+                    self._event_queue.get(), 
+                    timeout=1.0
+                )
+                await self._handle_event(event)
+            except asyncio.TimeoutError:
+                continue  # Check _running flag
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in dispatcher event loop: {e}", exc_info=True)
+    
+    async def _handle_event(self, event: Event) -> None:
+        """Process a broadcast event."""
+        if event.type != "completed":
+            return
+        
+        source = event.data.get("source")
+        if not source:
+            logger.warning("Completed event missing source field")
+            return
+        
+        # Parse source: "telegram:chat_id" -> ("telegram", "chat_id")
+        parts = source.split(":", 1)
+        if len(parts) != 2:
+            logger.warning(f"Invalid source format: {source}")
+            return
+        
+        source_id, external_user_id = parts
+        
+        # Get adapter
+        adapter = self.registry.get(source_id)
+        if not adapter:
+            logger.warning(f"No adapter found for source: {source_id}")
+            return
+        
+        # Create outgoing message
+        message = OutgoingMessage(
+            external_user_id=external_user_id,
+            content=event.data.get("content", ""),
+            source_id=source_id,
+            metadata={"thinking": event.data.get("thinking")},
+        )
+        
+        # Send with per-user ordering
+        lock = await self._get_send_lock(external_user_id)
+        async with lock:
+            try:
+                await adapter.send(message)
+            except Exception as e:
+                logger.error(f"Failed to send to {source_id}/{external_user_id}: {e}")
+```
+
 ---
 
 ## Message Flow
@@ -381,17 +665,20 @@ daemon/
 ├── api.py                      # + /sources/* endpoints (~100 lines)
 ├── manager.py                  # + source field in event, source system init
 ├── queue.py                    # UNCHANGED
-├── events.py                   # + subscribe_all() method (~15 lines)
+├── events.py                   # + subscribe_all(), unsubscribe_all() (~25 lines)
 ├── graph.py                    # UNCHANGED
-├── persistence.py              # + new tables (~40 lines)
+├── persistence.py              # + new tables, WAL mode (~60 lines)
 │
-├── sources/                    # NEW MODULE (~500+ lines total)
+├── sources/                    # NEW MODULE (~800+ lines total)
 │   ├── __init__.py             # Exports
 │   ├── base.py                 # Interfaces (IncomingMessage, Adapter ABC)
 │   ├── registry.py             # SourceRegistry with supervisor pattern
-│   ├── mapper.py               # SessionMapper + deduplication
-│   ├── dispatcher.py           # ResponseDispatcher with per-user locks
+│   ├── mapper.py               # SessionMapper + atomic deduplication
+│   ├── dispatcher.py           # ResponseDispatcher with graceful shutdown
 │   ├── persistence.py          # DB operations for sources
+│   ├── circuit_breaker.py      # CircuitBreaker for external API protection
+│   ├── rate_limiter.py         # TokenBucketLimiter for rate limiting
+│   ├── credentials.py          # CredentialManager for encryption
 │   │
 │   └── adapters/               # Concrete adapters
 │       ├── __init__.py
@@ -491,7 +778,8 @@ class SessionManager:
         self.source_registry = SourceRegistry(conn=self.conn, manager=self)
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
-            registry=self.source_registry
+            registry=self.source_registry,
+            subscriber_id="response_dispatcher"  # For cleanup
         )
         
     async def start(self):
@@ -501,6 +789,13 @@ class SessionManager:
         # Start sources and dispatcher
         await self.source_registry.start_all()
         self.source_dispatcher.start()
+    
+    async def stop(self):
+        """Graceful shutdown of source system."""
+        # Stop dispatcher first (drain pending responses)
+        await self.source_dispatcher.stop(timeout=30.0)
+        # Then stop all adapters
+        await self.source_registry.stop_all()
 ```
 
 ### 4. Persistence - Add New Tables (daemon/persistence.py)
@@ -650,11 +945,172 @@ sources:
 
 ## Security Considerations
 
-1. **Credential Storage**: Encrypt sensitive credentials (API tokens) in database
-2. **Webhook Verification**: Validate signatures on incoming webhooks
-3. **Rate Limiting**: Per-source rate limits to prevent abuse
-4. **Access Control**: User permissions for source configuration
-5. **Credential Rotation**: Support rotating credentials without downtime (support old + new during transition)
+### 1. Credential Storage
+
+**Problem**: API tokens stored as plain JSON in database are vulnerable to anyone with DB access.
+
+**Fix**: Encrypt sensitive credentials using Fernet (symmetric encryption):
+
+```python
+# daemon/sources/credentials.py
+from cryptography.fernet import Fernet
+import json
+import os
+
+class CredentialManager:
+    def __init__(self, encryption_key: bytes | None = None):
+        key = encryption_key or os.environ.get("SOURCE_CREDENTIAL_KEY")
+        if not key:
+            # Generate key for first run: Fernet.generate_key()
+            raise ValueError("SOURCE_CREDENTIAL_KEY environment variable required")
+        self._fernet = Fernet(key if isinstance(key, bytes) else key.encode())
+    
+    def encrypt(self, credentials: dict) -> str:
+        """Encrypt credentials dict to string."""
+        return self._fernet.encrypt(json.dumps(credentials).encode()).decode()
+    
+    def decrypt(self, encrypted: str) -> dict:
+        """Decrypt string back to credentials dict."""
+        return json.loads(self._fernet.decrypt(encrypted.encode()).decode())
+
+# Usage in SourcePersistence:
+def save_source_config(self, config: SourceConfig, cred_manager: CredentialManager):
+    encrypted_creds = cred_manager.encrypt(config.credentials)
+    conn.execute("""
+        INSERT INTO source_configs (source_id, credentials, ...)
+        VALUES (?, ?, ...)
+    """, (config.source_id, encrypted_creds, ...))
+```
+
+### 2. Webhook Verification
+
+Validate signatures on incoming webhooks:
+
+```python
+# In TelegramAdapter
+async def handle_webhook(self, payload: dict, headers: dict) -> None:
+    # Verify X-Telegram-Bot-Api-Secret-Token if configured
+    expected_token = self.config.config.get("secret_token")
+    if expected_token:
+        import secrets
+        provided_token = headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not secrets.compare_digest(expected_token, provided_token):
+            raise SecurityError("Invalid webhook signature")
+    await self._process_update(payload)
+```
+
+### 3. Input Validation on External User IDs
+
+Never trust external input directly:
+
+```python
+import re
+
+def validate_external_user_id(source_type: str, user_id: str) -> str:
+    """Validate and sanitize external user ID."""
+    if source_type == "telegram":
+        if not re.match(r'^-?\d+$', user_id):
+            raise ValueError(f"Invalid Telegram user ID: {user_id}")
+    elif source_type == "webhook":
+        if not re.match(r'^[a-zA-Z0-9_-]{1,128}$', user_id):
+            raise ValueError(f"Invalid webhook user ID: {user_id}")
+    # Add validation for other sources
+    
+    if len(user_id) > 256:
+        raise ValueError("User ID too long")
+    
+    return user_id
+```
+
+### 4. Rate Limiting
+
+Per-source rate limits to prevent abuse (see Rate Limiting section above).
+
+### 5. Access Control
+
+User permissions for source configuration (future - API auth layer).
+
+### 6. Credential Rotation
+
+Support rotating credentials without downtime:
+- Store old + new credentials during transition
+- Try new first, fall back to old on failure
+- Remove old after transition period
+
+---
+
+## Cleanup Jobs (TTL)
+
+Tables grow without bounds without periodic cleanup:
+
+```python
+# daemon/sources/cleanup.py
+import asyncio
+from datetime import datetime, timezone, timedelta
+
+class SourceCleanup:
+    """Periodic cleanup for source-related tables."""
+    
+    def __init__(self, conn: sqlite3.Connection, interval_hours: int = 6):
+        self._conn = conn
+        self._interval = interval_hours * 3600
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+    
+    def start(self) -> None:
+        self._running = True
+        self._task = asyncio.create_task(self._cleanup_loop())
+    
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+    
+    async def _cleanup_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self._interval)
+            try:
+                await self._run_cleanup()
+            except Exception as e:
+                logger.error(f"Cleanup job failed: {e}")
+    
+    async def _run_cleanup(self) -> dict:
+        """Run all cleanup tasks. Returns stats."""
+        stats = {}
+        
+        # 1. Cleanup old processed messages (24h TTL)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        cursor = self._conn.execute("""
+            DELETE FROM processed_external_messages 
+            WHERE processed_at < ?
+        """, (cutoff,))
+        stats["processed_messages_deleted"] = cursor.rowcount
+        
+        # 2. Cleanup inactive session mappings (30 day TTL, if no pending messages)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        cursor = self._conn.execute("""
+            DELETE FROM session_mappings 
+            WHERE last_message_at < ?
+            AND agent_session_id NOT IN (
+                SELECT DISTINCT session_id FROM message_queue 
+                WHERE status != 'completed'
+            )
+        """, (cutoff,))
+        stats["inactive_mappings_deleted"] = cursor.rowcount
+        
+        self._conn.commit()
+        logger.info(f"Cleanup completed: {stats}")
+        return stats
+```
+
+Start cleanup job in SessionManager:
+
+```python
+async def start(self):
+    # ... existing startup ...
+    self._cleanup = SourceCleanup(self.conn)
+    self._cleanup.start()
+```
 
 ---
 
@@ -705,3 +1161,27 @@ sources:
 | 5 | Frontend Integration | 2-3 days | Phase 4 |
 
 **Total: ~8-13 days** (backend only, excluding Phase 6 future adapters)
+
+---
+
+## Document Revision History
+
+| Date | Changes |
+|------|---------|
+| 2025-02-26 | Architecture review: Added memory leak prevention in subscribe_all(), exponential backoff in supervisor, atomic deduplication, thread-safe send locks, WAL mode, circuit breaker pattern, graceful shutdown, rate limiting, credential encryption, input validation, TTL cleanup jobs |
+
+### Summary of Key Improvements
+
+| Area | Issue | Fix |
+|------|-------|-----|
+| Memory Safety | EventBroadcaster subscriber leak | Added `unsubscribe_all()` with subscriber_id tracking |
+| Reliability | Static backoff on adapter crash | Exponential backoff with jitter |
+| Correctness | Deduplication race condition | Atomic INSERT with UNIQUE constraint |
+| Thread Safety | Per-user lock dict race | Guard lock with double-check pattern |
+| Performance | SQLite write contention | WAL mode + busy_timeout + cache |
+| Resilience | External API failures cascade | Circuit breaker per adapter |
+| Operations | Dispatcher hangs on shutdown | Graceful stop() with timeout |
+| Stability | Message burst overwhelm adapters | Token bucket rate limiting |
+| Security | Plaintext credentials | Fernet encryption |
+| Security | Unvalidated external input | Regex validation per source type |
+| Operations | Tables grow unbounded | Periodic TTL cleanup jobs |
