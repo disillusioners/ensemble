@@ -15,6 +15,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     """Create database file and parent directories if needed.
     
     Creates the sessions and session_hierarchy tables.
+    Enables WAL mode for better concurrent write performance.
     
     Args:
         db_path: Path to the SQLite database file.
@@ -29,6 +30,14 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     # check_same_thread=False allows connection to be used across FastAPI's async handlers
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    
+    # Enable WAL mode for better concurrent write performance
+    # Must be done BEFORE any tables are created
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")   # 30 second timeout
+    conn.execute("PRAGMA synchronous=NORMAL")   # Faster writes (safe with WAL)
+    conn.execute("PRAGMA cache_size=-64000")    # 64MB cache
+    conn.execute("PRAGMA foreign_keys=ON")
     
     # Create sessions table
     conn.execute("""
@@ -84,6 +93,68 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_message_queue_session_status 
         ON message_queue(session_id, status, priority, enqueued_at)
+    """)
+    
+    # Create source_configs table for pluggable message sources
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS source_configs (
+            source_id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            config JSON NOT NULL,
+            credentials TEXT,
+            enabled BOOLEAN DEFAULT TRUE,
+            status TEXT DEFAULT 'stopped',
+            error_message TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Create session_mappings table for external_user -> agent_session mapping
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS session_mappings (
+            mapping_id TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            external_user_id TEXT NOT NULL,
+            agent_session_id TEXT NOT NULL,
+            agent_dir TEXT NOT NULL,
+            metadata JSON,
+            last_message_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_id, external_user_id),
+            FOREIGN KEY (source_id) REFERENCES source_configs(source_id)
+        )
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_session_mappings_source 
+        ON session_mappings(source_id)
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_session_mappings_session 
+        ON session_mappings(agent_session_id)
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_session_mappings_cleanup 
+        ON session_mappings(last_message_at)
+    """)
+    
+    # Create processed_external_messages table for deduplication
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS processed_external_messages (
+            source_id TEXT,
+            external_message_id TEXT,
+            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source_id, external_message_id)
+        )
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_processed_msg_cleanup 
+        ON processed_external_messages(processed_at)
     """)
     
     conn.commit()

@@ -27,6 +27,7 @@ from .persistence import (
 )
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
+from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 
 import asyncio
 import logging
@@ -125,6 +126,15 @@ class SessionManager:
         
         # NEW: Event broadcaster for real-time SSE updates
         self.broadcaster = EventBroadcaster()
+
+        # NEW: Pluggable message sources system
+        self.source_registry = SourceRegistry(conn=self.conn, manager=self)
+        self.source_dispatcher = ResponseDispatcher(
+            broadcaster=self.broadcaster,
+            registry=self.source_registry,
+            subscriber_id="response_dispatcher"
+        )
+        self._source_cleanup: SourceCleanup | None = None
 
         # Start watchdog
         self.watchdog.start()
@@ -439,6 +449,7 @@ class SessionManager:
                             "content": result.content,
                             "thinking": result.thinking,
                             "tool_calls": result.tool_calls,
+                            "source": msg.source,  # Required for ResponseDispatcher routing
                         }
                     ))
                     
@@ -967,3 +978,45 @@ Provide a concise summary:"""
 
         # Clear database sessions
         return delete_all_sessions(self.conn)
+    
+    async def start_sources(self) -> None:
+        """Start the pluggable message sources system.
+        
+        This initializes:
+        - SourceRegistry: Loads and starts all enabled adapters from DB
+        - ResponseDispatcher: Listens for completed events to route responses
+        - SourceCleanup: Periodic cleanup of old processed messages and mappings
+        """
+        # Start cleanup job
+        self._source_cleanup = SourceCleanup(self.conn)
+        self._source_cleanup.start()
+        
+        # Start the dispatcher (listens for completed events)
+        await self.source_dispatcher.start()
+        
+        # Start all enabled adapters from database
+        await self.source_registry.start_all()
+        
+        logger.info("Message sources system started")
+    
+    async def stop_sources(self, timeout: float = 30.0) -> None:
+        """Stop the pluggable message sources system gracefully.
+        
+        Args:
+            timeout: Maximum seconds to wait for pending responses.
+        """
+        # Stop dispatcher first (drain pending responses)
+        await self.source_dispatcher.stop(timeout=timeout)
+        
+        # Stop all adapters
+        await self.source_registry.stop_all()
+        
+        # Stop cleanup job
+        if self._source_cleanup:
+            await self._source_cleanup.stop()
+        
+        logger.info("Message sources system stopped")
+    
+    def get_source_registry(self) -> SourceRegistry:
+        """Get the source registry for adapter management."""
+        return self.source_registry

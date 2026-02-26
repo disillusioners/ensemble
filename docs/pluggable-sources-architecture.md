@@ -662,30 +662,31 @@ class ResponseDispatcher:
 
 ```
 daemon/
-├── api.py                      # + /sources/* endpoints (~100 lines)
-├── manager.py                  # + source field in event, source system init
+├── api.py                      # ⏳ PENDING: /sources/* endpoints
+├── manager.py                  # ✅ DONE: source field, start_sources(), stop_sources()
 ├── queue.py                    # UNCHANGED
-├── events.py                   # + subscribe_all(), unsubscribe_all() (~25 lines)
+├── events.py                   # ✅ DONE: subscribe_all(), unsubscribe_all()
 ├── graph.py                    # UNCHANGED
-├── persistence.py              # + new tables, WAL mode (~60 lines)
+├── persistence.py              # ✅ DONE: new tables, WAL mode
 │
-├── sources/                    # NEW MODULE (~800+ lines total)
-│   ├── __init__.py             # Exports
-│   ├── base.py                 # Interfaces (IncomingMessage, Adapter ABC)
-│   ├── registry.py             # SourceRegistry with supervisor pattern
-│   ├── mapper.py               # SessionMapper + atomic deduplication
-│   ├── dispatcher.py           # ResponseDispatcher with graceful shutdown
-│   ├── persistence.py          # DB operations for sources
-│   ├── circuit_breaker.py      # CircuitBreaker for external API protection
-│   ├── rate_limiter.py         # TokenBucketLimiter for rate limiting
-│   ├── credentials.py          # CredentialManager for encryption
+├── sources/                    # ✅ DONE: NEW MODULE (~1000 lines)
+│   ├── __init__.py             # ✅ Exports
+│   ├── base.py                 # ✅ Interfaces (IncomingMessage, Adapter ABC)
+│   ├── registry.py             # ✅ SourceRegistry with supervisor + timeout
+│   ├── mapper.py               # ✅ SessionMapper + atomic deduplication
+│   ├── dispatcher.py           # ✅ ResponseDispatcher with async start + LRU
+│   ├── persistence.py          # ✅ DB operations for sources
+│   ├── circuit_breaker.py      # ✅ CircuitBreaker with async lock
+│   ├── rate_limiter.py         # ✅ TokenBucketLimiter
+│   ├── credentials.py          # ✅ CredentialManager
+│   ├── cleanup.py              # ✅ SourceCleanup with initial delay
 │   │
-│   └── adapters/               # Concrete adapters
-│       ├── __init__.py
-│       ├── telegram.py         # TelegramAdapter (polling + webhook)
-│       └── webhook.py          # WebhookAdapter (future)
+│   └── adapters/               # ⏳ PENDING
+│       ├── __init__.py         # ⏳ TODO
+│       ├── telegram.py         # ⏳ TODO: TelegramAdapter
+│       └── webhook.py          # ⏳ TODO: WebhookAdapter
 │
-└── models.py                   # + SourceInfo, SourceCreateRequest
+└── models.py                   # ⏳ PENDING: SourceInfo, SourceCreateRequest
 ```
 
 ---
@@ -818,27 +819,41 @@ def init_db(conn: sqlite3.Connection):
 
 ## Implementation Phases
 
-### Phase 0.5: Critical Core Fixes (1 day) ⚠️ MUST DO FIRST
-- [ ] Add `subscribe_all()` method to `EventBroadcaster` (daemon/events.py)
-- [ ] Add `source` field to completed event in `SessionManager` (daemon/manager.py)
-- [ ] Add new tables to persistence (source_configs, session_mappings, processed_external_messages)
-- [ ] Write tests for event subscription/routing
-- [ ] Verify core changes don't break existing functionality
+### Phase 0.5: Critical Core Fixes ✅ COMPLETE
+- [x] Add `subscribe_all()` and `unsubscribe_all()` methods to `EventBroadcaster` (daemon/events.py)
+- [x] Add `source` field to completed event in `SessionManager` (daemon/manager.py)
+- [x] Add new tables to persistence (source_configs, session_mappings, processed_external_messages)
+- [x] Enable WAL mode for SQLite concurrency
+- [x] Verify core changes don't break existing functionality (215 tests pass)
 
-### Phase 1: Foundation (1-2 days)
-- [ ] Create `daemon/sources/__init__.py`
-- [ ] Create `daemon/sources/base.py` with interfaces
-- [ ] Create `daemon/sources/persistence.py` with DB operations
-- [ ] Create `daemon/sources/mapper.py` for session mapping
-- [ ] Add deduplication logic in mapper
+### Phase 1: Foundation ✅ COMPLETE
+- [x] Create `daemon/sources/__init__.py`
+- [x] Create `daemon/sources/base.py` with interfaces (SourceStatus, IncomingMessage, OutgoingMessage, SourceConfig, MessageSourceAdapter)
+- [x] Create `daemon/sources/persistence.py` with DB operations
+- [x] Create `daemon/sources/mapper.py` for session mapping
+- [x] Add deduplication logic in mapper (atomic check-and-insert)
+- [x] Create utility modules:
+  - [x] `circuit_breaker.py` - CircuitBreaker with async lock protection
+  - [x] `rate_limiter.py` - TokenBucketLimiter with platform defaults
+  - [x] `credentials.py` - CredentialManager with Fernet encryption
+  - [x] `cleanup.py` - SourceCleanup for TTL cleanup jobs
 
-### Phase 2: Core Components (1-2 days)
-- [ ] Create `daemon/sources/registry.py` - SourceRegistry with supervisor pattern
-- [ ] Create `daemon/sources/dispatcher.py` - ResponseDispatcher with per-user locks
-- [ ] Integrate registry and dispatcher into SessionManager
-- [ ] Test event routing end-to-end
+### Phase 2: Core Components ✅ COMPLETE
+- [x] Create `daemon/sources/registry.py` - SourceRegistry with supervisor pattern + exponential backoff + start timeout
+- [x] Create `daemon/sources/dispatcher.py` - ResponseDispatcher with per-user locks + LRU eviction
+- [x] Integrate registry and dispatcher into SessionManager
+- [x] Add `start_sources()` and `stop_sources()` methods to SessionManager
+- [x] Code review fixes applied:
+  - [x] Fix: `_handle_message()` calls `queue.enqueue()` with correct parameters
+  - [x] Fix: `dispatcher.start()` is now async
+  - [x] Fix: CircuitBreaker methods are async with lock protection
+  - [x] Fix: Input validation for source_id and external_user_id
+  - [x] Fix: LRU eviction for `_send_locks` dict (MAX_SEND_LOCKS=10000)
+  - [x] Fix: Supervisor timeout for hung `adapter.start()` (60s)
+  - [x] Fix: SQL operator precedence in `cleanup_inactive_mappings`
+  - [x] Fix: Initial 60s delay before first cleanup
 
-### Phase 3: Telegram Adapter (2-3 days)
+### Phase 3: Telegram Adapter ⏳ PENDING
 - [ ] Create `daemon/sources/adapters/__init__.py`
 - [ ] Create `daemon/sources/adapters/telegram.py`
 - [ ] Implement polling-based message receiving (initial)
@@ -847,20 +862,20 @@ def init_db(conn: sqlite3.Connection):
 - [ ] Add error handling with exponential backoff
 - [ ] Add webhook support (for production)
 
-### Phase 4: API Endpoints (1-2 days)
+### Phase 4: API Endpoints ⏳ PENDING
 - [ ] Add source CRUD endpoints to `daemon/api.py`
 - [ ] Add mapping endpoints
 - [ ] Add webhook receiver endpoint
 - [ ] Add request/response models to `daemon/models.py`
 - [ ] Add API tests
 
-### Phase 5: Frontend Integration (2-3 days)
+### Phase 5: Frontend Integration ⏳ PENDING
 - [ ] Source configuration UI
 - [ ] Source list/status display
 - [ ] Mapping management UI
 - [ ] Agent selection for sources
 
-### Phase 6: Additional Adapters (Future)
+### Phase 6: Additional Adapters ⏳ PENDING (Future)
 - [ ] Webhook adapter
 - [ ] WhatsApp adapter
 - [ ] Discord adapter
@@ -1151,16 +1166,17 @@ async def start(self):
 
 ## Estimated Timeline
 
-| Phase | Description | Effort | Dependencies |
-|-------|-------------|--------|--------------|
-| 0.5 | Critical Core Fixes | 1 day | None |
-| 1 | Foundation | 1-2 days | Phase 0.5 |
-| 2 | Core Components | 1-2 days | Phase 1 |
-| 3 | Telegram Adapter | 2-3 days | Phase 2 |
-| 4 | API Endpoints | 1-2 days | Phase 3 |
-| 5 | Frontend Integration | 2-3 days | Phase 4 |
+| Phase | Description | Status | Effort | Dependencies |
+|-------|-------------|--------|--------|--------------|
+| 0.5 | Critical Core Fixes | ✅ DONE | 1 day | None |
+| 1 | Foundation | ✅ DONE | 1-2 days | Phase 0.5 |
+| 2 | Core Components | ✅ DONE | 1-2 days | Phase 1 |
+| 3 | Telegram Adapter | ⏳ PENDING | 2-3 days | Phase 2 |
+| 4 | API Endpoints | ⏳ PENDING | 1-2 days | Phase 3 |
+| 5 | Frontend Integration | ⏳ PENDING | 2-3 days | Phase 4 |
 
-**Total: ~8-13 days** (backend only, excluding Phase 6 future adapters)
+**Completed: ~4-5 days** (Phases 0.5, 1, 2 - backend core)
+**Remaining: ~5-8 days** (Phases 3, 4, 5 - adapters + API + frontend)
 
 ---
 
@@ -1168,7 +1184,45 @@ async def start(self):
 
 | Date | Changes |
 |------|---------|
-| 2025-02-26 | Architecture review: Added memory leak prevention in subscribe_all(), exponential backoff in supervisor, atomic deduplication, thread-safe send locks, WAL mode, circuit breaker pattern, graceful shutdown, rate limiting, credential encryption, input validation, TTL cleanup jobs |
+| 2025-02-26 | Initial architecture design with improvements from review |
+| 2025-02-26 | **IMPLEMENTED**: Phases 0.5, 1, 2 complete - all core modules created |
+| 2025-02-26 | **CODE REVIEW**: Fixed 5 CRITICAL + 4 HIGH issues after @oracle review |
+
+### Implementation Status
+
+| Component | Status | Tests | Notes |
+|-----------|--------|-------|-------|
+| `daemon/events.py` | ✅ Done | ✅ 21 | subscribe_all(), unsubscribe_all() |
+| `daemon/manager.py` | ✅ Done | - | source field, start_sources(), stop_sources() |
+| `daemon/persistence.py` | ✅ Done | - | WAL mode, new tables |
+| `daemon/sources/base.py` | ✅ Done | - | Core interfaces (dataclasses) |
+| `daemon/sources/circuit_breaker.py` | ✅ Done | ✅ 14 | Async with lock |
+| `daemon/sources/rate_limiter.py` | ✅ Done | ✅ 13 | Token bucket |
+| `daemon/sources/credentials.py` | ✅ Done | - | Fernet encryption |
+| `daemon/sources/persistence.py` | ✅ Done | ✅ 20 | DB operations |
+| `daemon/sources/mapper.py` | ✅ Done | ✅ 26 | Session mapping + dedup |
+| `daemon/sources/registry.py` | ✅ Done | ✅ 17 | Supervisor + timeout |
+| `daemon/sources/dispatcher.py` | ✅ Done | ✅ 21 | Async start + LRU |
+| `daemon/sources/cleanup.py` | ✅ Done | - | TTL cleanup |
+| `daemon/sources/adapters/telegram.py` | ⏳ Pending | - | Phase 3 |
+| API endpoints | ⏳ Pending | - | Phase 4 |
+| Frontend UI | ⏳ Pending | - | Phase 5 |
+
+**Test Coverage: 111 tests for sources module**
+
+### Code Review Fixes Applied (2025-02-26)
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | CRITICAL | Type contract violation in `_handle_message()` | Call `queue.enqueue()` with individual params |
+| 2 | CRITICAL | `dispatcher.start()` sync/async pattern | Made async with `await` |
+| 3 | CRITICAL | Race in `available_tokens` property | Added docstring documenting acceptable race |
+| 4 | CRITICAL | CircuitBreaker not thread-safe | Made methods async with lock |
+| 5 | CRITICAL | Missing input validation | Added regex + length checks |
+| 6 | HIGH | Memory leak in `_send_locks` | LRU eviction with OrderedDict |
+| 7 | HIGH | No timeout for hung adapter.start() | Added 60s timeout with wait_for |
+| 8 | HIGH | SQL operator precedence | Fixed with explicit parentheses |
+| 9 | HIGH | Cleanup runs immediately | Added 60s initial delay |
 
 ### Summary of Key Improvements
 
