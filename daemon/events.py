@@ -46,6 +46,10 @@ class EventBroadcaster:
         self._lock = threading.Lock()  # Thread-safe for sync operations
         self._async_lock: Optional[asyncio.Lock] = None  # Created lazily in async context
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None  # Set from main event loop
+        
+        # Global subscribers for ResponseDispatcher and other listeners
+        self._global_subscribers: list[asyncio.Queue] = []
+        self._subscriber_refs: dict[str, asyncio.Queue] = {}  # Track by ID for cleanup
     
     def set_main_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Set the main event loop for thread-safe coroutine scheduling.
@@ -89,8 +93,49 @@ class EventBroadcaster:
                 self._queues[session_id] = asyncio.Queue(maxsize=self._max_queue_size)
             return self._queues[session_id]
     
+    async def subscribe_all(self, subscriber_id: str, maxsize: int = 1000) -> asyncio.Queue:
+        """Subscribe to ALL events across all sessions.
+        
+        Used by ResponseDispatcher to route agent responses back to external sources.
+        
+        Args:
+            subscriber_id: Unique identifier for cleanup (e.g., "response_dispatcher").
+            maxsize: Maximum queue size for subscriber.
+            
+        Returns:
+            asyncio.Queue that will receive all broadcast events.
+        """
+        q = asyncio.Queue(maxsize=maxsize)
+        with self._lock:
+            # Remove old subscription if exists (prevents duplicates)
+            if subscriber_id in self._subscriber_refs:
+                old_q = self._subscriber_refs[subscriber_id]
+                if old_q in self._global_subscribers:
+                    self._global_subscribers.remove(old_q)
+            
+            self._global_subscribers.append(q)
+            self._subscriber_refs[subscriber_id] = q
+        logger.debug(f"Global subscriber '{subscriber_id}' registered")
+        return q
+    
+    def unsubscribe_all(self, subscriber_id: str) -> None:
+        """Unsubscribe from all events.
+        
+        Call during shutdown to prevent memory leaks.
+        
+        Args:
+            subscriber_id: The subscriber ID used in subscribe_all().
+        """
+        with self._lock:
+            q = self._subscriber_refs.pop(subscriber_id, None)
+            if q and q in self._global_subscribers:
+                self._global_subscribers.remove(q)
+        logger.debug(f"Global subscriber '{subscriber_id}' unregistered")
+    
     async def broadcast(self, event: Event) -> None:
         """Push event to session's queue and history.
+        
+        Also pushes to all global subscribers (e.g., ResponseDispatcher).
         
         Args:
             event: The event to broadcast.
@@ -108,7 +153,7 @@ class EventBroadcaster:
             if len(history) > self._history_size:
                 history.pop(0)
         
-        # Push to queue (non-blocking, drop if full)
+        # Push to session queue (non-blocking, drop if full)
         queue = self._queues.get(session_id)
         if queue:
             try:
@@ -116,6 +161,13 @@ class EventBroadcaster:
                 logger.debug(f"Broadcast event {event.type} to session {session_id}")
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full for session {session_id}, dropping event")
+        
+        # Push to global subscribers (non-blocking, drop if full)
+        for q in self._global_subscribers:
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.warning("Global subscriber queue full, dropping event")
     
     def broadcast_sync(self, event: Event) -> None:
         """Synchronous version of broadcast for use in threads.
