@@ -15,7 +15,7 @@
 }
 
 .session-sidebar {
-  width: 18rem;
+  width: 25rem;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -54,7 +54,7 @@
 
 .back-button {
   color: #94a3b8;
-  
+
   &:hover {
     color: #e2e8f0;
     background-color: #1e293b;
@@ -76,18 +76,18 @@
   color: #94a3b8;
   cursor: pointer;
   transition: all 0.2s;
-  
+
   &:hover {
     color: #e2e8f0;
   }
-  
+
   &.active {
     &.think-btn {
       background-color: rgba(245, 158, 11, 0.2);
       color: #f59e0b;
       border-color: rgba(245, 158, 11, 0.3);
     }
-    
+
     &.tools-btn {
       background-color: rgba(16, 167, 247, 0.2);
       color: #10a7f7;
@@ -124,7 +124,7 @@
   color: #f43f5e;
   cursor: pointer;
   padding: 0.25rem;
-  
+
   &:hover {
     color: white;
   }
