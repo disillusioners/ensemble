@@ -35,6 +35,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS sessions (
             session_id TEXT PRIMARY KEY,
             agent_dir TEXT NOT NULL,
+            agent_name TEXT,
             parent_id TEXT,
             status TEXT DEFAULT 'idle',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -42,6 +43,13 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             metadata JSON
         )
     """)
+    
+    # Migration: Add agent_name column if it doesn't exist
+    cursor = conn.execute("PRAGMA table_info(sessions)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'agent_name' not in columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN agent_name TEXT")
+        logger.info("Added agent_name column to sessions table")
     
     # Create session_hierarchy table
     conn.execute("""
@@ -95,6 +103,19 @@ def get_checkpointer(conn: sqlite3.Connection) -> SqliteSaver:
     return SqliteSaver(conn)
 
 
+def get_agent_name(agent_dir: str) -> str:
+    """Derive agent name from agent directory path.
+    
+    Args:
+        agent_dir: Path to the agent directory.
+        
+    Returns:
+        Agent name in Title Case (e.g., "Coder", "Designer").
+    """
+    from pathlib import Path
+    return Path(agent_dir).name.title()
+
+
 def save_session_metadata(
     conn: sqlite3.Connection,
     session_id: str,
@@ -111,12 +132,15 @@ def save_session_metadata(
         agent_dir: Path to the agent directory.
         parent_id: Optional parent session ID for hierarchical sessions.
     """
+    # Derive agent_name from agent_dir
+    agent_name = get_agent_name(agent_dir)
+    
     conn.execute(
         """
-        INSERT INTO sessions (session_id, agent_dir, parent_id, status)
-        VALUES (?, ?, ?, 'idle')
+        INSERT INTO sessions (session_id, agent_dir, agent_name, parent_id, status)
+        VALUES (?, ?, ?, ?, 'idle')
         """,
-        (session_id, agent_dir, parent_id)
+        (session_id, agent_dir, agent_name, parent_id)
     )
     
     if parent_id is not None:
@@ -129,7 +153,7 @@ def save_session_metadata(
         )
     
     conn.commit()
-    logger.info(f"Saved session metadata for session_id={session_id}, parent_id={parent_id}")
+    logger.info(f"Saved session metadata for session_id={session_id}, parent_id={parent_id}, agent_name={agent_name}")
 
 
 def update_session_status(
@@ -171,7 +195,7 @@ def get_session_metadata(
     """
     cursor = conn.execute(
         """
-        SELECT session_id, agent_dir, parent_id, status, 
+        SELECT session_id, agent_dir, agent_name, parent_id, status, 
                created_at, updated_at, metadata
         FROM sessions
         WHERE session_id = ?
@@ -201,6 +225,7 @@ def get_session_metadata(
     return {
         "session_id": row["session_id"],
         "agent_dir": row["agent_dir"],
+        "agent_name": row["agent_name"],
         "parent_id": row["parent_id"],
         "status": row["status"],
         "created_at": row["created_at"],
@@ -221,7 +246,7 @@ def list_all_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """
     cursor = conn.execute(
         """
-        SELECT session_id, agent_dir, parent_id, status,
+        SELECT session_id, agent_dir, agent_name, parent_id, status,
                created_at, updated_at, metadata
         FROM sessions
         ORDER BY created_at DESC
@@ -249,6 +274,7 @@ def list_all_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         sessions.append({
             "session_id": row["session_id"],
             "agent_dir": row["agent_dir"],
+            "agent_name": row["agent_name"],
             "parent_id": row["parent_id"],
             "status": row["status"],
             "created_at": row["created_at"],

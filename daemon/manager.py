@@ -23,6 +23,7 @@ from .persistence import (
     get_session_metadata,
     delete_all_sessions,
     get_session_messages,
+    get_agent_name,
 )
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
@@ -475,6 +476,13 @@ class SessionManager:
                                 "retry_count": msg.retry_count
                             }
                         ))
+            
+            # Queue is empty - check if this is a child session and send completion report
+            if self.queue.is_empty(session_id):
+                meta = get_session_metadata(self.conn, session_id)
+                if meta and meta.get("parent_id"):
+                    # This is a child session that has completed - send report to parent
+                    await self._send_completion_report(session_id)
         finally:
             async with self._processing_lock:
                 self._processing.discard(session_id)
@@ -613,6 +621,139 @@ class SessionManager:
                 )
         
         return MessageResult(content="")
+
+    async def _summarize_session(self, session_id: str, agent_name: str) -> str:
+        """Summarize session messages using LLM.
+        
+        Args:
+            session_id: The session ID to summarize.
+            agent_name: The name of the agent (e.g., "Coder", "Designer").
+            
+        Returns:
+            Formatted summary string: "{agent_name} has done: {summary}"
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_openai import ChatOpenAI
+        
+        # Get session messages
+        messages = get_session_messages(self.conn, session_id)
+        
+        if not messages:
+            return f"{agent_name} has done: No activity recorded."
+        
+        # Build conversation summary for the LLM
+        conversation_text = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                # Truncate very long messages
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                conversation_text.append(f"{role}: {content}")
+        
+        if not conversation_text:
+            return f"{agent_name} has done: No messages to summarize."
+        
+        conversation = "\n".join(conversation_text)
+        
+        # Create LLM client for summarization using the same config pattern
+        llm_config = {
+            "base_url": self.config.llm.base_url,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "temperature": 0.3,  # Lower temperature for more focused summaries
+        }
+        
+        # Import here to use the same pattern as graph.py
+        from .graph import ThinkingChatOpenAI
+        llm = ThinkingChatOpenAI(**llm_config)
+        
+        summarization_prompt = f"""Summarize what this agent accomplished in 2-3 sentences. Focus on the outcomes and key actions taken, not the process.
+
+Agent conversation:
+{conversation}
+
+Provide a concise summary:"""
+
+        try:
+            response = await asyncio.to_thread(
+                llm.invoke,
+                [SystemMessage(content="You are a helpful assistant that summarizes agent conversations concisely."),
+                 HumanMessage(content=summarization_prompt)]
+            )
+            # Handle both string and list content types
+            content = response.content
+            if isinstance(content, list):
+                # Extract text from list of content blocks
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        text_parts.append(block.get("text", ""))
+                    else:
+                        text_parts.append(str(block))
+                summary = " ".join(text_parts)
+            else:
+                summary = str(content) if content else ""
+            return f"{agent_name} has done: {summary}"
+        except Exception as e:
+            logger.warning(f"Failed to summarize session {session_id}: {e}")
+            # Fallback: count messages and provide basic summary
+            return f"{agent_name} has done: Completed {len(messages)} message(s)."
+
+    async def _send_completion_report(self, session_id: str) -> None:
+        """Send completion report to parent session when child is done.
+        
+        Called when a child session's queue becomes empty.
+        Summarizes the child's activity and enqueues a report message to the parent.
+        
+        Args:
+            session_id: The child session ID that has completed.
+        """
+        # Get session metadata
+        meta = get_session_metadata(self.conn, session_id)
+        if not meta:
+            logger.warning(f"Cannot send completion report: session {session_id} not found")
+            return
+        
+        parent_id = meta.get("parent_id")
+        if not parent_id:
+            logger.debug(f"Session {session_id} has no parent, skipping completion report")
+            return
+        
+        agent_name = meta.get("agent_name") or get_agent_name(meta.get("agent_dir", "Unknown"))
+        
+        logger.info(f"Session {session_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
+        
+        # Summarize session activity
+        summary = await self._summarize_session(session_id, agent_name)
+        
+        # Enqueue report message to parent
+        message_id = self.queue.enqueue(
+            session_id=parent_id,
+            content=summary,
+            source=f"report:{session_id}",
+            priority=1,  # Normal priority as requested
+            metadata={"type": "completion_report", "child_session_id": session_id}
+        )
+        
+        # Broadcast report event
+        await self.broadcaster.broadcast(Event(
+            type="status_changed",
+            session_id=parent_id,
+            message_id=message_id,
+            data={
+                "type": "completion_report",
+                "child_session_id": session_id,
+                "agent_name": agent_name,
+                "summary": summary
+            }
+        ))
+        
+        logger.info(f"Sent completion report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+        
+        # Trigger parent queue processing
+        asyncio.create_task(self._process_queue(parent_id))
 
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
