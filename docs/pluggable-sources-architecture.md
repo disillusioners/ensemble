@@ -669,7 +669,7 @@ daemon/
 ├── graph.py                    # UNCHANGED
 ├── persistence.py              # ✅ DONE: new tables, WAL mode
 │
-├── sources/                    # ✅ DONE: NEW MODULE (~1000 lines)
+├── sources/                    # ✅ DONE: NEW MODULE (~1500 lines)
 │   ├── __init__.py             # ✅ Exports
 │   ├── base.py                 # ✅ Interfaces (IncomingMessage, Adapter ABC)
 │   ├── registry.py             # ✅ SourceRegistry with supervisor + timeout
@@ -681,9 +681,9 @@ daemon/
 │   ├── credentials.py          # ✅ CredentialManager
 │   ├── cleanup.py              # ✅ SourceCleanup with initial delay
 │   │
-│   └── adapters/               # ⏳ PENDING
-│       ├── __init__.py         # ⏳ TODO
-│       ├── telegram.py         # ⏳ TODO: TelegramAdapter
+│   └── adapters/               # ✅ DONE
+│       ├── __init__.py         # ✅ Exports TelegramAdapter
+│       ├── telegram.py         # ✅ TelegramAdapter (~430 lines, polling + webhook + LRU)
 │       └── webhook.py          # ⏳ TODO: WebhookAdapter
 │
 └── models.py                   # ⏳ PENDING: SourceInfo, SourceCreateRequest
@@ -853,14 +853,22 @@ def init_db(conn: sqlite3.Connection):
   - [x] Fix: SQL operator precedence in `cleanup_inactive_mappings`
   - [x] Fix: Initial 60s delay before first cleanup
 
-### Phase 3: Telegram Adapter ⏳ PENDING
-- [ ] Create `daemon/sources/adapters/__init__.py`
-- [ ] Create `daemon/sources/adapters/telegram.py`
-- [ ] Implement polling-based message receiving (initial)
-- [ ] Implement message sending via Bot API
-- [ ] Handle Telegram-specific message types (text, commands)
-- [ ] Add error handling with exponential backoff
-- [ ] Add webhook support (for production)
+### Phase 3: Telegram Adapter ✅ COMPLETE
+- [x] Create `daemon/sources/adapters/__init__.py`
+- [x] Create `daemon/sources/adapters/telegram.py`
+- [x] Implement polling-based message receiving
+- [x] Implement message sending via Bot API
+- [x] Handle Telegram-specific message types (text, commands, photos, documents, stickers)
+- [x] Add error handling with circuit breaker
+- [x] Add webhook support with secret token verification
+- [x] Add rate limiting with token bucket
+- [x] Add per-chat message ordering locks with LRU eviction
+- [x] **Oracle review fixes applied:**
+  - [x] CRITICAL: Fix message loss in polling loop (acknowledge only after success)
+  - [x] HIGH: LRU eviction for `_chat_locks` (MAX_CHAT_LOCKS=1000)
+  - [x] HIGH: Circuit breaker counts each network retry as failure
+  - [x] MEDIUM: Check circuit before acquiring rate limit token
+- [x] Add comprehensive test suite (32 tests)
 
 ### Phase 4: API Endpoints ⏳ PENDING
 - [ ] Add source CRUD endpoints to `daemon/api.py`
@@ -1171,12 +1179,12 @@ async def start(self):
 | 0.5 | Critical Core Fixes | ✅ DONE | 1 day | None |
 | 1 | Foundation | ✅ DONE | 1-2 days | Phase 0.5 |
 | 2 | Core Components | ✅ DONE | 1-2 days | Phase 1 |
-| 3 | Telegram Adapter | ⏳ PENDING | 2-3 days | Phase 2 |
+| 3 | Telegram Adapter | ✅ DONE | 1 day | Phase 2 |
 | 4 | API Endpoints | ⏳ PENDING | 1-2 days | Phase 3 |
 | 5 | Frontend Integration | ⏳ PENDING | 2-3 days | Phase 4 |
 
-**Completed: ~4-5 days** (Phases 0.5, 1, 2 - backend core)
-**Remaining: ~5-8 days** (Phases 3, 4, 5 - adapters + API + frontend)
+**Completed: ~5-6 days** (Phases 0.5, 1, 2, 3 - backend core + Telegram)
+**Remaining: ~3-5 days** (Phases 4, 5 - API + frontend)
 
 ---
 
@@ -1187,6 +1195,8 @@ async def start(self):
 | 2025-02-26 | Initial architecture design with improvements from review |
 | 2025-02-26 | **IMPLEMENTED**: Phases 0.5, 1, 2 complete - all core modules created |
 | 2025-02-26 | **CODE REVIEW**: Fixed 5 CRITICAL + 4 HIGH issues after @oracle review |
+| 2025-02-26 | **PHASE 3 COMPLETE**: TelegramAdapter with polling, webhook, circuit breaker, rate limiting (25 tests) |
+| 2025-02-26 | **ORACLE REVIEW**: Fixed 1 CRITICAL + 2 HIGH + 2 MEDIUM issues in Telegram adapter (32 tests) |
 
 ### Implementation Status
 
@@ -1204,11 +1214,11 @@ async def start(self):
 | `daemon/sources/registry.py` | ✅ Done | ✅ 17 | Supervisor + timeout |
 | `daemon/sources/dispatcher.py` | ✅ Done | ✅ 21 | Async start + LRU |
 | `daemon/sources/cleanup.py` | ✅ Done | - | TTL cleanup |
-| `daemon/sources/adapters/telegram.py` | ⏳ Pending | - | Phase 3 |
+| `daemon/sources/adapters/telegram.py` | ✅ Done | ✅ 32 | Polling + webhook + circuit breaker + LRU |
 | API endpoints | ⏳ Pending | - | Phase 4 |
 | Frontend UI | ⏳ Pending | - | Phase 5 |
 
-**Test Coverage: 111 tests for sources module**
+**Test Coverage: 143 tests for sources module**
 
 ### Code Review Fixes Applied (2025-02-26)
 
@@ -1224,18 +1234,33 @@ async def start(self):
 | 8 | HIGH | SQL operator precedence | Fixed with explicit parentheses |
 | 9 | HIGH | Cleanup runs immediately | Added 60s initial delay |
 
+### Telegram Adapter Review Fixes (2025-02-26)
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | CRITICAL | Message loss in polling loop | Acknowledge update_id only after successful processing |
+| 2 | HIGH | Unbounded `_chat_locks` growth | LRU eviction with MAX_CHAT_LOCKS=1000 limit |
+| 3 | HIGH | Circuit breaker doesn't count retries | Record failure for each network retry attempt |
+| 4 | MEDIUM | Rate limit token wasted on send failure | Check circuit breaker before acquiring token |
+| 5 | LOW | Unused imports (hashlib, hmac) | Removed |
+
 ### Summary of Key Improvements
 
 | Area | Issue | Fix |
 |------|-------|-----|
 | Memory Safety | EventBroadcaster subscriber leak | Added `unsubscribe_all()` with subscriber_id tracking |
+| Memory Safety | Unbounded `_chat_locks` growth | LRU eviction with MAX_CHAT_LOCKS=1000 limit |
 | Reliability | Static backoff on adapter crash | Exponential backoff with jitter |
+| Reliability | Message loss in polling loop | Acknowledge update_id only after successful processing |
 | Correctness | Deduplication race condition | Atomic INSERT with UNIQUE constraint |
 | Thread Safety | Per-user lock dict race | Guard lock with double-check pattern |
 | Performance | SQLite write contention | WAL mode + busy_timeout + cache |
 | Resilience | External API failures cascade | Circuit breaker per adapter |
+| Resilience | Circuit breaker slow to open | Count each network retry as failure |
 | Operations | Dispatcher hangs on shutdown | Graceful stop() with timeout |
 | Stability | Message burst overwhelm adapters | Token bucket rate limiting |
+| Efficiency | Rate limit token wasted on failure | Check circuit breaker before acquiring token |
 | Security | Plaintext credentials | Fernet encryption |
 | Security | Unvalidated external input | Regex validation per source type |
+| Security | Webhook timing attacks | `secrets.compare_digest()` for token verification |
 | Operations | Tables grow unbounded | Periodic TTL cleanup jobs |
