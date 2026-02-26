@@ -23,7 +23,7 @@
     </p>
   </div>
 
-  <!-- Session List -->
+  <!-- Session Tree -->
   <div class="session-list">
     @if (sessions.length === 0) {
       <div class="empty-state">
@@ -32,49 +32,77 @@
       </div>
     } @else {
       <div class="sessions">
-        @for (session of sessions; track session.session_id) {
-          @let agent = getAgentInfo(session.agent_dir);
-          @let isActive = session.session_id === currentSessionId;
-          
-          <a
-            [routerLink]="['/sessions', session.session_id]"
-            class="session-item"
-            [class.active]="isActive"
-          >
-            <div class="session-content">
-              <div class="session-info">
-                <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
-                <div class="session-details">
-                  <p class="agent-name">{{ agent?.name || 'Agent' }}</p>
-                  <p class="session-id">{{ getSessionIdShort(session.session_id) }}</p>
-                </div>
-              </div>
-              
-              <div class="session-meta">
-                <span 
-                  class="status-badge"
-                  [style.background-color]="getStatusStyle(session.status).backgroundColor"
-                  [style.color]="getStatusStyle(session.status).color"
-                >
-                  {{ session.status }}
-                </span>
-                <span class="timestamp">
-                  {{ formatDate(session.created_at) }}
-                </span>
-              </div>
-            </div>
-            
-            <!-- Delete button -->
-            <button
-              class="delete-btn"
-              (click)="onDeleteSession(session.session_id, $event)"
-              title="Delete session"
-            >
-              <mat-icon>close</mat-icon>
-            </button>
-          </a>
+        @for (node of sessionTree(); track node.session.session_id) {
+          <ng-container [ngTemplateOutlet]="sessionNode" [ngTemplateOutletContext]="{ $implicit: node, depth: 0 }"></ng-container>
         }
       </div>
     }
   </div>
 </div>
+
+<!-- Recursive template for session nodes -->
+<ng-template #sessionNode let-node let-depth="depth">
+  @let session = node.session;
+  @let agent = getAgentInfo(session.agent_dir);
+  @let isActive = session.session_id === currentSessionId;
+  @let hasChildren = node.children.length > 0;
+  @let expanded = isExpanded(session.session_id);
+  
+  <a
+    [routerLink]="['/sessions', session.session_id]"
+    class="session-item"
+    [class.active]="isActive"
+    [class.has-children]="hasChildren"
+    [style.padding-left.px]="16 + depth * 16"
+  >
+    <div class="session-content">
+      <div class="session-info">
+        @if (hasChildren) {
+          <button 
+            class="toggle-btn" 
+            (click)="toggleExpand(session.session_id, $event)"
+            [title]="expanded ? 'Collapse' : 'Expand'"
+          >
+            <mat-icon>{{ expanded ? 'remove' : 'add' }}</mat-icon>
+          </button>
+        } @else {
+          <span class="toggle-placeholder"></span>
+        }
+        <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
+        <div class="session-details">
+          <p class="agent-name">{{ agent?.name || 'Agent' }}</p>
+          <p class="session-id">{{ getSessionIdShort(session.session_id) }}</p>
+        </div>
+      </div>
+      
+      <div class="session-meta">
+        <span 
+          class="status-badge"
+          [style.background-color]="getStatusStyle(session.status).backgroundColor"
+          [style.color]="getStatusStyle(session.status).color"
+        >
+          {{ session.status }}
+        </span>
+        <span class="timestamp">
+          {{ formatDate(session.created_at) }}
+        </span>
+      </div>
+    </div>
+    
+    <!-- Delete button -->
+    <button
+      class="delete-btn"
+      (click)="onDeleteSession(session.session_id, $event)"
+      title="Delete session"
+    >
+      <mat-icon>close</mat-icon>
+    </button>
+  </a>
+
+  <!-- Render children recursively when expanded -->
+  @if (hasChildren && expanded) {
+    @for (child of node.children; track child.session.session_id) {
+      <ng-container [ngTemplateOutlet]="sessionNode" [ngTemplateOutletContext]="{ $implicit: child, depth: depth + 1 }"></ng-container>
+    }
+  }
+</ng-template>

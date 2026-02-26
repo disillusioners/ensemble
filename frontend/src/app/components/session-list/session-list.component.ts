@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -6,6 +6,11 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { Agent, SessionInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
+
+export interface SessionTreeNode {
+  session: SessionInfo;
+  children: SessionTreeNode[];
+}
 
 @Component({
   selector: 'app-session-list',
@@ -22,6 +27,36 @@ export class SessionListComponent {
   @Output() deleteSession = new EventEmitter<string>();
   @Output() newSession = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
+
+  // Track expanded/collapsed state per session
+  readonly expandedSessions = signal<Set<string>>(new Set());
+
+  // Build tree structure from flat session list
+  readonly sessionTree = computed(() => {
+    const sessions = this.sessions;
+    if (!sessions?.length) return [];
+
+    const sessionMap = new Map<string, SessionTreeNode>();
+    
+    // Create nodes for all sessions
+    sessions.forEach(session => {
+      sessionMap.set(session.session_id, { session, children: [] });
+    });
+
+    const rootNodes: SessionTreeNode[] = [];
+
+    // Build tree by attaching children to parents
+    sessions.forEach(session => {
+      const node = sessionMap.get(session.session_id)!;
+      if (session.parent_id && sessionMap.has(session.parent_id)) {
+        sessionMap.get(session.parent_id)!.children.push(node);
+      } else {
+        rootNodes.push(node);
+      }
+    });
+
+    return rootNodes;
+  });
 
   readonly statusColors: Record<string, { bg: string; text: string }> = {
     idle: { bg: '#4d4d5c', text: '#c5c5d2' },
@@ -77,5 +112,22 @@ export class SessionListComponent {
 
   getSessionIdShort(sessionId: string): string {
     return sessionId.slice(0, 12) + '...';
+  }
+
+  isExpanded(sessionId: string): boolean {
+    return this.expandedSessions().has(sessionId);
+  }
+
+  toggleExpand(sessionId: string, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const expanded = this.expandedSessions();
+    const newSet = new Set(expanded);
+    if (newSet.has(sessionId)) {
+      newSet.delete(sessionId);
+    } else {
+      newSet.add(sessionId);
+    }
+    this.expandedSessions.set(newSet);
   }
 }
