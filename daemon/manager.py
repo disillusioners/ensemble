@@ -726,10 +726,10 @@ Provide a concise summary:"""
                     break
         
         if last_assistant_content:
-            return f"{agent_name} has done: {last_assistant_content}"
+            return f"{agent_name} has done:\n{last_assistant_content}"
         else:
             # Fallback if no assistant message found
-            return f"{agent_name} has done: Task completed (no response message)."
+            return f"{agent_name} has done:\nTask completed (no response message)."
 
     async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
         """Send completion report to parent session when child is done.

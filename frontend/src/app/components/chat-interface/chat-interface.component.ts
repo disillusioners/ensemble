@@ -86,4 +86,10 @@ export class ChatInterfaceComponent implements AfterViewChecked {
   formatTime(dateString: string): string {
     return new Date(dateString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
+
+  hasMeaningfulContent(message: Message): boolean {
+    const content = message.content;
+    // Check if content exists and has non-whitespace characters
+    return content != null && content.trim().length > 0;
+  }
 }
