@@ -47,8 +47,9 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     def send_message(session_id: str, message: str) -> str:
         """Send a message to another session's input queue.
         
-        The message is queued and will be processed when the target
-        session is ready. Returns immediately with message_id.
+        The message is queued and processed asynchronously. The target
+        session will process the message and send a completion report
+        back if it's a child session.
         
         Args:
             session_id: The ID of the target session to send the message to
@@ -58,23 +59,37 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
             The message_id for tracking (queue is async, response comes later)
         """
         import asyncio
+        
+        # Enqueue the message
+        message_id = manager.queue.enqueue(
+            session_id=session_id,
+            content=message,
+            source=f"agent:{current_session_id}"
+        )
+        
+        # Trigger async processing of the target session's queue
+        # We need to schedule this since we're in a sync tool context
         try:
-            # Try to get running event loop
             loop = asyncio.get_running_loop()
-            # We're in an async context, need to use the sync wrapper
-            # Since LangGraph tools run sync, we use the sync enqueue
-            return manager.queue.enqueue(
-                session_id=session_id,
-                content=message,
-                source=f"agent:{current_session_id}"
-            )
+            # We're in an async context (LangGraph), schedule the processing
+            asyncio.create_task(manager._process_queue(session_id))
         except RuntimeError:
-            # No running loop, create one
-            return manager.queue.enqueue(
-                session_id=session_id,
-                content=message,
-                source=f"agent:{current_session_id}"
-            )
+            # No running loop, try to run in a new thread
+            import threading
+            import concurrent.futures
+            
+            def run_processing():
+                import asyncio
+                new_loop = asyncio.new_event_loop()
+                try:
+                    new_loop.run_until_complete(manager._process_queue(session_id))
+                finally:
+                    new_loop.close()
+            
+            thread = threading.Thread(target=run_processing, daemon=True)
+            thread.start()
+        
+        return message_id
     
     @tool
     def terminate_session(session_id: str) -> bool:

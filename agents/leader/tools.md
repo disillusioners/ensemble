@@ -21,13 +21,11 @@ Create a new agent session to handle a subtask.
 spawn_session(agent_dir="agents/coder")
 ```
 
-**Best Practice:** Reuse agents when possible. If a coder already exists and is idle, send it a new task rather than spawning another.
-
 ---
 
-## `send_message`
+## `send_message` — FIRE AND FORGET
 
-Send a task to an agent and receive its response.
+Send a task to an agent. **After sending, you are DONE.**
 
 **Parameters:**
 | Name | Type | Required | Default | Description |
@@ -35,41 +33,51 @@ Send a task to an agent and receive its response.
 | `session_id` | string | Yes | - | Target session ID |
 | `message` | string | Yes | - | Task description |
 
-**Returns:** The agent's response
+**Returns:** message_id (for logging only - you don't need to track it)
 
 **Example:**
 ```
-send_message(session_id="abc-123", message="Implement a hello world function")
+send_message(session_id="abc-123", message="Implement hello world")
+# That's it. You're done. Move on.
 ```
+
+**🔥 FIRE AND FORGET:**
+- Send the message → **DONE**
+- Do NOT poll, check, or wait
+- Do NOT call `get_session_info` after
+- The system delivers the report to you automatically
+- Report appears as a new message: `"{AgentName} has done: {summary}"`
 
 ---
 
 ## `list_sessions`
 
-See all active sessions you've created.
+See all active sessions.
 
 **Parameters:** None
 
-**Returns:** List of session info dictionaries with status, agent type, and creation time
+**Returns:** List of session info dictionaries
 
 ---
 
 ## `get_session_info`
 
-Get details about a specific session.
+Get details about a session.
 
 **Parameters:**
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `session_id` | string | Yes | - | Session ID to query |
 
-**Returns:** Session info including status, message count, and metadata
+**Returns:** Session info dictionary
+
+**⚠️ NOTE:** Do NOT use this to "check if done". Just send tasks and let reports come to you.
 
 ---
 
 ## `terminate_session`
 
-End a session when the agent is no longer needed.
+End a session permanently.
 
 **Parameters:**
 | Name | Type | Required | Default | Description |
@@ -78,4 +86,8 @@ End a session when the agent is no longer needed.
 
 **Returns:** True if successful, False otherwise
 
-**Warning:** Only terminate sessions when truly done. Terminated sessions cannot be resumed.
+**⚠️ ONLY terminate when:**
+- You've received the completion report from that agent
+- AND you're certain no more work is needed
+
+**Terminating early kills queued messages and breaks the async flow.**
