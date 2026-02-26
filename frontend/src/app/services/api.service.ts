@@ -9,7 +9,16 @@ import type {
   HealthResponse, 
   AgentListResponse, 
   Agent,
-  AgentCreate
+  AgentCreate,
+  Source,
+  SourceCreate,
+  SourceUpdate,
+  SourceListResponse,
+  SourceActionResponse,
+  SessionMapping,
+  SessionMappingCreate,
+  SessionMappingListResponse,
+  DeleteResponse
 } from '../models';
 
 @Injectable({
@@ -65,5 +74,47 @@ export class ApiService {
 
   getMessages(sessionId: string): Observable<Message[]> {
     return this.http.get<Message[]>(`${this.API_BASE}/sessions/${sessionId}/messages`);
+  }
+
+  // Sources
+  listSources(): Observable<SourceListResponse> {
+    return this.http.get<SourceListResponse>(`${this.API_BASE}/sources`);
+  }
+
+  getSource(sourceId: string): Observable<Source> {
+    return this.http.get<Source>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}`);
+  }
+
+  createSource(source: SourceCreate): Observable<Source> {
+    return this.http.post<Source>(`${this.API_BASE}/sources`, source);
+  }
+
+  updateSource(sourceId: string, source: SourceUpdate): Observable<Source> {
+    return this.http.put<Source>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}`, source);
+  }
+
+  deleteSource(sourceId: string): Observable<DeleteResponse> {
+    return this.http.delete<DeleteResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}`);
+  }
+
+  startSource(sourceId: string): Observable<SourceActionResponse> {
+    return this.http.post<SourceActionResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/start`, {});
+  }
+
+  stopSource(sourceId: string): Observable<SourceActionResponse> {
+    return this.http.post<SourceActionResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/stop`, {});
+  }
+
+  // Mappings
+  listMappings(sourceId: string): Observable<SessionMappingListResponse> {
+    return this.http.get<SessionMappingListResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`);
+  }
+
+  createMapping(sourceId: string, mapping: SessionMappingCreate): Observable<SessionMapping> {
+    return this.http.post<SessionMapping>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`, mapping);
+  }
+
+  deleteMapping(sourceId: string, mappingId: string): Observable<DeleteResponse> {
+    return this.http.delete<DeleteResponse>(`${this.API_BASE}/sources/${sourceId}/mappings/${encodeURIComponent(mappingId)}`);
   }
 }

@@ -95,3 +95,72 @@ export interface SSEEvent {
   message_id: string | null;
   data: Record<string, unknown>;
 }
+
+// Source types
+export type SourceStatus = 'stopped' | 'starting' | 'running' | 'error';
+export type SourceType = 'telegram' | 'webhook' | 'whatsapp' | 'discord';
+
+export interface Source {
+  source_id: string;
+  source_type: SourceType;
+  name: string;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  status: SourceStatus;
+  error_message?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface SourceCreate {
+  source_id: string;
+  source_type: SourceType;
+  name: string;
+  config?: Record<string, unknown>;
+  credentials?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface SourceUpdate {
+  name?: string;
+  config?: Record<string, unknown>;
+  credentials?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface SourceListResponse {
+  sources: Source[];
+}
+
+export interface SourceActionResponse {
+  source_id: string;
+  status: SourceStatus;
+  message: string;
+}
+
+// Session Mapping types
+export interface SessionMapping {
+  mapping_id: string;
+  source_id: string;
+  external_user_id: string;
+  agent_session_id: string;
+  agent_dir: string;
+  metadata?: Record<string, unknown>;
+  last_message_at?: string;
+  created_at: string;
+}
+
+export interface SessionMappingCreate {
+  external_user_id: string;
+  agent_dir: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SessionMappingListResponse {
+  mappings: SessionMapping[];
+}
+
+export interface DeleteResponse {
+  deleted?: boolean;
+  terminated?: boolean;
+}

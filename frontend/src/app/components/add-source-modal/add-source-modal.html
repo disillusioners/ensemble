@@ -1,0 +1,130 @@
+<div class="modal-container">
+  <!-- Backdrop -->
+  <div class="modal-backdrop" (click)="handleClose()"></div>
+  
+  <!-- Modal -->
+  <div class="modal-content animate-fade-in">
+    <!-- Header -->
+    <div class="modal-header">
+      <h2 class="font-display text-xl font-semibold text-dark-50">Add New Source</h2>
+      <button (click)="handleClose()" class="close-btn">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <form (submit)="handleSubmit(); $event.preventDefault()" class="modal-form">
+      <!-- Error -->
+      @if (error()) {
+        <div class="error-banner">
+          {{ error() }}
+        </div>
+      }
+
+      <!-- Source ID -->
+      <div class="form-group">
+        <label class="form-label">
+          Source ID <span class="text-accent-rose">*</span>
+        </label>
+        <input
+          type="text"
+          [value]="sourceId()"
+          (input)="onSourceIdChange($event)"
+          placeholder="my-telegram-bot"
+          class="form-input"
+        />
+        <p class="form-hint">Alphanumeric, lowercase, hyphens and underscores allowed</p>
+      </div>
+
+      <!-- Name -->
+      <div class="form-group">
+        <label class="form-label">
+          Name <span class="text-accent-rose">*</span>
+        </label>
+        <input
+          type="text"
+          [value]="name()"
+          (input)="onNameChange($event)"
+          placeholder="My Telegram Bot"
+          class="form-input"
+        />
+      </div>
+
+      <!-- Source Type -->
+      <div class="form-group">
+        <label class="form-label">Source Type</label>
+        <div class="source-type-grid">
+          @for (typeOption of sourceTypeOptions; track typeOption.value) {
+            <button
+              type="button"
+              (click)="onSourceTypeChange(typeOption.value)"
+              class="source-type-btn"
+              [class.selected]="sourceType() === typeOption.value"
+            >
+              <span class="type-name">{{ typeOption.label }}</span>
+              <span class="type-desc">{{ typeOption.description }}</span>
+            </button>
+          }
+        </div>
+      </div>
+
+      <!-- Config JSON -->
+      <div class="form-group">
+        <label class="form-label">Config (JSON)</label>
+        <textarea
+          [value]="configJson()"
+          (input)="onConfigJsonChange($event)"
+          placeholder='{"webhook_url": "/webhook"}'
+          rows="3"
+          class="form-textarea mono"
+        ></textarea>
+        <p class="form-hint">Optional configuration in JSON format</p>
+      </div>
+
+      <!-- Credentials JSON -->
+      <div class="form-group">
+        <label class="form-label">Credentials (JSON)</label>
+        <textarea
+          [value]="credentialsJson()"
+          (input)="onCredentialsJsonChange($event)"
+          placeholder='{"api_token": "your-token-here"}'
+          rows="3"
+          class="form-textarea mono"
+        ></textarea>
+        <p class="form-hint">Optional credentials in JSON format (stored securely)</p>
+      </div>
+
+      <!-- Enable Toggle -->
+      <div class="form-group">
+        <label class="toggle-label">
+          <span>Enable source on creation</span>
+          <input
+            type="checkbox"
+            [checked]="enabled()"
+            (change)="onEnabledChange($event)"
+            class="toggle-input"
+          />
+          <span class="toggle-switch"></span>
+        </label>
+      </div>
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button type="button" (click)="handleClose()" class="cancel-btn">
+          Cancel
+        </button>
+        <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn">
+          @if (isLoading()) {
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          }
+          Create Source
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

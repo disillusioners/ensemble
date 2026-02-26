@@ -4,3 +4,6 @@ export * from './agent-switcher/agent-switcher.component';
 export * from './session-list/session-list.component';
 export * from './chat-interface/chat-interface.component';
 export * from './message-input/message-input.component';
+export * from './source-list/source-list.component';
+export * from './source-card/source-card.component';
+export * from './add-source-modal/add-source-modal.component';
