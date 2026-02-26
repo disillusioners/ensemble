@@ -701,14 +701,45 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done: Completed {len(messages)} message(s)."
 
-    async def _send_completion_report(self, session_id: str) -> None:
+    def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
+        """Get the last assistant message from session history.
+        
+        This is the default/simple approach for completion reports - just
+        pass the agent's last response to the parent.
+        
+        Args:
+            session_id: The session ID to get message from.
+            agent_name: The name of the agent (e.g., "Coder", "Designer").
+            
+        Returns:
+            Formatted string: "{agent_name} has done: {last_message}"
+        """
+        messages = get_session_messages(self.conn, session_id)
+        
+        # Find the last assistant message
+        last_assistant_content = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if content and content.strip():
+                    last_assistant_content = content.strip()
+                    break
+        
+        if last_assistant_content:
+            return f"{agent_name} has done: {last_assistant_content}"
+        else:
+            # Fallback if no assistant message found
+            return f"{agent_name} has done: Task completed (no response message)."
+
+    async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
         """Send completion report to parent session when child is done.
         
         Called when a child session's queue becomes empty.
-        Summarizes the child's activity and enqueues a report message to the parent.
+        Sends the child's last assistant message (or LLM summary) to the parent.
         
         Args:
             session_id: The child session ID that has completed.
+            use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
         # Get session metadata
         meta = get_session_metadata(self.conn, session_id)
@@ -725,8 +756,11 @@ Provide a concise summary:"""
         
         logger.info(f"Session {session_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
         
-        # Summarize session activity
-        summary = await self._summarize_session(session_id, agent_name)
+        # Get report content - either last message or LLM summary
+        if use_llm_summary:
+            summary = await self._summarize_session(session_id, agent_name)
+        else:
+            summary = self._get_last_assistant_message(session_id, agent_name)
         
         # Enqueue report message to parent
         message_id = self.queue.enqueue(
