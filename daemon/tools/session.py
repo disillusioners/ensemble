@@ -10,6 +10,7 @@ from .time import time
 from .inner_soul import create_inner_soul_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
+from .help import create_help_tool
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
@@ -155,5 +156,9 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     if agent_dir and Path(agent_dir).name == "_mother":
         mother_tools = create_mother_tools(manager, current_session_id)
         tools.extend(mother_tools)
+    
+    # Add help tool (must be last so it knows about all other tools)
+    help_tool = create_help_tool(tools)
+    tools.append(help_tool)
     
     return tools
