@@ -233,32 +233,37 @@ class TelegramAdapter(MessageSourceAdapter):
             logger.warning(f"Cannot send: adapter not running (status={self._status})")
             return False
         
-        chat_id = message.external_user_id
+        # Determine where to send the message
+        # For group chats: reply_chat_id = group ID (from metadata)
+        # For private chats: reply_chat_id = user ID (same as external_user_id)
+        reply_chat_id = message.metadata.get("reply_chat_id") if message.metadata else None
+        if not reply_chat_id:
+            reply_chat_id = message.external_user_id
         
-        # Stop typing indicator before sending
-        self.stop_typing(chat_id)
+        # Stop typing indicator before sending (use the same chat_id we send to)
+        self.stop_typing(reply_chat_id)
         
         # Validate chat_id format
-        if not self._validate_chat_id(chat_id):
-            logger.error(f"Invalid Telegram chat_id: {chat_id}")
+        if not self._validate_chat_id(reply_chat_id):
+            logger.error(f"Invalid Telegram chat_id: {reply_chat_id}")
             return False
         
         # Check circuit breaker BEFORE acquiring rate limit token to avoid waste
         if not await self._circuit_breaker.can_execute():
-            logger.warning(f"Circuit open, cannot send to {chat_id}")
+            logger.warning(f"Circuit open, cannot send to {reply_chat_id}")
             return False
         
         # Wait for rate limit token
         if not await self._rate_limiter.wait_and_acquire(max_wait=10.0):
-            logger.warning(f"Rate limit exceeded, dropping message to {chat_id}")
+            logger.warning(f"Rate limit exceeded, dropping message to {reply_chat_id}")
             return False
         
         # Use per-chat lock for ordering
-        lock = await self._get_chat_lock(chat_id)
+        lock = await self._get_chat_lock(reply_chat_id)
         async with lock:
             try:
                 params = {
-                    "chat_id": chat_id,
+                    "chat_id": reply_chat_id,
                     "text": message.content,
                     "parse_mode": message.metadata.get("parse_mode", "HTML"),
                 }
@@ -267,14 +272,14 @@ class TelegramAdapter(MessageSourceAdapter):
                     params["reply_to_message_id"] = message.reply_to_id
                 
                 await self._api_call("sendMessage", **params)
-                logger.debug(f"Sent message to Telegram chat {chat_id}")
+                logger.debug(f"Sent message to Telegram chat {reply_chat_id}")
                 return True
                 
             except TelegramAPIError as e:
-                logger.error(f"Failed to send to Telegram {chat_id}: {e}")
+                logger.error(f"Failed to send to Telegram {reply_chat_id}: {e}")
                 return False
             except CircuitOpenError:
-                logger.warning(f"Circuit open, cannot send to {chat_id}")
+                logger.warning(f"Circuit open, cannot send to {reply_chat_id}")
                 return False
     
     async def start_typing(self, chat_id: str) -> None:
@@ -463,6 +468,22 @@ class TelegramAdapter(MessageSourceAdapter):
             logger.warning(f"Update {update_id} has no chat_id")
             return
         
+        # Extract the actual user who sent the message
+        from_user = message.get("from", {})
+        from_user_id = str(from_user.get("id", ""))
+        
+        if not from_user_id:
+            logger.warning(f"Update {update_id} has no from_user_id")
+            return
+        
+        # Session mapping strategy:
+        # - Private chat: each user has their own session (from_user_id)
+        # - Group chat: entire group shares ONE session (chat_id) for collaborative context
+        if chat_type == "private":
+            session_user_id = from_user_id
+        else:
+            session_user_id = chat_id  # Group/Supergroup/Channel = shared session
+        
         # Extract message content
         text = message.get("text", "")
         if not text:
@@ -491,12 +512,12 @@ class TelegramAdapter(MessageSourceAdapter):
                 break
         
         # Build metadata
-        from_user = message.get("from", {})
         metadata = {
             "telegram": {
                 "message_id": message.get("message_id"),
+                "chat_id": chat_id,  # For sending responses (group or private)
                 "chat_type": chat_type,
-                "from_id": from_user.get("id"),
+                "from_id": from_user_id,
                 "from_username": from_user.get("username"),
                 "from_first_name": from_user.get("first_name"),
                 "from_last_name": from_user.get("last_name"),
@@ -504,6 +525,8 @@ class TelegramAdapter(MessageSourceAdapter):
                 "edit_date": message.get("edit_date"),
             },
             "agent": self._default_agent,
+            # For group chats: reply to the group, but session is per-user
+            "reply_chat_id": chat_id,
         }
         
         # Handle special commands
@@ -512,8 +535,9 @@ class TelegramAdapter(MessageSourceAdapter):
             metadata["command"] = command
         
         # Create incoming message
+        # session_user_id: private chat = user_id, group chat = chat_id (shared session)
         incoming = IncomingMessage(
-            external_user_id=chat_id,
+            external_user_id=session_user_id,
             content=text,
             source_id=self.source_id,
             metadata=metadata,
@@ -524,7 +548,10 @@ class TelegramAdapter(MessageSourceAdapter):
         # Emit to handler
         try:
             await self._emit_message(incoming)
-            logger.debug(f"Processed Telegram message from chat {chat_id}")
+            logger.debug(
+                f"Processed Telegram message: session_user={session_user_id}, "
+                f"chat={chat_id} ({chat_type}), from={from_user_id}, type={message_type}"
+            )
         except Exception as e:
             logger.error(f"Error emitting message: {e}", exc_info=True)
     

@@ -546,10 +546,12 @@ class SourceRegistry:
             )
             
             # Start typing indicator for Telegram sources
+            # Use reply_chat_id for typing (in groups, show typing in the group)
             adapter = self.get(source_id)
             if adapter and hasattr(adapter, 'start_typing'):
-                await adapter.start_typing(msg.external_user_id)  # type: ignore
-                logger.debug(f"Started typing indicator for user {msg.external_user_id}")
+                reply_chat_id = msg.metadata.get("reply_chat_id", msg.external_user_id) if msg.metadata else msg.external_user_id
+                await adapter.start_typing(reply_chat_id)  # type: ignore
+                logger.debug(f"Started typing indicator for chat {reply_chat_id}")
             
             # Trigger queue processing (safe to call even if already processing)
             asyncio.create_task(self._manager._process_queue(session_id))
