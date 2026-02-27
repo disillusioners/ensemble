@@ -20,10 +20,10 @@ export interface SessionTreeNode {
   styleUrl: './session-list.scss'
 })
 export class SessionListComponent {
-  @Input() agents: Agent[] = [];
-  @Input() sessions: SessionInfo[] = [];
-  @Input() currentSessionId: string | null = null;
-  @Input() selectedAgent: Agent | null = null;
+  readonly agents = input<Agent[]>([]);
+  readonly sessions = input<SessionInfo[]>([]);
+  readonly currentSessionId = input<string | null>(null);
+  readonly selectedAgent = input<Agent | null>(null);
   @Output() deleteSession = new EventEmitter<string>();
   @Output() newSession = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
@@ -33,7 +33,7 @@ export class SessionListComponent {
 
   // Build tree structure from flat session list
   readonly sessionTree = computed(() => {
-    const sessions = this.sessions;
+    const sessions = this.sessions();
     if (!sessions?.length) return [];
 
     const sessionMap = new Map<string, SessionTreeNode>();
@@ -68,7 +68,7 @@ export class SessionListComponent {
 
   getAgentInfo(agentDir: string): Agent | undefined {
     const agentId = agentDir.split('/').pop() || agentDir;
-    return this.agents.find(a => a.id === agentId);
+    return this.agents().find(a => a.id === agentId);
   }
 
   formatDate(dateString: string): string {

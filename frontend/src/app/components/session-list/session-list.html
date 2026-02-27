@@ -5,8 +5,8 @@
       <h2 class="title">Sessions</h2>
       <div class="header-actions">
         <app-agent-switcher
-          [agents]="agents"
-          [selectedAgent]="selectedAgent"
+          [agents]="agents()"
+          [selectedAgent]="selectedAgent()"
           (agentChange)="onAgentChange($event)"
         ></app-agent-switcher>
         <button
@@ -19,13 +19,13 @@
       </div>
     </div>
     <p class="subtitle">
-      {{ sessions.length }} active session{{ sessions.length !== 1 ? 's' : '' }}
+      {{ sessions().length }} active session{{ sessions().length !== 1 ? 's' : '' }}
     </p>
   </div>
 
   <!-- Session Tree -->
   <div class="session-list">
-    @if (sessions.length === 0) {
+    @if (sessions().length === 0) {
       <div class="empty-state">
         <p>No active sessions</p>
         <a routerLink="/" class="new-chat-link">Start a new chat</a>
@@ -44,7 +44,7 @@
 <ng-template #sessionNode let-node let-depth="depth">
   @let session = node.session;
   @let agent = getAgentInfo(session.agent_dir);
-  @let isActive = session.session_id === currentSessionId;
+  @let isActive = session.session_id === currentSessionId();
   @let hasChildren = node.children.length > 0;
   @let expanded = isExpanded(session.session_id);
   

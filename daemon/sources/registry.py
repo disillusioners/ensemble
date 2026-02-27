@@ -189,6 +189,8 @@ class SourceRegistry:
             enabled=config_dict.get("enabled", True),
         )
         
+        logger.info(f"Creating adapter for {source_id}: config={config.config}")
+        
         # Create callback wrapper that includes source_id
         async def on_message(msg):
             await self._handle_message(source_id, msg)
@@ -196,7 +198,9 @@ class SourceRegistry:
         # Create the appropriate adapter
         if source_type == "telegram":
             from .adapters.telegram import TelegramAdapter
-            return TelegramAdapter(config, on_message)
+            adapter = TelegramAdapter(config, on_message)
+            logger.info(f"TelegramAdapter created: default_agent={adapter._default_agent}")
+            return adapter
         else:
             logger.warning(f"Unsupported source type: {source_type}")
             return None
@@ -474,9 +478,19 @@ class SourceRegistry:
             # Determine agent_dir from metadata or use default
             agent_dir = msg.metadata.get("agent_dir") if msg.metadata else None
             if not agent_dir:
-                # Use default from config
-                agent_dir = self._manager.config.agents.directory
-                logger.debug(f"Using default agent_dir from config: {agent_dir}")
+                # Check if agent name is specified in metadata (e.g., from Telegram default_agent)
+                agent_name = msg.metadata.get("agent") if msg.metadata else None
+                if agent_name:
+                    # Construct agent_dir from base directory + agent name
+                    base_dir = self._manager.config.agents.directory
+                    agent_dir = f"{base_dir}/{agent_name}"
+                    logger.info(f"📍 Using agent from metadata: agent={agent_name}, agent_dir={agent_dir}")
+                else:
+                    # Use default from config (base directory)
+                    agent_dir = self._manager.config.agents.directory
+                    logger.warning(f"⚠️ No agent specified, using base directory: {agent_dir}")
+            else:
+                logger.debug(f"Using explicit agent_dir: {agent_dir}")
             
             # Check for force_new_session flag (e.g., /new command)
             force_new = msg.metadata.get("force_new_session", False) if msg.metadata else False

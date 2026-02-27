@@ -529,6 +529,8 @@ class TelegramAdapter(MessageSourceAdapter):
             "reply_chat_id": chat_id,
         }
         
+        logger.debug(f"Message metadata: agent={self._default_agent}, chat_type={chat_type}")
+        
         # Handle special commands
         if command == "/new":
             metadata["force_new_session"] = True
