@@ -477,12 +477,17 @@ class TelegramAdapter(MessageSourceAdapter):
                 logger.debug(f"Update {update_id} has no text content")
                 return
         
-        # Determine message type
+        # Determine message type and check for commands
         entities = message.get("entities", [])
         message_type = "text"
+        command = None
         for entity in entities:
             if entity.get("type") == "bot_command":
                 message_type = "command"
+                # Extract command text (e.g., "/new" or "/new@botname")
+                offset = entity.get("offset", 0)
+                length = entity.get("length", 0)
+                command = text[offset:offset + length].split("@")[0]  # Remove bot name suffix
                 break
         
         # Build metadata
@@ -500,6 +505,11 @@ class TelegramAdapter(MessageSourceAdapter):
             },
             "agent": self._default_agent,
         }
+        
+        # Handle special commands
+        if command == "/new":
+            metadata["force_new_session"] = True
+            metadata["command"] = command
         
         # Create incoming message
         incoming = IncomingMessage(

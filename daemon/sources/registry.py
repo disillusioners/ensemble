@@ -478,6 +478,30 @@ class SourceRegistry:
                 agent_dir = self._manager.config.agents.directory
                 logger.debug(f"Using default agent_dir from config: {agent_dir}")
             
+            # Check for force_new_session flag (e.g., /new command)
+            force_new = msg.metadata.get("force_new_session", False) if msg.metadata else False
+            command = msg.metadata.get("command") if msg.metadata else None
+            
+            if force_new:
+                # Delete existing mapping if exists
+                existing_mapping = persistence.get_session_mapping(
+                    self._conn, source_id, msg.external_user_id
+                )
+                if existing_mapping:
+                    mapping_id = existing_mapping["mapping_id"]
+                    old_session_id = existing_mapping["agent_session_id"]
+                    persistence.delete_session_mapping(self._conn, mapping_id)
+                    logger.info(
+                        f"🗑️ Deleted existing mapping for /new: "
+                        f"user={msg.external_user_id}, old_session={old_session_id}"
+                    )
+                    # Also terminate the old session
+                    try:
+                        self._manager.terminate_session(old_session_id)
+                        logger.debug(f"Terminated old session: {old_session_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not terminate old session {old_session_id}: {e}")
+            
             logger.debug(f"Getting or creating session: agent_dir={agent_dir}")
             
             # Get or create the session
@@ -488,6 +512,21 @@ class SourceRegistry:
             )
             
             logger.debug(f"Got session_id={session_id}")
+            
+            # Handle special commands that don't need agent processing
+            if command == "/new":
+                # Send confirmation message directly
+                adapter = self.get(source_id)
+                if adapter:
+                    from .base import OutgoingMessage
+                    confirmation = OutgoingMessage(
+                        external_user_id=msg.external_user_id,
+                        content="✨ Started new conversation! Your chat history has been reset.",
+                        source_id=source_id,
+                    )
+                    await adapter.send(confirmation)
+                    logger.info(f"✅ Sent /new confirmation to user {msg.external_user_id}")
+                return  # Don't queue to agent
             
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
@@ -509,7 +548,7 @@ class SourceRegistry:
             # Start typing indicator for Telegram sources
             adapter = self.get(source_id)
             if adapter and hasattr(adapter, 'start_typing'):
-                await adapter.start_typing(msg.external_user_id)
+                await adapter.start_typing(msg.external_user_id)  # type: ignore
                 logger.debug(f"Started typing indicator for user {msg.external_user_id}")
             
             # Trigger queue processing (safe to call even if already processing)
