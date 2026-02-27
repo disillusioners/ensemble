@@ -70,30 +70,168 @@
         </div>
       </div>
 
-      <!-- Config JSON -->
-      <div class="form-group">
-        <label class="form-label">Config (JSON)</label>
-        <textarea
-          [value]="configJson()"
-          (input)="onConfigJsonChange($event)"
-          placeholder='{"webhook_url": "/webhook"}'
-          rows="3"
-          class="form-textarea mono"
-        ></textarea>
-        <p class="form-hint">Optional configuration in JSON format</p>
-      </div>
+      <!-- Source Configuration Section -->
+      <div class="form-group config-section">
+        <label class="form-label">Source Configuration</label>
+        
+        <!-- Tab Navigation -->
+        <div class="config-tabs">
+          <button
+            type="button"
+            (click)="onConfigTabChange('simple')"
+            class="config-tab"
+            [class.active]="configTab() === 'simple'"
+          >
+            Simple
+          </button>
+          <button
+            type="button"
+            (click)="onConfigTabChange('json')"
+            class="config-tab"
+            [class.active]="configTab() === 'json'"
+          >
+            Full JSON
+          </button>
+        </div>
 
-      <!-- Credentials JSON -->
-      <div class="form-group">
-        <label class="form-label">Credentials (JSON)</label>
-        <textarea
-          [value]="credentialsJson()"
-          (input)="onCredentialsJsonChange($event)"
-          placeholder='{"api_token": "your-token-here"}'
-          rows="3"
-          class="form-textarea mono"
-        ></textarea>
-        <p class="form-hint">Optional credentials in JSON format (stored securely)</p>
+        <!-- Simple Tab Content -->
+        @if (configTab() === 'simple') {
+          <div class="config-content">
+            @if (currentFields().length === 0) {
+              <p class="no-fields-hint">No configuration fields available for this source type. Use the Full JSON tab.</p>
+            } @else {
+              <!-- Group fields by section -->
+              @if (credentialFields().length > 0) {
+                <div class="field-section">
+                  <span class="field-section-label">Credentials</span>
+                  @for (field of credentialFields(); track field.key) {
+                    <div class="simple-field">
+                      <label class="field-label">
+                        {{ field.label }}
+                        @if (field.required) {
+                          <span class="text-accent-rose">*</span>
+                        }
+                      </label>
+                      @if (field.type === 'checkbox') {
+                        <label class="toggle-label field-toggle">
+                          <span class="toggle-text">{{ field.hint }}</span>
+                          <input
+                            type="checkbox"
+                            [checked]="simpleFieldValues()[field.key] ?? field.defaultValue ?? false"
+                            (change)="onSimpleFieldChange(field.key, $event)"
+                            class="toggle-input"
+                          />
+                          <span class="toggle-switch"></span>
+                        </label>
+                      } @else if (field.type === 'select') {
+                        <select
+                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          (change)="onSimpleFieldChange(field.key, $event)"
+                          class="form-select"
+                        >
+                          <option value="" disabled>{{ field.placeholder }}</option>
+                          @for (option of field.options; track option.value) {
+                            <option [value]="option.value">{{ option.label }}</option>
+                          }
+                        </select>
+                      } @else {
+                        <input
+                          [type]="field.type"
+                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          (input)="onSimpleFieldChange(field.key, $event)"
+                          [placeholder]="field.placeholder"
+                          class="form-input"
+                        />
+                      }
+                      @if (field.hint && field.type !== 'checkbox') {
+                        <p class="form-hint">{{ field.hint }}</p>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+              
+              @if (configFields().length > 0) {
+                <div class="field-section">
+                  <span class="field-section-label">Settings</span>
+                  @for (field of configFields(); track field.key) {
+                    <div class="simple-field">
+                      <label class="field-label">
+                        {{ field.label }}
+                        @if (field.required) {
+                          <span class="text-accent-rose">*</span>
+                        }
+                      </label>
+                      @if (field.type === 'checkbox') {
+                        <label class="toggle-label field-toggle">
+                          <span class="toggle-text">{{ field.hint }}</span>
+                          <input
+                            type="checkbox"
+                            [checked]="simpleFieldValues()[field.key] ?? field.defaultValue ?? false"
+                            (change)="onSimpleFieldChange(field.key, $event)"
+                            class="toggle-input"
+                          />
+                          <span class="toggle-switch"></span>
+                        </label>
+                      } @else if (field.type === 'select') {
+                        <select
+                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          (change)="onSimpleFieldChange(field.key, $event)"
+                          class="form-select"
+                        >
+                          <option value="" disabled>{{ field.placeholder }}</option>
+                          @for (option of field.options; track option.value) {
+                            <option [value]="option.value">{{ option.label }}</option>
+                          }
+                        </select>
+                      } @else {
+                        <input
+                          [type]="field.type"
+                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          (input)="onSimpleFieldChange(field.key, $event)"
+                          [placeholder]="field.placeholder"
+                          class="form-input"
+                        />
+                      }
+                      @if (field.hint && field.type !== 'checkbox') {
+                        <p class="form-hint">{{ field.hint }}</p>
+                      }
+                    </div>
+                  }
+                </div>
+              }
+            }
+          </div>
+        }
+
+        <!-- JSON Tab Content -->
+        @if (configTab() === 'json') {
+          <div class="config-content">
+            <div class="simple-field">
+              <label class="field-label">Config (JSON)</label>
+              <textarea
+                [value]="configJson()"
+                (input)="onConfigJsonChange($event)"
+                placeholder='{"webhook_url": "/webhook"}'
+                rows="3"
+                class="form-textarea mono"
+              ></textarea>
+              <p class="form-hint">Optional configuration in JSON format</p>
+            </div>
+
+            <div class="simple-field">
+              <label class="field-label">Credentials (JSON)</label>
+              <textarea
+                [value]="credentialsJson()"
+                (input)="onCredentialsJsonChange($event)"
+                placeholder='{"api_token": "your-token-here"}'
+                rows="3"
+                class="form-textarea mono"
+              ></textarea>
+              <p class="form-hint">Optional credentials in JSON format (stored securely)</p>
+            </div>
+          </div>
+        }
       </div>
 
       <!-- Enable Toggle -->
