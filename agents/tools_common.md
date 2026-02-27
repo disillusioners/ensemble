@@ -1,52 +1,62 @@
 # Common Tools
 
-All tools have short descriptions. Use `tool_help("tool_name")` for detailed docs.
+Use `tool_help("tool_name")` for full docs. Common tools:
 
-## Quick Reference
+## File Operations
 
-| Tool | Purpose |
-|------|---------|
-| `bash` | Execute shell commands |
-| `time` | Get current date/time |
-| `read_file` | Read file contents |
-| `list_directory` | List directory contents |
-| `glob_files` | Find files by pattern |
-| `inner_soul` | Remember, learn, or change yourself |
+```
+read_file(path, offset=1, limit=2000)     # Read file with line numbers
+list_directory(path=".", show_hidden=False)  # List dir contents
+glob_files(pattern="**/*.py", path=".")   # Find files by pattern
+```
 
-## Session Tools
+## Shell
 
-| Tool | Purpose |
-|------|---------|
-| `spawn_session` | Spawn a new agent session |
-| `send_message` | Send message to another session |
-| `terminate_session` | Terminate a session |
-| `list_sessions` | List all active sessions |
-| `get_session_info` | Get session details |
+```
+bash(command, timeout=120, workdir=None)  # Execute shell command
+time(format_type="iso")                   # Get current time
+```
 
-## Project Tools
+## Session Management
 
-| Tool | Purpose |
-|------|---------|
-| `project_create` | Create a new project |
-| `project_get` | Get project by ID or name |
-| `project_list` | List projects with filters |
-| `project_search` | Search projects |
-| `project_update` | Update project fields |
-| `project_set_status` | Set project status |
-| `project_add_directory` | Add directory to project |
-| `project_add_tag` | Add tag to project |
-| `project_set_metadata` | Set custom metadata |
-| `project_link` | Link project to entity |
-| `project_delete` | Delete a project |
+```
+spawn_session(agent_dir, session_id=None)  # Spawn new agent
+send_message(session_id, message)          # Send to session queue
+terminate_session(session_id)              # Kill session
+list_sessions()                            # List all sessions
+get_session_info(session_id)               # Get session details
+```
+
+## Project Management
+
+```
+project_create(name, project_type="general", main_directory=None, tags=[], metadata={})
+project_get(project_id=None, name=None)    # Get by ID or name
+project_list(status=None, tags=[], limit=50)
+project_search(query, limit=20)
+project_update(project_id, name=None, description=None, tags=None)
+project_set_status(project_id, status)     # active|paused|completed|archived
+project_add_tag(project_id, tag)
+project_set_metadata(project_id, key, value)
+project_link(project_id, entity_type, entity_id)
+project_delete(project_id)
+```
+
+## Self-Modification
+
+```
+inner_soul(intent, content)               # intent: remember|learn|change
+```
 
 ## Help
 
-| Tool | Purpose |
-|------|---------|
-| `tool_help()` | List all available tools |
-| `tool_help("name")` | Get detailed docs for a tool |
-| `tool_help(category="X")` | List tools by category |
+```
+tool_help()                                # List all tools
+tool_help("tool_name")                     # Detailed docs for tool
+tool_help(category="project")              # List by category
+```
 
 ---
 
-**Tip:** Call `tool_help()` without arguments to see all available tools grouped by category.
+**Status values:** `active`, `paused`, `completed`, `archived`
+**Project types:** `software`, `documentation`, `research`, `task`, `general`, or custom
