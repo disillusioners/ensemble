@@ -9,6 +9,7 @@ from .filesystem import list_directory, read_file, glob_files
 from .time import time
 from .inner_soul import create_inner_soul_tool
 from .agent_mother import create_mother_tools
+from .project import create_project_tools
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
@@ -127,6 +128,9 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     # Create inner_soul tool for self-modification
     inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)
     
+    # Create project management tools (with session context for creator tracking)
+    project_tools = create_project_tools(manager.conn, current_session_id, agent_dir)
+    
     # Base tools (available in all sessions)
     tools = [
         bash,
@@ -143,6 +147,9 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         # Self-modification tool
         inner_soul,
     ]
+    
+    # Add project management tools (available in all sessions)
+    tools.extend(project_tools)
     
     # Add mother tools if this is the _mother agent
     if agent_dir and Path(agent_dir).name == "_mother":

@@ -157,6 +157,70 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         ON processed_external_messages(processed_at)
     """)
     
+    # Create projects table for project management
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            project_type TEXT NOT NULL DEFAULT 'general',
+            status TEXT NOT NULL DEFAULT 'active',
+            main_directory TEXT,
+            related_directories TEXT DEFAULT '[]',
+            description TEXT,
+            metadata TEXT DEFAULT '{}',
+            relationships TEXT DEFAULT '{}',
+            creator_session_id TEXT,
+            creator_agent_dir TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Indexes for projects table
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_type ON projects(project_type)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_creator_session ON projects(creator_session_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_projects_main_directory ON projects(main_directory)
+    """)
+    
+    # Create project_tags junction table for efficient tag filtering
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_tags (
+            project_id TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (project_id, tag),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    
+    # Index for tag-based lookups
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)
+    """)
+    
+    # Migration: Add creator columns if they don't exist
+    cursor = conn.execute("PRAGMA table_info(projects)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'creator_session_id' not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN creator_session_id TEXT")
+        logger.info("Added creator_session_id column to projects table")
+    if 'creator_agent_dir' not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN creator_agent_dir TEXT")
+        logger.info("Added creator_agent_dir column to projects table")
+    
     conn.commit()
     logger.info(f"Database initialized at {db_path}")
     return conn
