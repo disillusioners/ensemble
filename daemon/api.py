@@ -54,6 +54,8 @@ from .models import (
     SourceActionResponse,
     SourceStatus,
     SourceType,
+    SourceTestRequest,
+    SourceTestResponse,
     # Mapping models
     SessionMappingCreate,
     SessionMappingInfo,
@@ -746,6 +748,44 @@ async def create_source(source_create: SourceCreate):
         created_at=datetime.fromisoformat(saved["created_at"]).replace(tzinfo=timezone.utc),
         updated_at=datetime.fromisoformat(saved["updated_at"]).replace(tzinfo=timezone.utc) if saved.get("updated_at") else None,
     )
+
+
+# POST /sources/test - Test source configuration
+@app.post("/sources/test", response_model=SourceTestResponse)
+async def test_source(test_request: SourceTestRequest):
+    """Test a source configuration without saving it.
+    
+    Validates credentials by attempting to connect to the external service.
+    """
+    from .sources.base import SourceConfig
+    
+    # Create a temporary config for testing
+    temp_config = SourceConfig(
+        source_id="test",
+        source_type=test_request.source_type.value,
+        name="Test",
+        config=test_request.config,
+        credentials=test_request.credentials,
+        enabled=True,
+    )
+    
+    # Get the appropriate adapter class
+    if test_request.source_type == SourceType.telegram:
+        from .sources.adapters.telegram import TelegramAdapter
+        success, message = await TelegramAdapter.test_connection(temp_config)
+    elif test_request.source_type == SourceType.webhook:
+        # Webhook doesn't require external connection test
+        success, message = True, "Webhook sources don't require connection testing"
+    elif test_request.source_type == SourceType.whatsapp:
+        # WhatsApp not implemented yet
+        success, message = False, "WhatsApp adapter not yet implemented"
+    elif test_request.source_type == SourceType.discord:
+        # Discord not implemented yet
+        success, message = False, "Discord adapter not yet implemented"
+    else:
+        success, message = False, f"Unknown source type: {test_request.source_type}"
+    
+    return SourceTestResponse(success=success, message=message)
 
 
 # GET /sources/{source_id} - Get source info

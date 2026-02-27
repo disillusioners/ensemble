@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable, Awaitable, Tuple
 from enum import Enum
 
 
@@ -99,6 +99,21 @@ class MessageSourceAdapter(ABC):
     async def health_check(self) -> bool:
         """Check if adapter is healthy and connected."""
         ...
+    
+    @classmethod
+    async def test_connection(cls, config: SourceConfig) -> Tuple[bool, str]:
+        """Test connection to external service without full initialization.
+        
+        Args:
+            config: Source configuration to test
+            
+        Returns:
+            Tuple of (success: bool, message: str)
+            - success: True if connection test passed
+            - message: Human-readable result or error message
+        """
+        # Default implementation - subclasses should override
+        return True, "Test not implemented for this source type"
     
     async def reload(self, new_config: SourceConfig) -> None:
         """Reload configuration (restart if needed)."""

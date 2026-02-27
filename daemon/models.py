@@ -375,6 +375,40 @@ class SourceListResponse(BaseModel):
     )
 
 
+class SourceTestRequest(BaseModel):
+    """Request for testing a source configuration."""
+
+    source_type: SourceType = Field(..., description="Type of message source")
+    config: dict[str, Any] = Field(default_factory=dict, description="Source-specific configuration")
+    credentials: dict[str, Any] = Field(default_factory=dict, description="Credentials to test")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "source_type": "telegram",
+                "config": {"polling_enabled": True},
+                "credentials": {"bot_token": "123456:ABC-DEF"}
+            }
+        }
+    )
+
+
+class SourceTestResponse(BaseModel):
+    """Response for testing a source configuration."""
+
+    success: bool = Field(..., description="Whether the connection test succeeded")
+    message: str = Field(..., description="Human-readable result or error message")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "success": True,
+                "message": "Connected to @my_bot (My Bot)"
+            }
+        }
+    )
+
+
 class SourceActionResponse(BaseModel):
     """Response for source actions (start/stop)."""
 

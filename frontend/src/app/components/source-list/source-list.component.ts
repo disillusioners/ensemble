@@ -1,4 +1,4 @@
-import { Component, signal, inject, OnInit } from '@angular/core';
+import { Component, signal, inject, OnInit, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -32,19 +32,23 @@ export class SourceListComponent implements OnInit {
   private readonly router = inject(Router);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly destroyRef = inject(DestroyRef);
 
   readonly sources = signal<Source[]>([]);
   readonly isLoading = signal(false);
 
   ngOnInit(): void {
+    console.log('SourceListComponent ngOnInit called');
     this.loadSources();
   }
 
   protected loadSources(): void {
+    console.log('loadSources() called, calling API...');
     this.isLoading.set(true);
     
-    this.api.listSources().pipe(takeUntilDestroyed()).subscribe({
+    this.api.listSources().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (response) => {
+        console.log('listSources response:', response);
         this.sources.set(response.sources);
         this.isLoading.set(false);
       },
@@ -62,7 +66,8 @@ export class SourceListComponent implements OnInit {
       disableClose: true
     });
 
-    dialogRef.afterClosed().pipe(takeUntilDestroyed()).subscribe((result?: SourceCreate) => {
+    dialogRef.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result?: SourceCreate) => {
+      console.log('Dialog closed with result:', result);
       if (result) {
         this.createSource(result);
       }
@@ -72,7 +77,7 @@ export class SourceListComponent implements OnInit {
   private createSource(sourceCreate: SourceCreate): void {
     this.isLoading.set(true);
     
-    this.api.createSource(sourceCreate).pipe(takeUntilDestroyed()).subscribe({
+    this.api.createSource(sourceCreate).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (newSource) => {
         this.sources.update(prev => [...prev, newSource]);
         this.showSuccess(`Source "${newSource.name}" created successfully`);
@@ -89,7 +94,7 @@ export class SourceListComponent implements OnInit {
   protected onStartSource(sourceId: string): void {
     this.isLoading.set(true);
     
-    this.api.startSource(sourceId).pipe(takeUntilDestroyed()).subscribe({
+    this.api.startSource(sourceId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (response) => {
         this.sources.update(prev => 
           prev.map(s => s.source_id === sourceId ? { ...s, status: response.status } : s)
@@ -108,7 +113,7 @@ export class SourceListComponent implements OnInit {
   protected onStopSource(sourceId: string): void {
     this.isLoading.set(true);
     
-    this.api.stopSource(sourceId).pipe(takeUntilDestroyed()).subscribe({
+    this.api.stopSource(sourceId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (response) => {
         this.sources.update(prev => 
           prev.map(s => s.source_id === sourceId ? { ...s, status: response.status } : s)
@@ -134,7 +139,7 @@ export class SourceListComponent implements OnInit {
 
     this.isLoading.set(true);
     
-    this.api.deleteSource(sourceId).pipe(takeUntilDestroyed()).subscribe({
+    this.api.deleteSource(sourceId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.sources.update(prev => prev.filter(s => s.source_id !== sourceId));
         this.showSuccess('Source deleted successfully');
@@ -151,7 +156,7 @@ export class SourceListComponent implements OnInit {
   protected onUpdateSource(sourceId: string, update: SourceUpdate): void {
     this.isLoading.set(true);
     
-    this.api.updateSource(sourceId, update).pipe(takeUntilDestroyed()).subscribe({
+    this.api.updateSource(sourceId, update).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (updatedSource) => {
         this.sources.update(prev => 
           prev.map(s => s.source_id === sourceId ? updatedSource : s)

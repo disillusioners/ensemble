@@ -55,6 +55,10 @@ export class AddSourceModalComponent implements OnInit {
   protected readonly isLoading = signal(false);
   protected readonly error = signal<string | null>(null);
   
+  // Test connection state
+  protected readonly isTesting = signal(false);
+  protected readonly testResult = signal<{ success: boolean; message: string } | null>(null);
+  
   // Tab state for config section
   protected readonly configTab = signal<ConfigTab>('simple');
   
@@ -132,6 +136,25 @@ export class AddSourceModalComponent implements OnInit {
   protected readonly configFields = computed(() => {
     return this.currentFields().filter(f => f.section === 'config');
   });
+  
+  // Helper method to get field value as string (for input/select fields)
+  protected getFieldValue(key: string): string {
+    const value = this.simpleFieldValues()[key];
+    return value !== undefined ? String(value) : '';
+  }
+  
+  // Helper method to get field value as boolean (for checkbox fields)
+  protected getFieldChecked(key: string, defaultValue: string | number | boolean | undefined): boolean {
+    const value = this.simpleFieldValues()[key];
+    if (value !== undefined) {
+      return Boolean(value);
+    }
+    // Convert defaultValue to boolean if it's not already
+    if (typeof defaultValue === 'boolean') {
+      return defaultValue;
+    }
+    return false;
+  }
 
   protected readonly sourceTypeOptions: SourceTypeOption[] = [
     { value: 'telegram', label: 'Telegram', icon: 'telegram', description: 'Receive messages from Telegram bots' },
@@ -258,9 +281,12 @@ export class AddSourceModalComponent implements OnInit {
     this.name.set(target.value);
   }
 
-  protected async handleSubmit(): Promise<void> {
+  protected handleSubmit(): void {
     const idValue = this.sourceId();
     const nameValue = this.name();
+    
+    // Clear previous error
+    this.error.set(null);
     
     // Validation - Source ID
     if (!idValue.trim()) {
@@ -337,24 +363,80 @@ export class AddSourceModalComponent implements OnInit {
       }
     }
 
-    this.isLoading.set(true);
-    this.error.set(null);
+    const source: SourceCreate = {
+      source_id: idValue.trim().toLowerCase(),
+      source_type: this.sourceType(),
+      name: nameValue.trim(),
+      config: Object.keys(config).length > 0 ? config : undefined,
+      credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
+      enabled: this.enabled()
+    };
+    
+    console.log('Closing dialog with source:', source);
+    this.dialogRef.close(source);
+  }
+
+  protected async handleTestConnection(): Promise<void> {
+    // Build config and credentials from current form state
+    let config: Record<string, unknown> = {};
+    let credentials: Record<string, unknown> = {};
+
+    if (this.configTab() === 'simple') {
+      const values = this.simpleFieldValues();
+      const fields = this.currentFields();
+      
+      for (const field of fields) {
+        const value = values[field.key];
+        if (value !== undefined && value !== '') {
+          if (field.section === 'config') {
+            config[field.key] = value;
+          } else {
+            credentials[field.key] = value;
+          }
+        }
+      }
+    } else {
+      // Use JSON input
+      if (this.configJson().trim()) {
+        try {
+          config = JSON.parse(this.configJson());
+        } catch {
+          this.testResult.set({ success: false, message: 'Invalid JSON in Config field' });
+          return;
+        }
+      }
+
+      if (this.credentialsJson().trim()) {
+        try {
+          credentials = JSON.parse(this.credentialsJson());
+        } catch {
+          this.testResult.set({ success: false, message: 'Invalid JSON in Credentials field' });
+          return;
+        }
+      }
+    }
+
+    this.isTesting.set(true);
+    this.testResult.set(null);
 
     try {
-      const source: SourceCreate = {
-        source_id: idValue.trim().toLowerCase(),
+      const response = await this.api.testSource({
         source_type: this.sourceType(),
-        name: nameValue.trim(),
-        config: Object.keys(config).length > 0 ? config : undefined,
-        credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-        enabled: this.enabled()
-      };
+        config,
+        credentials
+      }).toPromise();
       
-      this.dialogRef.close(source);
+      this.testResult.set({
+        success: response?.success ?? false,
+        message: response?.message ?? 'Test completed'
+      });
     } catch (err) {
-      this.error.set(err instanceof Error ? err.message : 'Failed to create source');
+      this.testResult.set({
+        success: false,
+        message: err instanceof Error ? err.message : 'Connection test failed'
+      });
     } finally {
-      this.isLoading.set(false);
+      this.isTesting.set(false);
     }
   }
 

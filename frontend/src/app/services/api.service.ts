@@ -15,6 +15,8 @@ import type {
   SourceUpdate,
   SourceListResponse,
   SourceActionResponse,
+  SourceTestRequest,
+  SourceTestResponse,
   SessionMapping,
   SessionMappingCreate,
   SessionMappingListResponse,
@@ -103,6 +105,10 @@ export class ApiService {
 
   stopSource(sourceId: string): Observable<SourceActionResponse> {
     return this.http.post<SourceActionResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/stop`, {});
+  }
+
+  testSource(testRequest: SourceTestRequest): Observable<SourceTestResponse> {
+    return this.http.post<SourceTestResponse>(`${this.API_BASE}/sources/test`, testRequest);
   }
 
   // Mappings

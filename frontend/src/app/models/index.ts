@@ -138,6 +138,17 @@ export interface SourceActionResponse {
   message: string;
 }
 
+export interface SourceTestRequest {
+  source_type: SourceType;
+  config?: Record<string, unknown>;
+  credentials?: Record<string, unknown>;
+}
+
+export interface SourceTestResponse {
+  success: boolean;
+  message: string;
+}
+
 // Session Mapping types
 export interface SessionMapping {
   mapping_id: string;

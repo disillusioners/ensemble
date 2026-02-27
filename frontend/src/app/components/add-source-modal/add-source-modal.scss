@@ -404,6 +404,58 @@ $accent-blue: #3b82f6;
   }
 }
 
+// Test section
+.test-section {
+  padding: 1rem;
+  border-top: 1px solid $border-color;
+  background-color: $bg-card;
+}
+
+.test-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+  color: $text-secondary;
+  background-color: $bg-primary;
+  border: 1px solid $border-color;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover:not(:disabled) {
+    border-color: $accent-violet;
+    color: $accent-violet;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.test-result {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+
+  &.success {
+    background-color: rgba($accent-emerald, 0.15);
+    color: $accent-emerald;
+  }
+
+  &.error {
+    background-color: rgba($accent-rose, 0.15);
+    color: $accent-rose;
+  }
+}
+
 // Form actions
 .form-actions {
   display: flex;

@@ -280,6 +280,55 @@ class TelegramAdapter(MessageSourceAdapter):
             logger.warning(f"Health check failed: {e}")
             return False
     
+    @classmethod
+    async def test_connection(cls, config: SourceConfig) -> tuple[bool, str]:
+        """Test Telegram bot token without full adapter initialization.
+        
+        Args:
+            config: Source configuration containing bot_token in credentials
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from ..base import MessageSourceAdapter
+        
+        bot_token = config.credentials.get("bot_token")
+        if not bot_token:
+            return False, "Bot token is required"
+        
+        url = TELEGRAM_API_BASE.format(token=bot_token, method="getMe")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    data = await resp.json()
+                    
+                    if not data.get("ok"):
+                        error_desc = data.get("description", "Unknown error")
+                        error_code = data.get("error_code", 0)
+                        
+                        # Provide user-friendly error messages
+                        if error_code == 401:
+                            return False, "Invalid bot token. Please check your token from @BotFather."
+                        elif error_code == 404:
+                            return False, "Bot not found. Please verify your bot token."
+                        else:
+                            return False, f"Telegram API error: {error_desc}"
+                    
+                    bot_info = data.get("result", {})
+                    username = bot_info.get("username", "unknown")
+                    first_name = bot_info.get("first_name", "")
+                    
+                    return True, f"Connected to @{username}" + (f" ({first_name})" if first_name else "")
+                    
+        except asyncio.TimeoutError:
+            return False, "Connection timed out. Please check your network."
+        except aiohttp.ClientError as e:
+            return False, f"Connection failed: {str(e)}"
+        except Exception as e:
+            logger.error(f"Unexpected error during Telegram connection test: {e}")
+            return False, f"Unexpected error: {str(e)}"
+    
     async def handle_webhook(self, payload: dict, headers: dict) -> None:
         """Handle incoming webhook from Telegram.
         

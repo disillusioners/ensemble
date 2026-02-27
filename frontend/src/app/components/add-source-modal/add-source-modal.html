@@ -1,6 +1,6 @@
 <div class="modal-container">
-  <!-- Backdrop -->
-  <div class="modal-backdrop" (click)="handleClose()"></div>
+  <!-- Backdrop - no click handler since disableClose is set to true -->
+  <div class="modal-backdrop"></div>
   
   <!-- Modal -->
   <div class="modal-content animate-fade-in">
@@ -117,7 +117,7 @@
                           <span class="toggle-text">{{ field.hint }}</span>
                           <input
                             type="checkbox"
-                            [checked]="simpleFieldValues()[field.key] ?? field.defaultValue ?? false"
+                            [checked]="getFieldChecked(field.key, field.defaultValue)"
                             (change)="onSimpleFieldChange(field.key, $event)"
                             class="toggle-input"
                           />
@@ -125,7 +125,7 @@
                         </label>
                       } @else if (field.type === 'select') {
                         <select
-                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          [value]="getFieldValue(field.key)"
                           (change)="onSimpleFieldChange(field.key, $event)"
                           class="form-select"
                         >
@@ -137,7 +137,7 @@
                       } @else {
                         <input
                           [type]="field.type"
-                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          [value]="getFieldValue(field.key)"
                           (input)="onSimpleFieldChange(field.key, $event)"
                           [placeholder]="field.placeholder"
                           class="form-input"
@@ -167,7 +167,7 @@
                           <span class="toggle-text">{{ field.hint }}</span>
                           <input
                             type="checkbox"
-                            [checked]="simpleFieldValues()[field.key] ?? field.defaultValue ?? false"
+                            [checked]="getFieldChecked(field.key, field.defaultValue)"
                             (change)="onSimpleFieldChange(field.key, $event)"
                             class="toggle-input"
                           />
@@ -175,7 +175,7 @@
                         </label>
                       } @else if (field.type === 'select') {
                         <select
-                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          [value]="getFieldValue(field.key)"
                           (change)="onSimpleFieldChange(field.key, $event)"
                           class="form-select"
                         >
@@ -187,7 +187,7 @@
                       } @else {
                         <input
                           [type]="field.type"
-                          [value]="simpleFieldValues()[field.key] ?? ''"
+                          [value]="getFieldValue(field.key)"
                           (input)="onSimpleFieldChange(field.key, $event)"
                           [placeholder]="field.placeholder"
                           class="form-input"
@@ -232,6 +232,44 @@
             </div>
           </div>
         }
+        
+        <!-- Test Connection Button & Result -->
+        <div class="test-section">
+          <button
+            type="button"
+            (click)="handleTestConnection()"
+            [disabled]="isTesting()"
+            class="test-btn"
+          >
+            @if (isTesting()) {
+              <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+              </svg>
+              Testing...
+            } @else {
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              Test Connection
+            }
+          </button>
+          
+          @if (testResult()) {
+            <div class="test-result" [class.success]="testResult()?.success" [class.error]="!testResult()?.success">
+              @if (testResult()?.success) {
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+              } @else {
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              }
+              <span>{{ testResult()?.message }}</span>
+            </div>
+          }
+        </div>
       </div>
 
       <!-- Enable Toggle -->
