@@ -442,21 +442,25 @@ class SessionManager:
 
     async def _process_queue(self, session_id: str) -> None:
         """Event-driven queue processor for a session."""
+        logger.debug(f"_process_queue called for session {session_id[:8]}...")
         # Check if already processing
         async with self._processing_lock:
             if session_id in self._processing:
-                logger.debug(f"Session {session_id} already being processed, skipping")
+                logger.debug(f"Session {session_id[:8]}... already being processed, skipping")
                 return
             self._processing.add(session_id)
+            logger.debug(f"Added session {session_id[:8]}... to processing set")
         
         try:
             if not self.circuit_breaker.can_execute(session_id):
-                logger.warning(f"Circuit breaker open for session {session_id}")
+                logger.warning(f"Circuit breaker open for session {session_id[:8]}...")
                 return
             
+            logger.debug(f"Starting dequeue loop for session {session_id[:8]}...")
             while True:
                 msg = self.queue.dequeue(session_id, timeout=0)
                 if msg is None:
+                    logger.debug(f"No more messages for session {session_id[:8]}..., exiting loop")
                     break
                 
                 logger.info(f"Processing message {msg.message_id[:8]}... for session {session_id[:8]}...")
@@ -582,6 +586,7 @@ class SessionManager:
         finally:
             async with self._processing_lock:
                 self._processing.discard(session_id)
+                logger.debug(f"Removed session {session_id[:8]}... from processing set")
 
     def _process_message_sync(self, session_id: str, message: str) -> MessageResult:
         """Synchronous message processing (wraps existing send_message logic)."""

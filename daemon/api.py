@@ -145,7 +145,14 @@ async def lifespan(app: FastAPI):
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     start_time = time.time()
+    
+    # Start message sources (loads adapters from DB and starts them)
+    await manager.start_sources()
+    
     yield
+    
+    # Stop message sources on shutdown
+    await manager.stop_sources()
 
 
 app = FastAPI(
@@ -903,6 +910,7 @@ async def delete_source(source_id: str):
 async def start_source(source_id: str):
     """Start a message source adapter."""
     from .sources.persistence import get_source_config, update_source_status
+    from .sources.base import SourceConfig
     
     source = get_source_config(manager.conn, source_id)
     if not source:
@@ -926,7 +934,42 @@ async def start_source(source_id: str):
     # Check if registry has the source
     if manager.source_registry:
         try:
-            await manager.source_registry.start_source(source_id)
+            # Check if adapter is already registered
+            existing_adapter = manager.source_registry.get(source_id)
+            
+            if existing_adapter is None:
+                # Create adapter from config
+                source_type = source["source_type"]
+                credentials = source.get("credentials", {})
+                
+                # Decrypt credentials if encrypted
+                if credentials and isinstance(credentials, str):
+                    credentials = credential_manager.decrypt(credentials)
+                
+                config = SourceConfig(
+                    source_id=source["source_id"],
+                    source_type=source_type,
+                    name=source["name"],
+                    config=source.get("config", {}),
+                    credentials=credentials,
+                    enabled=source["enabled"],
+                )
+                
+                # Create the appropriate adapter
+                if source_type == "telegram":
+                    from .sources.adapters.telegram import TelegramAdapter
+                    # Create callback wrapper that includes source_id
+                    async def on_message(msg):
+                        await manager.source_registry._handle_message(source_id, msg)
+                    adapter = TelegramAdapter(config, on_message)
+                else:
+                    raise ValueError(f"Source type '{source_type}' adapter not yet implemented")
+                
+                # Register the adapter
+                manager.source_registry.register(adapter)
+            
+            # Start the adapter
+            await manager.source_registry.start_adapter(source_id)
             update_source_status(manager.conn, source_id, "running")
             return SourceActionResponse(
                 source_id=source_id,
@@ -967,7 +1010,7 @@ async def stop_source(source_id: str):
     # Check if registry has the source
     if manager.source_registry:
         try:
-            await manager.source_registry.stop_source(source_id)
+            await manager.source_registry.stop_adapter(source_id)
             update_source_status(manager.conn, source_id, "stopped")
             return SourceActionResponse(
                 source_id=source_id,

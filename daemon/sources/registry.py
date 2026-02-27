@@ -117,35 +117,89 @@ class SourceRegistry:
     async def start_all(self) -> None:
         """Load all enabled adapters from database and start them.
         
-        Loads source configurations from the database and starts all
-        enabled adapters. Adapters are started in supervisor mode.
+        Loads source configurations from the database, creates adapters
+        if not registered, and starts all enabled adapters.
         """
         logger.info("Loading and starting all enabled adapters...")
         
         # Load configs from database
         configs = persistence.list_source_configs(self._conn)
         
-        enabled_count = 0
+        started_count = 0
         for config_dict in configs:
             if not config_dict.get("enabled", True):
+                logger.debug(f"Skipping disabled source: {config_dict['source_id']}")
                 continue
             
             source_id = config_dict["source_id"]
-            enabled_count += 1
             
             # Check if adapter is already registered
             adapter = self.get(source_id)
             if adapter is None:
-                logger.warning(
-                    f"Adapter not registered for enabled config: {source_id}. "
-                    f"Skipping auto-start."
-                )
-                continue
+                # Create adapter from config
+                logger.info(f"Creating adapter for: {source_id}")
+                try:
+                    adapter = await self._create_adapter_from_config(config_dict)
+                    if adapter:
+                        self.register(adapter)
+                        logger.info(f"Registered adapter: {source_id}")
+                    else:
+                        logger.warning(f"Could not create adapter for: {source_id}")
+                        continue
+                except Exception as e:
+                    logger.error(f"Failed to create adapter {source_id}: {e}")
+                    continue
             
             # Start the adapter
-            await self.start_adapter(source_id)
+            try:
+                await self.start_adapter(source_id)
+                started_count += 1
+            except Exception as e:
+                logger.error(f"Failed to start adapter {source_id}: {e}")
         
-        logger.info(f"Started {enabled_count} adapters from database")
+        logger.info(f"Started {started_count} adapters from database")
+    
+    async def _create_adapter_from_config(self, config_dict: dict):
+        """Create an adapter instance from a config dictionary.
+        
+        Args:
+            config_dict: Source configuration from database.
+            
+        Returns:
+            MessageSourceAdapter instance or None if unsupported type.
+        """
+        from .base import SourceConfig
+        from .credentials import CredentialManager
+        
+        source_type = config_dict["source_type"]
+        source_id = config_dict["source_id"]
+        
+        # Decrypt credentials if needed
+        credentials = config_dict.get("credentials", {})
+        if credentials and isinstance(credentials, str):
+            cred_manager = CredentialManager()
+            credentials = cred_manager.decrypt(credentials)
+        
+        config = SourceConfig(
+            source_id=source_id,
+            source_type=source_type,
+            name=config_dict["name"],
+            config=config_dict.get("config", {}),
+            credentials=credentials,
+            enabled=config_dict.get("enabled", True),
+        )
+        
+        # Create callback wrapper that includes source_id
+        async def on_message(msg):
+            await self._handle_message(source_id, msg)
+        
+        # Create the appropriate adapter
+        if source_type == "telegram":
+            from .adapters.telegram import TelegramAdapter
+            return TelegramAdapter(config, on_message)
+        else:
+            logger.warning(f"Unsupported source type: {source_type}")
+            return None
     
     async def stop_all(self) -> None:
         """Stop all running adapters gracefully.
@@ -390,15 +444,25 @@ class SourceRegistry:
             source_id: The source_id the message came from.
             msg: The incoming message.
         """
+        logger.debug(
+            f"_handle_message called: source_id={source_id}, "
+            f"user={msg.external_user_id}, content={msg.content[:50] if msg.content else None}..."
+        )
         try:
             # Check for duplicates using the message_id from metadata
+            # Try multiple locations for message_id (telegram stores in nested dict)
             external_msg_id = msg.metadata.get("message_id")
+            if not external_msg_id and msg.metadata.get("telegram"):
+                external_msg_id = msg.metadata.get("telegram", {}).get("message_id")
+            
+            logger.debug(f"Checking for duplicate: external_msg_id={external_msg_id}")
+            
             if external_msg_id:
                 is_dup = persistence.is_duplicate_message(
                     self._conn, source_id, external_msg_id
                 )
                 if is_dup:
-                    logger.debug(
+                    logger.info(
                         f"Skipping duplicate message: source_id={source_id}, "
                         f"external_id={external_msg_id}"
                     )
@@ -412,6 +476,9 @@ class SourceRegistry:
             if not agent_dir:
                 # Use default from config
                 agent_dir = self._manager.config.agents.directory
+                logger.debug(f"Using default agent_dir from config: {agent_dir}")
+            
+            logger.debug(f"Getting or creating session: agent_dir={agent_dir}")
             
             # Get or create the session
             session_id = await mapper.get_or_create_session(
@@ -419,6 +486,8 @@ class SourceRegistry:
                 external_user_id=msg.external_user_id,
                 agent_dir=agent_dir
             )
+            
+            logger.debug(f"Got session_id={session_id}")
             
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
@@ -431,10 +500,15 @@ class SourceRegistry:
                 priority=1,
                 metadata=msg.metadata
             )
-            logger.debug(
-                f"Queued message from {source_id}: "
-                f"user={msg.external_user_id}, type={msg.message_type}"
+            logger.info(
+                f"✅ Queued message: source_id={source_id}, "
+                f"user={msg.external_user_id}, session={session_id}, "
+                f"content={msg.content[:50] if msg.content else None}..."
             )
             
+            # Trigger queue processing (safe to call even if already processing)
+            asyncio.create_task(self._manager._process_queue(session_id))
+            logger.debug(f"Triggered queue processing for session {session_id}")
+            
         except Exception as e:
-            logger.error(f"Error handling message from {source_id}: {e}")
+            logger.error(f"❌ Error in _handle_message: {e}", exc_info=True)

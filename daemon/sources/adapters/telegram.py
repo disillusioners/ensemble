@@ -175,7 +175,10 @@ class TelegramAdapter(MessageSourceAdapter):
             
             # Start polling if enabled
             if self._polling_enabled:
+                logger.info(f"Starting Telegram polling for {self.source_id} (bot: @{self._bot_info.get('username')})")
                 self._polling_task = asyncio.create_task(self._polling_loop())
+            else:
+                logger.info(f"Polling disabled for {self.source_id}, webhook mode only")
             
             self._status = SourceStatus.RUNNING
             logger.info(f"Telegram adapter started: {self.source_id}")

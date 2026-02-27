@@ -183,7 +183,7 @@ class InputMessageQueue:
         with condition:
             condition.notify()
 
-        logger.debug(f"Enqueued message {message_id} to session {session_id}")
+        logger.info(f"📥 Enqueued message {message_id[:8]}... to session {session_id[:8]}...")
         return message_id
 
     def dequeue(self, session_id: str, timeout: float = 0) -> Optional[QueuedMessage]:
@@ -230,9 +230,10 @@ class InputMessageQueue:
             self._conn.commit()
 
             if row is None:
+                logger.debug(f"No ready message for session {session_id[:8]}...")
                 return None
 
-            return QueuedMessage(
+            msg = QueuedMessage(
                 message_id=row[0],
                 session_id=row[1],
                 content=row[2],
@@ -246,6 +247,8 @@ class InputMessageQueue:
                 status=row[10],
                 error_message=row[11]
             )
+            logger.info(f"📤 Dequeued message {msg.message_id[:8]}... from session {session_id[:8]}...")
+            return msg
 
     def _peek_ready_message(self, session_id: str) -> Optional[str]:
         """Check if there's a ready message without claiming it."""
