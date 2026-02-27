@@ -10,23 +10,7 @@ def time(
     timezone_str: Optional[str] = None,
     format_type: Optional[str] = "iso"
 ) -> str:
-    """Get current date and time information.
-    
-    Args:
-        timezone_str: IANA timezone name (e.g., 'America/New_York', 'Europe/London', 'Asia/Tokyo').
-                      If not provided, uses UTC.
-        format_type: Output format - 'iso' (default), 'human', 'unix', or 'all'
-    
-    Returns:
-        Current time information in the requested format
-        
-    Examples:
-        time()                          -> Current time in ISO format (UTC)
-        time(format_type="human")       -> Human-readable format like "Monday, January 15, 2024 at 10:30 AM"
-        time(format_type="unix")        -> Unix timestamp like "1705315800"
-        time(format_type="all")         -> All formats combined
-        time(timezone_str="America/New_York") -> Current time in New York timezone
-    """
+    """Get current date and time. Use tool_help("time") for details."""
     try:
         # Get current time
         if timezone_str:
@@ -71,3 +55,21 @@ def time(
         
     except Exception as e:
         return f"ERROR: {str(e)}"
+
+time._full_doc_ = """Get current date and time information.
+    
+Args:
+    timezone_str: IANA timezone name (e.g., 'America/New_York', 'Europe/London', 'Asia/Tokyo').
+                  If not provided, uses UTC.
+    format_type: Output format - 'iso' (default), 'human', 'unix', or 'all'
+
+Returns:
+    Current time information in the requested format
+    
+Examples:
+    time()                          -> Current time in ISO format (UTC)
+    time(format_type="human")       -> Human-readable format like "Monday, January 15, 2024 at 10:30 AM"
+    time(format_type="unix")        -> Unix timestamp like "1705315800"
+    time(format_type="all")         -> All formats combined
+    time(timezone_str="America/New_York") -> Current time in New York timezone
+"""

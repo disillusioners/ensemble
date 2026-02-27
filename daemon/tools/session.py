@@ -30,36 +30,26 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     
     @tool
     def spawn_session(agent_dir: str, session_id: str | None = None) -> str:
-        """Spawn a new agent session.
-        
-        Args:
-            agent_dir: The path to agent directory (e.g., 'agents/coder')
-            session_id: Optional session ID (auto-generated if omitted)
-        
-        Returns:
-            The session_id of the newly created session
-        """
+        """Spawn a new agent session. Use tool_help("spawn_session") for details."""
         return manager.spawn_session(
             agent_dir=agent_dir,
             session_id=session_id,
             parent_id=current_session_id
         )
     
+    spawn_session._full_doc_ = """Spawn a new agent session.
+
+Args:
+    agent_dir: The path to agent directory (e.g., 'agents/coder')
+    session_id: Optional session ID (auto-generated if omitted)
+
+Returns:
+    The session_id of the newly created session
+"""
+    
     @tool
     def send_message(session_id: str, message: str) -> str:
-        """Send a message to another session's input queue.
-        
-        The message is queued and processed asynchronously. The target
-        session will process the message and send a completion report
-        back if it's a child session.
-        
-        Args:
-            session_id: The ID of the target session to send the message to
-            message: The message content to send
-        
-        Returns:
-            The message_id for tracking (queue is async, response comes later)
-        """
+        """Send a message to another session's input queue. Use tool_help("send_message") for details."""
         import asyncio
         
         # Enqueue the message
@@ -93,38 +83,58 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         
         return message_id
     
+    send_message._full_doc_ = """Send a message to another session's input queue.
+
+The message is queued and processed asynchronously. The target
+session will process the message and send a completion report
+back if it's a child session.
+
+Args:
+    session_id: The ID of the target session to send the message to
+    message: The message content to send
+
+Returns:
+    The message_id for tracking (queue is async, response comes later)
+"""
+    
     @tool
     def terminate_session(session_id: str) -> bool:
-        """Terminate a session. Use with caution.
-        
-        Args:
-            session_id: The ID of the session to terminate
-        
-        Returns:
-            True if termination was successful, False otherwise
-        """
+        """Terminate a session. Use with caution. Use tool_help("terminate_session") for details."""
         return manager.terminate_session(session_id)
+    
+    terminate_session._full_doc_ = """Terminate a session. Use with caution.
+
+Args:
+    session_id: The ID of the session to terminate
+
+Returns:
+    True if termination was successful, False otherwise
+"""
     
     @tool
     def list_sessions() -> list[dict]:
-        """List all active sessions.
-        
-        Returns:
-            List of session info dictionaries
-        """
+        """List all active sessions. Use tool_help("list_sessions") for details."""
         return manager.list_sessions()
+    
+    list_sessions._full_doc_ = """List all active sessions.
+
+Returns:
+    List of session info dictionaries
+"""
     
     @tool
     def get_session_info(session_id: str) -> dict:
-        """Get information about a specific session.
-        
-        Args:
-            session_id: The ID of the session to get info for
-        
-        Returns:
-            Session info dictionary
-        """
+        """Get information about a specific session. Use tool_help("get_session_info") for details."""
         return manager.get_session_info(session_id)
+    
+    get_session_info._full_doc_ = """Get information about a specific session.
+
+Args:
+    session_id: The ID of the session to get info for
+
+Returns:
+    Session info dictionary
+"""
     
     # Create inner_soul tool for self-modification
     inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)

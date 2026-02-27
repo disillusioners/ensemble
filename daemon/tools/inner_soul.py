@@ -158,54 +158,7 @@ def create_inner_soul_tool(
         intent: Literal["remember", "learn", "change"] | None = None,
         target: Literal["memory", "workflow", "soul", "user"] | None = None
     ) -> str:
-        """The core of agent growth - remember, learn, and evolve.
-        
-        This tool understands what you mean, not just what you say.
-        It knows which files to update based on the semantic meaning
-        of your request.
-        
-        ## Files and Their Purposes:
-        - **soul.md** - Who you ARE (identity, personality, core beliefs)
-        - **user.md** - Who the USER is (preferences, relationship)
-        - **memory.md** - What you KNOW (important knowledge, always kept)
-        - **memories/** - What happened (events, observations, timestamped)
-        - **workflow.md** - HOW you work (processes, rules, steps)
-        
-        ## How It Works:
-        If you don't specify intent/target, the tool will classify your
-        request automatically and update the right file(s).
-        
-        Args:
-            content: (Legacy) What to remember/learn/change. Alias for 'request'.
-            request: What you want to remember/learn/change. Can be natural
-                     language like "My name is Cody" or "User prefers concise responses"
-            intent: (Optional) Explicit intent: "remember", "learn", or "change"
-            target: (Optional) Explicit target: "memory", "workflow", "soul", "user"
-        
-        Returns:
-            Confirmation of what was done, or error message
-        
-        Examples:
-            # Natural language (auto-classified):
-            inner_soul(request="My name is Cody")
-            # → Updates soul.md (identity)
-            
-            inner_soul(request="User likes TypeScript")
-            # → Updates user.md (user preference)
-            
-            inner_soul(request="Be cozy with the user")
-            # → Updates soul.md + user.md (personality + relationship)
-            
-            inner_soul(request="Always check for tests before committing")
-            # → Updates workflow.md (process)
-            
-            inner_soul(request="I learned that early testing catches bugs")
-            # → Creates memory file (knowledge)
-            
-            # Legacy API (backward compatible):
-            inner_soul(intent="remember", content="User prefers TypeScript")
-            inner_soul(intent="change", target="workflow", content="Add review step")
-        """
+        """Remember, learn, or change yourself. Use tool_help("inner_soul") for details."""
         try:
             agent_path = Path(agent_dir)
             
@@ -257,6 +210,55 @@ def create_inner_soul_tool(
             
         except Exception as e:
             return f"ERROR: {str(e)}"
+    
+    inner_soul._full_doc_ = """The core of agent growth - remember, learn, and evolve.
+
+This tool understands what you mean, not just what you say.
+It knows which files to update based on the semantic meaning
+of your request.
+
+## Files and Their Purposes:
+- **soul.md** - Who you ARE (identity, personality, core beliefs)
+- **user.md** - Who the USER is (preferences, relationship)
+- **memory.md** - What you KNOW (important knowledge, always kept)
+- **memories/** - What happened (events, observations, timestamped)
+- **workflow.md** - HOW you work (processes, rules, steps)
+
+## How It Works:
+If you don't specify intent/target, the tool will classify your
+request automatically and update the right file(s).
+
+Args:
+    content: (Legacy) What to remember/learn/change. Alias for 'request'.
+    request: What you want to remember/learn/change. Can be natural
+             language like "My name is Cody" or "User prefers concise responses"
+    intent: (Optional) Explicit intent: "remember", "learn", or "change"
+    target: (Optional) Explicit target: "memory", "workflow", "soul", "user"
+
+Returns:
+    Confirmation of what was done, or error message
+
+Examples:
+    # Natural language (auto-classified):
+    inner_soul(request="My name is Cody")
+    # → Updates soul.md (identity)
+    
+    inner_soul(request="User likes TypeScript")
+    # → Updates user.md (user preference)
+    
+    inner_soul(request="Be cozy with the user")
+    # → Updates soul.md + user.md (personality + relationship)
+    
+    inner_soul(request="Always check for tests before committing")
+    # → Updates workflow.md (process)
+    
+    inner_soul(request="I learned that early testing catches bugs")
+    # → Creates memory file (knowledge)
+    
+    # Legacy API (backward compatible):
+    inner_soul(intent="remember", content="User prefers TypeScript")
+    inner_soul(intent="change", target="workflow", content="Add review step")
+"""
     
     return inner_soul
 

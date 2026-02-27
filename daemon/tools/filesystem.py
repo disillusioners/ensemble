@@ -11,18 +11,7 @@ def list_directory(
     path: str = ".",
     show_hidden: bool = False
 ) -> str:
-    """List contents of a directory.
-    
-    Args:
-        path: Directory path to list (default: current directory)
-        show_hidden: Whether to show hidden files (default: False)
-    
-    Returns:
-        Directory listing with file type indicators:
-        - / suffix for directories
-        - @ suffix for symlinks
-        - * suffix for executables
-    """
+    """List directory contents. Use tool_help("list_directory") for details."""
     try:
         dir_path = Path(path).expanduser().resolve()
         
@@ -58,6 +47,18 @@ def list_directory(
     except Exception as e:
         return f"ERROR: {str(e)}"
 
+list_directory._full_doc_ = """List contents of a directory.
+
+Args:
+    path: Directory path to list (default: current directory)
+    show_hidden: Whether to show hidden files (default: False)
+
+Returns:
+    Directory listing with file type indicators:
+    - / suffix for directories
+    - @ suffix for symlinks
+    - * suffix for executables
+"""
 
 @tool
 def read_file(
@@ -65,16 +66,7 @@ def read_file(
     offset: int = 1,
     limit: int = 2000
 ) -> str:
-    """Read contents of a file.
-    
-    Args:
-        path: File path to read
-        offset: Line number to start from (1-indexed, default: 1)
-        limit: Maximum number of lines to read (default: 2000)
-    
-    Returns:
-        File contents with line numbers (format: "line_num: content")
-    """
+    """Read file contents. Use tool_help("read_file") for details."""
     try:
         file_path = Path(path).expanduser().resolve()
         
@@ -109,21 +101,24 @@ def read_file(
     except Exception as e:
         return f"ERROR: {str(e)}"
 
+read_file._full_doc_ = """Read contents of a file.
+
+Args:
+    path: File path to read
+    offset: Line number to start from (1-indexed, default: 1)
+    limit: Maximum number of lines to read (default: 2000)
+
+Returns:
+    File contents with line numbers (format: "line_num: content")
+"""
+
 
 @tool
 def glob_files(
     pattern: str,
     path: str = "."
 ) -> str:
-    """Find files matching a glob pattern.
-    
-    Args:
-        pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
-        path: Base directory to search from (default: current directory)
-    
-    Returns:
-        List of matching file paths, sorted by modification time (newest first)
-    """
+    """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
     try:
         base_path = Path(path).expanduser().resolve()
         
@@ -155,3 +150,13 @@ def glob_files(
         
     except Exception as e:
         return f"ERROR: {str(e)}"
+
+glob_files._full_doc_ = """Find files matching a glob pattern.
+
+Args:
+    pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
+    path: Base directory to search from (default: current directory)
+
+Returns:
+    List of matching file paths, sorted by modification time (newest first)
+"""

@@ -32,14 +32,7 @@ def create_mother_tools(manager: "SessionManager", current_session_id: str):
     
     @tool
     def agent_list(include_system: bool = False) -> list[dict]:
-        """List all available agents.
-        
-        Args:
-            include_system: If True, include system agents (starting with _)
-        
-        Returns:
-            List of agent info dictionaries with id, name, description, purpose
-        """
+        """List all available agents. Use tool_help("agent_list") for details."""
         agents_dir = BASE_DIR / "agents"
         agents = []
         
@@ -95,6 +88,15 @@ def create_mother_tools(manager: "SessionManager", current_session_id: str):
         
         return agents
     
+    agent_list._full_doc_ = """List all available agents.
+
+Args:
+    include_system: If True, include system agents (starting with _)
+
+Returns:
+    List of agent info dictionaries with id, name, description, purpose
+"""
+    
     @tool
     def agent_create(
         name: str,
@@ -108,23 +110,7 @@ def create_mother_tools(manager: "SessionManager", current_session_id: str):
         icon: str = "🤖",
         color: str = "accent-blue",
     ) -> dict:
-        """Create a new agent with the specified configuration.
-        
-        Args:
-            name: Agent identifier (lowercase, underscores, e.g., "code_reviewer")
-            purpose: What the agent does - its main goal
-            personality: How the agent communicates (e.g., "friendly", "formal")
-            workflow: Optional workflow steps the agent should follow
-            rules_must: List of things the agent must always do
-            rules_must_not: List of things the agent must never do
-            tools_extra: Additional tools the agent needs (beyond basics)
-            description: Human-readable description for meta.json
-            icon: Emoji icon for the agent
-            color: Color theme for the agent UI
-        
-        Returns:
-            Dict with success status and agent info, or error message
-        """
+        """Create a new agent with the specified configuration. Use tool_help("agent_create") for details."""
         # Validate name
         if not name.replace("_", "").replace("-", "").isalnum():
             return {
@@ -270,17 +256,27 @@ This agent has access to these additional tools:
                 "error": f"Failed to create agent: {str(e)}"
             }
     
+    agent_create._full_doc_ = """Create a new agent with the specified configuration.
+
+Args:
+    name: Agent identifier (lowercase, underscores, e.g., "code_reviewer")
+    purpose: What the agent does - its main goal
+    personality: How the agent communicates (e.g., "friendly", "formal")
+    workflow: Optional workflow steps the agent should follow
+    rules_must: List of things the agent must always do
+    rules_must_not: List of things the agent must never do
+    tools_extra: Additional tools the agent needs (beyond basics)
+    description: Human-readable description for meta.json
+    icon: Emoji icon for the agent
+    color: Color theme for the agent UI
+
+Returns:
+    Dict with success status and agent info, or error message
+"""
+    
     @tool
     def agent_read(agent_name: str, file: str = "soul.md") -> dict:
-        """Read an agent's file contents.
-        
-        Args:
-            agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
-            file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
-        
-        Returns:
-            Dict with success status and file content, or error message
-        """
+        """Read an agent's file contents. Use tool_help("agent_read") for details."""
         # Protect system agents except _mother (self-read) and _inner_soul (mother can modify)
         if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
             return {
@@ -324,18 +320,19 @@ This agent has access to these additional tools:
                 "error": f"Failed to read file: {str(e)}"
             }
     
+    agent_read._full_doc_ = """Read an agent's file contents.
+
+Args:
+    agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
+    file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
+
+Returns:
+    Dict with success status and file content, or error message
+"""
+    
     @tool
     def agent_modify(agent_name: str, file: str, content: str) -> dict:
-        """Modify an agent's file contents.
-        
-        Args:
-            agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
-            file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md)
-            content: The new content for the file
-        
-        Returns:
-            Dict with success status, or error message
-        """
+        """Modify an agent's file contents. Use tool_help("agent_modify") for details."""
         # Protect system agents except _mother (self-mod) and _inner_soul (mother can modify)
         if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
             return {
@@ -380,17 +377,20 @@ This agent has access to these additional tools:
                 "error": f"Failed to modify file: {str(e)}"
             }
     
+    agent_modify._full_doc_ = """Modify an agent's file contents.
+
+Args:
+    agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
+    file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md)
+    content: The new content for the file
+
+Returns:
+    Dict with success status, or error message
+"""
+    
     @tool
     def agent_delete(agent_name: str, confirm: bool = False) -> dict:
-        """Delete an agent (move to _trash).
-        
-        Args:
-            agent_name: The agent identifier to delete
-            confirm: Must be True to actually delete (safety check)
-        
-        Returns:
-            Dict with success status, or error message
-        """
+        """Delete an agent (move to _trash). Use tool_help("agent_delete") for details."""
         # Protect system agents
         if agent_name.startswith("_"):
             return {
@@ -438,6 +438,16 @@ This agent has access to these additional tools:
                 "success": False,
                 "error": f"Failed to delete agent: {str(e)}"
             }
+    
+    agent_delete._full_doc_ = """Delete an agent (move to _trash).
+
+Args:
+    agent_name: The agent identifier to delete
+    confirm: Must be True to actually delete (safety check)
+
+Returns:
+    Dict with success status, or error message
+"""
     
     return [
         agent_list,
