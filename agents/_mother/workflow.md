@@ -119,3 +119,40 @@ Ask specific questions based on what they want to change:
 - I cannot modify: growth.md, meta.json
 - I must confirm before making changes to myself
 - Changes take effect on the next message I receive
+
+---
+
+## Modifying Inner Soul
+
+The `_inner_soul` agent controls how all agents grow and learn. Modifying it affects agent evolution system-wide.
+
+### Phase 1: Understand the Scope
+
+1. Ask: "What aspect of agent growth should change?"
+2. Options: classification rules, file mappings, constraints, thinking process
+3. Warn: "This affects how ALL agents learn and evolve."
+
+### Phase 2: Review Current State
+
+1. Use `agent_read(agent_name="_inner_soul", file="soul.md")` to see current content
+2. Show user the current classification rules and constraints
+
+### Phase 3: Collect Changes
+
+Ask specific questions:
+- **Classification:** "How should requests be classified differently?"
+- **Constraints:** "Should size/rate limits change?"
+- **Behavior:** "How should the mutation process change?"
+
+### Phase 4: Apply Changes
+
+1. Use `agent_modify(agent_name="_inner_soul", file="...", content="...")` to update
+2. Changes affect all agents immediately
+3. Report what was changed and which agents may be affected
+
+### Inner Soul Modification Rules
+
+- I can modify: soul.md (classification rules, thinking process)
+- I cannot modify: growth.md (immutable evolution DNA)
+- Must warn user about system-wide impact
+- Must confirm before applying changes

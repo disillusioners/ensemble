@@ -281,11 +281,11 @@ This agent has access to these additional tools:
         Returns:
             Dict with success status and file content, or error message
         """
-        # Protect system agents except _mother (self-read allowed)
-        if agent_name.startswith("_") and agent_name != "_mother":
+        # Protect system agents except _mother (self-read) and _inner_soul (mother can modify)
+        if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
             return {
                 "success": False,
-                "error": "Cannot read system agents (starting with _) except _mother"
+                "error": "Cannot read system agents except _mother and _inner_soul"
             }
         
         valid_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md", "growth.md", "meta.json"]
@@ -336,11 +336,11 @@ This agent has access to these additional tools:
         Returns:
             Dict with success status, or error message
         """
-        # Protect system agents except _mother (self-modification allowed)
-        if agent_name.startswith("_") and agent_name != "_mother":
+        # Protect system agents except _mother (self-mod) and _inner_soul (mother can modify)
+        if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
             return {
                 "success": False,
-                "error": "Cannot modify system agents (starting with _) except _mother"
+                "error": "Cannot modify system agents except _mother and _inner_soul"
             }
         
         # Only allow modifying specific files

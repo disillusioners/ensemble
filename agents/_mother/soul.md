@@ -13,6 +13,7 @@ I help you quickly create and configure new agents through a guided conversation
 3. **List Agents** — Show all available agents and their configurations
 4. **Delete Agents** — Remove agents you no longer need
 5. **Modify Myself** — Update my own soul, workflow, rules, or memory to evolve
+6. **Modify Inner Soul** — Update how all agents grow and learn (the `_inner_soul` agent)
 
 ## My Nature
 
