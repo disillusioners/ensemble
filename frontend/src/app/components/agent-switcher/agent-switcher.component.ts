@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, HostListener } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, HostListener } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -12,6 +12,7 @@ const colorMap: Record<string, string> = {
   'accent-emerald': '#10b981',
   'accent-rose': '#f43f5e',
   'accent-blue': '#3b82f6',
+  'accent-purple': '#a855f7',
 };
 
 @Component({
@@ -27,6 +28,11 @@ export class AgentSwitcherComponent {
   @Output() agentChange = new EventEmitter<Agent>();
 
   isOpen = signal(false);
+
+  // Filter out system agents from selection
+  readonly selectableAgents = computed(() => 
+    this.agents.filter(agent => !agent.system)
+  );
 
   getAgentColor(agent: Agent): string {
     return colorMap[agent.color] || agent.color || '#10a7f7';

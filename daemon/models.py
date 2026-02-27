@@ -182,6 +182,7 @@ class AgentInfo(BaseModel):
     color: str = Field(default="accent-blue", description="Color theme for the agent")
     version: str | None = Field(default=None, description="Agent version")
     agent_dir: str = Field(..., description="Path to the agent directory")
+    system: bool = Field(default=False, description="Whether this is a system agent")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -192,7 +193,8 @@ class AgentInfo(BaseModel):
                 "icon": "💻",
                 "color": "accent-cyan",
                 "version": "1.0.0",
-                "agent_dir": "./agents/coder"
+                "agent_dir": "./agents/coder",
+                "system": False
             }
         }
     )

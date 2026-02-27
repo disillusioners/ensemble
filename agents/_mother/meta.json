@@ -1,0 +1,9 @@
+{
+  "id": "_mother",
+  "name": "Mother",
+  "description": "Creates, modifies, and manages other agents",
+  "icon": "🧬",
+  "color": "accent-purple",
+  "version": "1.0.0",
+  "system": true
+}

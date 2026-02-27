@@ -204,8 +204,12 @@ async def list_agents():
     
     if agents_dir.exists():
         for agent_path in sorted(agents_dir.iterdir()):
-            # Skip hidden/internal directories (starting with _)
-            if not agent_path.is_dir() or agent_path.name.startswith("_"):
+            # Skip hidden directories (starting with .) and non-directories
+            if not agent_path.is_dir() or agent_path.name.startswith("."):
+                continue
+            
+            # Skip special internal directories that aren't agents
+            if agent_path.name in ("_trash", "_baby_template"):
                 continue
             
             meta_path = agent_path / "meta.json"
@@ -222,6 +226,7 @@ async def list_agents():
                         color=meta.get("color", "accent-blue"),
                         version=meta.get("version"),
                         agent_dir=f"./agents/{agent_path.name}",
+                        system=meta.get("system", False),
                     ))
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning(f"Failed to load meta.json for {agent_path.name}: {e}")

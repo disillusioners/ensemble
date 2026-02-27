@@ -29,7 +29,7 @@
   @if (isOpen()) {
     <div class="dropdown-menu">
       <div class="menu-content">
-        @for (agent of agents; track agent.id) {
+        @for (agent of selectableAgents(); track agent.id) {
           <button
             class="menu-item"
             [class.selected]="selectedAgent?.id === agent.id"

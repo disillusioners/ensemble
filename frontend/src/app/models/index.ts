@@ -63,6 +63,7 @@ export interface Agent {
   color: string;
   version?: string;
   agent_dir: string;
+  system?: boolean;
 }
 
 export interface AgentListResponse {
