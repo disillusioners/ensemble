@@ -2,14 +2,16 @@
 
 import uuid
 import logging
+import asyncio
+import sqlite3
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
 
 from langgraph.graph.state import CompiledStateGraph
-
-# Create logger for this module
-logger = logging.getLogger(__name__)
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
 
 from .config import Config
 from .graph import build_session_graph
@@ -28,14 +30,13 @@ from .persistence import (
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
-
-import asyncio
-import logging
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
-
-import time
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.outputs import LLMResult
+from .cancellation import (
+    CancellationToken, 
+    CancellationReason,
+    OperationCancelledError
+)
+from .request_registry import ActiveRequestRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,41 @@ class ActivityCallbackHandler(BaseCallbackHandler):
         self._maybe_update()
 
 
+class CancellationCallbackHandler(BaseCallbackHandler):
+    """Callback that checks for cancellation at key points during LLM execution."""
+    
+    def __init__(
+        self, 
+        cancellation_token: CancellationToken,
+        check_interval_tokens: int = 10
+    ):
+        self._token = cancellation_token
+        self._check_interval = check_interval_tokens
+        self._token_count = 0
+    
+    def _check_cancellation(self) -> None:
+        """Check for cancellation and raise if cancelled."""
+        self._token.check()
+    
+    def on_llm_start(self, serialized, prompts, **kwargs) -> None:
+        """Check cancellation before LLM call."""
+        self._check_cancellation()
+    
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        """Check cancellation periodically during streaming."""
+        self._token_count += 1
+        if self._token_count % self._check_interval == 0:
+            self._check_cancellation()
+    
+    def on_tool_start(self, serialized, input_str, **kwargs) -> None:
+        """Check cancellation before tool execution."""
+        self._check_cancellation()
+    
+    def on_chain_start(self, serialized, inputs, **kwargs) -> None:
+        """Check cancellation before chain step."""
+        self._check_cancellation()
+
+
 @dataclass
 class MessageResult:
     """Result of sending a message to a session."""
@@ -119,7 +155,15 @@ class SessionManager:
 
         # NEW: Message queue system
         self.queue = InputMessageQueue(self.conn)
-        self.watchdog = SessionWatchdog(self.queue, self.conn)
+        
+        # NEW: Request registry for cancellation support
+        self._request_registry = ActiveRequestRegistry()
+        
+        self.watchdog = SessionWatchdog(
+            self.queue, 
+            self.conn,
+            request_registry=self._request_registry
+        )
         self.circuit_breaker = SessionCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
         self._processing_lock = asyncio.Lock()
@@ -428,17 +472,39 @@ class SessionManager:
                     data={"status": "processing", "is_retry": is_retry}
                 ))
                 
+                # Register request for cancellation support
+                cancellation_source = self._request_registry.register(
+                    message_id=msg.message_id,
+                    session_id=session_id,
+                    task=asyncio.current_task()
+                )
+                
                 try:
                     result = await asyncio.to_thread(
                         self._process_message_with_tracking,
                         session_id,
                         msg.content,
                         msg.message_id,
+                        cancellation_token=cancellation_source.token,
                         is_retry=is_retry,
                     )
                     
-                    self.queue.ack(msg.message_id)
+                    # Pre-ACK status check to prevent race condition with watchdog
+                    # Always record success since processing completed without error
                     self.circuit_breaker.record_success(session_id)
+                    
+                    cursor = self.conn.execute(
+                        "SELECT status FROM message_queue WHERE message_id = ?",
+                        (msg.message_id,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0] == 'processing':
+                        self.queue.ack(msg.message_id)
+                    else:
+                        logger.warning(
+                            f"Message {msg.message_id[:8]}... status changed to '{row[0] if row else 'unknown'}' "
+                            f"during processing, skipping ack (success already recorded)"
+                        )
                     
                     # Broadcast completed event
                     await self.broadcaster.broadcast(Event(
@@ -452,6 +518,21 @@ class SessionManager:
                             "source": msg.source,  # Required for ResponseDispatcher routing
                         }
                     ))
+                    
+                except OperationCancelledError as e:
+                    logger.info(f"Message {msg.message_id[:8]}... was cancelled: {e.reason.value}")
+                    # Don't schedule retry here - watchdog already did
+                    # Broadcast cancelled event
+                    await self.broadcaster.broadcast(Event(
+                        type="cancelled",
+                        session_id=session_id,
+                        message_id=msg.message_id,
+                        data={"reason": e.reason.value}
+                    ))
+                    
+                except asyncio.CancelledError:
+                    logger.info(f"Message {msg.message_id[:8]}... task was cancelled")
+                    raise  # Re-raise to properly handle task cancellation
                     
                 except Exception as e:
                     logger.error(f"Error processing message {msg.message_id}: {e}")
@@ -487,6 +568,10 @@ class SessionManager:
                                 "retry_count": msg.retry_count
                             }
                         ))
+                
+                finally:
+                    # Always unregister the request
+                    self._request_registry.unregister(msg.message_id)
             
             # Queue is empty - check if this is a child session and send completion report
             if self.queue.is_empty(session_id):
@@ -507,9 +592,10 @@ class SessionManager:
         session_id: str, 
         message: str,
         message_id: str,
+        cancellation_token: CancellationToken | None = None,
         is_retry: bool = False,
     ) -> MessageResult:
-        """Process message with activity tracking.
+        """Process message with activity tracking and cancellation support.
         
         On retry, resumes from checkpoint instead of re-sending message
         to prevent duplicate execution.
@@ -518,10 +604,14 @@ class SessionManager:
             session_id: The session ID.
             message: The message content.
             message_id: The queue message ID.
+            cancellation_token: Optional token to check for cancellation.
             is_retry: If True, attempt to resume from checkpoint.
         
         Returns:
             MessageResult with response data.
+            
+        Raises:
+            OperationCancelledError: If cancellation is requested.
         """
         graph = self.get_session(session_id)
         
@@ -532,9 +622,21 @@ class SessionManager:
             update_interval_seconds=5.0
         )
         
+        # Build callbacks list
+        callbacks: list[BaseCallbackHandler] = [activity_callback]
+        
+        # Add cancellation callback if token provided
+        if cancellation_token:
+            # Check cancellation before starting
+            cancellation_token.check()
+            cancellation_callback = CancellationCallbackHandler(
+                cancellation_token=cancellation_token
+            )
+            callbacks.append(cancellation_callback)
+        
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": [activity_callback]
+            "callbacks": callbacks
         }
         
         # On retry with checkpoint, resume instead of re-adding message

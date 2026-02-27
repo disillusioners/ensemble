@@ -1,0 +1,116 @@
+"""Registry for tracking active processing requests."""
+
+import threading
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+from .cancellation import CancellationTokenSource, CancellationReason
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ActiveRequest:
+    """Tracks an actively processing message."""
+    message_id: str
+    session_id: str
+    cancellation_source: CancellationTokenSource
+    started_at: datetime
+    task: Optional[asyncio.Task] = None
+    thread_id: Optional[int] = None
+
+
+class ActiveRequestRegistry:
+    """Thread-safe registry for tracking and cancelling active requests.
+    
+    This is the bridge between the Watchdog (sync thread) and the
+    SessionManager (async event loop).
+    """
+    
+    def __init__(self):
+        self._requests: dict[str, ActiveRequest] = {}  # message_id -> ActiveRequest
+        self._by_session: dict[str, set[str]] = {}  # session_id -> set of message_ids
+        self._lock = threading.RLock()
+    
+    def register(
+        self,
+        message_id: str,
+        session_id: str,
+        task: Optional[asyncio.Task] = None
+    ) -> CancellationTokenSource:
+        """Register a new active request.
+        
+        Returns:
+            CancellationTokenSource that can be used to cancel this request.
+        """
+        source = CancellationTokenSource()
+        request = ActiveRequest(
+            message_id=message_id,
+            session_id=session_id,
+            cancellation_source=source,
+            started_at=datetime.now(timezone.utc),
+            task=task,
+            thread_id=threading.current_thread().ident
+        )
+        
+        with self._lock:
+            self._requests[message_id] = request
+            if session_id not in self._by_session:
+                self._by_session[session_id] = set()
+            self._by_session[session_id].add(message_id)
+        
+        logger.debug(f"Registered active request {message_id[:8]}... for session {session_id[:8]}...")
+        return source
+    
+    def unregister(self, message_id: str) -> None:
+        """Unregister a completed request."""
+        with self._lock:
+            request = self._requests.pop(message_id, None)
+            if request:
+                session_id = request.session_id
+                if session_id in self._by_session:
+                    self._by_session[session_id].discard(message_id)
+                    if not self._by_session[session_id]:
+                        del self._by_session[session_id]
+                logger.debug(f"Unregistered request {message_id[:8]}...")
+    
+    def cancel(self, message_id: str, reason: CancellationReason) -> bool:
+        """Request cancellation of a specific message.
+        
+        Returns:
+            True if cancellation was signalled, False if not found.
+        """
+        with self._lock:
+            request = self._requests.get(message_id)
+            if request is None:
+                return False
+            
+            # Cancel the asyncio task if available
+            if request.task and not request.task.done():
+                # Schedule cancellation on the task's event loop
+                try:
+                    loop = request.task.get_loop()
+                    loop.call_soon_threadsafe(request.task.cancel)
+                except RuntimeError:
+                    pass  # No event loop available
+            
+            # Signal via cancellation token
+            request.cancellation_source.cancel(reason)
+            logger.info(
+                f"Signalled cancellation for {message_id[:8]}... "
+                f"(reason: {reason.value})"
+            )
+            return True
+    
+    def get_active_for_session(self, session_id: str) -> list[str]:
+        """Get list of active message IDs for a session."""
+        with self._lock:
+            return list(self._by_session.get(session_id, set()))
+    
+    def get_request(self, message_id: str) -> Optional[ActiveRequest]:
+        """Get request info by message ID."""
+        with self._lock:
+            return self._requests.get(message_id)

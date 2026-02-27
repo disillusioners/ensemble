@@ -13,6 +13,12 @@ from typing import Any, Optional
 
 import sqlite3
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .request_registry import ActiveRequestRegistry
+    from .cancellation import CancellationReason
+
 logger = logging.getLogger("daemon.queue")
 
 
@@ -23,8 +29,8 @@ MAX_RETRIES = 5
 CHECK_INTERVAL_SECONDS = 30
 
 # Backoff configuration
-INITIAL_BACKOFF_SECONDS = 2
-BACKOFF_MULTIPLIER = 2.5
+INITIAL_BACKOFF_SECONDS = 6
+BACKOFF_MULTIPLIER = 7
 MAX_BACKOFF_SECONDS = 300
 BACKOFF_JITTER = 0.1  # 10%
 
@@ -468,10 +474,22 @@ class SessionCircuitBreaker:
 class SessionWatchdog:
     """Background thread to monitor and recover stuck messages."""
 
-    def __init__(self, queue: InputMessageQueue, conn: sqlite3.Connection):
-        """Initialize the watchdog."""
+    def __init__(
+        self, 
+        queue: "InputMessageQueue", 
+        conn: sqlite3.Connection,
+        request_registry: Optional["ActiveRequestRegistry"] = None
+    ):
+        """Initialize the watchdog.
+        
+        Args:
+            queue: The message queue to monitor.
+            conn: Database connection.
+            request_registry: Optional registry for cancelling active requests.
+        """
         self._queue = queue
         self._conn = conn
+        self._request_registry = request_registry
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -515,6 +533,8 @@ class SessionWatchdog:
 
     def _check_stuck_messages(self) -> None:
         """Find and handle stuck processing messages."""
+        from .cancellation import CancellationReason
+        
         timeout_threshold = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
         
         cursor = self._conn.execute("""
@@ -532,6 +552,16 @@ class SessionWatchdog:
         for row in stuck_messages:
             message_id, session_id, retry_count, max_retries = row
             
+            # Attempt to cancel the running request
+            cancelled = False
+            if self._request_registry:
+                cancelled = self._request_registry.cancel(
+                    message_id, 
+                    CancellationReason.WATCHDOG_RETRY
+                )
+                if cancelled:
+                    logger.info(f"Cancelled stuck request {message_id[:8]}...")
+            
             if retry_count >= max_retries:
                 # Too many retries - mark as failed
                 self._queue.fail(message_id, "Message timed out after max retries")
@@ -543,7 +573,7 @@ class SessionWatchdog:
                     retry_count + 1,
                     f"Message stuck in processing for > {MESSAGE_TIMEOUT_SECONDS}s"
                 )
-                logger.info(f"Message {message_id} scheduled for retry due to stuck processing")
+                logger.info(f"Message {message_id[:8]}... scheduled for retry (cancelled={cancelled})")
 
     def _check_retry_ready_messages(self) -> None:
         """Move retry-ready messages back to ready status."""
