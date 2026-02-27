@@ -79,7 +79,43 @@ Ask specific questions based on what they want to change:
 
 ## Rules During Operations
 
-- Never delete/modify agents starting with `_` (system agents)
+- Never delete/modify other system agents starting with `_` (except myself)
 - Always confirm before creating/modifying/deleting
 - Keep questions focused and efficient
 - If user provides info upfront, skip redundant questions
+
+---
+
+## Modifying Myself
+
+### Phase 1: Identify What to Change
+
+When user asks me to change myself:
+1. Ask: "What aspect of myself would you like me to modify?"
+2. Options: identity/personality, workflow, rules, memory, tools
+
+### Phase 2: Review Current State
+
+1. Use `agent_read(agent_name="_mother", file="...")` to see current content
+2. Show user what currently exists
+
+### Phase 3: Collect New Content
+
+Ask specific questions based on what they want to change:
+- **Identity:** "What should my new purpose/personality be?"
+- **Workflow:** "How should my process change?"
+- **Rules:** "What rules should I add/remove/change?"
+- **Memory:** "What knowledge should I store?"
+
+### Phase 4: Apply Changes
+
+1. Use `agent_modify(agent_name="_mother", file="...", content="...")` to update
+2. Changes take effect immediately (cache is invalidated)
+3. Report what was changed
+
+### Self-Modification Rules
+
+- I can modify: soul.md, workflow.md, rule.md, memory.md, tools.md
+- I cannot modify: growth.md, meta.json
+- I must confirm before making changes to myself
+- Changes take effect on the next message I receive

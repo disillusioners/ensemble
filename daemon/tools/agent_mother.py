@@ -275,17 +275,17 @@ This agent has access to these additional tools:
         """Read an agent's file contents.
         
         Args:
-            agent_name: The agent identifier (e.g., "coder", "leader")
+            agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
             file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
         
         Returns:
             Dict with success status and file content, or error message
         """
-        # Protect system agents
-        if agent_name.startswith("_"):
+        # Protect system agents except _mother (self-read allowed)
+        if agent_name.startswith("_") and agent_name != "_mother":
             return {
                 "success": False,
-                "error": "Cannot read system agents (starting with _)"
+                "error": "Cannot read system agents (starting with _) except _mother"
             }
         
         valid_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md", "growth.md", "meta.json"]
@@ -329,18 +329,18 @@ This agent has access to these additional tools:
         """Modify an agent's file contents.
         
         Args:
-            agent_name: The agent identifier (e.g., "coder", "leader")
+            agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
             file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md)
             content: The new content for the file
         
         Returns:
             Dict with success status, or error message
         """
-        # Protect system agents
-        if agent_name.startswith("_"):
+        # Protect system agents except _mother (self-modification allowed)
+        if agent_name.startswith("_") and agent_name != "_mother":
             return {
                 "success": False,
-                "error": "Cannot modify system agents (starting with _)"
+                "error": "Cannot modify system agents (starting with _) except _mother"
             }
         
         # Only allow modifying specific files
@@ -364,11 +364,15 @@ This agent has access to these additional tools:
             # Write new content
             file_path.write_text(content)
             
+            # Invalidate prompt cache so changes take effect immediately
+            manager.prompt_cache.invalidate(agent_dir)
+            
             return {
                 "success": True,
                 "agent": agent_name,
                 "file": file,
                 "message": f"Updated {file} for agent '{agent_name}'",
+                "cache_invalidated": True,
             }
         except Exception as e:
             return {
