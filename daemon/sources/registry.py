@@ -506,6 +506,12 @@ class SourceRegistry:
                 f"content={msg.content[:50] if msg.content else None}..."
             )
             
+            # Start typing indicator for Telegram sources
+            adapter = self.get(source_id)
+            if adapter and hasattr(adapter, 'start_typing'):
+                await adapter.start_typing(msg.external_user_id)
+                logger.debug(f"Started typing indicator for user {msg.external_user_id}")
+            
             # Trigger queue processing (safe to call even if already processing)
             asyncio.create_task(self._manager._process_queue(session_id))
             logger.debug(f"Triggered queue processing for session {session_id}")

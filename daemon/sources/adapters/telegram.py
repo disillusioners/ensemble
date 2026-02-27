@@ -75,6 +75,9 @@ class TelegramAdapter(MessageSourceAdapter):
         # Per-chat rate limit tracking with LRU eviction
         self._chat_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._chat_locks_guard = asyncio.Lock()
+        
+        # Typing indicator tracking per chat
+        self._typing_tasks: dict[str, asyncio.Task] = {}
     
     @property
     def bot_username(self) -> Optional[str]:
@@ -196,6 +199,10 @@ class TelegramAdapter(MessageSourceAdapter):
         """Stop the adapter gracefully."""
         logger.info(f"Stopping Telegram adapter: {self.source_id}")
         
+        # Stop all typing indicators
+        for chat_id in list(self._typing_tasks.keys()):
+            self.stop_typing(chat_id)
+        
         # Stop polling
         if self._polling_task:
             self._polling_task.cancel()
@@ -220,13 +227,16 @@ class TelegramAdapter(MessageSourceAdapter):
             message: Outgoing message to send
             
         Returns:
-            True if sent successfully, False otherwise
+            True if sent successfully, False otherwise.
         """
         if self._status != SourceStatus.RUNNING:
             logger.warning(f"Cannot send: adapter not running (status={self._status})")
             return False
         
         chat_id = message.external_user_id
+        
+        # Stop typing indicator before sending
+        self.stop_typing(chat_id)
         
         # Validate chat_id format
         if not self._validate_chat_id(chat_id):
@@ -266,6 +276,48 @@ class TelegramAdapter(MessageSourceAdapter):
             except CircuitOpenError:
                 logger.warning(f"Circuit open, cannot send to {chat_id}")
                 return False
+    
+    async def start_typing(self, chat_id: str) -> None:
+        """Start showing typing indicator for a chat.
+        
+        Sends typing action periodically (every 4 seconds) until stopped.
+        Telegram's typing action expires after 5 seconds.
+        
+        Args:
+            chat_id: The Telegram chat ID to show typing for.
+        """
+        # Stop any existing typing task for this chat
+        self.stop_typing(chat_id)
+        
+        async def typing_loop():
+            """Send typing action periodically."""
+            try:
+                while True:
+                    try:
+                        await self._api_call("sendChatAction", chat_id=chat_id, action="typing")
+                        logger.debug(f"Sent typing indicator to chat {chat_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to send typing indicator: {e}")
+                        break
+                    await asyncio.sleep(4)  # Send every 4 seconds (expires after 5)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                logger.debug(f"Typing indicator stopped for chat {chat_id}")
+        
+        self._typing_tasks[chat_id] = asyncio.create_task(typing_loop())
+        logger.debug(f"Started typing indicator for chat {chat_id}")
+    
+    def stop_typing(self, chat_id: str) -> None:
+        """Stop showing typing indicator for a chat.
+        
+        Args:
+            chat_id: The Telegram chat ID to stop typing for.
+        """
+        task = self._typing_tasks.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+            logger.debug(f"Cancelled typing indicator for chat {chat_id}")
     
     async def health_check(self) -> bool:
         """Check if the adapter is healthy."""
