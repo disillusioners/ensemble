@@ -182,8 +182,9 @@ class ResponseDispatcher:
                 return
             
             # Step 3: Parse source as "source_id:external_user_id"
+            # Sources without ":" are internal (e.g., "api") and don't need routing
             if ":" not in source:
-                logger.warning(f"Invalid source format (missing ':'): {source}")
+                logger.debug(f"Skipping internal source (no routing needed): {source}")
                 return
             
             source_id, external_user_id = source.split(":", 1)
