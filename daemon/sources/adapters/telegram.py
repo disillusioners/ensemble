@@ -422,7 +422,8 @@ class TelegramAdapter(MessageSourceAdapter):
                         logger.error(f"Failed to process update {update_id}: {e}", exc_info=True)
                         # Continue to next update instead of breaking
                         # Update will be re-fetched on next poll since we didn't acknowledge it
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                # TimeoutError can occur when CancelledError propagates through aiohttp
                 break
             except Exception as e:
                 logger.error(f"Polling error: {e}", exc_info=True)
