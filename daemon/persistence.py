@@ -613,6 +613,10 @@ def get_session_messages(
             elif kwargs.get("reasoning_content"):
                 thinking = kwargs["reasoning_content"]
         
+        # Parse <think/> tags from content using shared utility
+        from daemon.manager import parse_think_tags
+        content, thinking_extracted = parse_think_tags(content)
+        
         # Extract tool_calls for AI messages
         tool_calls = None
         if msg_type == 'ai' and hasattr(msg, 'tool_calls') and msg.tool_calls:
@@ -645,6 +649,7 @@ def get_session_messages(
             "role": role,
             "content": content,
             "thinking": thinking,
+            "thinking_extracted": thinking_extracted,
             "tool_calls": tool_calls,
             "created_at": datetime.now(timezone.utc).isoformat(),
         })

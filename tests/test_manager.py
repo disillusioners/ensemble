@@ -4,8 +4,54 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 from datetime import datetime
 
-from daemon.manager import SessionManager
+from daemon.manager import SessionManager, parse_think_tags
 from daemon.config import Config, LLMConfig, LimitsConfig, PersistenceConfig, DaemonConfig, AgentsConfig
+
+
+class TestParseThinkTags:
+    """Tests for parse_think_tags utility function."""
+
+    def test_basic_extraction(self):
+        """Test basic think tag extraction."""
+        content = "\x3cthink\x3ethis is my thinking\x3c/think\x3eThe actual response"
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking == "this is my thinking"
+        assert cleaned == "The actual response"
+
+    def test_multiple_tags(self):
+        """Test multiple think tags are combined."""
+        content = "\x3cthink\x3eFirst thought\x3c/think\x3eSome text\x3cthink\x3eSecond thought\x3c/think\x3eMore text"
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking == "First thought\nSecond thought"
+        assert cleaned == "Some textMore text"
+
+    def test_tags_with_attributes(self):
+        """Test think tags with attributes."""
+        content = '\x3cthink budget="123" duration="456"\x3eMy reasoning\x3c/think\x3eResponse'
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking == "My reasoning"
+        assert cleaned == "Response"
+
+    def test_no_tags(self):
+        """Test content without think tags."""
+        content = "Just a regular response"
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking is None
+        assert cleaned == "Just a regular response"
+
+    def test_case_insensitive(self):
+        """Test case insensitive parsing."""
+        content = "\x3cTHINK\x3eUpper case\x3c/THINK\x3eResponse"
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking == "Upper case"
+        assert cleaned == "Response"
+
+    def test_multiline_thinking(self):
+        """Test multiline thinking content."""
+        content = "\x3cthink\x3eLine 1\nLine 2\nLine 3\x3c/think\x3eResponse"
+        cleaned, thinking = parse_think_tags(content)
+        assert thinking == "Line 1\nLine 2\nLine 3"
+        assert cleaned == "Response"
 
 
 @pytest.fixture

@@ -139,6 +139,33 @@ class AsyncMessageResult:
     status: str = "queued"
 
 
+# Pattern for parsing <think/> tags
+_THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
+
+
+def parse_think_tags(content: str) -> tuple[str, str | None]:
+    """Parse <think/> tags from message content.
+    
+    Extracts thinking content from <think...>...</think tags and removes them
+    from the content string. Handles multiple think blocks by combining them
+    with newlines.
+    
+    Args:
+        content: The message content potentially containing think tags.
+        
+    Returns:
+        Tuple of (cleaned_content, thinking_extracted) where:
+        - cleaned_content: Content with think tags removed
+        - thinking_extracted: Combined content from think tags, or None if none found
+    """
+    think_matches = _THINK_PATTERN.findall(content)
+    if think_matches:
+        thinking_extracted = '\n'.join(think_matches).strip()
+        cleaned_content = _THINK_PATTERN.sub('', content).strip()
+        return cleaned_content, thinking_extracted
+    return content, None
+
+
 class SessionManager:
     """Manages all agent sessions, their graphs, and lifecycle."""
 
@@ -365,16 +392,8 @@ class SessionManager:
                     elif metadata.get("reasoning_content"):
                         thinking = metadata["reasoning_content"]
                 
-                # Parse <think...>...</think tags from content if not already extracted
-                # Some OpenAI-compatible providers embed thinking in content instead of metadata
-                thinking_extracted = None
-                think_pattern = r'<think[^>]*>(.*?)</think\s*>'
-                think_matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
-                if think_matches:
-                    # Combine all think blocks
-                    thinking_extracted = '\n'.join(think_matches).strip()
-                    # Remove think tags from content
-                    content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                # Parse <think/> tags from content
+                content, thinking_extracted = parse_think_tags(content)
                 
                 return MessageResult(
                     content=content,
@@ -747,16 +766,8 @@ class SessionManager:
                     elif metadata.get("reasoning_content"):
                         thinking = metadata["reasoning_content"]
                 
-                # Parse <think...>...</think tags from content if not already extracted
-                # Some OpenAI-compatible providers embed thinking in content instead of metadata
-                thinking_extracted = None
-                think_pattern = r'<think[^>]*>(.*?)</think\s*>'
-                think_matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
-                if think_matches:
-                    # Combine all think blocks
-                    thinking_extracted = '\n'.join(think_matches).strip()
-                    # Remove think tags from content
-                    content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                # Parse <think/> tags from content
+                content, thinking_extracted = parse_think_tags(content)
                 
                 return MessageResult(
                     content=content,
