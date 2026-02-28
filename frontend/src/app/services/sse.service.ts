@@ -147,6 +147,7 @@ export class SseService {
               role: 'assistant',
               content: data.content || '',
               thinking: data.thinking || undefined,
+              thinking_extracted: data.thinking_extracted || undefined,
               tool_calls: data.tool_calls || undefined,
               created_at: new Date().toISOString(),
             };

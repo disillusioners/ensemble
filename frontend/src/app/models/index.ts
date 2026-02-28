@@ -22,6 +22,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   thinking?: string;
+  thinking_extracted?: string;
   tool_calls?: ToolCall[];
   error?: string;
   created_at: string;
@@ -43,6 +44,7 @@ export interface MessageResponse {
   role: string;
   content: string | null;
   thinking?: string | null;
+  thinking_extracted?: string | null;
   tool_calls: unknown[] | null;
   created_at: string;
 }

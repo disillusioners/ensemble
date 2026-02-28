@@ -46,13 +46,13 @@
           <div class="message-content" [class.align-right]="message.role === 'user'">
             
             <!-- Thinking block -->
-            @if (message.role === 'assistant' && message.thinking && showThinking) {
+            @if (message.role === 'assistant' && getThinkingContent(message) && showThinking) {
               <div class="thinking-block">
                 <div class="thinking-header">
                   <span>💭</span>
                   <span>Thinking</span>
                 </div>
-                <pre class="thinking-content">{{ message.thinking }}</pre>
+                <pre class="thinking-content">{{ getThinkingContent(message) }}</pre>
               </div>
             }
 

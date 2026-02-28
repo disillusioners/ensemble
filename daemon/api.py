@@ -532,6 +532,7 @@ async def send_message(session_id: str, message: MessageCreate):
         role="assistant",
         content="",  # Response will come async
         thinking=None,
+        thinking_extracted=None,
         tool_calls=None,
         created_at=now,
     )

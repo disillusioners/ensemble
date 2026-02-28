@@ -4,6 +4,7 @@ import uuid
 import logging
 import asyncio
 import sqlite3
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +127,7 @@ class MessageResult:
     """Result of sending a message to a session."""
     content: str
     thinking: str | None = None
+    thinking_extracted: str | None = None  # Extracted from <think/> tags in content
     tool_calls: list[dict[str, Any]] | None = None
 
 
@@ -363,9 +365,21 @@ class SessionManager:
                     elif metadata.get("reasoning_content"):
                         thinking = metadata["reasoning_content"]
                 
+                # Parse <think...>...</think tags from content if not already extracted
+                # Some OpenAI-compatible providers embed thinking in content instead of metadata
+                thinking_extracted = None
+                think_pattern = r'<think[^>]*>(.*?)</think\s*>'
+                think_matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
+                if think_matches:
+                    # Combine all think blocks
+                    thinking_extracted = '\n'.join(think_matches).strip()
+                    # Remove think tags from content
+                    content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                
                 return MessageResult(
                     content=content,
                     thinking=thinking,
+                    thinking_extracted=thinking_extracted,
                     tool_calls=tool_calls,
                 )
         return MessageResult(content="")
@@ -518,6 +532,7 @@ class SessionManager:
                         data={
                             "content": result.content,
                             "thinking": result.thinking,
+                            "thinking_extracted": result.thinking_extracted,
                             "tool_calls": result.tool_calls,
                             "source": msg.source,  # Required for ResponseDispatcher routing
                         }
@@ -732,9 +747,21 @@ class SessionManager:
                     elif metadata.get("reasoning_content"):
                         thinking = metadata["reasoning_content"]
                 
+                # Parse <think...>...</think tags from content if not already extracted
+                # Some OpenAI-compatible providers embed thinking in content instead of metadata
+                thinking_extracted = None
+                think_pattern = r'<think[^>]*>(.*?)</think\s*>'
+                think_matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
+                if think_matches:
+                    # Combine all think blocks
+                    thinking_extracted = '\n'.join(think_matches).strip()
+                    # Remove think tags from content
+                    content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+                
                 return MessageResult(
                     content=content,
                     thinking=thinking,
+                    thinking_extracted=thinking_extracted,
                     tool_calls=tool_calls,
                 )
         

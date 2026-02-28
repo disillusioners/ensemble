@@ -92,4 +92,15 @@ export class ChatInterfaceComponent implements AfterViewChecked {
     // Check if content exists and has non-whitespace characters
     return content != null && content.trim().length > 0;
   }
+
+  getThinkingContent(message: Message): string | null {
+    // Prioritize thinking (from metadata) over thinking_extracted (from tags)
+    if (message.thinking && message.thinking.trim()) {
+      return message.thinking;
+    }
+    if (message.thinking_extracted && message.thinking_extracted.trim()) {
+      return message.thinking_extracted;
+    }
+    return null;
+  }
 }
