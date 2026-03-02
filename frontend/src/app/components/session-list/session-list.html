@@ -70,19 +70,19 @@
         }
         <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
         <div class="session-details">
-          <p class="agent-name">{{ agent?.name || 'Agent' }}</p>
+          <p class="agent-name">
+            {{ agent?.name || 'Agent' }}
+            <span
+              class="status-dot"
+              [style.background-color]="getStatusStyle(session.status).color"
+              [title]="session.status"
+            ></span>
+          </p>
           <p class="session-id">{{ getSessionIdShort(session.session_id) }}</p>
         </div>
       </div>
       
       <div class="session-meta">
-        <span 
-          class="status-badge"
-          [style.background-color]="getStatusStyle(session.status).backgroundColor"
-          [style.color]="getStatusStyle(session.status).color"
-        >
-          {{ session.status }}
-        </span>
         <span class="timestamp">
           {{ formatDate(session.created_at) }}
         </span>

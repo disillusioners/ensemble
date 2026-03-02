@@ -210,9 +210,25 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 
   .active & {
     color: #f1f5f9;
+  }
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: help;
+  transition: transform 0.15s ease;
+
+  &:hover {
+    transform: scale(1.2);
   }
 }
 
@@ -232,14 +248,6 @@
   align-items: flex-end;
   gap: 4px;
   flex-shrink: 0;
-}
-
-.status-badge {
-  padding: 2px 8px;
-  border-radius: 9999px;
-  font-size: 12px;
-  font-weight: 500;
-  text-transform: capitalize;
 }
 
 .timestamp {
