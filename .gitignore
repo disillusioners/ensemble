@@ -50,3 +50,5 @@ logs/
 playground/
 *.db-shm
 *.db-wal
+# Config files
+config.yaml
