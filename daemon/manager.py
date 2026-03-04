@@ -314,7 +314,7 @@ class SessionManager:
 
         return session_id
 
-    def send_message(self, session_id: str, message: str) -> MessageResult:
+    async def send_message(self, session_id: str, message: str) -> MessageResult:
         """Send a message to a session and get the response.
 
         Args:
@@ -332,7 +332,7 @@ class SessionManager:
 
         # Invoke with message
         config = {"configurable": {"thread_id": session_id}}
-        result = graph.invoke({"messages": [message]}, config)
+        result = await graph.ainvoke({"messages": [message]}, config)
 
         # Extract message data from the current turn
         messages = result.get("messages", [])
@@ -831,7 +831,7 @@ class SessionManager:
         
         # After streaming completes, get final result
         # Validate final_result exists
-        final_result = graph.get_state(config)
+        final_result = await graph.aget_state(config)
         if not final_result:
             logger.error(f"No final state for session {session_id} after streaming")
             return MessageResult(content="", tool_calls=None)

@@ -111,7 +111,7 @@ def test_agent_bootstrap_and_hello(integration_config, agent_system_prompt):
     assert len(last_message.content) > 10, "Response seems too short to be meaningful"
 
 
-def test_agent_bootstrap_with_session_manager(integration_config, agent_system_prompt):
+async def test_agent_bootstrap_with_session_manager(integration_config, agent_system_prompt):
     """Test using the full SessionManager to bootstrap an agent.
     
     This validates the complete flow used by the actual application.
@@ -140,7 +140,7 @@ def test_agent_bootstrap_with_session_manager(integration_config, agent_system_p
     assert session_id in manager.sessions, "Session should be registered"
     
     # Send hello message
-    response = manager.send_message(session_id, "Hello! Please respond briefly.")
+    response = await manager.send_message(session_id, "Hello! Please respond briefly.")
     
     # Validate response
     assert response, "Should receive a non-empty response"

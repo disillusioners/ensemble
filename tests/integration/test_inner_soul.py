@@ -79,7 +79,7 @@ inner_soul(intent="learn", content="Testing early catches bugs")
     return str(agent_dir)
 
 
-def test_inner_soul_remember_e2e(integration_config, test_agent_dir):
+async def test_inner_soul_remember_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent uses inner_soul to remember something.
     
     Flow:
@@ -107,7 +107,7 @@ def test_inner_soul_remember_e2e(integration_config, test_agent_dir):
 
 Use the inner_soul tool with intent="remember" to store this information."""
     
-    response = manager.send_message(session_id, message)
+    response = await manager.send_message(session_id, message)
     
     # Verify response exists (MessageResult has .content attribute)
     assert response.content, "Should receive a response"
@@ -138,7 +138,7 @@ Use the inner_soul tool with intent="remember" to store this information."""
     manager.terminate_session(session_id)
 
 
-def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir):
+async def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent uses inner_soul to change workflow.
     
     Flow:
@@ -162,7 +162,7 @@ def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir):
 
 Use: inner_soul(intent="change", target="workflow", content="Step 4: Review response before sending")"""
     
-    response = manager.send_message(session_id, message)
+    response = await manager.send_message(session_id, message)
     
     assert response.content, "Should receive a response"
     print(f"\n[INNER_SOUL TEST] Workflow change response: {response.content[:500]}...")
@@ -182,7 +182,7 @@ Use: inner_soul(intent="change", target="workflow", content="Step 4: Review resp
     manager.terminate_session(session_id)
 
 
-def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agent_dir):
+async def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent proposes soul change (requires approval).
     
     Flow:
@@ -210,7 +210,7 @@ def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agent_dir)
 
 Use: inner_soul(intent="change", target="soul", content="I value clear communication in all interactions")"""
     
-    response = manager.send_message(session_id, message)
+    response = await manager.send_message(session_id, message)
     
     assert response.content, "Should receive a response"
     print(f"\n[INNER_SOUL TEST] Soul proposal response: {response.content[:500]}...")

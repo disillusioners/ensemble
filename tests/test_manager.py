@@ -226,7 +226,8 @@ class TestSpawnSession:
 class TestSendMessage:
     """Tests for send_message method."""
 
-    def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test sending message to session."""
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -240,13 +241,15 @@ class TestSendMessage:
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             # Send a message
-            response = manager.send_message(session_id, "Hello!")
+            response = await manager.send_message(session_id, "Hello!")
             
-            # Verify graph.invoke was called
-            mock_graph.invoke.assert_called_once()
+            # Verify graph.ainvoke was called
+            mock_graph.ainvoke.assert_called_once()
             assert response.content == "Test response"
 
-    def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    @pytest.mark.asyncio
+    @pytest.mark.asyncio
+    async def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test error when session doesn't exist."""
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
@@ -254,7 +257,7 @@ class TestSendMessage:
             manager = SessionManager(mock_config)
             
             with pytest.raises(KeyError, match="Session not found"):
-                manager.send_message("non-existent-session", "Hello!")
+                await manager.send_message("non-existent-session", "Hello!")
 
 
 class TestTerminateSession:
@@ -346,14 +349,15 @@ class TestListSessions:
 class TestThinkTagParsing:
     """Tests for <think/> tag parsing in message responses."""
 
-    def test_think_tag_extracted_from_content(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_think_tag_extracted_from_content(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that <think/> tags are extracted and removed from content."""
         # Use spec=[] to prevent Mock from auto-creating attributes like 'thinking'
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = "<think>this is my thinking</think>The actual response"
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -366,7 +370,7 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             # Thinking should be extracted
             assert result.thinking_extracted == "this is my thinking"
@@ -375,13 +379,14 @@ class TestThinkTagParsing:
             # No metadata thinking in this case
             assert result.thinking is None
 
-    def test_multiple_think_tags_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_multiple_think_tags_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that multiple <think/> tags are combined."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = "<think>First thought</think>Some text<think>Second thought</think>More text"
+        mock_message.content = '<think>First thought</think>Some text<think>Second thought</think>More text'
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -394,20 +399,22 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             # Both thoughts should be combined with newline
             assert result.thinking_extracted == "First thought\nSecond thought"
             # Content should have all tags removed
             assert result.content == "Some textMore text"
 
-    def test_think_tag_with_attributes(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_think_tag_with_attributes(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that <think/> tags with attributes are parsed."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = '<think budget="123" duration="456">My reasoning here</think>Response'
+        mock_message.content = '<think budget="123" duration="456">My reasoning here</think>Another thought'
+
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -420,20 +427,21 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             assert result.thinking_extracted == "My reasoning here"
             assert result.content == "Response"
 
-    def test_thinking_metadata_priority_over_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
-        """Test that metadata thinking is kept separate from extracted thinking."""
-        mock_message = Mock(spec=['content', 'type', 'tool_calls', 'additional_kwargs'])
-        mock_message.content = "<think>Extracted thinking</think>Response"
+    @pytest.mark.asyncio
+    async def test_thinking_metadata_priority_over_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+        """Test that metadata thinking takes priority over extracted thinking."""
+        mock_message = Mock(spec=['content', 'type', 'tool_calls'])
+        mock_message.content = '<think>Extracted thinking</think>Response'
         mock_message.type = 'ai'
         mock_message.tool_calls = []
         # Simulate metadata thinking (from provider)
         mock_message.additional_kwargs = {"reasoning_content": "Metadata thinking"}
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -446,20 +454,21 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             # Both should be populated separately
             assert result.thinking == "Metadata thinking"
             assert result.thinking_extracted == "Extracted thinking"
             assert result.content == "Response"
 
-    def test_no_think_tag_returns_none_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_no_think_tag_returns_none_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that response without think tags has None for thinking_extracted."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = "Just a regular response"
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -472,19 +481,20 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             assert result.thinking_extracted is None
             assert result.thinking is None
             assert result.content == "Just a regular response"
 
-    def test_case_insensitive_think_tags(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    @pytest.mark.asyncio
+    async def test_case_insensitive_think_tags(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that <THINK> and <Think> tags are also parsed."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = "<THINK>Upper case thinking</THINK>Response"
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
         with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
@@ -497,7 +507,7 @@ class TestThinkTagParsing:
             manager = SessionManager(mock_config)
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
-            result = manager.send_message(session_id, "Hello!")
+            result = await manager.send_message(session_id, "Hello!")
             
             assert result.thinking_extracted == "Upper case thinking"
             assert result.content == "Response"

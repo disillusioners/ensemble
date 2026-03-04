@@ -80,7 +80,7 @@ inner_soul(intent="remember", content="User prefers TypeScript")
     return str(agent_dir)
 
 
-def test_inner_soul_remember():
+async def test_inner_soul_remember():
     """Test: agent uses inner_soul to remember something."""
     print("\n" + "="*60)
     print("TEST: inner_soul remember")
@@ -117,7 +117,7 @@ def test_inner_soul_remember():
 Call inner_soul with intent="remember" and the content above."""
     
     print(f"\nSending message: {message[:100]}...")
-    response = manager.send_message(session_id, message)
+    response = await manager.send_message(session_id, message)
     
     print(f"\nAgent response:\n{response.content[:500]}...")
     if response.tool_calls:
@@ -148,7 +148,7 @@ Call inner_soul with intent="remember" and the content above."""
         return False
 
 
-def test_inner_soul_workflow_change():
+async def test_inner_soul_workflow_change():
     """Test: agent uses inner_soul to change workflow."""
     print("\n" + "="*60)
     print("TEST: inner_soul change workflow")
@@ -175,7 +175,7 @@ def test_inner_soul_workflow_change():
 Call: inner_soul(intent="change", target="workflow", content="Step 4: Review before responding")"""
     
     print(f"Sending message...")
-    response = manager.send_message(session_id, message)
+    response = await manager.send_message(session_id, message)
     print(f"Response: {response.content[:300]}...")
     
     workflow_after = workflow_file.read_text()
