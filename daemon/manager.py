@@ -215,16 +215,13 @@ class SessionManager:
 
     @property
     def checkpointer(self):
-        """Get the async checkpointer.
+        """Get the async checkpointer instance.
         
-        Raises:
-            RuntimeError: If checkpointer not initialized. Call await manager.initialize() first.
+        The checkpointer is created lazily on first access and but it must be initialized explicitly via initialize().
+        
+        Returns:
+            AsyncSqliteSaver checkpointer.
         """
-        if self._checkpointer is None:
-            raise RuntimeError(
-                "Checkpointer not initialized. Call 'await manager.initialize()' after creating "
-                "the SessionManager instance."
-            )
         return self._checkpointer
     
     async def initialize(self) -> None:
