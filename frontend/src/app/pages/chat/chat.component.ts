@@ -45,6 +45,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
+  readonly pendingMessage = signal<Message | null>(null);
 
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
@@ -93,6 +94,20 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (latestError) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
+      }
+    });
+
+    // Effect to handle partial/progressive messages
+    effect(() => {
+      const partialMessages = this.sseService.partialMessages();
+      if (partialMessages && partialMessages.size > 0) {
+        // Get the first partial message
+        const firstPartial = partialMessages.values().next().value;
+        if (firstPartial) {
+          this.pendingMessage.set(firstPartial);
+        }
+      } else {
+        this.pendingMessage.set(null);
       }
     });
   }

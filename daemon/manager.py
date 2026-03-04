@@ -517,8 +517,7 @@ class SessionManager:
                 )
                 
                 try:
-                    result = await asyncio.to_thread(
-                        self._process_message_with_tracking,
+                    result = await self._process_message_with_tracking(
                         session_id,
                         msg.content,
                         msg.message_id,
@@ -626,7 +625,7 @@ class SessionManager:
         """Synchronous message processing (wraps existing send_message logic)."""
         return self.send_message(session_id, message)
 
-    def _process_message_with_tracking(
+    async def _process_message_with_tracking(
         self, 
         session_id: str, 
         message: str,
@@ -678,105 +677,158 @@ class SessionManager:
             "callbacks": callbacks
         }
         
-        # On retry with checkpoint, resume instead of re-adding message
+        # Variables to collect during streaming
+        all_tool_calls = []
+        tool_call_map = {}  # Track tool calls by ID to match with outputs
+        thinking_content = None
+        final_content = ""
+        
+        # Build input - on retry with checkpoint, resume from None
         if is_retry and self._has_checkpoint(session_id):
             logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry)")
-            result = graph.invoke(None, config)
+            graph_input = None  # LangGraph will resume from checkpoint
         else:
             # First attempt or no checkpoint - add message to conversation
-            result = graph.invoke({"messages": [message]}, config)
+            graph_input = {"messages": [message]}
         
-        # Extract message data from the current turn
-        messages = result.get("messages", [])
-        
-        if messages:
-            # Find where the current turn starts (last HumanMessage from this invoke)
-            # We only want to process messages from the current turn, not history
-            current_turn_start = 0
-            for i, msg in enumerate(messages):
-                # HumanMessage is the user's input
-                if hasattr(msg, 'type') and msg.type == 'human':
-                    current_turn_start = i
+        # Stream through graph execution
+        # When using multiple stream modes, events are tuples: (mode, data)
+        async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
+            # Unpack tuple: (mode, data)
+            if isinstance(event, tuple):
+                mode, data = event
+            else:
+                # Single mode - treat as updates
+                mode = "updates"
+                data = event
             
-            # Get messages from current turn only
-            current_turn_messages = messages[current_turn_start:]
-            
-            # Build map of tool_call_id -> output from ToolMessages in current turn
-            tool_outputs = {}
-            for msg in current_turn_messages:
-                if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
-                    tool_outputs[msg.tool_call_id] = msg.content
-            
-            # Collect all tool_calls from AIMessages in current turn
-            all_tool_calls = []
-            for msg in current_turn_messages:
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        # Handle both dict and object formats
-                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                        output = tool_outputs.get(tc_id)
+            if mode == "updates":
+                # Handle node-level updates
+                if "agent" in data:
+                    # Agent node completed - could have new thinking or content
+                    agent_output = data["agent"]
+                    if "messages" in agent_output:
+                        latest_msg = agent_output["messages"][-1]
+                        if hasattr(latest_msg, 'content'):
+                            final_content = latest_msg.content or ""
                         
-                        if isinstance(tc, dict):
-                            all_tool_calls.append({
-                                "id": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "arguments": tc.get("args", {}),
-                                "output": output,
-                            })
-                        else:
-                            all_tool_calls.append({
-                                "id": getattr(tc, "id", ""),
-                                "name": getattr(tc, "name", ""),
-                                "arguments": getattr(tc, "args", {}),
-                                "output": output,
-                            })
+                        # Extract thinking from the message
+                        if hasattr(latest_msg, 'thinking') and latest_msg.thinking:
+                            thinking_content = latest_msg.thinking
+                            
+                            # Broadcast thinking event
+                            await self.broadcaster.broadcast(Event(
+                                type="thinking",
+                                session_id=session_id,
+                                message_id=message_id,
+                                data={"content": thinking_content}
+                            ))
+                        
+                        # Track tool calls from AI message for matching
+                        if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
+                            for tc in latest_msg.tool_calls:
+                                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                                tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                                tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                
+                                # Store for matching with tool output
+                                tool_call_map[tc_id] = {
+                                    "name": tc_name,
+                                    "args": tc_args,
+                                }
+                                
+                                # Broadcast tool_call event (tool starting)
+                                await self.broadcaster.broadcast(Event(
+                                    type="tool_call",
+                                    session_id=session_id,
+                                    message_id=message_id,
+                                    data={
+                                        "id": tc_id,
+                                        "name": tc_name,
+                                        "arguments": tc_args,
+                                    }
+                                ))
+                
+                elif "tools" in data:
+                    # Tools node completed - tool execution finished
+                    tool_messages = data["tools"].get("messages", [])
+                    for tool_msg in tool_messages:
+                        # Get tool_call_id to match with original call
+                        tool_call_id = getattr(tool_msg, 'tool_call_id', None)
+                        
+                        # Look up original tool call info
+                        original_call = tool_call_map.get(tool_call_id, {})
+                        
+                        tool_call_data = {
+                            "id": tool_call_id,
+                            "name": original_call.get("name", getattr(tool_msg, 'name', 'unknown')),
+                            "output": getattr(tool_msg, 'content', ""),
+                        }
+                        
+                        # Broadcast tool_complete event
+                        await self.broadcaster.broadcast(Event(
+                            type="tool_complete",
+                            session_id=session_id,
+                            message_id=message_id,
+                            data=tool_call_data
+                        ))
             
-            tool_calls = all_tool_calls if all_tool_calls else None
-            
-            # Find the last AIMessage (the current assistant response) for content and thinking
-            last_ai_message = None
-            for msg in reversed(messages):
-                if hasattr(msg, 'type') and msg.type == 'ai':
-                    last_ai_message = msg
-                    break
-            
-            if last_ai_message:
-                content = last_ai_message.content or ""
-                
-                # Extract thinking ONLY from the last AIMessage (for models that support extended thinking)
-                thinking = None
-                
-                # Check direct thinking attribute (some providers)
-                if hasattr(last_ai_message, 'thinking') and last_ai_message.thinking:
-                    thinking = last_ai_message.thinking
-                
-                # Check additional_kwargs (most common for OpenAI-compatible proxies like LiteLLM)
-                elif hasattr(last_ai_message, 'additional_kwargs'):
-                    kwargs = last_ai_message.additional_kwargs or {}
-                    if kwargs.get("thinking"):
-                        thinking = kwargs["thinking"]
-                    elif kwargs.get("reasoning_content"):
-                        thinking = kwargs["reasoning_content"]
-                
-                # Check response_metadata (fallback)
-                elif hasattr(last_ai_message, 'response_metadata'):
-                    metadata = last_ai_message.response_metadata or {}
-                    if metadata.get("thinking"):
-                        thinking = metadata["thinking"]
-                    elif metadata.get("reasoning_content"):
-                        thinking = metadata["reasoning_content"]
-                
-                # Parse <think/> tags from content
-                content, thinking_extracted = parse_think_tags(content)
-                
-                return MessageResult(
-                    content=content,
-                    thinking=thinking,
-                    thinking_extracted=thinking_extracted,
-                    tool_calls=tool_calls,
-                )
+            elif mode == "messages":
+                # Handle token-level streaming
+                # data is a tuple: (message_chunk, metadata)
+                if isinstance(data, tuple) and len(data) == 2:
+                    chunk, metadata = data
+                    if hasattr(chunk, 'content') and chunk.content:
+                        await self.broadcaster.broadcast(Event(
+                            type="content_chunk",
+                            session_id=session_id,
+                            message_id=message_id,
+                            data={"chunk": chunk.content}
+                        ))
         
-        return MessageResult(content="")
+        # After streaming completes, get final result
+        # Re-invoke to get final state (astream doesn't return final state)
+        final_result = graph.get_state(config)
+        messages = final_result.values.get("messages", []) if final_result else []
+        
+        # Build map of tool_call_id -> output from ToolMessages
+        tool_outputs = {}
+        for msg in messages:
+            if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
+                tool_outputs[msg.tool_call_id] = msg.content
+        
+        # Extract tool calls from messages and include outputs
+        for msg in messages:
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                    all_tool_calls.append({
+                        "id": tc_id,
+                        "name": tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                        "arguments": tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {}),
+                        "output": tool_outputs.get(tc_id),  # Include output from ToolMessage
+                    })
+        
+        # Extract thinking from final message
+        for msg in reversed(messages):
+            if hasattr(msg, 'type') and msg.type == 'ai':
+                if hasattr(msg, 'thinking') and msg.thinking:
+                    thinking_content = msg.thinking
+                elif hasattr(msg, 'additional_kwargs'):
+                    kwargs = msg.additional_kwargs or {}
+                    if kwargs.get("thinking"):
+                        thinking_content = kwargs["thinking"]
+                break
+        
+        # Parse <think/> tags from content
+        content, thinking_extracted = parse_think_tags(final_content)
+        
+        return MessageResult(
+            content=content,
+            thinking=thinking_content,
+            thinking_extracted=thinking_extracted,
+            tool_calls=all_tool_calls if all_tool_calls else None,
+        )
 
     async def _summarize_session(self, session_id: str, agent_name: str) -> str:
         """Summarize session messages using LLM.

@@ -20,8 +20,19 @@ export class SseService {
   latestCompletedMessage = signal<Message | null>(null);
   latestError = signal<{ message_id: string; error: string } | null>(null);
   statusUpdates = signal<Map<string, string>>(new Map());
+  partialMessages = signal<Map<string, Message>>(new Map());
 
   constructor(private ngZone: NgZone) {}
+
+  private _createEmptyMessage(messageId: string, sessionId: string): Message {
+    return {
+      type: 'message',
+      message_id: messageId,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+    };
+  }
 
   connect(sessionId: string): void {
     if (this.currentSessionId === sessionId && this.isConnected && this.eventSource) {
@@ -126,6 +137,72 @@ export class SseService {
       });
     });
 
+    eventSource.addEventListener('thinking', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const event: SSEEvent = {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'thinking',
+            session_id: data.session_id,
+            message_id: data.message_id,
+            data: data,
+          };
+          this.events.update(prev => [...prev, event]);
+          
+          // Update or create a partial message with thinking
+          if (data.message_id) {
+            this.partialMessages.update(prev => {
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const updated = {
+                ...existing,
+                thinking: data.content || existing.thinking,
+              };
+              return new Map(prev).set(data.message_id, updated);
+            });
+          }
+        } catch (err) {
+          console.error('Failed to parse thinking event:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('tool_complete', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const event: SSEEvent = {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'tool_complete',
+            session_id: data.session_id,
+            message_id: data.message_id,
+            data: data,
+          };
+          this.events.update(prev => [...prev, event]);
+          
+          // Add tool to partial message
+          if (data.message_id) {
+            this.partialMessages.update(prev => {
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const newToolCall = {
+                id: data.id || `tool-${Date.now()}`,
+                name: data.name || '',
+                arguments: {},
+                output: data.output || '',
+              };
+              const updated = {
+                ...existing,
+                tool_calls: [...(existing.tool_calls || []), newToolCall],
+              };
+              return new Map(prev).set(data.message_id, updated);
+            });
+          }
+        } catch (err) {
+          console.error('Failed to parse tool_complete event:', err);
+        }
+      });
+    });
+
     eventSource.addEventListener('completed', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
@@ -153,6 +230,13 @@ export class SseService {
             };
             this.latestCompletedMessage.set(message);
             this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'completed'));
+            
+            // Clear partial message on completion
+            this.partialMessages.update(prev => {
+              const updated = new Map(prev);
+              updated.delete(data.message_id);
+              return updated;
+            });
           }
         } catch (err) {
           console.error('Failed to parse completed event:', err);

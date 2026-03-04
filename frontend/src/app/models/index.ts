@@ -87,6 +87,8 @@ export type EventType =
   | 'status_changed' 
   | 'content_chunk' 
   | 'tool_call' 
+  | 'thinking'
+  | 'tool_complete'
   | 'completed' 
   | 'error' 
   | 'keepalive';

@@ -103,6 +103,65 @@
         </div>
       }
 
+      <!-- Pending/partial message - shows progressive updates -->
+      @if (pendingMessage) {
+        <div class="message-row assistant-message">
+          <div class="avatar" [style.backgroundColor]="agentColor + '20'">
+            <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
+          </div>
+          <div class="message-content">
+            
+            <!-- Thinking block -->
+            @if (getThinkingContent(pendingMessage) && showThinking) {
+              <div class="thinking-block">
+                <div class="thinking-header">
+                  <span>💭</span>
+                  <span>Thinking</span>
+                </div>
+                <pre class="thinking-content">{{ getThinkingContent(pendingMessage) }}</pre>
+              </div>
+            }
+
+            <!-- Tool calls -->
+            @if (pendingMessage.tool_calls && pendingMessage.tool_calls.length > 0 && showToolCalls) {
+              <div class="tool-calls">
+                @for (tc of getFormattedToolCalls(pendingMessage.tool_calls); track tc.id) {
+                  <div class="tool-call">
+                    <div class="tool-call-header">
+                      <span>🔧</span>
+                      <span>{{ tc.name }}</span>
+                    </div>
+                    @if (tc.formattedArgs) {
+                      <div class="tool-input">
+                        <div class="tool-label">Input:</div>
+                        <pre class="tool-content">{{ tc.formattedArgs }}</pre>
+                      </div>
+                    }
+                    @if (tc.formattedOutput) {
+                      <div class="tool-output">
+                        <div class="tool-label">Output:</div>
+                        <pre class="tool-content output">{{ tc.formattedOutput }}</pre>
+                      </div>
+                    }
+                  </div>
+                }
+              </div>
+            }
+
+            <!-- Main message bubble -->
+            <div 
+              class="message-bubble"
+              [style.backgroundColor]="agentColor + '15'"
+              [style.border]="'1px solid ' + agentColor + '30'"
+              [style.borderTopLeftRadius]="'4px'"
+              [style.borderTopRightRadius]="'12px'"
+            >
+              {{ pendingMessage.content || '...' }}
+            </div>
+          </div>
+        </div>
+      }
+
       <!-- Typing indicator -->
       @if (isLoading) {
         <div class="message-row assistant-message">

@@ -80,6 +80,7 @@
     
     <app-chat-interface
       [messages]="messages()"
+      [pendingMessage]="pendingMessage()"
       [isLoading]="isSending()"
       [agent]="sessionAgent()"
       [sessionId]="currentSession()?.session_id || null"

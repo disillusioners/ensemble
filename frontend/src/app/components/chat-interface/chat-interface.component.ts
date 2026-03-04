@@ -13,6 +13,7 @@ export class ChatInterfaceComponent implements AfterViewChecked {
   @ViewChild('messagesEnd') messagesEndRef!: ElementRef<HTMLDivElement>;
   
   @Input() messages: Message[] = [];
+  @Input() pendingMessage: Message | null = null;
   @Input() isLoading = false;
   @Input() agent: Agent | null | undefined = null;
   @Input() sessionId: string | null = null;
@@ -29,7 +30,7 @@ export class ChatInterfaceComponent implements AfterViewChecked {
 
   constructor() {
     effect(() => {
-      if (this.messages.length > 0 || this.isLoading) {
+      if (this.messages.length > 0 || this.isLoading || this.pendingMessage) {
         this.shouldScroll.set(true);
       }
     });
