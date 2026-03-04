@@ -914,7 +914,7 @@ class SessionManager:
         from langchain_openai import ChatOpenAI
         
         # Get session messages
-        messages = await get_session_messages(self.db_path, session_id)
+        messages = await get_session_messages(self.checkpointer, session_id)
         
         if not messages:
             return f"{agent_name} has done: No activity recorded."
@@ -992,7 +992,7 @@ Provide a concise summary:"""
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_session_messages(self.db_path, session_id)
+        messages = await get_session_messages(self.checkpointer, session_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1229,7 +1229,7 @@ Provide a concise summary:"""
         # Verify session exists
         self.get_session(session_id)  # raises KeyError if not found
         
-        return await get_session_messages(self.db_path, session_id)
+        return await get_session_messages(self.checkpointer, session_id)
 
     def clear_all_sessions(self) -> int:
         """Clear all sessions from memory and database.
