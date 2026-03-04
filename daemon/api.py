@@ -585,7 +585,7 @@ async def get_messages(session_id: str):
         )
 
     # Get message history from LangGraph checkpoints
-    return manager.get_messages(session_id)
+    return await manager.get_messages(session_id)
 
 
 # 9. GET /sessions/{session_id}/events - SSE stream

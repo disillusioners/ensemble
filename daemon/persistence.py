@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 logger = logging.getLogger(__name__)
 
@@ -226,16 +226,16 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def get_checkpointer(conn: sqlite3.Connection) -> SqliteSaver:
-    """Create and return a SqliteSaver checkpointer.
+def get_checkpointer(conn: sqlite3.Connection) -> AsyncSqliteSaver:
+    """Create and return an AsyncSqliteSaver checkpointer.
     
     Args:
         conn: SQLite database connection.
         
     Returns:
-        SqliteSaver: LangGraph checkpointer instance.
+        AsyncSqliteSaver: LangGraph async checkpointer instance.
     """
-    return SqliteSaver(conn)
+    return AsyncSqliteSaver(conn)
 
 
 def get_agent_name(agent_dir: str) -> str:
@@ -485,7 +485,7 @@ def delete_all_sessions(conn: sqlite3.Connection) -> int:
 
 def cleanup_old_checkpoints(
     conn: sqlite3.Connection,
-    checkpointer: SqliteSaver,
+    checkpointer: AsyncSqliteSaver,
     ttl_hours: int,
     max_count: int
 ) -> dict[str, Any]:
@@ -548,7 +548,7 @@ def cleanup_message_queue(
     return deleted
 
 
-def get_session_messages(
+async def get_session_messages(
     conn: sqlite3.Connection,
     session_id: str
 ) -> list[dict[str, Any]]:
@@ -564,11 +564,11 @@ def get_session_messages(
     from datetime import datetime, timezone
     import uuid
     
-    checkpointer = SqliteSaver(conn)
+    checkpointer = AsyncSqliteSaver(conn)
     config = {"configurable": {"thread_id": session_id}}
     
-    # Get the current state from checkpointer
-    state = checkpointer.get(config)
+    # Get the current state from async checkpointer
+    state = await checkpointer.aget(config)
     if state is None:
         return []
     

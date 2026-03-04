@@ -684,7 +684,7 @@ class SessionManager:
         final_content = ""
         
         # Build input - on retry with checkpoint, resume from None
-        if is_retry and self._has_checkpoint(session_id):
+        if is_retry and await self._has_checkpoint(session_id):
             logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry)")
             graph_input = None  # LangGraph will resume from checkpoint
         else:
@@ -889,7 +889,7 @@ class SessionManager:
         from langchain_openai import ChatOpenAI
         
         # Get session messages
-        messages = get_session_messages(self.conn, session_id)
+        messages = await get_session_messages(self.conn, session_id)
         
         if not messages:
             return f"{agent_name} has done: No activity recorded."
@@ -954,7 +954,7 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done: Completed {len(messages)} message(s)."
 
-    def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
+    async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
         """Get the last assistant message from session history.
         
         This is the default/simple approach for completion reports - just
@@ -967,7 +967,7 @@ Provide a concise summary:"""
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = get_session_messages(self.conn, session_id)
+        messages = await get_session_messages(self.conn, session_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1013,7 +1013,7 @@ Provide a concise summary:"""
         if use_llm_summary:
             summary = await self._summarize_session(session_id, agent_name)
         else:
-            summary = self._get_last_assistant_message(session_id, agent_name)
+            summary = await self._get_last_assistant_message(session_id, agent_name)
         
         # Enqueue report message to parent
         message_id = self.queue.enqueue(
@@ -1046,7 +1046,7 @@ Provide a concise summary:"""
         """Get queue statistics for a session."""
         return self.queue.get_stats(session_id)
 
-    def _has_checkpoint(self, session_id: str) -> bool:
+    async def _has_checkpoint(self, session_id: str) -> bool:
         """Check if a checkpoint exists for this session.
         
         Args:
@@ -1057,8 +1057,8 @@ Provide a concise summary:"""
         """
         try:
             config = {"configurable": {"thread_id": session_id}}
-            # Get the current state from checkpointer
-            state = self.checkpointer.get(config)
+            # Get the current state from async checkpointer
+            state = await self.checkpointer.aget(config)
             return state is not None
         except Exception:
             return False
@@ -1189,7 +1189,7 @@ Provide a concise summary:"""
             raise KeyError(f"Session not found: {session_id}")
         return meta
 
-    def get_messages(self, session_id: str) -> list[dict]:
+    async def get_messages(self, session_id: str) -> list[dict]:
         """Get message history for a session.
 
         Args:
@@ -1204,7 +1204,7 @@ Provide a concise summary:"""
         # Verify session exists
         self.get_session(session_id)  # raises KeyError if not found
         
-        return get_session_messages(self.conn, session_id)
+        return await get_session_messages(self.conn, session_id)
 
     def clear_all_sessions(self) -> int:
         """Clear all sessions from memory and database.

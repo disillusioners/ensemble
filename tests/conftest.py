@@ -40,6 +40,9 @@ mock_langgraph_checkpoint = create_mock_module("langgraph.checkpoint")
 mock_langgraph_checkpoint_sqlite = create_mock_module("langgraph.checkpoint.sqlite", {
     "SqliteSaver": MagicMock()
 })
+mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.sqlite.aio", {
+    "AsyncSqliteSaver": MagicMock()
+})
 
 # Pre-populate sys.modules
 _mock_modules = {
@@ -50,6 +53,7 @@ _mock_modules = {
     "langgraph.constants": mock_langgraph_constants,
     "langgraph.checkpoint": mock_langgraph_checkpoint,
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
+    "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
 }
 
 # Save and replace modules

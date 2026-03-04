@@ -50,8 +50,8 @@ async def mock_manager():
         session_id="test-session-id",
         status="queued"
     ))
-    # Mock get_messages for message history
-    manager.get_messages = Mock(return_value=[])
+    # Mock get_messages for message history (now async)
+    manager.get_messages = AsyncMock(return_value=[])
     # Mock conn for source endpoints (temp SQLite file)
     temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
     temp_db_path = temp_db.name
