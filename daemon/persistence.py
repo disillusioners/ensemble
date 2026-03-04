@@ -242,21 +242,6 @@ async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
         return saver
 
 
-def create_checkpointer(db_path: Path) -> AsyncSqliteSaver:
-    """Create an AsyncSqliteSaver checkpointer synchronously.
-    
-    This is a convenience function that can be used in synchronous contexts
-    like __init__ methods.
-    
-    Args:
-        db_path: Path to the SQLite database file.
-        
-    Returns:
-        AsyncSqliteSaver: LangGraph async checkpointer instance.
-    """
-    return asyncio.run(get_checkpointer(db_path))
-
-
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
     

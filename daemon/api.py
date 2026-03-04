@@ -142,6 +142,7 @@ async def lifespan(app: FastAPI):
     global manager, start_time
     config = load_config()
     manager = SessionManager(config)
+    await manager.initialize()  # Initialize async checkpointer within async context
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     start_time = time.time()

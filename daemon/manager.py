@@ -18,7 +18,6 @@ from .config import Config
 from .graph import build_session_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
-    create_checkpointer,
     get_checkpointer,
     init_database,
     list_all_sessions,
@@ -179,7 +178,7 @@ class SessionManager:
         self.config = config
         self.conn = init_database(Path(config.persistence.db_path))
         self.db_path = Path(config.persistence.db_path)
-        self.checkpointer = create_checkpointer(self.db_path)
+        self._checkpointer = None  # Lazy init - call await manager.initialize() to set
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
@@ -213,6 +212,30 @@ class SessionManager:
 
         # Start watchdog
         self.watchdog.start()
+
+    @property
+    def checkpointer(self):
+        """Get the async checkpointer.
+        
+        Raises:
+            RuntimeError: If checkpointer not initialized. Call await manager.initialize() first.
+        """
+        if self._checkpointer is None:
+            raise RuntimeError(
+                "Checkpointer not initialized. Call 'await manager.initialize()' after creating "
+                "the SessionManager instance."
+            )
+        return self._checkpointer
+    
+    async def initialize(self) -> None:
+        """Initialize the async checkpointer.
+        
+        Must be called after SessionManager construction, typically in the FastAPI
+        lifespan startup. This ensures the async checkpointer is created within
+        an async context.
+        """
+        self._checkpointer = await get_checkpointer(self.db_path)
+        logger.info("SessionManager initialized with async checkpointer")
 
     def spawn_session(
         self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
