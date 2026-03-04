@@ -218,6 +218,13 @@ export class SseService {
           
           // Create a Message object from the completed event
           if (data.message_id) {
+            // Get the partial message that was built during streaming
+            const partialMessage = this.partialMessages().get(data.message_id);
+            
+            // Use tool_calls from partial message (which has outputs) if available,
+            // otherwise fall back to completed event data
+            const toolCalls = partialMessage?.tool_calls || data.tool_calls || undefined;
+            
             const message: Message = {
               type: 'message',
               message_id: data.message_id,
@@ -225,7 +232,7 @@ export class SseService {
               content: data.content || '',
               thinking: data.thinking || undefined,
               thinking_extracted: data.thinking_extracted || undefined,
-              tool_calls: data.tool_calls || undefined,
+              tool_calls: toolCalls,
               created_at: new Date().toISOString(),
             };
             this.latestCompletedMessage.set(message);
