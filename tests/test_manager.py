@@ -112,7 +112,7 @@ class TestSessionManagerInit:
 
     def test_session_manager_init(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test manager initialization."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -128,7 +128,7 @@ class TestSpawnSession:
 
     def test_spawn_session_generates_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that session_id is auto-generated."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -145,7 +145,7 @@ class TestSpawnSession:
 
     def test_spawn_session_uses_provided_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that provided session_id is used."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -160,7 +160,7 @@ class TestSpawnSession:
 
     def test_spawn_session_max_sessions_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that max_sessions limit is enforced."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_sessions to 2 for this test
@@ -184,7 +184,7 @@ class TestSpawnSession:
 
     def test_spawn_session_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that max_children_per_session limit is enforced."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_children_per_session to 2 for this test
@@ -205,7 +205,7 @@ class TestSpawnSession:
 
     def test_spawn_session_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test that graph is created and stored."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph) as mock_build, \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -228,7 +228,7 @@ class TestSendMessage:
 
     def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test sending message to session."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -248,7 +248,7 @@ class TestSendMessage:
 
     def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -262,7 +262,7 @@ class TestTerminateSession:
 
     def test_terminate_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test terminating session."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -282,7 +282,7 @@ class TestTerminateSession:
 
     def test_terminate_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test terminating non-existent session."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -297,7 +297,7 @@ class TestGetSession:
 
     def test_get_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
         """Test getting session graph."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -314,7 +314,7 @@ class TestGetSession:
 
     def test_get_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
@@ -328,7 +328,7 @@ class TestListSessions:
 
     def test_list_sessions(self, mock_config, mock_checkpointer, mock_prompt_cache):
         """Test listing sessions."""
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.list_all_sessions', return_value=[
                  {"session_id": "session-1", "agent_dir": "/path/1", "status": "running"},
@@ -355,7 +355,7 @@ class TestThinkTagParsing:
         mock_message.tool_calls = []
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -383,7 +383,7 @@ class TestThinkTagParsing:
         mock_message.tool_calls = []
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -409,7 +409,7 @@ class TestThinkTagParsing:
         mock_message.tool_calls = []
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -435,7 +435,7 @@ class TestThinkTagParsing:
         mock_message.additional_kwargs = {"reasoning_content": "Metadata thinking"}
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -461,7 +461,7 @@ class TestThinkTagParsing:
         mock_message.tool_calls = []
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
@@ -486,7 +486,7 @@ class TestThinkTagParsing:
         mock_message.tool_calls = []
         mock_graph.invoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.get_checkpointer', return_value=mock_checkpointer), \
+        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
              patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \

@@ -18,6 +18,7 @@ from .config import Config
 from .graph import build_session_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
+    create_checkpointer,
     get_checkpointer,
     init_database,
     list_all_sessions,
@@ -177,7 +178,8 @@ class SessionManager:
         """
         self.config = config
         self.conn = init_database(Path(config.persistence.db_path))
-        self.checkpointer = get_checkpointer(self.conn)
+        self.db_path = Path(config.persistence.db_path)
+        self.checkpointer = create_checkpointer(self.db_path)
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
@@ -889,7 +891,7 @@ class SessionManager:
         from langchain_openai import ChatOpenAI
         
         # Get session messages
-        messages = await get_session_messages(self.conn, session_id)
+        messages = await get_session_messages(self.db_path, session_id)
         
         if not messages:
             return f"{agent_name} has done: No activity recorded."
@@ -967,7 +969,7 @@ Provide a concise summary:"""
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_session_messages(self.conn, session_id)
+        messages = await get_session_messages(self.db_path, session_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1204,7 +1206,7 @@ Provide a concise summary:"""
         # Verify session exists
         self.get_session(session_id)  # raises KeyError if not found
         
-        return await get_session_messages(self.conn, session_id)
+        return await get_session_messages(self.db_path, session_id)
 
     def clear_all_sessions(self) -> int:
         """Clear all sessions from memory and database.

@@ -17,6 +17,7 @@ sys.modules['langgraph.checkpoint.sqlite.aio'].AsyncSqliteSaver = mock_async_sql
 from daemon.persistence import (
     init_database,
     get_checkpointer,
+    create_checkpointer,
     save_session_metadata,
     get_session_metadata,
     update_session_status,
@@ -287,11 +288,8 @@ class TestGetCheckpointer:
     def test_get_checkpointer(self, tmp_path):
         """Test that get_checkpointer returns a SqliteSaver."""
         db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
 
-        checkpointer = get_checkpointer(conn)
+        checkpointer = create_checkpointer(db_path)
 
         # The mock is set up at module import time
         assert checkpointer is not None
-
-        conn.close()
