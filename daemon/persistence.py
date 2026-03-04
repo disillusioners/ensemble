@@ -231,9 +231,10 @@ def init_database(db_path: Path) -> sqlite3.Connection:
 async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     """Create and return an AsyncSqliteSaver checkpointer.
     
-    Note: Does NOT use async context manager because we want to keep
-    the checkpointer alive for the entire application lifetime.
-    The checkpointer will be cleaned up when the application shuts down.
+    Note: This creates the aiosqlite connection directly and which will be
+    kept alive for the entire application lifetime. The checkpointer will
+    be cleaned up when the application shuts down via the cleanup_checkpointer()
+    method on the SessionManager class.
     
     Args:
         db_path: Path to the SQLite database file.
@@ -241,9 +242,9 @@ async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     Returns:
         AsyncSqliteSaver: LangGraph async checkpointer instance.
     """
-    # Create WITHOUT context manager - keep alive for app lifetime
-    saver = await AsyncSqliteSaver.from_conn_string(str(db_path))
-    return saver
+    # Create connection directly - don't use async context manager
+    conn = await aiosqlite.connect(str(db_path))
+    return AsyncSqliteSaver(conn)
 
 
 def get_agent_name(agent_dir: str) -> str:
