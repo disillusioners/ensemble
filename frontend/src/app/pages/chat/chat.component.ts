@@ -193,10 +193,16 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   private handleSessionIdChange(sessionId: string | undefined): void {
+    // Reset sending state when switching sessions to prevent input lock
+    this.isSending.set(false);
+    this.pendingMessage.set(null);
+    this.sendError.set(null);
+
     if (!sessionId) {
       this.currentSession.set(null);
       this.messages.set([]);
       this.sseService.disconnect();
+      this.sseService.clearEvents();
       return;
     }
 
@@ -205,6 +211,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (session) {
       this.currentSession.set(session);
       this.loadMessages(sessionId);
+      this.sseService.clearEvents();
       this.sseService.connect(sessionId);
     } else {
       // Try to get session from API
@@ -212,6 +219,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         next: (sessionData) => {
           this.currentSession.set(sessionData);
           this.loadMessages(sessionId);
+          this.sseService.clearEvents();
           this.sseService.connect(sessionId);
         },
         error: () => {
@@ -244,9 +252,14 @@ export class ChatComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // Reset state when creating new session
+    this.isSending.set(false);
+    this.pendingMessage.set(null);
+    this.sendError.set(null);
     this.currentSession.set(null);
     this.messages.set([]);
     this.sseService.disconnect();
+    this.sseService.clearEvents();
 
     const agentPath = `./agents/${agent.id}`;
     
