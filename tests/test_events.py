@@ -133,7 +133,9 @@ class TestEventBroadcaster:
     @pytest.mark.asyncio
     async def test_get_events_since_returns_missed_events(self, broadcaster):
         """Test getting missed events for reconnection."""
-        # Pre-populate history
+        # Pre-populate history (need to create deque first since it's not a defaultdict)
+        from collections import deque
+        broadcaster._event_history["session-1"] = deque(maxlen=50)
         for i in range(3):
             event = Event(type=f"event{i}", session_id="session-1", event_id=i+1)
             broadcaster._event_history["session-1"].append(event)
