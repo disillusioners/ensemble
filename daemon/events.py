@@ -269,11 +269,20 @@ class EventBroadcaster:
         # Broadcast to session queue if it exists (active SSE connection)
         queue = self._queues.get(session_id)
         if queue is not None:
+            current_size = queue.qsize()
+            if current_size >= self._max_queue_size * 0.9:  # Log warning at 90% capacity
+                logger.warning(
+                    f"Queue near full for session {session_id}: "
+                    f"{current_size}/{self._max_queue_size}, event type={event.type}"
+                )
             try:
                 queue.put_nowait(event)
                 logger.debug(f"Broadcast event {event.type} to session {session_id}")
             except asyncio.QueueFull:
-                logger.warning(f"Event queue full for session {session_id}, dropping event")
+                logger.warning(
+                    f"Event queue full for session {session_id}, dropping event: "
+                    f"type={event.type}, priority={event.priority.name}"
+                )
         
         # Broadcast to global subscribers (e.g., ResponseDispatcher)
         for subscriber_queue in global_subscribers:

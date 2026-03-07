@@ -657,16 +657,22 @@ async def stream_events(session_id: str, request: Request):
             
             # Get the event queue for this session
             queue = await broadcaster.get_queue(session_id)
+            logger.info(f"SSE connected to session {session_id}, queue ready")
 
+            event_count = 0
             while True:
                 # Check for client disconnect
                 if await request.is_disconnected():
-                    logger.debug(f"Client disconnected from session {session_id}")
+                    logger.info(f"Client disconnected from session {session_id} after {event_count} events")
                     break
 
                 try:
                     # Wait for events with timeout
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    event_count += 1
+                    # Log every 50 events to track consumption rate
+                    if event_count % 50 == 0:
+                        logger.debug(f"SSE sent {event_count} events for session {session_id}, queue size: {queue.qsize()}")
                     yield event_to_sse(event)
                 except asyncio.TimeoutError:
                     # Send keepalive to prevent connection timeout

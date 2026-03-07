@@ -726,6 +726,13 @@ class SessionManager:
         thinking_content = None
         final_content = ""
         
+        # Content chunk batching to reduce event rate
+        content_buffer = ""
+        content_buffer_size = 0
+        CONTENT_BATCH_THRESHOLD = 50  # Flush after 50 characters
+        CONTENT_BATCH_TIMEOUT = 0.05  # Or after 50ms (whichever comes first)
+        last_content_flush = 0.0
+        
         # Build input - on retry with checkpoint, resume from None
         if is_retry and await self._has_checkpoint(session_id):
             logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry)")
@@ -828,17 +835,42 @@ class SessionManager:
                             ))
                 
                 elif mode == "messages":
-                    # Handle token-level streaming
+                    # Handle token-level streaming with batching to reduce event rate
                     # data is a tuple: (message_chunk, metadata)
                     if isinstance(data, tuple) and len(data) == 2:
                         chunk, metadata = data
                         if hasattr(chunk, 'content') and chunk.content:
-                            await self.broadcaster.broadcast(Event(
-                                type="content_chunk",
-                                session_id=session_id,
-                                message_id=message_id,
-                                data={"chunk": chunk.content}
-                            ))
+                            content_buffer += chunk.content
+                            content_buffer_size += len(chunk.content)
+                            
+                            # Flush if buffer exceeds threshold
+                            now = time.monotonic()
+                            should_flush = (
+                                content_buffer_size >= CONTENT_BATCH_THRESHOLD or
+                                (now - last_content_flush) >= CONTENT_BATCH_TIMEOUT
+                            )
+                            
+                            if should_flush and content_buffer:
+                                await self.broadcaster.broadcast(Event(
+                                    type="content_chunk",
+                                    session_id=session_id,
+                                    message_id=message_id,
+                                    data={"chunk": content_buffer}
+                                ))
+                                content_buffer = ""
+                                content_buffer_size = 0
+                                last_content_flush = now
+            
+            # Flush any remaining content in buffer after streaming ends
+            if content_buffer:
+                await self.broadcaster.broadcast(Event(
+                    type="content_chunk",
+                    session_id=session_id,
+                    message_id=message_id,
+                    data={"chunk": content_buffer}
+                ))
+                logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
+                
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
             # Broadcast error event
