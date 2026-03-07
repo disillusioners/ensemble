@@ -36,23 +36,29 @@ export class SseService {
   }
 
   connect(sessionId: string): void {
+    console.log('[SSE] connect() called with sessionId:', sessionId, 'currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected);
     if (this.currentSessionId === sessionId && this.isConnected && this.eventSource) {
+      console.log('[SSE] Already connected to this session, returning early');
       return;
     }
 
     this.disconnect();
     this.currentSessionId = sessionId;
+    console.log('[SSE] Calling connectInternal()');
     this.connectInternal();
   }
 
   private connectInternal(): void {
+    console.log('[SSE] connectInternal() called, currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected, 'eventSource:', !!this.eventSource);
     if (!this.currentSessionId) return;
 
     if (this.isConnected && this.eventSource) {
       return;
     }
 
-    const eventSource = new EventSource(`${this.API_BASE}/sessions/${this.currentSessionId}/events`);
+    const url = `${this.API_BASE}/sessions/${this.currentSessionId}/events`;
+    console.log('[SSE] Creating EventSource with URL:', url);
+    const eventSource = new EventSource(url);
     this.eventSource = eventSource;
     this.isStreaming.set(true);
 
@@ -220,6 +226,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          console.log('[SSE] Received completed event:', data.message_id, 'content length:', data.content?.length);
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'completed',
@@ -233,11 +240,11 @@ export class SseService {
           if (data.message_id) {
             // Get the partial message that was built during streaming
             const partialMessage = this.partialMessages().get(data.message_id);
-            
+          
             // Use tool_calls from partial message (which has outputs) if available,
             // otherwise fall back to completed event data
             const toolCalls = partialMessage?.tool_calls || data.tool_calls || undefined;
-            
+          
             const message: Message = {
               type: 'message',
               message_id: data.message_id,
@@ -249,15 +256,21 @@ export class SseService {
               created_at: new Date().toISOString(),
             };
             this.latestCompletedMessage.set(message);
+            console.log('[SSE] Set latestCompletedMessage for:', data.message_id);
             this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'completed'));
-            
+          
             // Clear partial message on completion
             this.partialMessages.update(prev => {
               const updated = new Map(prev);
               updated.delete(data.message_id);
+              console.log('[SSE] Cleared partial message, remaining:', updated.size);
               return updated;
             });
           }
+          
+          // Reset streaming state when completed
+          console.log('[SSE] Setting isStreaming to false');
+          this.isStreaming.set(false);
         } catch (err) {
           console.error('Failed to parse completed event:', err);
         }

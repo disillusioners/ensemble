@@ -277,7 +277,7 @@ class EventBroadcaster:
                 )
             try:
                 queue.put_nowait(event)
-                logger.debug(f"Broadcast event {event.type} to session {session_id}")
+                logger.debug(f"Broadcast event {event.type} (id={event.event_id}) to session {session_id}, queue size now: {queue.qsize()}")
             except asyncio.QueueFull:
                 logger.warning(
                     f"Event queue full for session {session_id}, dropping event: "

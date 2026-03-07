@@ -77,16 +77,20 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle SSE completed messages
     effect(() => {
       const latestMessage = this.sseService.latestCompletedMessage();
+      console.log('[Chat] completed effect triggered, latestMessage:', latestMessage?.message_id, 'role:', latestMessage?.role);
       if (latestMessage && latestMessage.role === 'assistant') {
         this.messages.update(prev => {
           const existingIndex = prev.findIndex(m => m.message_id === latestMessage.message_id);
           if (existingIndex >= 0) {
             const updated = [...prev];
             updated[existingIndex] = latestMessage;
+            console.log('[Chat] Updated existing message at index:', existingIndex);
             return updated;
           }
+          console.log('[Chat] Added new message to list');
           return [...prev, latestMessage];
         });
+        console.log('[Chat] Setting isSending to false');
         this.isSending.set(false);
       }
     });
@@ -103,13 +107,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle partial/progressive messages
     effect(() => {
       const partialMessages = this.sseService.partialMessages();
+      console.log('[Chat] partialMessages effect, size:', partialMessages?.size);
       if (partialMessages && partialMessages.size > 0) {
         // Get the first partial message
         const firstPartial = partialMessages.values().next().value;
         if (firstPartial) {
+          console.log('[Chat] Setting pendingMessage, content length:', firstPartial.content?.length);
           this.pendingMessage.set(firstPartial);
         }
       } else {
+        console.log('[Chat] Clearing pendingMessage');
         this.pendingMessage.set(null);
       }
     });
@@ -248,12 +255,14 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   private handleSessionIdChange(sessionId: string | undefined): void {
+    console.log('[Chat] handleSessionIdChange called with:', sessionId);
     // Reset sending state when switching sessions to prevent input lock
     this.isSending.set(false);
     this.pendingMessage.set(null);
     this.sendError.set(null);
 
     if (!sessionId) {
+      console.log('[Chat] No sessionId, disconnecting SSE');
       this.currentSession.set(null);
       this.messages.set([]);
       this.sseService.disconnect();
@@ -263,23 +272,27 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     // Find session in existing list or load it
     const session = this.sessions().find(s => s.session_id === sessionId);
+    console.log('[Chat] Session found in list:', !!session, 'sessions count:', this.sessions().length);
     if (session) {
+      console.log('[Chat] Using session from list, connecting SSE');
       this.currentSession.set(session);
       this.loadMessages(sessionId);
       this.sseService.clearEvents();
       this.sseService.connect(sessionId);
     } else {
       // Try to get session from API
+      console.log('[Chat] Session not in list, fetching from API');
       this.api.getSession(sessionId).subscribe({
         next: (sessionData) => {
+          console.log('[Chat] Got session from API, connecting SSE');
           this.currentSession.set(sessionData);
           this.loadMessages(sessionId);
           this.sseService.clearEvents();
           this.sseService.connect(sessionId);
         },
-        error: () => {
+        error: (err) => {
           // Session not found - navigate to home
-          console.warn('Session not found:', sessionId);
+          console.warn('[Chat] Session not found:', sessionId, 'error:', err);
           this.router.navigate(['/']);
         }
       });
