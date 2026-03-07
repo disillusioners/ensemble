@@ -92,14 +92,19 @@ export class ChatComponent implements OnInit, OnDestroy {
         });
         console.log('[Chat] Setting isSending to false');
         this.isSending.set(false);
+        // CRITICAL FIX: Reset the signal so it can trigger again on next message
+        this.sseService.latestCompletedMessage.set(null);
+        console.log('[Chat] Reset latestCompletedMessage to null');
       }
     });
 
-    // Effect to handle SSE errors
+    // Fallback effect: Reset isSending if streaming stopped but isSending is still true
     effect(() => {
-      const latestError = this.sseService.latestError();
-      if (latestError) {
-        console.error('Message processing error:', latestError);
+      const streaming = this.sseService.isStreaming();
+      const sending = this.isSending();
+      console.log('[Chat] Streaming effect - isStreaming:', streaming, 'isSending:', sending);
+      if (!streaming && sending) {
+        console.log('[Chat] Fallback: Streaming stopped, resetting isSending');
         this.isSending.set(false);
       }
     });
@@ -134,6 +139,19 @@ export class ChatComponent implements OnInit, OnDestroy {
         if (this.currentSession()?.session_id === titleUpdate.session_id) {
           this.currentSession.update(s => s ? { ...s, title: titleUpdate.title } : null);
         }
+        // FIX: Reset the signal so it can trigger again
+        this.sseService.titleUpdates.set(null);
+      }
+    });
+    
+    // Effect to handle SSE errors - reset the signal after consumption
+    effect(() => {
+      const latestError = this.sseService.latestError();
+      if (latestError) {
+        console.error('Message processing error:', latestError);
+        this.isSending.set(false);
+        // FIX: Reset the signal so it can trigger again
+        this.sseService.latestError.set(null);
       }
     });
   }
