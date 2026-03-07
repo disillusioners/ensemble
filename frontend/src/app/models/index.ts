@@ -7,6 +7,7 @@ export interface SessionInfo {
   status: SessionStatus;
   parent_id: string | null;
   children: string[];
+  title?: string | null;
   created_at: string;
   updated_at: string | null;
 }
@@ -95,7 +96,8 @@ export type EventType =
   | 'tool_complete'
   | 'completed' 
   | 'error' 
-  | 'keepalive';
+  | 'keepalive'
+  | 'title_updated';
 
 export interface SSEEvent {
   event_id: number;

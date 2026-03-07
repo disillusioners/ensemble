@@ -113,6 +113,22 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.pendingMessage.set(null);
       }
     });
+
+    // Effect to handle title updates from SSE
+    effect(() => {
+      const titleUpdate = this.sseService.titleUpdates();
+      if (titleUpdate) {
+        this.sessions.update(prev => prev.map(s => 
+          s.session_id === titleUpdate.session_id 
+            ? { ...s, title: titleUpdate.title }
+            : s
+        ));
+        // Also update currentSession if it matches
+        if (this.currentSession()?.session_id === titleUpdate.session_id) {
+          this.currentSession.update(s => s ? { ...s, title: titleUpdate.title } : null);
+        }
+      }
+    });
   }
 
   ngOnDestroy(): void {

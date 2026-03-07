@@ -133,13 +133,6 @@ class EventBroadcaster:
         logger.debug(f"Global subscriber '{subscriber_id}' unregistered")
     
     async def broadcast(self, event: Event) -> None:
-        """Push event to session's queue and history.
-        
-        Also pushes to all global subscribers (e.g., ResponseDispatcher).
-        
-        Args:
-            event: The event to broadcast.
-        """
         session_id = event.session_id
         
         # Thread-safe counter increment and history update
@@ -153,21 +146,14 @@ class EventBroadcaster:
             if len(history) > self._history_size:
                 history.pop(0)
         
-        # Push to session queue (non-blocking, drop if full)
+        # Only broadcast to session queue if there's an active consumer (queue exists and has items waiting)
         queue = self._queues.get(session_id)
-        if queue:
+        if queue and queue.qsize() > 0:
             try:
                 queue.put_nowait(event)
                 logger.debug(f"Broadcast event {event.type} to session {session_id}")
             except asyncio.QueueFull:
                 logger.warning(f"Event queue full for session {session_id}, dropping event")
-        
-        # Push to global subscribers (non-blocking, drop if full)
-        for q in self._global_subscribers:
-            try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
-                logger.warning("Global subscriber queue full, dropping event")
     
     def broadcast_sync(self, event: Event) -> None:
         """Synchronous version of broadcast for use in threads.
@@ -226,6 +212,28 @@ class EventBroadcaster:
             self._event_counters.pop(session_id, None)
         logger.debug(f"Cleaned up event state for session {session_id}")
     
+    def clear_queue(self, session_id: str) -> None:
+        """Clear the event queue for a session.
+        
+        Should be called when a new SSE connection is established to prevent
+        old events from accumulating when there was no active consumer.
+        
+        Args:
+            session_id: The session ID to clear the queue for.
+        """
+        queue = self._queues.get(session_id)
+        if queue:
+            cleared = 0
+            # Drain the queue
+            while not queue.empty():
+                try:
+                    queue.get_nowait()
+                    cleared += 1
+                except asyncio.QueueEmpty:
+                    break
+            if cleared > 0:
+                logger.debug(f"Cleared {cleared} stale events from queue for session {session_id}")
+    
     def get_stats(self, session_id: str) -> dict:
         """Get statistics for a session's event queue.
         
@@ -243,6 +251,7 @@ class EventBroadcaster:
                 "queue_size": queue.qsize() if queue else 0,
                 "history_size": len(history),
                 "last_event_id": self._event_counters.get(session_id, 0),
+                "has_consumer": queue is not None and queue.qsize() > 0,
             }
 
 

@@ -21,6 +21,7 @@ export class SseService {
   latestError = signal<{ message_id: string; error: string } | null>(null);
   statusUpdates = signal<Map<string, string>>(new Map());
   partialMessages = signal<Map<string, Message>>(new Map());
+  titleUpdates = signal<{ session_id: string; title: string } | null>(null);
 
   constructor(private ngZone: NgZone) {}
 
@@ -276,6 +277,28 @@ export class SseService {
 
     eventSource.addEventListener('keepalive', () => {
       // Keepalive received, connection is alive
+    });
+
+    eventSource.addEventListener('title_updated', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const event: SSEEvent = {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'title_updated',
+            session_id: data.session_id,
+            message_id: data.message_id,
+            data: data,
+          };
+          this.events.update(prev => [...prev, event]);
+          
+          if (data.session_id && data.title) {
+            this.titleUpdates.set({ session_id: data.session_id, title: data.title });
+          }
+        } catch (err) {
+          console.error('Failed to parse title_updated event:', err);
+        }
+      });
     });
 
     eventSource.onerror = () => {

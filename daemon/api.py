@@ -452,6 +452,7 @@ async def list_sessions(
             status=SessionStatus(sess["status"]),
             parent_id=sess.get("parent_id"),
             children=sess.get("children", []),
+            title=sess.get("title"),
             created_at=datetime.fromisoformat(sess["created_at"]).replace(tzinfo=timezone.utc) if isinstance(sess["created_at"], str) else sess["created_at"],
             updated_at=datetime.fromisoformat(sess["updated_at"]).replace(tzinfo=timezone.utc) if sess.get("updated_at") and isinstance(sess["updated_at"], str) else sess.get("updated_at"),
         ))
@@ -488,6 +489,7 @@ async def get_session(session_id: str):
         status=SessionStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
         children=session_meta.get("children", []),
+        title=session_meta.get("title"),
         created_at=datetime.fromisoformat(session_meta["created_at"]) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
         updated_at=datetime.fromisoformat(session_meta["updated_at"]) if session_meta.get("updated_at") and isinstance(session_meta["updated_at"], str) else session_meta.get("updated_at"),
     )
@@ -650,6 +652,9 @@ async def stream_events(session_id: str, request: Request):
                 except ValueError:
                     logger.warning(f"Invalid Last-Event-ID header: {last_event_id}")
 
+            # Clear any stale events from previous connection
+            broadcaster.clear_queue(session_id)
+            
             # Get the event queue for this session
             queue = await broadcaster.get_queue(session_id)
 
