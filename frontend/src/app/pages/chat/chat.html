@@ -6,9 +6,12 @@
       [sessions]="sessions()"
       [currentSessionId]="currentSession()?.session_id || null"
       [selectedAgent]="selectedAgent()"
+      [hasMore]="hasMoreSessions()"
+      [isLoadingMore]="isLoadingMore()"
       (deleteSession)="onDeleteSession($event)"
       (newSession)="onNewSession()"
       (agentChange)="onAgentChange($event)"
+      (loadMore)="onLoadMoreSessions()"
     ></app-session-list>
   </div>
 

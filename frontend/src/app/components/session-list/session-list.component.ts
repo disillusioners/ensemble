@@ -24,9 +24,12 @@ export class SessionListComponent {
   readonly sessions = input<SessionInfo[]>([]);
   readonly currentSessionId = input<string | null>(null);
   readonly selectedAgent = input<Agent | null>(null);
+  readonly hasMore = input<boolean>(false);
+  readonly isLoadingMore = input<boolean>(false);
   @Output() deleteSession = new EventEmitter<string>();
   @Output() newSession = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
+  @Output() loadMore = new EventEmitter<void>();
 
   // Track expanded/collapsed state per session
   readonly expandedSessions = signal<Set<string>>(new Set());
@@ -129,5 +132,9 @@ export class SessionListComponent {
       newSet.add(sessionId);
     }
     this.expandedSessions.set(newSet);
+  }
+
+  onLoadMore(): void {
+    this.loadMore.emit();
   }
 }

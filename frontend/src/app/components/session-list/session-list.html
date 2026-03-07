@@ -36,6 +36,24 @@
           <ng-container [ngTemplateOutlet]="sessionNode" [ngTemplateOutletContext]="{ $implicit: node, depth: 0 }"></ng-container>
         }
       </div>
+      
+      <!-- See More Button -->
+      @if (hasMore()) {
+        <div class="load-more-container">
+          <button 
+            class="load-more-btn" 
+            (click)="onLoadMore()"
+            [disabled]="isLoadingMore()"
+          >
+            @if (isLoadingMore()) {
+              <span class="loading-spinner"></span>
+              <span>Loading...</span>
+            } @else {
+              <span>See more</span>
+            }
+          </button>
+        </div>
+      }
     }
   </div>
 </div>
@@ -78,7 +96,7 @@
               [title]="session.status"
             ></span>
           </p>
-          <p class="session-id">{{ getSessionIdShort(session.session_id) }}</p>
+          <p class="session-id">{{ session.title || getSessionIdShort(session.session_id) }}</p>
         </div>
       </div>
       

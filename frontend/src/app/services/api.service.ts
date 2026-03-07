@@ -57,8 +57,10 @@ export class ApiService {
     });
   }
 
-  listSessions(): Observable<SessionListResponse> {
-    return this.http.get<SessionListResponse>(`${this.API_BASE}/sessions`);
+  listSessions(limit: number = 100, offset: number = 0): Observable<SessionListResponse> {
+    return this.http.get<SessionListResponse>(`${this.API_BASE}/sessions`, {
+      params: { limit: limit.toString(), offset: offset.toString() }
+    });
   }
 
   getSession(sessionId: string): Observable<SessionInfo> {

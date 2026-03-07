@@ -13,6 +13,10 @@ export interface SessionInfo {
 
 export interface SessionListResponse {
   sessions: SessionInfo[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_more: boolean;
 }
 
 // Message types

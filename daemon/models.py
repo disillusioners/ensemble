@@ -72,6 +72,7 @@ class SessionInfo(BaseModel):
     session_id: str = Field(..., description="Unique session identifier")
     agent_dir: str = Field(..., description="Directory containing the agent implementation")
     status: SessionStatus = Field(..., description="Current session status")
+    title: str | None = Field(default=None, description="Auto-generated session title from first message")
     parent_id: str | None = Field(default=None, description="Parent session ID if this is a child session")
     children: list[str] = Field(default_factory=list, description="List of child session IDs")
     created_at: datetime = Field(..., description="Session creation timestamp")
@@ -83,6 +84,7 @@ class SessionInfo(BaseModel):
                 "session_id": "session-123",
                 "agent_dir": "/path/to/agent",
                 "status": "running",
+                "title": "Help with Python debugging",
                 "parent_id": None,
                 "children": [],
                 "created_at": "2024-01-01T00:00:00Z",
@@ -154,6 +156,10 @@ class SessionListResponse(BaseModel):
     """Response for listing sessions."""
 
     sessions: list[SessionInfo] = Field(..., description="List of active sessions")
+    total: int = Field(..., description="Total number of sessions available")
+    limit: int = Field(..., description="Maximum number of sessions returned")
+    offset: int = Field(..., description="Number of sessions skipped")
+    has_more: bool = Field(..., description="Whether more sessions are available")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -168,7 +174,11 @@ class SessionListResponse(BaseModel):
                         "created_at": "2024-01-01T00:00:00Z",
                         "updated_at": "2024-01-01T00:01:00Z"
                     }
-                ]
+                ],
+                "total": 150,
+                "limit": 100,
+                "offset": 0,
+                "has_more": True
             }
         }
     )

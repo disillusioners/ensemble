@@ -429,9 +429,21 @@ async def create_session(session_create: SessionCreate):
 
 # 3. GET /sessions - List sessions
 @app.get("/sessions", response_model=SessionListResponse)
-async def list_sessions():
-    """List all sessions."""
-    sessions_data = manager.list_sessions()
+async def list_sessions(
+    limit: int = 100,
+    offset: int = 0
+):
+    """List sessions with pagination.
+    
+    Args:
+        limit: Maximum number of sessions to return (default: 100, max: 100).
+        offset: Number of sessions to skip (default: 0, min: 0).
+    """
+    # Input validation
+    limit = max(1, min(limit, 100))  # Clamp to 1-100
+    offset = max(0, offset)  # Ensure non-negative
+    
+    sessions_data, total = manager.list_sessions(limit=limit, offset=offset)
     sessions = []
     for sess in sessions_data:
         sessions.append(SessionInfo(
@@ -443,7 +455,16 @@ async def list_sessions():
             created_at=datetime.fromisoformat(sess["created_at"]).replace(tzinfo=timezone.utc) if isinstance(sess["created_at"], str) else sess["created_at"],
             updated_at=datetime.fromisoformat(sess["updated_at"]).replace(tzinfo=timezone.utc) if sess.get("updated_at") and isinstance(sess["updated_at"], str) else sess.get("updated_at"),
         ))
-    return SessionListResponse(sessions=sessions)
+    
+    has_more = (offset + limit) < total
+    
+    return SessionListResponse(
+        sessions=sessions,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=has_more
+    )
 
 
 # 4. GET /sessions/{session_id} - Get session info

@@ -511,3 +511,145 @@ class TestThinkTagParsing:
             
             assert result.thinking_extracted == "Upper case thinking"
             assert result.content == "Response"
+
+
+class TestGenerateSessionTitle:
+    """Tests for _generate_session_title method."""
+
+    @pytest.fixture
+    def mock_llm(self):
+        """Create a mock LLM that returns a title."""
+        mock = Mock()
+        mock_response = Mock()
+        mock_response.content = "Test Session Title"
+        mock.invoke.return_value = mock_response
+        return mock
+
+    @pytest.mark.asyncio
+    async def test_generate_session_title_success(self, mock_config, mock_llm):
+        """Test that title is generated and stored."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
+             patch('daemon.manager.update_session_title') as mock_update_title, \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
+            
+            manager = SessionManager(mock_config)
+            manager.conn = Mock()  # Mock connection
+            
+            # Call the method
+            title = await manager._generate_session_title("test-session", "Hello, how are you?")
+            
+            # Verify title was generated
+            assert title is not None
+            assert title == "Test Session Title"
+            
+            # Verify update_session_title was called
+            mock_update_title.assert_called_once()
+            
+    @pytest.mark.asyncio
+    async def test_generate_session_title_already_exists(self, mock_config):
+        """Test that returns None when title already exists."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {"title": "Existing Title"}}):
+            
+            manager = SessionManager(mock_config)
+            
+            # Call the method - should return None since title exists
+            title = await manager._generate_session_title("test-session", "Hello!")
+            
+            # Should return None because title already exists
+            assert title is None
+
+    @pytest.mark.asyncio
+    async def test_generate_session_title_llm_failure(self, mock_config):
+        """Test that handles LLM failure gracefully."""
+        # We need to mock at the instantiation level too, since the try/except 
+        # doesn't cover the LLM instantiation (line 1126 in manager.py)
+        mock_llm_instance = Mock()
+        mock_llm_instance.invoke.side_effect = Exception("LLM Error")
+        
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
+             patch('daemon.manager.update_session_title') as mock_update_title, \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm_instance), \
+             patch('daemon.manager.logger') as mock_logger:
+            
+            manager = SessionManager(mock_config)
+            manager.conn = Mock()
+            
+            # Call the method - should not raise (exception is caught in try/except)
+            title = await manager._generate_session_title("test-session", "Hello!")
+            
+            # Should return None on failure
+            assert title is None
+            
+            # Should not call update_session_title
+            mock_update_title.assert_not_called()
+            
+            # Should log warning
+            mock_logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_session_title_truncates_long_titles(self, mock_config):
+        """Test that long titles are truncated to 100 chars."""
+        long_title = "A" * 200  # 200 character title
+        
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = long_title
+        mock_llm.invoke.return_value = mock_response
+        
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
+             patch('daemon.manager.update_session_title') as mock_update_title, \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
+            
+            manager = SessionManager(mock_config)
+            manager.conn = Mock()
+            
+            # Call the method
+            title = await manager._generate_session_title("test-session", "Hello!")
+            
+            # Verify title was truncated to 100 chars (actually 97 + "...")
+            assert title is not None
+            assert len(title) <= 100
+            assert title.endswith("...")
+
+    @pytest.mark.asyncio
+    async def test_generate_session_title_empty_message(self, mock_config):
+        """Test that empty message returns None."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()):
+            
+            manager = SessionManager(mock_config)
+            
+            # Call with empty message
+            title = await manager._generate_session_title("test-session", "")
+            assert title is None
+            
+            # Call with whitespace only
+            title = await manager._generate_session_title("test-session", "   ")
+            assert title is None
+
+    @pytest.mark.asyncio
+    async def test_generate_session_title_list_content(self, mock_config):
+        """Test that list content from LLM is handled correctly."""
+        mock_llm = Mock()
+        mock_response = Mock()
+        # Return content as a list (some LLM providers return this format)
+        mock_response.content = [{"type": "text", "text": "List Response Title"}]
+        mock_llm.invoke.return_value = mock_response
+        
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
+             patch('daemon.manager.update_session_title'), \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
+            
+            manager = SessionManager(mock_config)
+            manager.conn = Mock()
+            
+            # Call the method
+            title = await manager._generate_session_title("test-session", "Hello!")
+            
+            # Verify title was extracted from list
+            assert title is not None
+            assert "List Response Title" in title

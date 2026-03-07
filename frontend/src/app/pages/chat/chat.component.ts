@@ -46,6 +46,9 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
   readonly pendingMessage = signal<Message | null>(null);
+  readonly totalSessions = signal(0);
+  readonly hasMoreSessions = signal(false);
+  readonly isLoadingMore = signal(false);
 
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
@@ -151,22 +154,58 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  private loadSessions(): void {
-    this.api.listSessions().subscribe({
+  private loadSessions(append: boolean = false): void {
+    if (append) {
+      this.isLoadingMore.set(true);
+    }
+    
+    const currentSessions = this.sessions();
+    const offset = append ? currentSessions.length : 0;
+    
+    this.api.listSessions(100, offset).subscribe({
       next: (response) => {
-        this.sessions.set(response.sessions);
+        if (append) {
+          // Deduplicate when appending - filter out sessions we already have
+          const existingIds = new Set(currentSessions.map(s => s.session_id));
+          const newSessions = response.sessions.filter(s => !existingIds.has(s.session_id));
+          this.sessions.update(prev => [...prev, ...newSessions]);
+        } else {
+          // When not appending (polling refresh), merge intelligently
+          // Keep any sessions we've loaded beyond the first page that still exist
+          const currentSessionIds = new Set(currentSessions.map(s => s.session_id));
+          const responseSessionIds = new Set(response.sessions.map(s => s.session_id));
+          
+          // If user has loaded more pages, preserve sessions not in this response
+          if (currentSessions.length > response.sessions.length) {
+            const extraSessions = currentSessions.filter(
+              s => !responseSessionIds.has(s.session_id)
+            );
+            this.sessions.set([...response.sessions, ...extraSessions]);
+            // Recalculate has_more based on what we have vs total
+            this.hasMoreSessions.set((response.sessions.length + extraSessions.length) < response.total);
+          } else {
+            this.sessions.set(response.sessions);
+            this.hasMoreSessions.set(response.has_more);
+          }
+        }
+        this.totalSessions.set(response.total);
+        this.isLoadingMore.set(false);
         
         // Check if current session still exists when sessions are loaded
         const currentSession = this.currentSession();
-        if (currentSession) {
-          const found = response.sessions.find(s => s.session_id === currentSession.session_id);
+        if (currentSession && !append) {
+          const allSessions = this.sessions();
+          const found = allSessions.find(s => s.session_id === currentSession.session_id);
           if (!found) {
             // Session not found - navigate to home
             this.router.navigate(['/']);
           }
         }
       },
-      error: (err) => console.error('Failed to load sessions:', err)
+      error: (err) => {
+        console.error('Failed to load sessions:', err);
+        this.isLoadingMore.set(false);
+      }
     });
   }
 
@@ -331,6 +370,12 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   protected onBackToHome(): void {
     this.router.navigate(['/']);
+  }
+
+  protected onLoadMoreSessions(): void {
+    if (this.hasMoreSessions() && !this.isLoadingMore()) {
+      this.loadSessions(true);
+    }
   }
 
   // Expose for template

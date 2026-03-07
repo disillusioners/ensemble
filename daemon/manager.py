@@ -23,6 +23,7 @@ from .persistence import (
     list_all_sessions,
     save_session_metadata,
     update_session_status,
+    update_session_title,
     get_session_metadata,
     delete_all_sessions,
     get_session_messages,
@@ -520,6 +521,11 @@ class SessionManager:
                 
                 logger.info(f"Processing message {msg.message_id[:8]}... for session {session_id[:8]}...")
                 
+                # Check if this is the first message and generate title
+                # Get message count before processing this message
+                existing_messages = await get_session_messages(self.checkpointer, session_id)
+                is_first_message = len(existing_messages) == 0
+                
                 # Extract retry flag from metadata
                 is_retry = msg.metadata.get("is_retry", False) if msg.metadata else False
                 
@@ -563,6 +569,21 @@ class SessionManager:
                             f"Message {msg.message_id[:8]}... status changed to '{row[0] if row else 'unknown'}' "
                             f"during processing, skipping ack (success already recorded)"
                         )
+                    
+                    # Generate title if this was the first message
+                    if is_first_message:
+                        try:
+                            title = await self._generate_session_title(session_id, msg.content)
+                            if title:
+                                # Broadcast title_updated event for frontend refresh
+                                await self.broadcaster.broadcast(Event(
+                                    type="title_updated",
+                                    session_id=session_id,
+                                    message_id=msg.message_id,
+                                    data={"title": title}
+                                ))
+                        except Exception as e:
+                            logger.warning(f"Failed to generate title for session {session_id}: {e}")
                     
                     # Broadcast completed event
                     await self.broadcaster.broadcast(Event(
@@ -976,36 +997,6 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done: Completed {len(messages)} message(s)."
 
-    async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
-        """Get the last assistant message from session history.
-        
-        This is the default/simple approach for completion reports - just
-        pass the agent's last response to the parent.
-        
-        Args:
-            session_id: The session ID to get message from.
-            agent_name: The name of the agent (e.g., "Coder", "Designer").
-            
-        Returns:
-            Formatted string: "{agent_name} has done: {last_message}"
-        """
-        messages = await get_session_messages(self.checkpointer, session_id)
-        
-        # Find the last assistant message
-        last_assistant_content = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if content and content.strip():
-                    last_assistant_content = content.strip()
-                    break
-        
-        if last_assistant_content:
-            return f"{agent_name} has done:\n{last_assistant_content}"
-        else:
-            # Fallback if no assistant message found
-            return f"{agent_name} has done:\nTask completed (no response message)."
-
     async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
         """Send completion report to parent session when child is done.
         
@@ -1038,6 +1029,7 @@ Provide a concise summary:"""
             summary = await self._get_last_assistant_message(session_id, agent_name)
         
         # Enqueue report message to parent
+        from .queue import InputMessageQueue
         message_id = self.queue.enqueue(
             session_id=parent_id,
             content=summary,
@@ -1063,6 +1055,119 @@ Provide a concise summary:"""
         
         # Trigger parent queue processing
         asyncio.create_task(self._process_queue(parent_id))
+
+    async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
+        """Get the last assistant message from session history.
+        
+        This is the default/simple approach for completion reports - just
+        pass the agent's last response to the parent.
+        
+        Args:
+            session_id: The session ID to get message from.
+            agent_name: The name of the agent (e.g., "Coder", "Designer").
+            
+        Returns:
+            Formatted string: "{agent_name} has done: {last_message}"
+        """
+        messages = await get_session_messages(self.checkpointer, session_id)
+        
+        # Find the last assistant message
+        last_assistant_content = None
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if content and content.strip():
+                    last_assistant_content = content.strip()
+                    break
+        
+        if last_assistant_content:
+            return f"{agent_name} has done:\n{last_assistant_content}"
+        else:
+            # Fallback if no assistant message found
+            return f"{agent_name} has done: Task completed (no response message)."
+
+        
+    async def _generate_session_title(self, session_id: str, first_message: str) -> str | None:
+        """Generate a session title from the first user message.
+        
+        Uses LLM to generate a concise, descriptive title based on the first message.
+        The title is stored in the session metadata.
+        
+        Args:
+            session_id: The session ID to generate title for.
+            first_message: The first user message content.
+            
+        Returns:
+            Generated title string, or None if generation fails.
+        """
+        # Skip if empty message
+        if not first_message or not first_message.strip():
+            return None
+        
+        # Check if title already exists
+        meta = get_session_metadata(self.conn, session_id)
+        if meta and meta.get("metadata", {}).get("title"):
+            # Title already exists, skip
+            logger.debug(f"Title already exists for session {session_id}, skipping generation")
+            return None
+        
+        from langchain_core.messages import HumanMessage, SystemMessage
+        
+        # Create LLM client for title generation
+        llm_config = {
+            "base_url": self.config.llm.base_url,
+            "api_key": self.config.llm.api_key,
+            "model": self.config.llm.model,
+            "temperature": 0.3,  # Lower temperature for more focused titles
+        }
+        
+        # Import here to use the same pattern as graph.py
+        from .graph import ThinkingChatOpenAI
+        llm = ThinkingChatOpenAI(**llm_config)
+        
+        title_prompt = f"""Generate a short, descriptive title (3-6 words max) for this user message. The title should summarize what the user is asking about or trying to accomplish.
+
+User message:
+{first_message[:500]}
+
+Title:"""
+
+        try:
+            response = await asyncio.to_thread(
+                llm.invoke,
+                [SystemMessage(content="You are a helpful assistant that generates concise session titles."),
+                 HumanMessage(content=title_prompt)]
+            )
+            # Handle both string and list content types
+            content = response.content
+            if isinstance(content, list):
+                # Extract text from list of content blocks
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        text_parts.append(block.get("text", ""))
+                    else:
+                        text_parts.append(str(block))
+                title = " ".join(text_parts).strip()
+            else:
+                title = str(content).strip() if content else ""
+            
+            # Validate and truncate title
+            if not title:
+                return None
+            
+            # Truncate to reasonable length (100 chars max)
+            if len(title) > 100:
+                title = title[:97] + "..."
+            
+            # Store title in session metadata
+            update_session_title(self.conn, session_id, title)
+            logger.info(f"Generated title for session {session_id}: {title}")
+            return title
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate title for session {session_id}: {e}")
+            return None
 
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
@@ -1186,13 +1291,17 @@ Provide a concise summary:"""
 
         return graph
 
-    def list_sessions(self) -> list[dict]:
-        """List all sessions.
+    def list_sessions(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """List sessions with pagination.
+
+        Args:
+            limit: Maximum number of sessions to return (default: 100).
+            offset: Number of sessions to skip (default: 0).
 
         Returns:
-            List of session info dictionaries from the database.
+            Tuple of (list of session info dictionaries, total count).
         """
-        return list_all_sessions(self.conn)
+        return list_all_sessions(self.conn, limit=limit, offset=offset)
 
     def get_session_info(self, session_id: str) -> dict:
         """Get information about a specific session.

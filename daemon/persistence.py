@@ -62,6 +62,12 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE sessions ADD COLUMN agent_name TEXT")
         logger.info("Added agent_name column to sessions table")
     
+    # Create index for efficient ordering by created_at
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_created_at 
+        ON sessions(created_at DESC)
+    """)
+    
     # Create session_hierarchy table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS session_hierarchy (
@@ -324,6 +330,52 @@ def update_session_status(
     logger.info(f"Updated session status: session_id={session_id}, status={status}")
 
 
+def update_session_title(
+    conn: sqlite3.Connection,
+    session_id: str,
+    title: str
+) -> None:
+    """Update session title in the metadata JSON column.
+    
+    Args:
+        conn: Database connection.
+        session_id: Session identifier to update.
+        title: New title value.
+    """
+    # Get current metadata
+    cursor = conn.execute(
+        "SELECT metadata FROM sessions WHERE session_id = ?",
+        (session_id,)
+    )
+    row = cursor.fetchone()
+    
+    if row is None:
+        logger.warning(f"Session {session_id} not found for title update")
+        return
+    
+    # Parse existing metadata or create new dict
+    metadata = row["metadata"]
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata) if metadata else {}
+    elif metadata is None:
+        metadata = {}
+    
+    # Update title in metadata
+    metadata["title"] = title
+    
+    # Save back to database
+    conn.execute(
+        """
+        UPDATE sessions
+        SET metadata = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE session_id = ?
+        """,
+        (json.dumps(metadata), session_id)
+    )
+    conn.commit()
+    logger.info(f"Updated session title: session_id={session_id}, title={title[:50]}...")
+
+
 def get_session_metadata(
     conn: sqlite3.Connection,
     session_id: str
@@ -364,7 +416,12 @@ def get_session_metadata(
     
     metadata = row["metadata"]
     if isinstance(metadata, str):
-        metadata = json.loads(metadata)
+        metadata = json.loads(metadata) if metadata else {}
+    elif metadata is None:
+        metadata = {}
+    
+    # Extract title from metadata
+    title = metadata.get("title") if isinstance(metadata, dict) else None
     
     return {
         "session_id": row["session_id"],
@@ -372,6 +429,7 @@ def get_session_metadata(
         "agent_name": row["agent_name"],
         "parent_id": row["parent_id"],
         "status": row["status"],
+        "title": title,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "metadata": metadata,
@@ -379,55 +437,85 @@ def get_session_metadata(
     }
 
 
-def list_all_sessions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Get all sessions with their children.
+def list_all_sessions(
+    conn: sqlite3.Connection, 
+    limit: int = 100, 
+    offset: int = 0
+) -> tuple[list[dict[str, Any]], int]:
+    """Get sessions with their children, with pagination support.
     
     Args:
         conn: Database connection.
+        limit: Maximum number of sessions to return (default: 100).
+        offset: Number of sessions to skip (default: 0).
         
     Returns:
-        List of session dictionaries with children.
+        Tuple of (list of session dictionaries with children, total count).
     """
+    # Get total count first
+    count_cursor = conn.execute("SELECT COUNT(*) as total FROM sessions")
+    total = count_cursor.fetchone()["total"]
+    
+    # Get paginated sessions
     cursor = conn.execute(
         """
         SELECT session_id, agent_dir, agent_name, parent_id, status,
                created_at, updated_at, metadata
         FROM sessions
         ORDER BY created_at DESC
-        """
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset)
     )
     rows = cursor.fetchall()
     
+    # Batch fetch children for all sessions (fixes N+1 query)
+    session_ids = [row["session_id"] for row in rows]
+    children_map: dict[str, list[str]] = {sid: [] for sid in session_ids}
+    
+    if session_ids:
+        placeholders = ",".join("?" * len(session_ids))
+        children_cursor = conn.execute(
+            f"""
+            SELECT parent_id, child_id
+            FROM session_hierarchy
+            WHERE parent_id IN ({placeholders})
+            """,
+            session_ids
+        )
+        for child_row in children_cursor.fetchall():
+            parent_id = child_row["parent_id"]
+            if parent_id in children_map:
+                children_map[parent_id].append(child_row["child_id"])
+    
     sessions = []
     for row in rows:
-        # Get children for each session
-        children_cursor = conn.execute(
-            """
-            SELECT child_id
-            FROM session_hierarchy
-            WHERE parent_id = ?
-            """,
-            (row["session_id"],)
-        )
-        children = [child_row["child_id"] for child_row in children_cursor.fetchall()]
+        session_id = row["session_id"]
+        children = children_map.get(session_id, [])
         
         metadata = row["metadata"]
         if isinstance(metadata, str):
-            metadata = json.loads(metadata)
+            metadata = json.loads(metadata) if metadata else {}
+        elif metadata is None:
+            metadata = {}
+        
+        # Extract title from metadata
+        title = metadata.get("title") if isinstance(metadata, dict) else None
         
         sessions.append({
-            "session_id": row["session_id"],
+            "session_id": session_id,
             "agent_dir": row["agent_dir"],
             "agent_name": row["agent_name"],
             "parent_id": row["parent_id"],
             "status": row["status"],
+            "title": title,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "metadata": metadata,
             "children": children
         })
     
-    return sessions
+    return sessions, total
 
 
 def delete_session(conn: sqlite3.Connection, session_id: str) -> None:
