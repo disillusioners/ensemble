@@ -731,7 +731,14 @@ class SessionManager:
         content_buffer_size = 0
         CONTENT_BATCH_THRESHOLD = 50  # Flush after 50 characters
         CONTENT_BATCH_TIMEOUT = 0.05  # Or after 50ms (whichever comes first)
-        last_content_flush = 0.0
+        last_content_flush = time.monotonic()  # Initialize to current time
+        
+        # Adaptive batching settings (adjusted based on queue health)
+        adaptive_threshold = CONTENT_BATCH_THRESHOLD
+        adaptive_timeout = CONTENT_BATCH_TIMEOUT
+        
+        # Event counter for monitoring
+        event_count = 0
         
         # Build input - on retry with checkpoint, resume from None
         if is_retry and await self._has_checkpoint(session_id):
@@ -835,19 +842,20 @@ class SessionManager:
                             ))
                 
                 elif mode == "messages":
-                    # Handle token-level streaming with batching to reduce event rate
+                    # Handle token-level streaming with adaptive batching to reduce event rate
                     # data is a tuple: (message_chunk, metadata)
                     if isinstance(data, tuple) and len(data) == 2:
                         chunk, metadata = data
                         if hasattr(chunk, 'content') and chunk.content:
                             content_buffer += chunk.content
                             content_buffer_size += len(chunk.content)
+                            event_count += 1
                             
-                            # Flush if buffer exceeds threshold
+                            # Flush if buffer exceeds threshold OR timeout elapsed
                             now = time.monotonic()
                             should_flush = (
-                                content_buffer_size >= CONTENT_BATCH_THRESHOLD or
-                                (now - last_content_flush) >= CONTENT_BATCH_TIMEOUT
+                                content_buffer_size >= adaptive_threshold or
+                                (now - last_content_flush) >= adaptive_timeout
                             )
                             
                             if should_flush and content_buffer:
@@ -860,6 +868,24 @@ class SessionManager:
                                 content_buffer = ""
                                 content_buffer_size = 0
                                 last_content_flush = now
+                                
+                            # Adaptive batching: check queue health periodically
+                            if event_count % 20 == 0:
+                                stats = self.broadcaster.get_stats(session_id)
+                                queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
+                                
+                                # Increase batch size when queue is > 50% full
+                                if queue_fill_ratio > 0.5:
+                                    adaptive_threshold = CONTENT_BATCH_THRESHOLD * 2  # 100 chars
+                                    adaptive_timeout = CONTENT_BATCH_TIMEOUT * 2     # 100ms
+                                    if event_count == 20:  # Log once
+                                        logger.info(
+                                            f"Queue at {queue_fill_ratio:.0%} capacity, "
+                                            f"increasing batch size for session {session_id[:8]}"
+                                        )
+                                else:
+                                    adaptive_threshold = CONTENT_BATCH_THRESHOLD
+                                    adaptive_timeout = CONTENT_BATCH_TIMEOUT
             
             # Flush any remaining content in buffer after streaming ends
             if content_buffer:

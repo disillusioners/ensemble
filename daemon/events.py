@@ -66,7 +66,7 @@ class EventBroadcaster:
     
     def __init__(
         self, 
-        max_queue_size: int = 100, 
+        max_queue_size: int = 200, 
         history_size: int = 50,
         event_ttl_seconds: float = 300.0,
     ):
@@ -398,6 +398,7 @@ class EventBroadcaster:
             
             return {
                 "queue_size": queue.qsize() if queue else 0,
+                "max_queue_size": self._max_queue_size,
                 "history_size": len(history) if history else 0,
                 "last_event_id": self._event_counters.get(session_id, 0),
                 "oldest_event_age_seconds": oldest_age,

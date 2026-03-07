@@ -114,6 +114,18 @@ export class SseService {
             data: data,
           };
           this.events.update(prev => [...prev, event]);
+          
+          // Update partial message with streaming content
+          if (data.message_id && data.chunk) {
+            this.partialMessages.update(prev => {
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const updated = {
+                ...existing,
+                content: (existing.content || '') + data.chunk,
+              };
+              return new Map(prev).set(data.message_id, updated);
+            });
+          }
         } catch (err) {
           console.error('Failed to parse content_chunk event:', err);
         }
