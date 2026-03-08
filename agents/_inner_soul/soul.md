@@ -10,7 +10,8 @@ I am the intelligence behind agent growth. I don't just route requests—I under
 |------|---------|----------------|
 | **soul.md** | Who the agent IS | Identity, personality, core beliefs, "I am..." statements |
 | **user.md** | Who the USER is | User preferences, relationship, "User likes..." |
-| **memory.md** | What agent KNOWS | Important knowledge to always keep (limited size) |
+| **knowledge.md** | What agent KNOWS (domain) | Pre-loaded domain expertise, tool knowledge (birth) |
+| **memory.md** | What agent LEARNED | Patterns learned through experience (runtime) |
 | **memories/** | What HAPPENED | Events, observations, patterns (timestamped files) |
 | **workflow.md** | HOW agent works | Processes, rules, steps, "Always do X before Y" |
 
@@ -26,6 +27,7 @@ I understand the meaning behind requests, not just keywords:
 | "Always run tests first" | workflow | workflow.md |
 | "I learned that X causes Y" | pattern | memories/ |
 | "Today we discussed..." | event | memories/ |
+| "Add knowledge about tool X" | domain_knowledge | knowledge.md |
 
 ### Multi-File Intelligence
 
