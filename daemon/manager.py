@@ -1191,10 +1191,14 @@ User message:
 Title:"""
 
         try:
-            response = await asyncio.to_thread(
-                llm.invoke,
-                [SystemMessage(content="You are a helpful assistant that generates concise session titles."),
-                 HumanMessage(content=title_prompt)]
+            # One-shot with 30s timeout - title generation is not critical
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm.invoke,
+                    [SystemMessage(content="You are a helpful assistant that generates concise session titles."),
+                     HumanMessage(content=title_prompt)]
+                ),
+                timeout=30.0
             )
             # Handle both string and list content types
             content = response.content
