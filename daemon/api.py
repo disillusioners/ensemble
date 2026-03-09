@@ -13,7 +13,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -162,6 +162,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# API Router with /api prefix
+api_router = APIRouter(prefix="/api")
+
 # Add CORS
 app.add_middleware(
     CORSMiddleware,
@@ -169,7 +172,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Global exception handler
 @app.exception_handler(Exception)
@@ -184,7 +186,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # 1. GET /health - Health check
-@app.get("/health", response_model=HealthResponse)
+@api_router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(
@@ -195,7 +197,7 @@ async def health_check():
 
 
 # 1.5. GET /agents - List available agents
-@app.get("/agents", response_model=AgentListResponse)
+@api_router.get("/agents", response_model=AgentListResponse)
 async def list_agents():
     """List all available agents by scanning the agents directory."""
     import json
@@ -236,7 +238,7 @@ async def list_agents():
 
 
 # 1.6. POST /agents - Create new agent
-@app.post("/agents", response_model=AgentInfo, status_code=201)
+@api_router.post("/agents", response_model=AgentInfo, status_code=201)
 async def create_agent(agent_create: AgentCreate):
     """Create a new agent from template."""
     import json
@@ -327,7 +329,7 @@ async def create_agent(agent_create: AgentCreate):
 
 
 # 1.7. DELETE /agents/{agent_id} - Move agent to trash
-@app.delete("/agents/{agent_id}")
+@api_router.delete("/agents/{agent_id}")
 async def delete_agent(agent_id: str):
     """Move an agent to trash (soft delete)."""
     import shutil
@@ -387,7 +389,7 @@ async def delete_agent(agent_id: str):
 
 
 # 2. POST /sessions - Spawn session
-@app.post("/sessions", response_model=SessionInfo, status_code=201)
+@api_router.post("/sessions", response_model=SessionInfo, status_code=201)
 async def create_session(session_create: SessionCreate):
     """Spawn a new session."""
     try:
@@ -428,7 +430,7 @@ async def create_session(session_create: SessionCreate):
 
 
 # 3. GET /sessions - List sessions
-@app.get("/sessions", response_model=SessionListResponse)
+@api_router.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(
     limit: int = 100,
     offset: int = 0
@@ -469,7 +471,7 @@ async def list_sessions(
 
 
 # 4. GET /sessions/{session_id} - Get session info
-@app.get("/sessions/{session_id}", response_model=SessionInfo)
+@api_router.get("/sessions/{session_id}", response_model=SessionInfo)
 async def get_session(session_id: str):
     """Get session information."""
     try:
@@ -496,7 +498,7 @@ async def get_session(session_id: str):
 
 
 # 5. DELETE /sessions/{session_id} - Terminate session
-@app.delete("/sessions/{session_id}")
+@api_router.delete("/sessions/{session_id}")
 async def terminate_session(session_id: str):
     """Terminate a session."""
     # Check session exists
@@ -517,7 +519,7 @@ async def terminate_session(session_id: str):
 
 
 # 6. POST /sessions/{session_id}/messages - Send message
-@app.post("/sessions/{session_id}/messages", response_model=MessageResponse)
+@api_router.post("/sessions/{session_id}/messages", response_model=MessageResponse)
 async def send_message(session_id: str, message: MessageCreate):
     """Send a message to a session (async via queue)."""
     # Check session exists
@@ -563,7 +565,7 @@ async def send_message(session_id: str, message: MessageCreate):
 
 
 # 7. GET /sessions/{session_id}/messages/{message_id} - Get message status
-@app.get("/sessions/{session_id}/messages/{message_id}")
+@api_router.get("/sessions/{session_id}/messages/{message_id}")
 async def get_message_status(session_id: str, message_id: str):
     """Get the status of a queued message."""
     # Check session exists
@@ -593,7 +595,7 @@ async def get_message_status(session_id: str, message_id: str):
 
 
 # 8. GET /sessions/{session_id}/messages - Get message history
-@app.get("/sessions/{session_id}/messages")
+@api_router.get("/sessions/{session_id}/messages")
 async def get_messages(session_id: str):
     """Get message history for a session."""
     # Check session exists
@@ -613,7 +615,7 @@ async def get_messages(session_id: str):
 
 
 # 9. GET /sessions/{session_id}/events - SSE stream
-@app.get("/sessions/{session_id}/events")
+@api_router.get("/sessions/{session_id}/events")
 async def stream_events(session_id: str, request: Request):
     """SSE stream for session events."""
     # Check session exists
@@ -707,7 +709,7 @@ async def stream_events(session_id: str, request: Request):
 
 
 # GET /sources - List all sources
-@app.get("/sources", response_model=SourceListResponse)
+@api_router.get("/sources", response_model=SourceListResponse)
 async def list_sources():
     """List all configured message sources."""
     from .sources.persistence import list_source_configs
@@ -730,7 +732,7 @@ async def list_sources():
 
 
 # POST /sources - Create new source
-@app.post("/sources", response_model=SourceInfo, status_code=201)
+@api_router.post("/sources", response_model=SourceInfo, status_code=201)
 async def create_source(source_create: SourceCreate):
     """Create a new message source."""
     from .sources.persistence import save_source_config, get_source_config
@@ -797,7 +799,7 @@ async def create_source(source_create: SourceCreate):
 
 
 # POST /sources/test - Test source configuration
-@app.post("/sources/test", response_model=SourceTestResponse)
+@api_router.post("/sources/test", response_model=SourceTestResponse)
 async def test_source(test_request: SourceTestRequest):
     """Test a source configuration without saving it.
     
@@ -835,7 +837,7 @@ async def test_source(test_request: SourceTestRequest):
 
 
 # GET /sources/{source_id} - Get source info
-@app.get("/sources/{source_id}", response_model=SourceInfo)
+@api_router.get("/sources/{source_id}", response_model=SourceInfo)
 async def get_source(source_id: str):
     """Get a specific message source."""
     from .sources.persistence import get_source_config
@@ -864,7 +866,7 @@ async def get_source(source_id: str):
 
 
 # PUT /sources/{source_id} - Update source
-@app.put("/sources/{source_id}", response_model=SourceInfo)
+@api_router.put("/sources/{source_id}", response_model=SourceInfo)
 async def update_source(source_id: str, source_update: SourceUpdate):
     """Update a message source configuration."""
     from .sources.persistence import get_source_config, save_source_config
@@ -926,7 +928,7 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 
 
 # DELETE /sources/{source_id} - Delete source
-@app.delete("/sources/{source_id}", response_model=DeleteResponse)
+@api_router.delete("/sources/{source_id}", response_model=DeleteResponse)
 async def delete_source(source_id: str):
     """Delete a message source."""
     from .sources.persistence import delete_source_config
@@ -945,7 +947,7 @@ async def delete_source(source_id: str):
 
 
 # POST /sources/{source_id}/start - Start a source
-@app.post("/sources/{source_id}/start", response_model=SourceActionResponse)
+@api_router.post("/sources/{source_id}/start", response_model=SourceActionResponse)
 async def start_source(source_id: str):
     """Start a message source adapter."""
     from .sources.persistence import get_source_config, update_source_status
@@ -1031,7 +1033,7 @@ async def start_source(source_id: str):
 
 
 # POST /sources/{source_id}/stop - Stop a source
-@app.post("/sources/{source_id}/stop", response_model=SourceActionResponse)
+@api_router.post("/sources/{source_id}/stop", response_model=SourceActionResponse)
 async def stop_source(source_id: str):
     """Stop a message source adapter."""
     from .sources.persistence import get_source_config, update_source_status
@@ -1076,7 +1078,7 @@ async def stop_source(source_id: str):
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source
-@app.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
+@api_router.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
 async def list_mappings(source_id: str):
     """List all session mappings for a source."""
     from .sources.persistence import get_source_config, list_session_mappings
@@ -1109,7 +1111,7 @@ async def list_mappings(source_id: str):
 
 
 # POST /sources/{source_id}/mappings - Create or update a mapping
-@app.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
+@api_router.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
 async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     """Create a session mapping for an external user."""
     from .sources.persistence import get_source_config, get_session_mapping, save_session_mapping
@@ -1199,7 +1201,7 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
 
 
 # DELETE /sources/{source_id}/mappings/{mapping_id} - Delete a mapping
-@app.delete("/sources/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
+@api_router.delete("/sources/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
 async def delete_mapping(source_id: str, mapping_id: str):
     """Delete a session mapping."""
     from .sources.persistence import delete_session_mapping, get_session_mapping
@@ -1224,7 +1226,7 @@ async def delete_mapping(source_id: str, mapping_id: str):
 
 
 # POST /webhooks/{source_id} - Receive webhook from external source
-@app.post("/webhooks/{source_id}")
+@api_router.post("/webhooks/{source_id}")
 async def receive_webhook(source_id: str, request: Request):
     """Receive a webhook from an external message source."""
     from .sources.persistence import get_source_config
@@ -1326,7 +1328,11 @@ async def receive_webhook(source_id: str, request: Request):
         )
 
 
-# Static file serving for production UI (served at root)
+# Include API router with /api prefix (must be after all routes are defined)
+app.include_router(api_router)
+
+
+# Static file serving for production UI (served at root - catch-all, must be last)
 @app.get("/")
 async def serve_ui():
     """Serve the frontend UI."""
