@@ -81,9 +81,9 @@ install: build
 	@echo "$(YELLOW)Configuring port $(PROD_PORT)...$(NC)"
 	sed 's/port: \$${PORT:-8080}/port: \$${PORT:-$(PROD_PORT)}/' $(CONFIG_FILE) > $(INSTALL_DIR)/$(CONFIG_FILE)
 	
-	# Copy .env file
+	# Copy .env.prod file (or .env as fallback)
 	@echo "$(YELLOW)Copying environment...$(NC)"
-	cp $(ENV_FILE) $(INSTALL_DIR)/ 2>/dev/null || cp .env.example $(INSTALL_DIR)/$(ENV_FILE) 2>/dev/null || true
+	cp .env.prod $(INSTALL_DIR)/.env 2>/dev/null || cp $(ENV_FILE) $(INSTALL_DIR)/.env 2>/dev/null || cp .env.example $(INSTALL_DIR)/.env 2>/dev/null || true
 	
 	# Copy frontend build (copy browser contents directly to dist)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
@@ -103,24 +103,42 @@ install: build
 	
 	# Create start script for production
 	@echo "$(YELLOW)Creating production start script...$(NC)"
-	@echo '#!/bin/bash' > $(INSTALL_DIR)/start-prod.sh
-	@echo 'set -e' >> $(INSTALL_DIR)/start-prod.sh
-	@echo 'cd "$$(dirname "$$0")"' >> $(INSTALL_DIR)/start-prod.sh
-	@echo 'export PORT=$(PROD_PORT)' >> $(INSTALL_DIR)/start-prod.sh
-	@echo 'if [ -f ".env" ]; then export $$(cat .env | grep -v "^#" | xargs); fi' >> $(INSTALL_DIR)/start-prod.sh
-	@echo 'mkdir -p data' >> $(INSTALL_DIR)/start-prod.sh
-	@echo '# Use venv python if available' >> $(INSTALL_DIR)/start-prod.sh
-	@echo 'if [ -f ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; else PYTHON="python3"; fi' >> $(INSTALL_DIR)/start-prod.sh
-	@echo '$$PYTHON -m uvicorn daemon.api:app --host 0.0.0.0 --port $(PROD_PORT)' >> $(INSTALL_DIR)/start-prod.sh
-	@chmod +x $(INSTALL_DIR)/start-prod.sh
+	@echo '#!/bin/bash' > $(INSTALL_DIR)/start.sh
+	@echo '# Start Ensemble Daemon (Production)' >> $(INSTALL_DIR)/start.sh
+	@echo 'set -e' >> $(INSTALL_DIR)/start.sh
+	@echo 'cd "$$(dirname "$$0")"' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '# Colors' >> $(INSTALL_DIR)/start.sh
+	@echo 'GREEN="\033[0;32m"' >> $(INSTALL_DIR)/start.sh
+	@echo 'NC="\033[0m"' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '# Use venv python if available' >> $(INSTALL_DIR)/start.sh
+	@echo 'if [ -f ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; else PYTHON="python3"; fi' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '# Load environment from .env' >> $(INSTALL_DIR)/start.sh
+	@echo 'if [ -f ".env" ]; then export $$(cat .env | grep -v "^#" | xargs); fi' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '# Set defaults' >> $(INSTALL_DIR)/start.sh
+	@echo 'export PORT="$${PORT:-$(PROD_PORT)}"' >> $(INSTALL_DIR)/start.sh
+	@echo 'export HOST="$${HOST:-0.0.0.0}"' >> $(INSTALL_DIR)/start.sh
+	@echo 'mkdir -p data' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo 'echo -e "$${GREEN}Starting Ensemble Daemon...$${NC}"' >> $(INSTALL_DIR)/start.sh
+	@echo 'echo "Port: $$PORT"' >> $(INSTALL_DIR)/start.sh
+	@echo 'echo "API:  http://localhost:$$PORT/docs"' >> $(INSTALL_DIR)/start.sh
+	@echo 'echo "UI:   http://localhost:$$PORT"' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '$$PYTHON -m uvicorn daemon.api:app --host $$HOST --port $$PORT' >> $(INSTALL_DIR)/start.sh
+	@chmod +x $(INSTALL_DIR)/start.sh
 	
 	@echo "$(GREEN)Installation complete!$(NC)"
 	@echo ""
 	@echo "Production version installed to: $(INSTALL_DIR)"
 	@echo "Port: $(PROD_PORT)"
 	@echo ""
-	@echo "To start: cd $(INSTALL_DIR) && ./start-prod.sh"
+	@echo "To start: cd $(INSTALL_DIR) && ./start.sh"
 	@echo "API Docs: http://localhost:$(PROD_PORT)/docs"
+	@echo "UI:       http://localhost:$(PROD_PORT)"
 
 # Clean build artifacts
 clean:

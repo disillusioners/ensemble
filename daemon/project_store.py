@@ -260,7 +260,7 @@ class ProjectStore:
         )
         return [self._row_to_project(row) for row in cursor.fetchall()]
     
-    def list(
+    def list_projects(
         self,
         status: str | None = None,
         project_type: str | None = None,

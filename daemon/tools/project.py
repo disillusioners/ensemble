@@ -311,7 +311,7 @@ def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "
         limit: int = 50,
     ) -> list[dict]:
         """List projects with optional filters. Use tool_help("project_list") for details."""
-        projects = store.list(
+        projects = store.list_projects(
             status=status,
             project_type=project_type,
             tags=tags,

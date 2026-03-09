@@ -1,5 +1,6 @@
 #!/bin/bash
-# Start the Ensemble Daemon
+# Start the Ensemble Daemon (local production test)
+# For full production install, use: make install
 
 set -e
 
@@ -27,19 +28,19 @@ else
     echo -e "${YELLOW}Using system Python (no venv found)${NC}"
 fi
 
-echo -e "${GREEN}Starting Ensemble Daemon...${NC}"
+echo -e "${GREEN}Starting Ensemble Daemon (Local Production Test)...${NC}"
 
-# Check if .env file exists
-if [ ! -f ".env" ]; then
-    echo -e "${YELLOW}Warning: .env file not found. Creating from .env.example...${NC}"
-    if [ -f ".env.example" ]; then
-        cp .env.example .env
-        echo -e "${YELLOW}Created .env file. Please edit it with your API keys.${NC}"
-    fi
+# Check if frontend is built
+if [ ! -f "frontend/dist/index.html" ]; then
+    echo -e "${YELLOW}Warning: Frontend not built. Run 'make build' first.${NC}"
+    echo -e "${YELLOW}Or use 'make install' for full production setup.${NC}"
 fi
 
-# Load environment variables from .env if it exists
-if [ -f ".env" ]; then
+# Load environment from .env.prod (or .env as fallback)
+if [ -f ".env.prod" ]; then
+    echo -e "${GREEN}Loading environment from .env.prod...${NC}"
+    export $(cat .env.prod | grep -v '^#' | xargs)
+elif [ -f ".env" ]; then
     echo -e "${GREEN}Loading environment from .env...${NC}"
     export $(cat .env | grep -v '^#' | xargs)
 fi
@@ -47,34 +48,28 @@ fi
 # Check required environment variables
 if [ -z "$OPENAI_API_KEY" ]; then
     echo -e "${RED}Error: OPENAI_API_KEY is not set${NC}"
-    echo "Please set it in .env file or export it:"
-    echo "  export OPENAI_API_KEY=your-api-key"
+    echo "Please set it in .env.prod or .env file"
     exit 1
 fi
 
 # Set defaults
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
+export PORT="${PORT:-8080}"
+export HOST="${HOST:-0.0.0.0}"
 
 # Create data directory if it doesn't exist
 mkdir -p data
 
-# Get port from config or use default
-PORT="${PORT:-8080}"
-HOST="${HOST:-0.0.0.0}"
-
+echo ""
 echo -e "${GREEN}Configuration:${NC}"
 echo "  Host: $HOST"
 echo "  Port: $PORT"
 echo "  Model: $OPENAI_MODEL"
-echo "  API URL: $OPENAI_BASE_URL"
 echo ""
-
-# Start the server
 echo -e "${GREEN}Starting server...${NC}"
-echo -e "${GREEN}API Documentation: http://localhost:$PORT/docs${NC}"
-echo -e "${GREEN}Health Check:     http://localhost:$PORT/health${NC}"
-echo -e "${GREEN}UI:                http://localhost:$PORT/ui${NC}"
+echo -e "${GREEN}API Docs: http://localhost:$PORT/docs${NC}"
+echo -e "${GREEN}UI:       http://localhost:$PORT${NC}"
 echo ""
 
 $PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT"

@@ -52,3 +52,4 @@ playground/
 *.db-wal
 # Config files
 config.yaml
+.env.prod
