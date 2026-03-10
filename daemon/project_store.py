@@ -87,9 +87,11 @@ class Project(SQLModel, table=True):
 
     description: Optional[str] = None
 
-    metadata: dict[str, Any] = Field(
+    # Use 'project_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
+    # Maps to 'metadata' column in DB, exposed as 'metadata' via to_dict()
+    project_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSON)
+        sa_column=Column("metadata", JSON)
     )
 
     relationships: dict[str, list[str]] = Field(
@@ -655,7 +657,7 @@ class ProjectStore:
         if project is None:
             return None
 
-        project.metadata[key] = value
+        project.project_metadata[key] = value
         project.updated_at = datetime.utcnow().isoformat()
         self.session.add(project)
         self.session.commit()
@@ -669,7 +671,7 @@ class ProjectStore:
         if project is None:
             return None
 
-        project.metadata.pop(key, None)
+        project.project_metadata.pop(key, None)
         project.updated_at = datetime.utcnow().isoformat()
         self.session.add(project)
         self.session.commit()
