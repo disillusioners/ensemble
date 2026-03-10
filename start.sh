@@ -61,6 +61,13 @@ export HOST="${HOST:-0.0.0.0}"
 # Create data directory if it doesn't exist
 mkdir -p data
 
+# Kill existing process on port
+if pid=$(lsof -ti :$PORT 2>/dev/null); then
+    echo -e "${YELLOW}Killing existing process on port $PORT (PID: $pid)${NC}"
+    kill $pid 2>/dev/null || true
+    sleep 1
+fi
+
 echo ""
 echo -e "${GREEN}Configuration:${NC}"
 echo "  Host: $HOST"

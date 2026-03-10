@@ -18,19 +18,43 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help
+.PHONY: build install install-deps clean uninstall help sync stop start dev
 
 help:
 	@echo "Available targets:"
 	@echo "  make build         - Build the frontend"
 	@echo "  make install       - Install production version to $(INSTALL_DIR)"
 	@echo "  make install-deps  - Install Python dependencies in $(INSTALL_DIR)"
+	@echo "  make sync          - Install dependencies with uv sync"
+	@echo "  make start         - Start the daemon (kills existing process first)"
+	@echo "  make stop          - Stop the daemon"
+	@echo "  make dev           - stop + sync + start"
 	@echo "  make clean         - Remove build artifacts"
 	@echo "  make uninstall     - Remove installed production version"
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)"
 	@echo "  PROD_PORT=$(PROD_PORT)"
+
+# Sync dependencies with uv
+sync:
+	@echo "$(GREEN)Syncing dependencies...$(NC)"
+	uv sync
+	@echo "$(GREEN)Dependencies synced!$(NC)"
+
+# Stop the daemon
+stop:
+	@echo "$(YELLOW)Stopping daemon on port $(PROD_PORT)...$(NC)"
+	@PID=$$(lsof -ti:$(PROD_PORT) 2>/dev/null) && { \
+		kill $$PID 2>/dev/null && echo "$(GREEN)Stopped process $$PID$(NC)" || true; \
+	} || echo "$(GREEN)No process found on port $(PROD_PORT)$(NC)"
+
+# Start the daemon
+start: stop
+	./start.sh
+
+# Development workflow
+dev: stop sync start
 
 # Build frontend
 build:
@@ -47,8 +71,8 @@ install-deps:
 	fi
 	cd $(INSTALL_DIR) && \
 	if command -v uv >/dev/null 2>&1; then \
-		echo "$(GREEN)Using uv to create venv and install dependencies...$(NC)"; \
-		uv venv && uv pip install -e .; \
+		echo "$(GREEN)Using uv to sync dependencies...$(NC)"; \
+		uv sync; \
 	else \
 		echo "$(GREEN)Using pip to create venv and install dependencies...$(NC)"; \
 		python3 -m venv .venv && .venv/bin/pip install -e .; \
@@ -102,8 +126,8 @@ install: build
 	@echo "$(YELLOW)Creating virtual environment and installing dependencies...$(NC)"
 	cd $(INSTALL_DIR) && \
 	if command -v uv >/dev/null 2>&1; then \
-		echo "$(GREEN)Using uv...$(NC)"; \
-		uv venv && uv pip install -e .; \
+		echo "$(GREEN)Using uv sync...$(NC)"; \
+		uv sync; \
 	else \
 		echo "$(GREEN)Using pip...$(NC)"; \
 		python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -e .; \
@@ -130,6 +154,13 @@ install: build
 	@echo 'export PORT="$${PORT:-$(PROD_PORT)}"' >> $(INSTALL_DIR)/start.sh
 	@echo 'export HOST="$${HOST:-0.0.0.0}"' >> $(INSTALL_DIR)/start.sh
 	@echo 'mkdir -p data' >> $(INSTALL_DIR)/start.sh
+	@echo '' >> $(INSTALL_DIR)/start.sh
+	@echo '# Kill existing process on port' >> $(INSTALL_DIR)/start.sh
+	@echo 'if pid=$$(lsof -ti :$$PORT 2>/dev/null); then' >> $(INSTALL_DIR)/start.sh
+	@echo '  echo "Killing existing process on port $$PORT (PID: $$pid)"' >> $(INSTALL_DIR)/start.sh
+	@echo '  kill $$pid 2>/dev/null || true' >> $(INSTALL_DIR)/start.sh
+	@echo '  sleep 1' >> $(INSTALL_DIR)/start.sh
+	@echo 'fi' >> $(INSTALL_DIR)/start.sh
 	@echo '' >> $(INSTALL_DIR)/start.sh
 	@echo 'echo -e "$${GREEN}Starting Ensemble Daemon...$${NC}"' >> $(INSTALL_DIR)/start.sh
 	@echo 'echo "Port: $$PORT"' >> $(INSTALL_DIR)/start.sh
