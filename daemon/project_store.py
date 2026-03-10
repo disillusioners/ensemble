@@ -404,12 +404,11 @@ class ProjectStore:
         if not keywords:
             return None
         
-        # Get all active projects
+        # Get all active projects (no JOIN needed - shortnames fetched via _row_to_project)
         cursor = self.conn.execute(
             """
-            SELECT p.* FROM projects p
-            LEFT JOIN project_shortnames ps ON p.project_id = ps.project_id
-            WHERE p.status = 'active'
+            SELECT * FROM projects
+            WHERE status = 'active'
             """
         )
         rows = cursor.fetchall()

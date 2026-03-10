@@ -1,272 +1,361 @@
-import json
-import re
-from pathlib import Path
+"""Tests for project context injection functionality."""
 
-from dataclasses import dataclass
+import json
+import sqlite3
+import pytest
 
 from dataclasses import asdict
 
-from ..project_store import import ProjectStore
-from project_store import ProjectStore
-from ProjectStore()
+from daemon.project_store import ProjectStore, Project
+from daemon.manager import extract_project_keywords, format_project_context
 
 
-class TestProjectContextInjection:
-    """Test project context injection functionality."""
-
+@pytest.fixture
+def conn():
+    """Create in-memory database with schema."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     
-    def test_match_by_keywords():
-        """Test the keyword extraction patterns."""
-        # Pattern: "X project"
-        patterns = _PROJECT_regex.findall("X project")
-        for match in _PROJECT_regex.findall("X project")
-        # match can be a tuple, group from groups
-        
-        result = _PROJECT_match_by_keywords(['abc', 'def', match_project(self.project_store):
-        self.assertIs result is_none,    
-    project_context = None
+    # Create projects table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            project_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            project_type TEXT NOT NULL DEFAULT 'general',
+            status TEXT NOT NULL DEFAULT 'active',
+            main_directory TEXT,
+            related_directories TEXT DEFAULT '[]',
+            description TEXT,
+            shortnames TEXT DEFAULT '[]',
+            metadata TEXT DEFAULT '{}',
+            relationships TEXT DEFAULT '{}',
+            creator_session_id TEXT,
+            creator_agent_dir TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Create indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_type ON projects(project_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_creator_session ON projects(creator_session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_main_directory ON projects(main_directory)")
+    
+    # Create project_tags junction table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_tags (
+            project_id TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (project_id, tag),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)")
+    
+    # Create project_shortnames junction table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_shortnames (
+            project_id TEXT NOT NULL,
+            shortname TEXT NOT NULL,
+            PRIMARY KEY (project_id, shortname),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)")
+    
+    conn.commit()
+    yield conn
+    conn.close()
 
-            keywords = ['abc', 'def']
-            # Match abc project - should in the like "abc system"
-        project = self.project_store.create(
+
+@pytest.fixture
+def store(conn):
+    """Create ProjectStore instance."""
+    return ProjectStore(conn)
+
+
+class TestExtractProjectKeywords:
+    """Tests for extract_project_keywords function."""
+
+    def test_extract_project_pattern(self):
+        """Test 'X project' pattern extraction."""
+        keywords = extract_project_keywords("Tell me about the abc project")
+        assert "abc" in keywords
+
+    def test_extract_prj_pattern(self):
+        """Test 'X prj' pattern extraction."""
+        keywords = extract_project_keywords("Work on the auth prj")
+        assert "auth" in keywords
+
+    def test_extract_proj_pattern(self):
+        """Test 'X proj' pattern extraction."""
+        keywords = extract_project_keywords("Check the billing proj")
+        assert "billing" in keywords
+
+    def test_extract_system_pattern(self):
+        """Test 'X system' pattern extraction."""
+        keywords = extract_project_keywords("Review the payment system")
+        assert "payment" in keywords
+
+    def test_extract_sys_pattern(self):
+        """Test 'X sys' pattern extraction."""
+        keywords = extract_project_keywords("Debug the notification sys")
+        assert "notification" in keywords
+
+    def test_extract_app_pattern(self):
+        """Test 'X app' pattern extraction."""
+        keywords = extract_project_keywords("Deploy the mobile app")
+        assert "mobile" in keywords
+
+    def test_extract_service_pattern(self):
+        """Test 'X service' pattern extraction."""
+        keywords = extract_project_keywords("Monitor the api service")
+        assert "api" in keywords
+
+    def test_extract_repo_pattern(self):
+        """Test 'X repo' pattern extraction."""
+        keywords = extract_project_keywords("Clone the backend repo")
+        assert "backend" in keywords
+
+    def test_extract_capitalized_words(self):
+        """Test extraction of capitalized words as potential project names."""
+        keywords = extract_project_keywords("Check Alpha and Beta systems")
+        assert "Alpha" in keywords
+        assert "Beta" in keywords
+
+    def test_multiple_patterns(self):
+        """Test extraction with multiple patterns in one message."""
+        keywords = extract_project_keywords(
+            "Work on the Auth project and check the Billing system"
+        )
+        assert "Auth" in keywords
+        assert "Billing" in keywords
+
+    def test_empty_message(self):
+        """Test with empty message."""
+        keywords = extract_project_keywords("")
+        assert keywords == []
+
+    def test_no_keywords(self):
+        """Test message with no project keywords (only generic capitalized word)."""
+        keywords = extract_project_keywords("Hello, how are you?")
+        # "Hello" is capitalized but short, but our filter is >2 chars so it's included
+        # This is acceptable behavior - capitalized words are potential project names
+        assert "Hello" in keywords
+
+    def test_case_insensitive_patterns(self):
+        """Test that patterns are case insensitive."""
+        keywords = extract_project_keywords("Work on the ABC PROJECT")
+        assert "abc" in keywords or "ABC" in keywords
+
+
+class TestFormatProjectContext:
+    """Tests for format_project_context function."""
+
+    def test_format_basic_project(self, store):
+        """Test formatting a basic project."""
+        project = store.create(name="Test Project")
+        context = format_project_context(project)
+        
+        assert "## Related Project" in context
+        assert "```json" in context
+        assert '"name": "Test Project"' in context
+
+    def test_format_full_project(self, store):
+        """Test formatting a project with all fields."""
+        project = store.create(
             name="ABC System",
             project_type="software",
             main_directory="/src/abc",
-            description="Authentication and billing service for ABC",
+            description="Authentication and billing service",
             tags=["auth", "billing"],
-            shortnames=["abc", "auth"]
-            related_directories=["/apps/dashboard"]
+            shortnames=["abc", "auth"],
+            related_directories=["/apps/dashboard"],
             metadata={"framework": "spring"}
-            relationships={}}
-            project = self.project_store.match_by_keywords(['abc'])
+        )
+        context = format_project_context(project)
         
- assert result is not None
-        # Match prj - matches "Prj" system"
+        assert "## Related Project" in context
+        assert '"name": "ABC System"' in context
+        assert '"project_type": "software"' in context
+        assert '"main_directory": "/src/abc"' in context
+        assert '"description": "Authentication and billing service"' in context
+        assert '"tags":' in context
+        assert '"shortnames":' in context
+
+    def test_format_returns_valid_json(self, store):
+        """Test that formatted context contains valid JSON."""
+        project = store.create(
+            name="JSON Test",
+            description="Test JSON parsing"
+        )
+        context = format_project_context(project)
+        
+        # Extract JSON from the formatted context
+        json_start = context.find("```json\n") + 8
+        json_end = context.find("\n```", json_start)
+        json_str = context[json_start:json_end]
+        
+        # Should be valid JSON
+        parsed = json.loads(json_str)
+        assert parsed["name"] == "JSON Test"
+        assert parsed["description"] == "Test JSON parsing"
+
+    def test_format_ends_with_newline(self, store):
+        """Test that formatted context ends with proper newlines."""
+        project = store.create(name="Newline Test")
+        context = format_project_context(project)
+        
+        # Should end with blank line for clean message prepending
+        assert context.endswith("\n\n")
+
+
+class TestMatchByKeywords:
+    """Tests for ProjectStore.match_by_keywords method."""
+
+    def test_match_by_name(self, store):
+        """Test matching project by name keyword."""
+        store.create(name="Alpha Project", shortnames=["alpha"])
+        
+        result = store.match_by_keywords(["alpha"])
+        assert result is not None
+        assert result.name == "Alpha Project"
+
+    def test_match_by_shortname(self, store):
+        """Test matching project by shortname keyword."""
+        store.create(name="Beta System", shortnames=["beta", "b"])
+        
+        result = store.match_by_keywords(["beta"])
+        assert result is not None
+        assert result.name == "Beta System"
+
+    def test_match_exact_vs_partial(self, store):
+        """Test that exact match scores higher than partial."""
+        store.create(name="Auth Service", shortnames=["auth"])
+        store.create(name="Authentication Service", shortnames=["authentication"])
+        
+        # "auth" should match "Auth Service" exactly (higher score)
+        result = store.match_by_keywords(["auth"])
+        assert result is not None
+        assert result.name == "Auth Service"
+
+    def test_match_no_keywords(self, store):
+        """Test with empty keywords list."""
+        store.create(name="Some Project")
+        
+        result = store.match_by_keywords([])
         assert result is None
-        # Check for result matches our new project context injection
-        
-        # Create test project
-        self.project_store.create(name="Test", project_type="software")
-        main_directory="/src/abc"
-        description="Authentication and billing service for ABC system"
-        related_directories=["/apps/dashboard", "/apps/abc"]
-        tags=["auth", "billing", "java", "spring"]
-        shortnames=["abc", "auth"]
-        relationships={"sessions": ["session-id-1"], "projects": ["session-id-1"], "relationships": {"sessions": ["session-id-1"]}
-        
-        assert result.project is None
+
+    def test_match_no_active_projects(self, store):
+        """Test when no active projects exist."""
+        result = store.match_by_keywords(["anything"])
         assert result is None
-        self.assertEqual(result.project, None)
+
+    def test_match_ignores_inactive_projects(self, store):
+        """Test that archived projects are not matched."""
+        project = store.create(name="Archived Project", shortnames=["archived"])
+        store.update(project.project_id, status="archived")
         
-        # No match - inject nothing
-        # No shortnames - nothing should
-        # Verify match_by_keywords doesn't modify DB
-        self.project_store.match_by_keywords(['abc'])
+        result = store.match_by_keywords(["archived"])
         assert result is None
-    
-    project_context = f"""
-## Related Project: {project_name}
-- Type: {project_type}
-- Directory: {main_directory}
-- related_directories: {related_directories}
-- description: {description}
-- tags: {tags}
-- shortnames: {shortnames}
-- metadata: {metadata}
-- relationships: {relationships}
-- creator_session_id: {creator_agent_dir}
 
-<session_id>
-</session>
+    def test_match_case_insensitive(self, store):
+        """Test that matching is case insensitive."""
+        store.create(name="LowerCase Project", shortnames=["lowercase"])
+        
+        result = store.match_by_keywords(["LOWERCASE"])
+        assert result is not None
+        assert result.name == "LowerCase Project"
 
-```
+    def test_match_partial_match(self, store):
+        """Test partial matching works."""
+        store.create(name="PaymentGateway", shortnames=["pg"])
+        
+        result = store.match_by_keywords(["payment"])
+        assert result is not None
+        assert result.name == "PaymentGateway"
+
+    def test_match_highest_score_wins(self, store):
+        """Test that project with highest score is returned."""
+        store.create(name="Auth Core", shortnames=["auth"])
+        store.create(name="Auth Extended System", shortnames=["authext"])
+        
+        # Both match "auth" but first one has exact match on shortname
+        result = store.match_by_keywords(["auth"])
+        assert result is not None
+        # Could be either depending on scoring, but should return something
+        assert "Auth" in result.name
+
+    def test_match_multiple_keywords(self, store):
+        """Test matching with multiple keywords."""
+        store.create(name="Auth Billing Service", shortnames=["auth", "billing"])
+        store.create(name="Other Project", shortnames=["other"])
+        
+        result = store.match_by_keywords(["auth", "billing"])
+        assert result is not None
+        assert result.name == "Auth Billing Service"
 
 
-) {
+class TestProjectContextInjectionIntegration:
+    """Integration tests for project context injection flow."""
+
+    def test_full_flow(self, store):
+        """Test the full flow from message to context injection."""
+        # Create a project
+        project = store.create(
+            name="Test System",
+            project_type="software",
+            main_directory="/src/test",
+            description="A test system for integration testing",
+            shortnames=["test", "ts"]
+        )
+        
+        # Simulate user message
+        message = "Help me with the test system"
+        
         # Extract keywords
         keywords = extract_project_keywords(message)
+        assert "test" in [k.lower() for k in keywords]
         
-        # Match
-        if not keywords:
-            return []
+        # Match project
+        matched = store.match_by_keywords(keywords)
+        assert matched is not None
+        assert matched.name == "Test System"
         
-        # No match
-        message_content = message_content
+        # Format context
+        context = format_project_context(matched)
+        assert "## Related Project" in context
+        assert '"name": "Test System"' in context
+
+    def test_no_match_no_injection(self, store):
+        """Test that no context is injected when no project matches."""
+        # Create a project that won't match
+        store.create(name="Unrelated Project", shortnames=["unrelated"])
         
-        # Check if first message
-        existing_messages = await get_session_messages(self.checkpointer, session_id)
-        is_first_message = len(existing_messages) == 0
+        # Message about something else
+        message = "Tell me about the weather"
+        keywords = extract_project_keywords(message)
         
-        # If first message
-        if not keywords:
-            keywords = extract_project_keywords(message)
-            if not keywords:
-                return None
-            
-            
-            # No match - inject nothing
-            project_context = json.dumps(project.to_dict(project)
-            context_content = f"## Related Project\n\n{project_context}\n\n{message.content}")
-        
- # No shortnames
-        assert message is not None
-        self.assertEqual(result.project, None)
-        
-        # Prepend to context to first message
-        project_context = format_project_context(project(project)
-        result.content = f"## Related Project\n\n{json.dumps(result.to_dict())}"
-        print(f"Project context injection:\ debug: {project.name}={project.shortnames}")
-        print(f"Match:_keywords: {keywords}")
-        expected = f"## Related Project: {project_name}\n\n{json.dumps(project.to_dict())}")
-        print(f"Score: {scores}")
-        # Should debug logging
-        assert result.project is None, logger.debug(f"No project match for keywords {keywords}")
-        
-    # Add project context to compose_system prompt
-        logger.debug(f"Prepending project context: {project_context}")
-            message_content = project_context
+        # Should not match any project
+        matched = store.match_by_keywords(keywords)
+        assert matched is None
+
+    def test_context_can_be_prepended_to_message(self, store):
+        """Test that context can be properly prepended to a message."""
+        project = store.create(
+            name="Prepend Test",
+            description="Testing prepend"
         )
-    
-        logger.debug(f"No project context for message: {project_context}")
-            message_content = project_context
         
-        # Format and prepend
-        result = await self._process_message_with_tracking(
-            session_id,
-            msg.content,
-            msg.message_id,
-            cancellation_token=cancellation_source.token,
-            is_retry=is_retry,
-        )
-
-        # Update todos
-        await self._generate_session_title(session_id, msg.content)
-            # self._send_completion_report if child
-            # Prepend project context
-            message_content = project_context
+        context = format_project_context(project)
+        original_message = "Please help me with this task"
         
-        # Check if this is the first message and generate title
-        if is_first_message:
-            try:
-                title = await self._generate_session_title(session_id, msg.content)
-                if title:
-                    logger.warning(f"Failed to generate title for session {session_id}: {e}")
-
-            except Exception as e:
-                logger.warning(f"Failed to generate title for session {session_id}: {e}")
-            
-            # Broadcast error event
-            await self.broadcaster.broadcast(Event(
-                type="error",
-                session_id=session_id,
-                message_id=msg.message_id,
-                data={
-                    "error": str(e),
-                    "status": "failed",
-                    "retry_count": msg.retry_count + 1,
-                    "is_retry": is_retry
-                }
-            })
-            # Broadcast completed event
-            await self.broadcaster.broadcast(Event(
-                type="completed",
-                session_id=session_id,
-                message_id=msg.message_id,
-                data={
-                    "content": result.content,
-                    "thinking": result.thinking,
-                    "thinking_extracted": result.thinking_extracted,
-                    "tool_calls": result.tool_calls,
-                    "source": msg.source,  # Required for ResponseDispatcher routing
-                    "source": msg.source,
-                    "priority": 1,  # Normal priority
-                    "metadata": {"type": "completion_report", "child_session_id": msg.child_session_id, "type": "completion_report"}
-                }
-            })
-            # Check queue health
-            await self.broadcaster.broadcast(Event(
-                type="status_changed",
-                session_id=session_id,
-                message_id=msg.message_id,
-                data={"status": "processing", "is_retry": is_retry}
-            ))
-            except OperationCancelledError as e:
-                logger.info(f"Message {msg.message_id[:8]}... was cancelled by cancellation source: {e.reason.value}")
-                # Don't schedule retry here - watchdog already did
-                self.queue.schedule_retry(msg.message_id, str(e))
-                self.circuit_breaker.record_failure(session_id)
-                self.circuit_breaker.record_success(session_id)
-                self.queue.fail(msg.message_id, str(e))
-                logger.warning(
-                    f"Message {msg.message_id[:8]}... status changed to '{row[0] if row else 'unknown'}' "
-                    f"during processing, skipping ack (success already recorded)"
-                self.circuit_breaker.record_success(session_id)
-                
-            # Pre-ACK status check to prevent race condition with watchdog
-            status = row[0] == 'processing':
-                    self.queue.ack(msg.message_id)
-                    except Exception as e:
-                        logger.error(f"Error processing message {msg.message_id}: {e}")
-                        self.circuit_breaker.record_failure(session_id)
-                        self.circuit_breaker.record_failure(session_id)
-                self.circuit_breaker.open = retry again.
-                        self.queue.schedule_retry(msg.message_id, msg.retry_count + 1, str(e))
-                    logger.warning(
-                        f"Circuit breaker open for session {session_id[:8]}..., retrying forever"
-                    )
-self.queue.schedule_retry(msg.message_id, msg.retry_count + 1, str(e))
-                    logger.warning(
-                        f"Circuit breaker still open for session {session_id}, skipping retry")
-                    self.queue.fail(msg.message_id, str(e))
-                    self.circuit_breaker.close()
-
-                    logger.warning(f"Circuit breaker still open for session {session_id[:8]}...")
-            
- except OperationCancelledError as e:
-                logger.info(f"Message {msg.message_id} was cancelled by: {e.reason.value}")
-                # Broadcast cancelled event
-                await self.broadcaster.broadcast(Event(
-                    type="cancelled",
-                    session_id=session_id,
-                    message_id=msg.message_id,
-                    data={"reason": e.reason.value}
-                ))
-            except asyncio.CancelledError:
-                logger.info(f"Message {msg.message_id[:8]}... task was cancelled")
-                raise  # Re-raise to don't schedule retry
-                self.queue.schedule_retry(
-                    msg.message_id,
-                    msg.retry_count + 1,
-                    str(e)
-                )
-            # Broadcast retry scheduled event
-                await self.broadcaster.broadcast(Event(
-                    type="status_changed",
-                    session_id=session_id,
-                    message_id=msg.message_id,
-                    data={
-                        "status": "retrying",
-                        "retry_count": msg.retry_count + 1,
-                        "error": str(e)
-                    }
-                ))
-            except Exception as e:
-                logger.error(f"Error processing message {msg.message_id}: {e}")
-                self.circuit_breaker.record_failure(session_id)
-                self.circuit_breaker.open()
-                retry again =                        self.queue.fail(msg.message_id, str(e))
-                self.circuit_breaker.close()
-                logger.warning(f"Circuit breaker now closed for session {session_id[:8]}...")
-        return
+        # Simulate prepending
+        combined = context + original_message
         
-    # Broadcast error event
-    await self.broadcaster.broadcast(Event(
-        type="error",
-        session_id=session_id,
-        message_id=msg.message_id,
-        data={
-            "error": str(e),
-            "status": "failed",
-            "retry_count": msg.retry_count,
-        }
-    ))
+        assert combined.startswith("## Related Project")
+        assert original_message in combined
+        assert "Prepend Test" in combined

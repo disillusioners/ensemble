@@ -91,44 +91,6 @@ def extract_project_keywords(message: str) -> list[str]:
 
 
 def format_project_context(project) -> str:
-    """Format project info as context block for message injection.
-    
-    Args:
-        project: Project object to format.
-    
-    Returns:
-        Formatted string with project context as JSON.
-    """
-    import json
-    from dataclasses import asdict
-    
-    project_dict = asdict(project)
-    project_json = json.dumps(project_dict, indent=2)
-    return f"""## Related Project
-
-```json
-{project_json}
-```"""
-
-
-def format_project_context(project) -> str:
-    """Format project info for context injection.
-    
-    Args:
-        project: Project object to format.
-    
-    Returns:
-        Formatted string with project JSON for context injection.
-    """
-    from dataclasses import asdict
-    return f"""## Related Project
-
-```json
-{asdict(project)}
-```"""
-
-
-def format_project_context(project) -> str:
     """Format project info as context block for prepending to message.
     
     Args:
@@ -655,21 +617,24 @@ class SessionManager:
                 )
                 
                 try:
+                    # Project context injection on first message (BEFORE processing)
+                    message_content = msg.content
+                    if is_first_message:
+                        keywords = extract_project_keywords(msg.content)
+                        project = self.project_store.match_by_keywords(keywords)
+                        if project:
+                            # Format project context and prepend to message
+                            project_context = format_project_context(project)
+                            message_content = project_context + msg.content
+                            logger.debug(f"Injected project context for project: {project.name}")
+                    
                     result = await self._process_message_with_tracking(
                         session_id,
-                        msg.content,
+                        message_content,
                         msg.message_id,
                         cancellation_token=cancellation_source.token,
                         is_retry=is_retry,
                     )
-                    
-                    # NEW: Project context injection on first message
-                    keywords = extract_project_keywords(msg.content)
-                    project = self.project_store.match_by_keywords(keywords)
-                    if project:
-                        # Format project context and prepend to message
-                        project_context = format_project_context(project)
-                        msg.content = project_context + "\n\n" + msg.content
                     
                     # Pre-ACK status check to prevent race condition with watchdog
                     # Always record success since processing completed without error
