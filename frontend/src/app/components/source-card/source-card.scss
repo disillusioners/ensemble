@@ -82,7 +82,10 @@ $accent-blue: #3b82f6;
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
-  animation: pulse 2s infinite;
+
+  &.pulsing {
+    animation: pulse 2s infinite;
+  }
 }
 
 @keyframes pulse {

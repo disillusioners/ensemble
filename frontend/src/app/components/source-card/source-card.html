@@ -32,7 +32,7 @@
     
     <!-- Status Badge -->
     <div class="status-badge" [style.background-color]="statusColor + '20'" [style.color]="statusColor">
-      <span class="status-dot" [style.background-color]="statusColor"></span>
+      <span class="status-dot" [class.pulsing]="source.status === 'running'" [style.background-color]="statusColor"></span>
       {{ statusLabel }}
     </div>
   </div>
