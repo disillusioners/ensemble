@@ -47,7 +47,7 @@ class DaemonConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DAEMON_")
 
     host: str = Field(default="0.0.0.0")
-    port: int = Field(default=8080)
+    port: int = Field(default=8079)
 
 
 class LimitsConfig(BaseSettings):

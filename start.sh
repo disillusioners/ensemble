@@ -55,7 +55,7 @@ fi
 # Set defaults
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
-export PORT="${PORT:-8080}"
+export PORT="${PORT:-8079}"
 export HOST="${HOST:-0.0.0.0}"
 
 # Create data directory if it doesn't exist

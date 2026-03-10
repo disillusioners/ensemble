@@ -76,7 +76,7 @@ llm:
 
 daemon:
   host: "0.0.0.0"
-  port: 8080
+  port: 8079
 
 limits:
   max_sessions: 100
@@ -107,7 +107,7 @@ llm:
 
 daemon:
   host: "${DAEMON_HOST:-0.0.0.0}"
-  port: ${DAEMON_PORT:-8080}
+  port: ${DAEMON_PORT:-8079}
 
 limits:
   max_sessions: ${MAX_SESSIONS:-100}

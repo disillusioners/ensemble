@@ -29,7 +29,7 @@ cp .env.example .env
 ./start.sh
 ```
 
-Server runs at `http://localhost:8080`
+Server runs at `http://localhost:8079`
 
 ## API
 
@@ -48,12 +48,12 @@ Server runs at `http://localhost:8080`
 
 ```bash
 # Spawn a session
-curl -X POST http://localhost:8080/sessions \
+curl -X POST http://localhost:8079/sessions \
   -H "Content-Type: application/json" \
   -d '{"agent_dir": "agents/leader"}'
 
 # Send a message
-curl -X POST http://localhost:8080/sessions/{session_id}/messages \
+curl -X POST http://localhost:8079/sessions/{session_id}/messages \
   -H "Content-Type: application/json" \
   -d '{"content": "Hello, agent!"}'
 ```
@@ -103,7 +103,7 @@ llm:
 
 daemon:
   host: "0.0.0.0"
-  port: 8080
+  port: 8079
 
 limits:
   max_sessions: 100

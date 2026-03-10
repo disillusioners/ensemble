@@ -45,8 +45,8 @@ Angular 21 single-page application providing the user interface for the auto-cod
 | `public/` | Static assets (favicon, etc.) |
 
 ## Integration Points
-- **Backend API**: Proxied via `proxy.conf.json` to `http://localhost:8080`
-- **WebSocket**: Proxied via `proxy.conf.json` to `ws://localhost:8080`
+- **Backend API**: Proxied via `proxy.conf.json` to `http://localhost:8079`
+- **WebSocket**: Proxied via `proxy.conf.json` to `ws://localhost:8079`
 - **API Prefix**: `/api` requests are rewritten to backend (path prefix removed)
 - **Dev Server Proxy**: Configured in `angular.json` using `proxy.conf.json`
 

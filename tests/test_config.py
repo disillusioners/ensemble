@@ -82,7 +82,7 @@ class TestLoadConfig:
             assert config.llm.api_key == "test-key"
             assert config.llm.model == "gpt-4"
             assert config.daemon.host == "0.0.0.0"
-            assert config.daemon.port == 8080
+            assert config.daemon.port == 8079
             assert config.limits.max_sessions == 100
         finally:
             # Cleanup
@@ -103,7 +103,7 @@ class TestLoadConfig:
             config = load_config()
             
             assert config.llm.base_url == "https://api.openai.com/v1"
-            assert config.daemon.port == 8080
+            assert config.daemon.port == 8079
         finally:
             # Cleanup env var
             del os.environ["ENSEMBLE_CONFIG"]
@@ -118,7 +118,7 @@ class TestLoadConfig:
         config = load_config(str(config_file))
         
         assert config.llm.base_url == "https://api.openai.com/v1"
-        assert config.daemon.port == 8080
+        assert config.daemon.port == 8079
 
     def test_env_var_substitution_in_config(self, tmp_path, sample_config_with_env_vars):
         """Test environment variable substitution in config file."""
@@ -204,7 +204,7 @@ class TestConfigValidation:
         assert config.llm.api_key == ""
         assert config.llm.model == "gpt-4"
         assert config.daemon.host == "0.0.0.0"
-        assert config.daemon.port == 8080
+        assert config.daemon.port == 8079
         assert config.limits.max_sessions == 100
 
     def test_config_with_custom_values(self):
@@ -233,7 +233,7 @@ class TestConfigValidation:
         
         assert "llm" in config_dict
         assert config_dict["llm"]["base_url"] == "https://api.openai.com/v1"
-        assert config_dict["daemon"]["port"] == 8080
+        assert config_dict["daemon"]["port"] == 8079
 
 
 class TestLLMConfig:
@@ -261,7 +261,7 @@ class TestDaemonConfig:
         config = DaemonConfig()
         
         assert config.host == "0.0.0.0"
-        assert config.port == 8080
+        assert config.port == 8079
 
 
 class TestLimitsConfig:

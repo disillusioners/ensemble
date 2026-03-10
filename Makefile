@@ -111,7 +111,7 @@ install: build
 	
 	# Copy and modify config.yaml with production port
 	@echo "$(YELLOW)Configuring port $(PROD_PORT)...$(NC)"
-	sed 's/port: \$${PORT:-8080}/port: \$${PORT:-$(PROD_PORT)}/' $(CONFIG_FILE) > $(INSTALL_DIR)/$(CONFIG_FILE)
+	sed 's/port: \$${PORT:-8079}/port: \$${PORT:-$(PROD_PORT)}/' $(CONFIG_FILE) > $(INSTALL_DIR)/$(CONFIG_FILE)
 	
 	# Copy .env.prod file (or .env as fallback)
 	@echo "$(YELLOW)Copying environment...$(NC)"

@@ -45,7 +45,7 @@ export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
 # Create data directory if it doesn't exist
 mkdir -p data
 
-PORT="${PORT:-8080}"
+PORT="${PORT:-8079}"
 HOST="${HOST:-0.0.0.0}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
