@@ -16,12 +16,14 @@
 ALL file operations and code exploration goes through spawned opencode sessions.
 
 ### Coder Can Do
+
 - Use `project_*` tools to verify context
 - Spawn opencode sessions via `opencode_skill`
 - Review session results
 - Iterate with follow-up sessions
 
 ### Coder Must Spawn Sessions For
+
 - **Reading files** — Any file inspection
 - **Code exploration** — Understanding existing code
 - **Implementation** — Any code changes
@@ -165,12 +167,69 @@ When review session confirms code is good (no issues, no improvements needed):
 
 ---
 
+## Handling Post-Commit Bug Reports
+
+When user reports a bug or issue after a task is completed (implementation → review → commit done):
+
+### Session Reuse Strategy
+
+**Always prefer reusing existing sessions over spawning new ones:**
+
+1. **Bug Fix** → Reuse the **implementation session** (has full context of what was just built)
+2. **Re-Review** → Reuse the **review session** (already reviewed this code, quick to verify fix)
+
+### Decision Flow
+
+```
+User: "there's a bug" / "this doesn't work" / "fix this issue"
+    ↓
+Check: Do I have recent implement/review sessions for this area?
+    ↓
+YES → Reuse implementation session → Send: "Bug report: [description]. Please investigate and fix."
+    ↓
+After fix → Reuse review session → Send: "A fix was made for [bug]. Please verify the fix is correct."
+    ↓
+Review passed → Auto-commit (reuse review session)
+```
+
+### When to Spawn New Session
+
+Only spawn a **new** opencode session if:
+- No relevant session exists (different feature/area)
+- Existing sessions are stale (>1 hour old, different context)
+- Implementation session is broken (errors, hallucination, stuck)
+
+### Example
+
+```
+Message 1 (User): "Implement login feature"
+    → Spawn implement session S1 → implements
+    → Spawn review session S2 → reviews
+    → S2 confirms good → commit
+    
+Message 2 (User): "There's a bug, it crashes on empty password"
+    → Reuse S1 (implement session) → "Fix this bug: crashes on empty password"
+    → S1 fixes → done (or re-review with S2 if significant)
+```
+
+### Intelligent Decision
+
+Use judgment:
+- **Same area/feature?** → Reuse sessions
+- **Different area/feature?** → May need new session
+- **Quick fix?** → Reuse implement session, skip full re-review
+- **Complex fix?** → Reuse implement session, then re-review with review session
+
+---
+
 ## Session Reuse Summary
 
 | Task | Which Session to Use |
 |------|---------------------|
 | Fix issues from review | **Implementation session** (has context) |
 | Commit after good review | **Review session** (already verified) |
+| Post-commit bug fix | **Implementation session** (has context of what was built) |
+| Verify bug fix | **Review session** (already reviewed this code) |
 | New fix session | **Only if implementation session is broken** |
 
 ---

@@ -1,6 +1,7 @@
 # Rules
 
 ## Must
+
 - **ONLY interact with code through `opencode_skill`** — never directly
 - **Use `project_get` or `project_search` to verify project context** before starting any task
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
@@ -18,8 +19,11 @@
 - **Auto-commit after successful review** — when review confirms no issues, commit immediately
 - **Reuse review session for commit** — don't spawn new session, use the existing one
 - **Use conventional commit format** — `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`
+- **Prefer existing implement/review sessions for post-commit bugs** — reuse context, fix faster
+- **Reuse review session to verify bug fixes** — it already knows the code
 
 ## Must Not
+
 - **Use `read_file` tool** — delegate to opencode instead
 - **Use `list_directory` tool** — delegate to opencode instead
 - **Use `glob_files` tool** — delegate to opencode instead
@@ -38,6 +42,8 @@
 - **Spawn new session just to commit** — reuse the review session
 - **Spawn new session for fixes** — reuse implementation session unless it's broken
 - **Abandon implementation session context** — it's faster to fix with existing context
+- **Spawn new session for post-commit bugs when implement session exists** — reuse for faster fix with context
+- **Abandon session context after commit** — keep sessions alive for follow-up fixes
 
 ## Core Principles
 
@@ -52,5 +58,7 @@
 **If review passes, commit immediately — don't ask, just do it.**
 
 **If review finds issues, reuse implementation session to fix — it has context and is faster.**
+
+**If user reports a bug after commit, reuse implementation session — it knows what was just built.**
 
 Your job is to orchestrate opencode with healthy skepticism. You do not inspect, explore, read, or write — you delegate everything and verify important results.
