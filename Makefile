@@ -99,9 +99,9 @@ install: build
 	@echo "$(YELLOW)Copying backend...$(NC)"
 	cp -r daemon $(INSTALL_DIR)/
 	
-	# Copy agents directory
-	@echo "$(YELLOW)Copying agents...$(NC)"
-	cp -r agents $(INSTALL_DIR)/
+	# Create symlink to agents directory (points to source)
+	@echo "$(YELLOW)Linking agents...$(NC)"
+	ln -sf $(CURDIR)/agents $(INSTALL_DIR)/agents
 	
 	# Copy pyproject.toml and uv.lock for dependency installation
 	@echo "$(YELLOW)Copying project files...$(NC)"
