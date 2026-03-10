@@ -67,6 +67,19 @@ $cyan: #06b6d4;
   width: 100%;
   max-width: 48rem;
   margin: 0 auto;
+
+  // Responsive: use more space on larger screens
+  @media (min-width: 1024px) {
+    max-width: 64rem; // 1024px - better use of space on laptops
+  }
+
+  @media (min-width: 1440px) {
+    max-width: 80rem; // 1280px - full width on large monitors
+  }
+
+  @media (min-width: 1920px) {
+    max-width: 96rem; // 1536px - ultrawide screens
+  }
 }
 
 // Welcome message
@@ -153,6 +166,16 @@ $cyan: #06b6d4;
 
   &.align-right {
     align-items: flex-end;
+  }
+
+  // Assistant messages can use more width on larger screens
+  .assistant-message & {
+    @media (min-width: 1024px) {
+      max-width: 85%;
+    }
+    @media (min-width: 1440px) {
+      max-width: 90%;
+    }
   }
 }
 
