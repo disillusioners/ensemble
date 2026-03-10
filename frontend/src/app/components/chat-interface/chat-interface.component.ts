@@ -95,6 +95,22 @@ export class ChatInterfaceComponent implements AfterViewChecked {
     return content != null && content.trim().length > 0;
   }
 
+  /**
+   * Check if a message has any visible content to display.
+   * Used to determine if the entire message row should be rendered.
+   */
+  hasVisibleContent(message: Message): boolean {
+    // User messages are always shown
+    if (message.role === 'user') return true;
+    
+    // For assistant messages, check if there's anything to display
+    const hasContent = this.hasMeaningfulContent(message);
+    const hasThinking = this.showThinking && !!this.getThinkingContent(message);
+    const hasToolCalls = this.showToolCalls && !!message.tool_calls && message.tool_calls.length > 0;
+    
+    return hasContent || hasThinking || hasToolCalls;
+  }
+
   getThinkingContent(message: Message): string | null {
     // Prioritize thinking (from metadata) over thinking_extracted (from tags)
     if (message.thinking && message.thinking.trim()) {
