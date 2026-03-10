@@ -91,7 +91,7 @@
                 [style.borderTopLeftRadius]="message.role === 'assistant' ? '4px' : '12px'"
                 [style.borderTopRightRadius]="message.role === 'user' ? '4px' : '12px'"
               >
-                {{ message.content || (message.role === 'assistant' ? '...' : '') }}
+                <markdown [data]="message.content || ''"></markdown>
               </div>
             }
 
@@ -156,7 +156,7 @@
               [style.borderTopLeftRadius]="'4px'"
               [style.borderTopRightRadius]="'12px'"
             >
-              {{ pendingMessage.content || '...' }}
+              <markdown [data]="pendingMessage.content || ''"></markdown>
             </div>
           </div>
         </div>

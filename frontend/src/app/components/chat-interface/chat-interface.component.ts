@@ -1,11 +1,12 @@
 import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, AfterViewChecked, signal, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { MarkdownModule } from 'ngx-markdown';
 import { Message, Agent, ToolCall } from '../../models';
 
 @Component({
   selector: 'app-chat-interface',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, MarkdownModule],
   templateUrl: './chat-interface.html',
   styleUrls: ['./chat-interface.scss']
 })
