@@ -59,6 +59,14 @@ install-deps:
 install: build
 	@echo "$(GREEN)Installing to $(INSTALL_DIR)...$(NC)"
 	
+	# Stop any process using the production port
+	@echo "$(YELLOW)Checking for processes on port $(PROD_PORT)...$(NC)"
+	@PID=$$(lsof -ti:$(PROD_PORT) 2>/dev/null) && { \
+		echo "$(YELLOW)Stopping process $$PID on port $(PROD_PORT)...$(NC)"; \
+		kill -9 $$PID 2>/dev/null || true; \
+		sleep 1; \
+	} || echo "$(GREEN)Port $(PROD_PORT) is available.$(NC)"
+	
 	# Create installation directory
 	mkdir -p $(INSTALL_DIR)
 	mkdir -p $(INSTALL_DIR)/data
