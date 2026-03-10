@@ -39,8 +39,115 @@ from .cancellation import (
     OperationCancelledError
 )
 from .request_registry import ActiveRequestRegistry
+from .project_store import ProjectStore
 
 logger = logging.getLogger(__name__)
+
+
+# Patterns for extracting project keywords from messages
+_PROJECT_PATTERNS = [
+    r'(\w+)\s+(?:project|prj|proj)',           # "abc project", "abc prj", "abc proj"
+    r'(\w+)\s+(?:system|sys)',                  # "abc system", "abc sys"
+    r'(\w+)\s+(?:app|application)',             # "abc app", "abc application"
+    r'(\w+)\s+(?:service|svc)',                 # "abc service", "abc svc"
+    r'(\w+)\s+(?:module|mod)',                  # "abc module", "abc mod"
+    r'(?:project|prj|proj)\s+(\w+)',            # "project abc", "prj abc"
+    r'(?:the\s+)?(\w+)\s+(?:repo|repository)',  # "abc repo", "the abc repository"
+]
+_PROJECT_REGEX = re.compile('|'.join(_PROJECT_PATTERNS), re.IGNORECASE)
+
+
+def extract_project_keywords(message: str) -> list[str]:
+    """Extract potential project name keywords from a message.
+    
+    Looks for patterns like "X project", "X system", "X prj", etc.
+    Also includes capitalized words that might be project names.
+    
+    Args:
+        message: The user message to extract keywords from.
+    
+    Returns:
+        List of potential project name keywords.
+    """
+    keywords = set()
+    
+    # Extract from patterns
+    matches = _PROJECT_REGEX.findall(message)
+    for match in matches:
+        # match can be a tuple from groups, filter out empty strings
+        for word in (match if isinstance(match, tuple) else (match,)):
+            if word and len(word) > 1:  # Skip single chars
+                keywords.add(word)
+    
+    # Extract capitalized words (potential proper nouns/project names)
+    # Match words starting with uppercase followed by lowercase/numbers
+    cap_pattern = r'\b([A-Z][a-z0-9]+)\b'
+    cap_matches = re.findall(cap_pattern, message)
+    for word in cap_matches:
+        if len(word) > 2:  # Skip short words like "The", "For", etc.
+            keywords.add(word)
+    
+    return list(keywords)
+
+
+def format_project_context(project) -> str:
+    """Format project info as context block for message injection.
+    
+    Args:
+        project: Project object to format.
+    
+    Returns:
+        Formatted string with project context as JSON.
+    """
+    import json
+    from dataclasses import asdict
+    
+    project_dict = asdict(project)
+    project_json = json.dumps(project_dict, indent=2)
+    return f"""## Related Project
+
+```json
+{project_json}
+```"""
+
+
+def format_project_context(project) -> str:
+    """Format project info for context injection.
+    
+    Args:
+        project: Project object to format.
+    
+    Returns:
+        Formatted string with project JSON for context injection.
+    """
+    from dataclasses import asdict
+    return f"""## Related Project
+
+```json
+{asdict(project)}
+```"""
+
+
+def format_project_context(project) -> str:
+    """Format project info as context block for prepending to message.
+    
+    Args:
+        project: Project dataclass instance.
+    
+    Returns:
+        Formatted string with project JSON info.
+    """
+    from dataclasses import asdict
+    import json
+    
+    project_dict = asdict(project)
+    return f"""## Related Project
+
+```json
+{json.dumps(project_dict, indent=2)}
+```
+
+"""
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -210,6 +317,9 @@ class SessionManager:
             subscriber_id="response_dispatcher"
         )
         self._source_cleanup: SourceCleanup | None = None
+
+        # NEW: Project store for project context injection
+        self.project_store = ProjectStore(self.conn)
 
         # Start watchdog
         self.watchdog.start()
@@ -552,6 +662,14 @@ class SessionManager:
                         cancellation_token=cancellation_source.token,
                         is_retry=is_retry,
                     )
+                    
+                    # NEW: Project context injection on first message
+                    keywords = extract_project_keywords(msg.content)
+                    project = self.project_store.match_by_keywords(keywords)
+                    if project:
+                        # Format project context and prepend to message
+                        project_context = format_project_context(project)
+                        msg.content = project_context + "\n\n" + msg.content
                     
                     # Pre-ACK status check to prevent race condition with watchdog
                     # Always record success since processing completed without error

@@ -389,6 +389,58 @@ class ProjectStore:
         )
         return [self._row_to_project(row) for row in cursor.fetchall()]
     
+    def match_by_keywords(self, keywords: list[str]) -> Project | None:
+        """Find best matching project by keywords against name and shortnames.
+        
+        Simple scoring: exact match = 2 points, case-insensitive partial match = 1 point.
+        Returns highest scoring project or None if no matches.
+        
+        Args:
+            keywords: List of keywords extracted from user message.
+        
+        Returns:
+            Best matching Project or None if no matches found.
+        """
+        if not keywords:
+            return None
+        
+        # Get all active projects
+        cursor = self.conn.execute(
+            """
+            SELECT p.* FROM projects p
+            LEFT JOIN project_shortnames ps ON p.project_id = ps.project_id
+            WHERE p.status = 'active'
+            """
+        )
+        rows = cursor.fetchall()
+        
+        if not rows:
+            return None
+        
+        best_project: Project | None = None
+        best_score = 0
+        
+        for row in rows:
+            project = self._row_to_project(row)
+            score = 0
+            
+            # Build list of identifiers to match against (name + shortnames)
+            identifiers = [project.name.lower()] + [s.lower() for s in project.shortnames]
+            
+            for keyword in keywords:
+                kw = keyword.lower()
+                for identifier in identifiers:
+                    if kw == identifier:
+                        score += 2  # Exact match
+                    elif kw in identifier or identifier in kw:
+                        score += 1  # Partial match
+            
+            if score > best_score:
+                best_score = score
+                best_project = project
+        
+        return best_project if best_score > 0 else None
+    
     def get_by_shortname(self, shortname: str) -> Project | None:
         """Get a project by shortname.
         
