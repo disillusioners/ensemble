@@ -46,6 +46,7 @@ class Project:
     related_directories: list[str]
     description: str | None
     tags: list[str]
+    shortnames: list[str]
     metadata: dict[str, Any]
     relationships: dict[str, list[str]]
     creator_session_id: str | None
@@ -77,6 +78,7 @@ class ProjectStore:
         related_directories: list[str] | None = None,
         description: str | None = None,
         tags: list[str] | None = None,
+        shortnames: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         project_id: str | None = None,
         creator_session_id: str | None = None,
@@ -91,6 +93,7 @@ class ProjectStore:
             related_directories: Additional related directory paths.
             description: Project description.
             tags: List of tags for categorization.
+            shortnames: List of alternative short names/nicknames for the project.
             metadata: Type-specific metadata.
             project_id: Optional custom project ID (auto-generated if None).
             creator_session_id: Session ID that created this project.
@@ -117,6 +120,7 @@ class ProjectStore:
         now = datetime.utcnow().isoformat()
         project_id = project_id or str(uuid.uuid4())
         tags = tags or []
+        shortnames = shortnames or []
         
         project = Project(
             project_id=project_id,
@@ -127,6 +131,7 @@ class ProjectStore:
             related_directories=related_directories or [],
             description=description,
             tags=tags,
+            shortnames=shortnames,
             metadata=metadata or {},
             relationships={},
             creator_session_id=creator_session_id,
@@ -143,9 +148,9 @@ class ProjectStore:
         self.conn.execute("""
             INSERT OR REPLACE INTO projects (
                 project_id, name, project_type, status, main_directory,
-                related_directories, description, metadata, relationships,
+                related_directories, description, shortnames, metadata, relationships,
                 creator_session_id, creator_agent_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             project.project_id,
             project.name,
@@ -154,6 +159,7 @@ class ProjectStore:
             project.main_directory,
             json.dumps(project.related_directories),
             project.description,
+            json.dumps(project.shortnames),
             json.dumps(project.metadata),
             json.dumps(project.relationships),
             project.creator_session_id,
@@ -164,6 +170,9 @@ class ProjectStore:
         
         # Sync tags to junction table
         self._sync_tags(project.project_id, project.tags)
+        
+        # Sync shortnames to junction table
+        self._sync_shortnames(project.project_id, project.shortnames)
         
         self.conn.commit()
     
@@ -180,6 +189,21 @@ class ProjectStore:
             self.conn.execute(
                 "INSERT OR IGNORE INTO project_tags (project_id, tag) VALUES (?, ?)",
                 (project_id, tag)
+            )
+    
+    def _sync_shortnames(self, project_id: str, shortnames: list[str]) -> None:
+        """Sync shortnames to the project_shortnames junction table."""
+        # Remove existing shortnames
+        self.conn.execute(
+            "DELETE FROM project_shortnames WHERE project_id = ?",
+            (project_id,)
+        )
+        
+        # Insert new shortnames
+        for shortname in shortnames:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO project_shortnames (project_id, shortname) VALUES (?, ?)",
+                (project_id, shortname)
             )
     
     def get(self, project_id: str) -> Project | None:
@@ -343,7 +367,7 @@ class ProjectStore:
         return [self._row_to_project(row) for row in cursor.fetchall()]
     
     def search(self, query: str, limit: int = 20) -> list[Project]:
-        """Search projects by name or description.
+        """Search projects by name, description, or shortnames.
         
         Args:
             query: Search query string.
@@ -352,16 +376,40 @@ class ProjectStore:
         Returns:
             List of matching Project objects.
         """
+        # Search in projects table for name/description
         cursor = self.conn.execute(
             """
-            SELECT * FROM projects 
-            WHERE name LIKE ? OR description LIKE ?
-            ORDER BY updated_at DESC
+            SELECT DISTINCT p.* FROM projects p
+            LEFT JOIN project_shortnames ps ON p.project_id = ps.project_id
+            WHERE p.name LIKE ? OR p.description LIKE ? OR ps.shortname LIKE ?
+            ORDER BY p.updated_at DESC
             LIMIT ?
             """,
-            (f"%{query}%", f"%{query}%", limit)
+            (f"%{query}%", f"%{query}%", f"%{query}%", limit)
         )
         return [self._row_to_project(row) for row in cursor.fetchall()]
+    
+    def get_by_shortname(self, shortname: str) -> Project | None:
+        """Get a project by shortname.
+        
+        Args:
+            shortname: The project shortname/nickname.
+        
+        Returns:
+            Project object or None if not found.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT p.* FROM projects p
+            JOIN project_shortnames ps ON p.project_id = ps.project_id
+            WHERE ps.shortname = ?
+            """,
+            (shortname,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_project(row)
     
     def update(
         self,
@@ -517,6 +565,60 @@ class ProjectStore:
         
         return project
     
+    def set_shortnames(self, project_id: str, shortnames: list[str]) -> Project | None:
+        """Replace all shortnames on a project.
+        
+        Args:
+            project_id: The project ID.
+            shortnames: New list of shortnames (replaces existing).
+        
+        Returns:
+            Updated Project object or None if not found.
+        """
+        return self.update(project_id, shortnames=shortnames)
+    
+    def add_shortname(self, project_id: str, shortname: str) -> Project | None:
+        """Add a shortname to a project.
+        
+        Args:
+            project_id: The project ID.
+            shortname: Shortname to add.
+        
+        Returns:
+            Updated Project object or None if not found.
+        """
+        project = self.get(project_id)
+        if project is None:
+            return None
+        
+        if shortname not in project.shortnames:
+            project.shortnames.append(shortname)
+            project.updated_at = datetime.utcnow().isoformat()
+            self._save(project)
+        
+        return project
+    
+    def remove_shortname(self, project_id: str, shortname: str) -> Project | None:
+        """Remove a shortname from a project.
+        
+        Args:
+            project_id: The project ID.
+            shortname: Shortname to remove.
+        
+        Returns:
+            Updated Project object or None if not found.
+        """
+        project = self.get(project_id)
+        if project is None:
+            return None
+        
+        if shortname in project.shortnames:
+            project.shortnames.remove(shortname)
+            project.updated_at = datetime.utcnow().isoformat()
+            self._save(project)
+        
+        return project
+    
     def set_metadata(self, project_id: str, key: str, value: Any) -> Project | None:
         """Set a metadata key-value pair.
         
@@ -657,6 +759,13 @@ class ProjectStore:
         )
         tags = [r[0] for r in cursor.fetchall()]
         
+        # Get shortnames from junction table
+        cursor = self.conn.execute(
+            "SELECT shortname FROM project_shortnames WHERE project_id = ?",
+            (project_id,)
+        )
+        shortnames = [r[0] for r in cursor.fetchall()]
+        
         return Project(
             project_id=row[0],
             name=row[1],
@@ -666,12 +775,13 @@ class ProjectStore:
             related_directories=json.loads(row[5]) if row[5] else [],
             description=row[6],
             tags=tags,
-            metadata=json.loads(row[7]) if row[7] else {},
-            relationships=json.loads(row[8]) if row[8] else {},
-            creator_session_id=row[9],
-            creator_agent_dir=row[10],
-            created_at=row[11],
-            updated_at=row[12],
+            shortnames=shortnames,
+            metadata=json.loads(row[8]) if row[8] else {},
+            relationships=json.loads(row[9]) if row[9] else {},
+            creator_session_id=row[10],
+            creator_agent_dir=row[11],
+            created_at=row[12],
+            updated_at=row[13],
         )
     
     def to_dict(self, project: Project) -> dict:

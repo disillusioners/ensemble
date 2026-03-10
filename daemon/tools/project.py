@@ -32,6 +32,7 @@ Args:
     related_directories: Additional directories related to this project.
     description: Brief description of the project's purpose.
     tags: List of tags for categorization and filtering.
+    shortnames: List of alternative short names/nicknames for the project.
     metadata: Custom key-value pairs for type-specific data.
 
 Returns:
@@ -43,16 +44,18 @@ Example:
         project_type="software",
         main_directory="/home/user/projects/my-web-app",
         tags=["web", "frontend", "react"],
+        shortnames=["mwa", "webapp"],
         metadata={"framework": "React", "language": "TypeScript"}
     )""",
     
-    "project_get": """Get a project by ID or name.
+    "project_get": """Get a project by ID, name, or shortname.
 
-Provide either project_id or name (project_id takes precedence).
+Provide either project_id, name, or shortname (project_id takes precedence, then name).
 
 Args:
     project_id: The unique project identifier.
     name: The project name (used if project_id not provided).
+    shortname: A project shortname/nickname (used if project_id and name not provided).
 
 Returns:
     Project dictionary with all details, or None if not found.""",
@@ -68,10 +71,10 @@ Args:
 Returns:
     List of project dictionaries, sorted by most recently updated.""",
     
-    "project_search": """Search projects by name or description.
+    "project_search": """Search projects by name, description, or shortnames.
 
 Args:
-    query: Search string to match against name and description.
+    query: Search string to match against name, description, and shortnames.
     limit: Maximum number of results (default: 20).
 
 Returns:
@@ -110,6 +113,7 @@ Args:
     main_directory: New main directory path.
     related_directories: Replace all related directories.
     tags: Replace all tags (use project_add_tag/remove_tag for incremental).
+    shortnames: Replace all shortnames (use project_add_shortname/remove_shortname for incremental).
 
 Returns:
     Updated project dictionary, or None if not found.""",
@@ -177,6 +181,41 @@ Returns:
 Args:
     project_id: The project ID.
     tag: Tag to remove.
+
+Returns:
+    Updated project dictionary, or None if not found.""",
+    
+    "project_set_shortnames": """Replace all shortnames on a project.
+
+Shortnames are alternative names/nicknames for quick reference.
+For example, "agents-ensemble" might have shortnames ["ensemble", "ae"].
+
+This atomically replaces all shortnames. For incremental changes,
+use project_add_shortname and project_remove_shortname.
+
+Args:
+    project_id: The project ID.
+    shortnames: New list of shortnames (replaces existing entirely).
+
+Returns:
+    Updated project dictionary, or None if not found.""",
+    
+    "project_add_shortname": """Add a shortname to a project.
+
+Shortnames are alternative names/nicknames for quick reference.
+
+Args:
+    project_id: The project ID.
+    shortname: Shortname to add.
+
+Returns:
+    Updated project dictionary, or None if not found.""",
+    
+    "project_remove_shortname": """Remove a shortname from a project.
+
+Args:
+    project_id: The project ID.
+    shortname: Shortname to remove.
 
 Returns:
     Updated project dictionary, or None if not found.""",
@@ -350,6 +389,7 @@ def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "
         main_directory: str | None = None,
         related_directories: list[str] | None = None,
         tags: list[str] | None = None,
+        shortnames: list[str] | None = None,
     ) -> dict | None:
         """Update project fields. Use tool_help("project_update") for details."""
         updates = {}
@@ -365,6 +405,8 @@ def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "
             updates["related_directories"] = related_directories
         if tags is not None:
             updates["tags"] = tags
+        if shortnames is not None:
+            updates["shortnames"] = shortnames
         
         if not updates:
             project = store.get(project_id)
@@ -436,6 +478,27 @@ def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "
     project_remove_tag._full_doc_ = _FULL_DOCS["project_remove_tag"]
     
     @tool
+    def project_set_shortnames(project_id: str, shortnames: list[str]) -> dict | None:
+        """Replace all shortnames on a project. Use tool_help("project_set_shortnames") for details."""
+        project = store.set_shortnames(project_id, shortnames)
+        return store.to_dict(project) if project else None
+    project_set_shortnames._full_doc_ = _FULL_DOCS["project_set_shortnames"]
+    
+    @tool
+    def project_add_shortname(project_id: str, shortname: str) -> dict | None:
+        """Add a shortname to a project. Use tool_help("project_add_shortname") for details."""
+        project = store.add_shortname(project_id, shortname)
+        return store.to_dict(project) if project else None
+    project_add_shortname._full_doc_ = _FULL_DOCS["project_add_shortname"]
+    
+    @tool
+    def project_remove_shortname(project_id: str, shortname: str) -> dict | None:
+        """Remove a shortname from a project. Use tool_help("project_remove_shortname") for details."""
+        project = store.remove_shortname(project_id, shortname)
+        return store.to_dict(project) if project else None
+    project_remove_shortname._full_doc_ = _FULL_DOCS["project_remove_shortname"]
+    
+    @tool
     def project_set_metadata(project_id: str, key: str, value) -> dict | None:
         """Set a custom metadata field. Use tool_help("project_set_metadata") for details."""
         project = store.set_metadata(project_id, key, value)
@@ -491,6 +554,9 @@ def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "
         project_set_tags,
         project_add_tag,
         project_remove_tag,
+        project_set_shortnames,
+        project_add_shortname,
+        project_remove_shortname,
         project_set_metadata,
         project_delete_metadata,
         project_link,

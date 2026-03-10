@@ -175,6 +175,7 @@ def init_database(db_path: Path) -> sqlite3.Connection:
             main_directory TEXT,
             related_directories TEXT DEFAULT '[]',
             description TEXT,
+            shortnames TEXT DEFAULT '[]',
             metadata TEXT DEFAULT '{}',
             relationships TEXT DEFAULT '{}',
             creator_session_id TEXT,
@@ -219,6 +220,21 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)
     """)
     
+    # Create project_shortnames junction table for efficient shortname filtering
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_shortnames (
+            project_id TEXT NOT NULL,
+            shortname TEXT NOT NULL,
+            PRIMARY KEY (project_id, shortname),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    
+    # Index for shortname-based lookups
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)
+    """)
+    
     # Migration: Add creator columns if they don't exist
     cursor = conn.execute("PRAGMA table_info(projects)")
     columns = [row[1] for row in cursor.fetchall()]
@@ -228,6 +244,9 @@ def init_database(db_path: Path) -> sqlite3.Connection:
     if 'creator_agent_dir' not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN creator_agent_dir TEXT")
         logger.info("Added creator_agent_dir column to projects table")
+    if 'shortnames' not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN shortnames TEXT DEFAULT '[]'")
+        logger.info("Added shortnames column to projects table")
     
     conn.commit()
     logger.info(f"Database initialized at {db_path}")

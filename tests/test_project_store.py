@@ -24,6 +24,7 @@ def conn():
             main_directory TEXT,
             related_directories TEXT DEFAULT '[]',
             description TEXT,
+            shortnames TEXT DEFAULT '[]',
             metadata TEXT DEFAULT '{}',
             relationships TEXT DEFAULT '{}',
             creator_session_id TEXT,
@@ -52,6 +53,18 @@ def conn():
     """)
     
     conn.execute("CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)")
+    
+    # Create project_shortnames junction table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_shortnames (
+            project_id TEXT NOT NULL,
+            shortname TEXT NOT NULL,
+            PRIMARY KEY (project_id, shortname),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)")
     
     conn.commit()
     yield conn
@@ -226,7 +239,54 @@ class TestList:
         store.create(name="Project 2")
         store.create(name="Project 3")
         
-        results = store.list()
+        results = store.list_projects()
+        
+        assert len(results) == 3
+        assert results[0].name == "Project 3"  # Most recent first
+
+    def test_list_empty(self, store):
+        """Test listing with no projects."""
+        results = store.list_projects()
+        assert results == []
+    
+    def test_list_by_status(self, store):
+        """Test filtering by status."""
+        p1 = store.create(name="Active Project")
+        p2 = store.create(name="Paused Project")
+        store.update_status(p2.project_id, "paused")
+        
+        results = store.list_projects(status="paused")
+        
+        assert len(results) == 1
+        assert results[0].name == "Paused Project"
+    
+    def test_list_by_type(self, store):
+        """Test filtering by type."""
+        store.create(name="Software Project", project_type="software")
+        store.create(name="Doc Project", project_type="documentation")
+        
+        results = store.list_projects(project_type="software")
+        
+        assert len(results) == 1
+        assert results[0].name == "Software Project"
+    
+    def test_list_by_tags(self, store):
+        """Test filtering by tags (AND logic)."""
+        store.create(name="Project A", tags=["python", "web"])
+        store.create(name="Project B", tags=["python"])
+        store.create(name="Project C", tags=["python", "web", "api"])
+        
+        # Must have ALL tags
+        results = store.list_projects(tags=["python", "web"])
+        
+        assert len(results) == 2
+    
+    def test_list_pagination(self, store):
+        """Test pagination with limit and offset."""
+        for i in range(5):
+            store.create(name=f"Project {i}")
+        
+        results = store.list_projects(limit=3)
         
         assert len(results) == 3
 

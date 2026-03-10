@@ -1,4 +1,4 @@
-"""Tests for daemon/tools/project.py - 18 project management tools."""
+"""Tests for daemon/tools/project.py - 21 project management tools."""
 
 import json
 import sqlite3
@@ -24,6 +24,7 @@ def conn():
             main_directory TEXT,
             related_directories TEXT DEFAULT '[]',
             description TEXT,
+            shortnames TEXT DEFAULT '[]',
             metadata TEXT DEFAULT '{}',
             relationships TEXT DEFAULT '{}',
             creator_session_id TEXT,
@@ -52,6 +53,18 @@ def conn():
     """)
     
     conn.execute("CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)")
+    
+    # Create project_shortnames junction table
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_shortnames (
+            project_id TEXT NOT NULL,
+            shortname TEXT NOT NULL,
+            PRIMARY KEY (project_id, shortname),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+        )
+    """)
+    
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)")
     
     conn.commit()
     yield conn
@@ -648,10 +661,10 @@ class TestProjectDelete:
 
 
 class TestToolCount:
-    """Verify all 18 tools are created."""
+    """Verify all 21 tools are created."""
 
-    def test_all_18_tools_exist(self, tools):
-        """Test that exactly 18 tools are created."""
+    def test_all_21_tools_exist(self, tools):
+        """Test that exactly 21 tools are created."""
         tool_names = [t.name for t in tools]
         
         expected_tools = [
@@ -668,6 +681,9 @@ class TestToolCount:
             "project_set_tags",
             "project_add_tag",
             "project_remove_tag",
+            "project_set_shortnames",
+            "project_add_shortname",
+            "project_remove_shortname",
             "project_set_metadata",
             "project_delete_metadata",
             "project_link",
@@ -675,7 +691,7 @@ class TestToolCount:
             "project_delete",
         ]
         
-        assert len(tools) == 18
+        assert len(tools) == 21
         for name in expected_tools:
             assert name in tool_names
 
