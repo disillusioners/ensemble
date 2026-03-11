@@ -47,14 +47,15 @@ logger = logging.getLogger(__name__)
 
 
 # Patterns for extracting project keywords from messages
+# Use [\w-]+ to match word characters and hyphens/underscores
 _PROJECT_PATTERNS = [
-    r'(\w+)\s+(?:project|prj|proj)',           # "abc project", "abc prj", "abc proj"
-    r'(\w+)\s+(?:system|sys)',                  # "abc system", "abc sys"
-    r'(\w+)\s+(?:app|application)',             # "abc app", "abc application"
-    r'(\w+)\s+(?:service|svc)',                 # "abc service", "abc svc"
-    r'(\w+)\s+(?:module|mod)',                  # "abc module", "abc mod"
-    r'(?:project|prj|proj)\s+(\w+)',            # "project abc", "prj abc"
-    r'(?:the\s+)?(\w+)\s+(?:repo|repository)',  # "abc repo", "the abc repository"
+    r'([\w-]+)\s+(?:project|prj|proj)',           # "abc project", "abc prj", "abc proj", "yd-timemachine prj"
+    r'([\w-]+)\s+(?:system|sys)',                  # "abc system", "abc sys"
+    r'([\w-]+)\s+(?:app|application)',             # "abc app", "abc application"
+    r'([\w-]+)\s+(?:service|svc)',                 # "abc service", "abc svc"
+    r'([\w-]+)\s+(?:module|mod)',                  # "abc module", "abc mod"
+    r'(?:project|prj|proj)\s+([\w-]+)',            # "project abc", "prj abc"
+    r'(?:the\s+)?([\w-]+)\s+(?:repo|repository)',  # "abc repo", "the abc repository"
 ]
 _PROJECT_REGEX = re.compile('|'.join(_PROJECT_PATTERNS), re.IGNORECASE)
 
