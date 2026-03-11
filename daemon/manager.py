@@ -42,6 +42,7 @@ from .cancellation import (
 from .request_registry import ActiveRequestRegistry
 from .project_store import ProjectStore
 from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import event
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +286,22 @@ class SessionManager:
 
         # NEW: Project store for project context injection
         # Create SQLModel engine and session for ProjectStore
-        self._project_engine = create_engine(f"sqlite:///{self.db_path}")
+        self._project_engine = create_engine(
+            f"sqlite:///{self.db_path}",
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True
+        )
+
+        # Set SQLite PRAGMAs for better concurrency
+        @event.listens_for(self._project_engine, "connect")
+        def set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
         self._project_session = Session(self._project_engine)
         # Ensure tables exist
         SQLModel.metadata.create_all(self._project_engine)
@@ -1546,3 +1562,11 @@ Title:"""
     def get_source_registry(self) -> SourceRegistry:
         """Get the source registry for adapter management."""
         return self.source_registry
+
+    def cleanup(self) -> None:
+        """Cleanup resources including database sessions."""
+        self.watchdog.stop()
+        if hasattr(self, '_project_session') and self._project_session:
+            self._project_session.close()
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()

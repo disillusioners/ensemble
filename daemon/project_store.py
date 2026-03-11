@@ -511,7 +511,6 @@ class ProjectStore:
 
         project.updated_at = datetime.utcnow().isoformat()
 
-        self.session.add(project)
         self.session.commit()
         self.session.refresh(project)
 
@@ -549,7 +548,6 @@ class ProjectStore:
             project.tags.append(tag)
             self._sync_tags(project_id, project.tags)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
             self.session.commit()
             self.session.refresh(project)
 
@@ -565,7 +563,6 @@ class ProjectStore:
             project.tags.remove(tag)
             self._sync_tags(project_id, project.tags)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
             self.session.commit()
             self.session.refresh(project)
 
@@ -590,7 +587,6 @@ class ProjectStore:
             project.shortnames.append(shortname)
             self._sync_shortnames(project_id, project.shortnames)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
             self.session.commit()
             self.session.refresh(project)
 
@@ -606,7 +602,6 @@ class ProjectStore:
             project.shortnames.remove(shortname)
             self._sync_shortnames(project_id, project.shortnames)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
             self.session.commit()
             self.session.refresh(project)
 
@@ -626,7 +621,7 @@ class ProjectStore:
         if directory not in project.related_directories:
             project.related_directories.append(directory)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
+            flag_modified(project, "related_directories")
             self.session.commit()
             self.session.refresh(project)
 
@@ -641,7 +636,7 @@ class ProjectStore:
         if directory in project.related_directories:
             project.related_directories.remove(directory)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
+            flag_modified(project, "related_directories")
             self.session.commit()
             self.session.refresh(project)
 
@@ -660,7 +655,7 @@ class ProjectStore:
 
         project.project_metadata[key] = value
         project.updated_at = datetime.utcnow().isoformat()
-        self.session.add(project)
+        flag_modified(project, "project_metadata")
         self.session.commit()
         self.session.refresh(project)
 
@@ -674,7 +669,7 @@ class ProjectStore:
 
         project.project_metadata.pop(key, None)
         project.updated_at = datetime.utcnow().isoformat()
-        self.session.add(project)
+        flag_modified(project, "project_metadata")
         self.session.commit()
         self.session.refresh(project)
 
@@ -702,7 +697,7 @@ class ProjectStore:
         if entity_id not in project.relationships[entity_type]:
             project.relationships[entity_type].append(entity_id)
             project.updated_at = datetime.utcnow().isoformat()
-            self.session.add(project)
+            flag_modified(project, "relationships")
             self.session.commit()
             self.session.refresh(project)
 
@@ -723,7 +718,7 @@ class ProjectStore:
             if entity_id in project.relationships[entity_type]:
                 project.relationships[entity_type].remove(entity_id)
                 project.updated_at = datetime.utcnow().isoformat()
-                self.session.add(project)
+                flag_modified(project, "relationships")
                 self.session.commit()
                 self.session.refresh(project)
 
