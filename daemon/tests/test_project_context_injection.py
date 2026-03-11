@@ -1,80 +1,36 @@
 """Tests for project context injection functionality."""
 
 import json
-import sqlite3
 import pytest
 
 from dataclasses import asdict
+
+from sqlmodel import Session, SQLModel, create_engine
 
 from daemon.project_store import ProjectStore, Project
 from daemon.manager import extract_project_keywords, format_project_context
 
 
 @pytest.fixture
-def conn():
-    """Create in-memory database with schema."""
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    
-    # Create projects table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            project_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            project_type TEXT NOT NULL DEFAULT 'general',
-            status TEXT NOT NULL DEFAULT 'active',
-            main_directory TEXT,
-            related_directories TEXT DEFAULT '[]',
-            description TEXT,
-            shortnames TEXT DEFAULT '[]',
-            metadata TEXT DEFAULT '{}',
-            relationships TEXT DEFAULT '{}',
-            creator_session_id TEXT,
-            creator_agent_dir TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
-    
-    # Create indexes
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_type ON projects(project_type)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_updated ON projects(updated_at)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_creator_session ON projects(creator_session_id)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_main_directory ON projects(main_directory)")
-    
-    # Create project_tags junction table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS project_tags (
-            project_id TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            PRIMARY KEY (project_id, tag),
-            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag)")
-    
-    # Create project_shortnames junction table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS project_shortnames (
-            project_id TEXT NOT NULL,
-            shortname TEXT NOT NULL,
-            PRIMARY KEY (project_id, shortname),
-            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE CASCADE
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)")
-    
-    conn.commit()
-    yield conn
-    conn.close()
+def engine():
+    """Create in-memory SQLite engine for testing."""
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture
-def store(conn):
-    """Create ProjectStore instance."""
-    return ProjectStore(conn)
+def session(engine):
+    """Create SQLModel Session for testing."""
+    with Session(engine) as session:
+        yield session
+
+
+@pytest.fixture
+def store(session):
+    """Create ProjectStore instance with SQLModel Session."""
+    return ProjectStore(session)
 
 
 class TestExtractProjectKeywords:

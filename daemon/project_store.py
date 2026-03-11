@@ -767,7 +767,8 @@ class ProjectStore:
     # SERIALIZATION
     # --------------------------------------------------------
 
-    def to_dict(self, project: Project) -> dict:
+    @staticmethod
+    def to_dict(project: Project) -> dict:
         """Convert a Project object to a dictionary for tool output."""
         return {
             "project_id": project.project_id,
@@ -779,7 +780,7 @@ class ProjectStore:
             "description": project.description,
             "tags": project.tags,
             "shortnames": project.shortnames,
-            "metadata": project.metadata,
+            "metadata": project.project_metadata,
             "relationships": project.relationships,
             "creator_session_id": project.creator_session_id,
             "creator_agent_dir": project.creator_agent_dir,

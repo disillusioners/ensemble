@@ -184,52 +184,29 @@ class TestHelpToolWithProjectTools:
     
     def test_help_with_project_tools(self):
         """Test help tool works with project tools."""
-        import sqlite3
+        from sqlmodel import Session, SQLModel, create_engine
         from daemon.tools.project import create_project_tools
+        from daemon.project_store import ProjectStore
         
-        conn = sqlite3.connect(":memory:")
+        engine = create_engine("sqlite:///:memory:", echo=False)
+        SQLModel.metadata.create_all(engine)
         
-        # Create tables
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS projects (
-                project_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                project_type TEXT NOT NULL DEFAULT 'general',
-                status TEXT NOT NULL DEFAULT 'active',
-                main_directory TEXT,
-                related_directories TEXT DEFAULT '[]',
-                description TEXT,
-                metadata TEXT DEFAULT '{}',
-                relationships TEXT DEFAULT '{}',
-                creator_session_id TEXT,
-                creator_agent_dir TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS project_tags (
-                project_id TEXT NOT NULL,
-                tag TEXT NOT NULL,
-                PRIMARY KEY (project_id, tag)
-            )
-        """)
-        conn.commit()
+        with Session(engine) as session:
+            store = ProjectStore(session)
+            project_tools = create_project_tools(store)
+            help_tool = create_help_tool(project_tools)
+            
+            # Test listing
+            result = help_tool.invoke({})
+            assert "project_create" in result
+            
+            # Test specific tool help
+            result = help_tool.invoke({"tool_name": "project_create"})
+            assert "project_create" in result
+            assert "Create a new project" in result
+            
+            # Test category listing
+            result = help_tool.invoke({"category": "project"})
+            assert "project_create" in result
         
-        project_tools = create_project_tools(conn)
-        help_tool = create_help_tool(project_tools)
-        
-        # Test listing
-        result = help_tool.invoke({})
-        assert "project_create" in result
-        
-        # Test specific tool help
-        result = help_tool.invoke({"tool_name": "project_create"})
-        assert "project_create" in result
-        assert "Create a new project" in result
-        
-        # Test category listing
-        result = help_tool.invoke({"category": "project"})
-        assert "project_create" in result
-        
-        conn.close()
+        engine.dispose()

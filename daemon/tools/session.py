@@ -140,7 +140,7 @@ Returns:
     inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)
     
     # Create project management tools (with session context for creator tracking)
-    project_tools = create_project_tools(manager.conn, current_session_id, agent_dir)
+    project_tools = create_project_tools(manager.project_store, current_session_id, agent_dir)
     
     # Base tools (available in all sessions)
     tools = [

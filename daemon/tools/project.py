@@ -7,13 +7,9 @@ Provides CRUD operations for projects with:
 - Relationships to sessions, agents, and other projects
 """
 
-from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ..project_store import ProjectStore, ProjectStatus
-
-if TYPE_CHECKING:
-    import sqlite3
 
 
 # Full documentation strings for each tool
@@ -286,18 +282,17 @@ Returns:
 }
 
 
-def create_project_tools(conn: "sqlite3.Connection", current_session_id: str = "", agent_dir: str = ""):
-    """Create project management tools with injected database connection.
+def create_project_tools(store: ProjectStore, current_session_id: str = "", agent_dir: str = ""):
+    """Create project management tools with injected ProjectStore.
     
     Args:
-        conn: SQLite database connection.
+        store: ProjectStore instance for database operations.
         current_session_id: The current session ID (used for creator tracking).
         agent_dir: The current agent directory (used for creator tracking).
     
     Returns:
         List of tool functions for project management.
     """
-    store = ProjectStore(conn)
     
     @tool
     def project_create(

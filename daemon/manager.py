@@ -40,6 +40,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .project_store import ProjectStore
+from sqlmodel import Session, SQLModel, create_engine
 
 logger = logging.getLogger(__name__)
 
@@ -94,15 +95,15 @@ def format_project_context(project) -> str:
     """Format project info as context block for prepending to message.
     
     Args:
-        project: Project dataclass instance.
+        project: Project SQLModel instance.
     
     Returns:
         Formatted string with project JSON info.
     """
-    from dataclasses import asdict
     import json
+    from .project_store import ProjectStore
     
-    project_dict = asdict(project)
+    project_dict = ProjectStore.to_dict(project)
     return f"""## Related Project
 
 ```json
@@ -281,7 +282,12 @@ class SessionManager:
         self._source_cleanup: SourceCleanup | None = None
 
         # NEW: Project store for project context injection
-        self.project_store = ProjectStore(self.conn)
+        # Create SQLModel engine and session for ProjectStore
+        self._project_engine = create_engine(f"sqlite:///{self.db_path}")
+        self._project_session = Session(self._project_engine)
+        # Ensure tables exist
+        SQLModel.metadata.create_all(self._project_engine)
+        self.project_store = ProjectStore(self._project_session)
 
         # Start watchdog
         self.watchdog.start()
