@@ -10,6 +10,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { ApiService } from '../../services/api.service';
 import { SourceCardComponent } from '../source-card/source-card.component';
 import { AddSourceModalComponent } from '../add-source-modal/add-source-modal.component';
+import { EditSourceModalComponent } from '../edit-source-modal/edit-source-modal.component';
 import type { Source, SourceCreate, SourceUpdate } from '../../models';
 
 @Component({
@@ -70,6 +71,21 @@ export class SourceListComponent implements OnInit {
       console.log('Dialog closed with result:', result);
       if (result) {
         this.createSource(result);
+      }
+    });
+  }
+
+  protected onEditSource(source: Source): void {
+    const dialogRef = this.dialog.open(EditSourceModalComponent, {
+      panelClass: 'dark-modal-panel',
+      disableClose: true,
+      data: { source }
+    });
+
+    dialogRef.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result?: SourceUpdate) => {
+      console.log('Edit dialog closed with result:', result);
+      if (result) {
+        this.onUpdateSource(source.source_id, result);
       }
     });
   }

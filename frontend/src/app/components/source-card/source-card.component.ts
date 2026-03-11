@@ -22,6 +22,7 @@ export class SourceCardComponent {
   @Output() stop = new EventEmitter<string>();
   @Output() delete = new EventEmitter<string>();
   @Output() toggleEnabled = new EventEmitter<Source>();
+  @Output() edit = new EventEmitter<Source>();
 
   protected readonly sourceTypes: Record<string, SourceTypeInfo> = {
     telegram: { type: 'telegram', label: 'Telegram', icon: 'telegram', color: '#229ED9' },
@@ -71,6 +72,10 @@ export class SourceCardComponent {
 
   protected onToggleEnabled(): void {
     this.toggleEnabled.emit(this.source);
+  }
+
+  protected onEdit(): void {
+    this.edit.emit(this.source);
   }
 
   protected formatDate(dateStr: string): string {
