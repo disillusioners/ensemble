@@ -10,6 +10,7 @@ from typing import Optional, Any
 from sqlmodel import SQLModel, Field, Session, select, col
 from sqlalchemy import Column, delete as sql_delete
 from sqlalchemy.types import JSON
+from sqlalchemy.orm.attributes import flag_modified
 
 
 # ============================================================
@@ -254,7 +255,7 @@ class ProjectStore:
             main_directory=main_directory,
             related_directories=related_directories or [],
             description=description,
-            metadata=metadata or {},
+            project_metadata=metadata or {},  # Map to project_metadata field
             relationships={},
             creator_session_id=creator_session_id,
             creator_agent_dir=creator_agent_dir,
