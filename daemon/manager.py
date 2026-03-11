@@ -40,7 +40,12 @@ from .cancellation import (
     OperationCancelledError
 )
 from .request_registry import ActiveRequestRegistry
-from .project_store import ProjectStore
+from .repositories import (
+    ProjectRepositoryProtocol,
+    SQLModelProjectRepository,
+    DatabaseConfig,
+    create_project_repository,
+)
 from sqlmodel import Session, SQLModel, create_engine
 from sqlalchemy import event
 
@@ -98,15 +103,15 @@ def format_project_context(project) -> str:
     """Format project info as context block for prepending to message.
     
     Args:
-        project: Project SQLModel instance.
+        project: ProjectData instance from repository.
     
     Returns:
         Formatted string with project JSON info.
     """
     import json
-    from .project_store import ProjectStore
     
-    project_dict = ProjectStore.to_dict(project)
+    # ProjectData has to_dict() method
+    project_dict = project.to_dict() if hasattr(project, 'to_dict') else vars(project)
     return f"""## Related Project
 
 ```json
@@ -284,28 +289,12 @@ class SessionManager:
         )
         self._source_cleanup: SourceCleanup | None = None
 
-        # NEW: Project store for project context injection
-        # Create SQLModel engine and session for ProjectStore
-        self._project_engine = create_engine(
-            f"sqlite:///{self.db_path}",
-            connect_args={"check_same_thread": False},
-            pool_pre_ping=True
-        )
-
-        # Set SQLite PRAGMAs for better concurrency
-        @event.listens_for(self._project_engine, "connect")
-        def set_sqlite_pragma(dbapi_conn, connection_record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-        self._project_session = Session(self._project_engine)
-        # Ensure tables exist
-        SQLModel.metadata.create_all(self._project_engine)
-        self.project_store = ProjectStore(self._project_session)
+        # NEW: Project repository for project context injection
+        # Using the new repository layer with proper transaction management
+        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
+        self._project_repository = create_project_repository(db_config)
+        # Keep backward compatible name for tools
+        self.project_store = self._project_repository
 
         # Start watchdog
         self.watchdog.start()

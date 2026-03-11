@@ -9,7 +9,8 @@ Provides CRUD operations for projects with:
 
 from langchain_core.tools import tool
 
-from ..project_store import ProjectStore, ProjectStatus
+from ..repositories.protocol import ProjectRepositoryProtocol
+from ..repositories.project_repository import ProjectStatus
 
 
 # Full documentation strings for each tool
@@ -282,11 +283,11 @@ Returns:
 }
 
 
-def create_project_tools(store: ProjectStore, current_session_id: str = "", agent_dir: str = ""):
-    """Create project management tools with injected ProjectStore.
+def create_project_tools(store: ProjectRepositoryProtocol, current_session_id: str = "", agent_dir: str = ""):
+    """Create project management tools with injected repository.
     
     Args:
-        store: ProjectStore instance for database operations.
+        store: ProjectRepositoryProtocol instance for database operations.
         current_session_id: The current session ID (used for creator tracking).
         agent_dir: The current agent directory (used for creator tracking).
     
@@ -317,7 +318,7 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
                 creator_session_id=current_session_id or None,
                 creator_agent_dir=agent_dir or None,
             )
-            return store.to_dict(project)
+            return project.to_dict()
         except ValueError as e:
             return {"error": str(e)}
     project_create._full_doc_ = _FULL_DOCS["project_create"]
@@ -334,7 +335,7 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
         
         if project is None:
             return None
-        return store.to_dict(project)
+        return project.to_dict()
     project_get._full_doc_ = _FULL_DOCS["project_get"]
     
     @tool
@@ -351,28 +352,28 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
             tags=tags,
             limit=limit,
         )
-        return [store.to_dict(p) for p in projects]
+        return [p.to_dict() for p in projects]
     project_list._full_doc_ = _FULL_DOCS["project_list"]
     
     @tool
     def project_search(query: str, limit: int = 20) -> list[dict]:
         """Search projects by name or description. Use tool_help("project_search") for details."""
         projects = store.search(query, limit=limit)
-        return [store.to_dict(p) for p in projects]
+        return [p.to_dict() for p in projects]
     project_search._full_doc_ = _FULL_DOCS["project_search"]
     
     @tool
     def project_get_by_session(session_id: str) -> list[dict]:
         """Get projects linked to a session. Use tool_help("project_get_by_session") for details."""
         projects = store.get_by_session(session_id)
-        return [store.to_dict(p) for p in projects]
+        return [p.to_dict() for p in projects]
     project_get_by_session._full_doc_ = _FULL_DOCS["project_get_by_session"]
     
     @tool
     def project_get_by_directory(directory: str) -> list[dict]:
         """Get projects referencing a directory. Use tool_help("project_get_by_directory") for details."""
         projects = store.get_by_directory(directory)
-        return [store.to_dict(p) for p in projects]
+        return [p.to_dict() for p in projects]
     project_get_by_directory._full_doc_ = _FULL_DOCS["project_get_by_directory"]
     
     @tool
@@ -405,11 +406,11 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
         
         if not updates:
             project = store.get(project_id)
-            return store.to_dict(project) if project else None
+            return project.to_dict() if project else None
         
         try:
             project = store.update(project_id, **updates)
-            return store.to_dict(project) if project else None
+            return project.to_dict() if project else None
         except ValueError as e:
             return {"error": str(e)}
     project_update._full_doc_ = _FULL_DOCS["project_update"]
@@ -425,7 +426,7 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
         
         try:
             project = store.update_status(project_id, status)
-            return store.to_dict(project) if project else None
+            return project.to_dict() if project else None
         except ValueError as e:
             return {"error": str(e)}
     project_set_status._full_doc_ = _FULL_DOCS["project_set_status"]
@@ -441,70 +442,70 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
             project = store.update(project_id, main_directory=directory)
         else:
             project = store.add_related_directory(project_id, directory)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_add_directory._full_doc_ = _FULL_DOCS["project_add_directory"]
     
     @tool
     def project_remove_directory(project_id: str, directory: str) -> dict | None:
         """Remove a directory from project. Use tool_help("project_remove_directory") for details."""
         project = store.remove_related_directory(project_id, directory)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_remove_directory._full_doc_ = _FULL_DOCS["project_remove_directory"]
     
     @tool
     def project_set_tags(project_id: str, tags: list[str]) -> dict | None:
         """Replace all tags on a project. Use tool_help("project_set_tags") for details."""
         project = store.set_tags(project_id, tags)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_set_tags._full_doc_ = _FULL_DOCS["project_set_tags"]
     
     @tool
     def project_add_tag(project_id: str, tag: str) -> dict | None:
         """Add a tag to a project. Use tool_help("project_add_tag") for details."""
         project = store.add_tag(project_id, tag)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_add_tag._full_doc_ = _FULL_DOCS["project_add_tag"]
     
     @tool
     def project_remove_tag(project_id: str, tag: str) -> dict | None:
         """Remove a tag from a project. Use tool_help("project_remove_tag") for details."""
         project = store.remove_tag(project_id, tag)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_remove_tag._full_doc_ = _FULL_DOCS["project_remove_tag"]
     
     @tool
     def project_set_shortnames(project_id: str, shortnames: list[str]) -> dict | None:
         """Replace all shortnames on a project. Use tool_help("project_set_shortnames") for details."""
         project = store.set_shortnames(project_id, shortnames)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_set_shortnames._full_doc_ = _FULL_DOCS["project_set_shortnames"]
     
     @tool
     def project_add_shortname(project_id: str, shortname: str) -> dict | None:
         """Add a shortname to a project. Use tool_help("project_add_shortname") for details."""
         project = store.add_shortname(project_id, shortname)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_add_shortname._full_doc_ = _FULL_DOCS["project_add_shortname"]
     
     @tool
     def project_remove_shortname(project_id: str, shortname: str) -> dict | None:
         """Remove a shortname from a project. Use tool_help("project_remove_shortname") for details."""
         project = store.remove_shortname(project_id, shortname)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_remove_shortname._full_doc_ = _FULL_DOCS["project_remove_shortname"]
     
     @tool
     def project_set_metadata(project_id: str, key: str, value) -> dict | None:
         """Set a custom metadata field. Use tool_help("project_set_metadata") for details."""
         project = store.set_metadata(project_id, key, value)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_set_metadata._full_doc_ = _FULL_DOCS["project_set_metadata"]
     
     @tool
     def project_delete_metadata(project_id: str, key: str) -> dict | None:
         """Delete a metadata field. Use tool_help("project_delete_metadata") for details."""
         project = store.delete_metadata(project_id, key)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_delete_metadata._full_doc_ = _FULL_DOCS["project_delete_metadata"]
     
     @tool
@@ -515,7 +516,7 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
     ) -> dict | None:
         """Link a project to another entity. Use tool_help("project_link") for details."""
         project = store.add_relationship(project_id, entity_type, entity_id)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_link._full_doc_ = _FULL_DOCS["project_link"]
     
     @tool
@@ -526,7 +527,7 @@ def create_project_tools(store: ProjectStore, current_session_id: str = "", agen
     ) -> dict | None:
         """Remove a link to another entity. Use tool_help("project_unlink") for details."""
         project = store.remove_relationship(project_id, entity_type, entity_id)
-        return store.to_dict(project) if project else None
+        return project.to_dict() if project else None
     project_unlink._full_doc_ = _FULL_DOCS["project_unlink"]
     
     @tool
