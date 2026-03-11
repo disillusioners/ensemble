@@ -101,7 +101,7 @@ install: build
 	
 	# Create symlink to agents directory (points to source)
 	@echo "$(YELLOW)Linking agents...$(NC)"
-	ln -sf $(CURDIR)/agents $(INSTALL_DIR)/agents
+	ln -sfn $(CURDIR)/agents $(INSTALL_DIR)/agents
 	
 	# Copy pyproject.toml and uv.lock for dependency installation
 	@echo "$(YELLOW)Copying project files...$(NC)"
