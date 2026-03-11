@@ -1,149 +1,42 @@
-"""Project management storage layer using SQLModel."""
+"""SQLModel-based Project Repository implementation.
+
+This module provides the concrete implementation of ProjectRepositoryProtocol
+using SQLModel/SQLAlchemy, with fixes for the flush warning issue.
+"""
 
 from __future__ import annotations
 
-import enum
 import uuid
 from datetime import datetime
-from typing import Optional, Any
+from typing import Any
 
-from sqlmodel import SQLModel, Field, Session, select, col
-from sqlalchemy import Column, delete as sql_delete
-from sqlalchemy.types import JSON
+from sqlalchemy import delete as sql_delete, insert
 from sqlalchemy.orm.attributes import flag_modified
+from sqlmodel import Session, select, col
+
+from .protocol import ProjectData, ProjectRepositoryProtocol
+from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType
 
 
-# ============================================================
-# ENUMS
-# ============================================================
-
-class ProjectStatus(str, enum.Enum):
-    ACTIVE = "active"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    ARCHIVED = "archived"
+class SQLModelProjectRepository(ProjectRepositoryProtocol):
+    """SQLModel-based implementation of ProjectRepositoryProtocol.
     
-    @classmethod
-    def is_valid(cls, status: str) -> bool:
-        return status in cls._value2member_map_
-
-
-class ProjectType(str, enum.Enum):
-    SOFTWARE = "software"
-    DOCUMENTATION = "documentation"
-    RESEARCH = "research"
-    TASK = "task"
-    GENERAL = "general"
+    This implementation fixes the flush warning by using bulk operations
+    for junction table syncs instead of add() in a loop.
     
-    @classmethod
-    def is_valid(cls, project_type: str) -> bool:
-        # Allow custom types beyond the predefined ones
-        return bool(project_type and project_type.strip())
-
-
-# ============================================================
-# LINK TABLES
-# ============================================================
-
-class ProjectTagLink(SQLModel, table=True):
-    __tablename__ = "project_tags"
-
-    project_id: str = Field(foreign_key="projects.project_id", primary_key=True)
-    tag: str = Field(primary_key=True)
-
-
-class ProjectShortnameLink(SQLModel, table=True):
-    __tablename__ = "project_shortnames"
-
-    project_id: str = Field(foreign_key="projects.project_id", primary_key=True)
-    shortname: str = Field(primary_key=True)
-
-
-# ============================================================
-# PROJECT MODEL
-# ============================================================
-
-class Project(SQLModel, table=True):
-    """SQLModel Project table - internal representation.
-    
-    Note: tags and shortnames are stored in junction tables and loaded
-    via helper methods in ProjectStore to maintain the original interface
-    where Project.tags and Project.shortnames are list[str].
+    Key improvements over ProjectStore:
+    1. Uses bulk INSERT for tags/shortnames (no flush warning)
+    2. Proper transaction management
+    3. Returns database-agnostic ProjectData DTOs
+    4. Better separation of concerns
     """
-    __tablename__ = "projects"
-
-    project_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-
-    name: str = Field(index=True, unique=True)
-
-    project_type: str = Field(default="general")
-    status: str = Field(default=ProjectStatus.ACTIVE.value)
-
-    main_directory: Optional[str] = None
-
-    related_directories: list[str] = Field(
-        default_factory=list,
-        sa_column=Column(JSON)
-    )
-
-    description: Optional[str] = None
-
-    # Use 'project_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
-    # Maps to 'metadata' column in DB, exposed as 'metadata' via to_dict()
-    project_metadata: dict[str, Any] = Field(
-        default_factory=dict,
-        sa_column=Column("metadata", JSON)
-    )
-
-    relationships: dict[str, list[str]] = Field(
-        default_factory=dict,
-        sa_column=Column(JSON)
-    )
-
-    creator_session_id: Optional[str] = None
-    creator_agent_dir: Optional[str] = None
-
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     
-    # These are loaded dynamically, not stored in DB
-    _tags: list[str] = []
-    _shortnames: list[str] = []
-    
-    @property
-    def tags(self) -> list[str]:
-        return getattr(self, '_tags', [])
-    
-    @tags.setter
-    def tags(self, value: list[str]):
-        self._tags = value
-    
-    @property
-    def shortnames(self) -> list[str]:
-        return getattr(self, '_shortnames', [])
-    
-    @shortnames.setter
-    def shortnames(self, value: list[str]):
-        self._shortnames = value
-
-
-# ============================================================
-# STORE
-# ============================================================
-
-class ProjectStore:
-    """SQLModel-based project storage with CRUD operations.
-    
-    Maintains the same interface as the original SQLite-based ProjectStore
-    to minimize changes for callers.
-    """
-
     def __init__(self, session: Session):
+        """Initialize repository with a database session."""
         self.session = session
 
-
     # --------------------------------------------------------
-    # INTERNAL HELPERS
+    # INTERNAL HELPERS - Using bulk operations to avoid flush warning
     # --------------------------------------------------------
 
     def _load_tags(self, project_id: str) -> list[str]:
@@ -160,39 +53,46 @@ class ProjectStore:
         ).all()
         return [link.shortname for link in links]
 
-    def _enrich_project(self, project: Project | None) -> Project | None:
-        """Load tags and shortnames into a Project object."""
+    def _enrich_project(self, project: Project | None) -> ProjectData | None:
+        """Load tags/shortnames and convert to ProjectData."""
         if project is None:
             return None
         project.tags = self._load_tags(project.project_id)
         project.shortnames = self._load_shortnames(project.project_id)
-        return project
+        return project.to_data()
 
-    def _enrich_projects(self, projects: list[Project]) -> list[Project]:
-        """Load tags and shortnames into multiple Project objects."""
+    def _enrich_projects(self, projects: list[Project]) -> list[ProjectData]:
+        """Load tags/shortnames for multiple projects."""
+        result = []
         for p in projects:
             p.tags = self._load_tags(p.project_id)
             p.shortnames = self._load_shortnames(p.project_id)
-        return projects
+            result.append(p.to_data())
+        return result
 
-    def _sync_tags(self, project_id: str, tags: list[str]) -> None:
-        """Sync tags to the junction table."""
+    def _sync_tags_bulk(self, project_id: str, tags: list[str]) -> None:
+        """Sync tags using bulk operations - NO FLUSH WARNING."""
         self.session.exec(
             sql_delete(ProjectTagLink).where(ProjectTagLink.project_id == project_id)
         )
-        for tag in tags:
-            self.session.add(ProjectTagLink(project_id=project_id, tag=tag))
+        if tags:
+            self.session.execute(
+                insert(ProjectTagLink),
+                [{"project_id": project_id, "tag": tag} for tag in tags]
+            )
         self.session.commit()
 
-    def _sync_shortnames(self, project_id: str, shortnames: list[str]) -> None:
-        """Sync shortnames to the junction table."""
+    def _sync_shortnames_bulk(self, project_id: str, shortnames: list[str]) -> None:
+        """Sync shortnames using bulk operations - NO FLUSH WARNING."""
         self.session.exec(
             sql_delete(ProjectShortnameLink).where(ProjectShortnameLink.project_id == project_id)
         )
-        for s in shortnames:
-            self.session.add(ProjectShortnameLink(project_id=project_id, shortname=s))
+        if shortnames:
+            self.session.execute(
+                insert(ProjectShortnameLink),
+                [{"project_id": project_id, "shortname": s} for s in shortnames]
+            )
         self.session.commit()
-
 
     # --------------------------------------------------------
     # CREATE
@@ -211,33 +111,11 @@ class ProjectStore:
         project_id: str | None = None,
         creator_session_id: str | None = None,
         creator_agent_dir: str | None = None,
-    ) -> Project:
-        """Create a new project.
-        
-        Args:
-            name: Project name (must be unique).
-            project_type: Type of project (software, documentation, research, custom).
-            main_directory: Primary project directory path.
-            related_directories: Additional related directory paths.
-            description: Project description.
-            tags: List of tags for categorization.
-            shortnames: List of alternative short names/nicknames for the project.
-            metadata: Type-specific metadata.
-            project_id: Optional custom project ID (auto-generated if None).
-            creator_session_id: Session ID that created this project.
-            creator_agent_dir: Agent directory of the creator.
-        
-        Returns:
-            The created Project object.
-        
-        Raises:
-            ValueError: If name is duplicate or type is invalid.
-        """
-        # Validate project_type (allow custom types)
+    ) -> ProjectData:
+        """Create a new project."""
         if not ProjectType.is_valid(project_type):
             raise ValueError(f"Invalid project_type: {project_type}")
         
-        # Check for duplicate name
         existing = self.get_by_name(name)
         if existing:
             raise ValueError(f"Project with name '{name}' already exists")
@@ -255,43 +133,40 @@ class ProjectStore:
             main_directory=main_directory,
             related_directories=related_directories or [],
             description=description,
-            project_metadata=metadata or {},  # Map to project_metadata field
+            project_metadata=metadata or {},
             relationships={},
             creator_session_id=creator_session_id,
             creator_agent_dir=creator_agent_dir,
             created_at=now,
             updated_at=now,
         )
-        project.tags = tags
-        project.shortnames = shortnames
 
         self.session.add(project)
         self.session.commit()
         self.session.refresh(project)
 
-        self._sync_tags(project.project_id, tags)
-        self._sync_shortnames(project.project_id, shortnames)
+        self._sync_tags_bulk(project.project_id, tags)
+        self._sync_shortnames_bulk(project.project_id, shortnames)
 
-        return self._enrich_project(project) or project
-
+        return self._enrich_project(project) or project.to_data()
 
     # --------------------------------------------------------
-    # GETTERS
+    # READ
     # --------------------------------------------------------
 
-    def get(self, project_id: str) -> Project | None:
+    def get(self, project_id: str) -> ProjectData | None:
         """Get a project by ID."""
         project = self.session.get(Project, project_id)
         return self._enrich_project(project)
 
-    def get_by_name(self, name: str) -> Project | None:
+    def get_by_name(self, name: str) -> ProjectData | None:
         """Get a project by name."""
         project = self.session.exec(
             select(Project).where(Project.name == name)
         ).first()
         return self._enrich_project(project)
 
-    def get_by_shortname(self, shortname: str) -> Project | None:
+    def get_by_shortname(self, shortname: str) -> ProjectData | None:
         """Get a project by shortname."""
         stmt = (
             select(Project)
@@ -301,15 +176,13 @@ class ProjectStore:
         project = self.session.exec(stmt).first()
         return self._enrich_project(project)
 
-    def get_by_session(self, session_id: str) -> list[Project]:
+    def get_by_session(self, session_id: str) -> list[ProjectData]:
         """Get all projects linked to a session."""
-        # Search by creator_session_id or in relationships JSON
         stmt = select(Project).where(
             (Project.creator_session_id == session_id)
             | col(Project.relationships).contains(f'"sessions"')
         )
         projects = list(self.session.exec(stmt))
-        # Filter in Python for JSON contains check
         result = []
         for p in projects:
             if p.creator_session_id == session_id:
@@ -318,20 +191,18 @@ class ProjectStore:
                 result.append(p)
         return self._enrich_projects(result)
 
-    def get_by_directory(self, directory: str) -> list[Project]:
+    def get_by_directory(self, directory: str) -> list[ProjectData]:
         """Get all projects that reference a directory."""
         stmt = select(Project).where(
             (Project.main_directory == directory)
             | col(Project.related_directories).contains(f'"{directory}"')
         )
         projects = list(self.session.exec(stmt))
-        # Filter in Python for JSON array contains
         result = []
         for p in projects:
             if p.main_directory == directory or directory in p.related_directories:
                 result.append(p)
         return self._enrich_projects(result)
-
 
     # --------------------------------------------------------
     # LIST
@@ -344,32 +215,18 @@ class ProjectStore:
         tags: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[Project]:
-        """List projects with optional filters.
-        
-        Args:
-            status: Filter by status.
-            project_type: Filter by project type.
-            tags: Filter by tags (projects must have ALL specified tags).
-            limit: Maximum number of results.
-            offset: Offset for pagination.
-        
-        Returns:
-            List of matching Project objects.
-        """
+    ) -> list[ProjectData]:
+        """List projects with optional filters."""
         if tags:
             return self._list_with_tags(status, project_type, tags, limit, offset)
 
         stmt = select(Project)
-
         if status:
             stmt = stmt.where(Project.status == status)
-
         if project_type:
             stmt = stmt.where(Project.project_type == project_type)
 
         stmt = stmt.order_by(col(Project.updated_at).desc()).offset(offset).limit(limit)
-
         projects = list(self.session.exec(stmt))
         return self._enrich_projects(projects)
 
@@ -380,39 +237,30 @@ class ProjectStore:
         tags: list[str],
         limit: int,
         offset: int,
-    ) -> list[Project]:
+    ) -> list[ProjectData]:
         """List projects using junction table for tag filtering."""
-        # Build query with JOINs for each tag
-        # Projects must have ALL specified tags
         stmt = select(Project)
-        
         for tag in tags:
-            alias = ProjectTagLink  # For simplicity, we'll use subqueries
             stmt = stmt.where(
                 col(Project.project_id).in_(
                     select(ProjectTagLink.project_id).where(ProjectTagLink.tag == tag)
                 )
             )
-
         if status:
             stmt = stmt.where(Project.status == status)
-
         if project_type:
             stmt = stmt.where(Project.project_type == project_type)
 
         stmt = stmt.order_by(col(Project.updated_at).desc()).offset(offset).limit(limit)
-
         projects = list(self.session.exec(stmt))
         return self._enrich_projects(projects)
-
 
     # --------------------------------------------------------
     # SEARCH
     # --------------------------------------------------------
 
-    def search(self, query: str, limit: int = 20) -> list[Project]:
+    def search(self, query: str, limit: int = 20) -> list[ProjectData]:
         """Search projects by name, description, or shortnames."""
-        # Use DISTINCT to avoid duplicates from JOIN
         stmt = (
             select(Project)
             .join(ProjectShortnameLink, isouter=True)
@@ -425,16 +273,11 @@ class ProjectStore:
             .order_by(col(Project.updated_at).desc())
             .limit(limit)
         )
-
         projects = list(self.session.exec(stmt))
         return self._enrich_projects(projects)
 
-    def match_by_keywords(self, keywords: list[str]) -> Project | None:
-        """Find best matching project by keywords against name and shortnames.
-        
-        Simple scoring: exact match = 2 points, case-insensitive partial match = 1 point.
-        Returns highest scoring project or None if no matches.
-        """
+    def match_by_keywords(self, keywords: list[str]) -> ProjectData | None:
+        """Find best matching project by keywords."""
         if not keywords:
             return None
 
@@ -445,22 +288,20 @@ class ProjectStore:
         if not projects:
             return None
 
-        best_project: Project | None = None
+        best_project: ProjectData | None = None
         best_score = 0
 
         for project in projects:
             score = 0
-            
-            # Build list of identifiers to match against (name + shortnames)
             identifiers = [project.name.lower()] + [s.lower() for s in project.shortnames]
 
             for keyword in keywords:
                 kw = keyword.lower()
                 for identifier in identifiers:
                     if kw == identifier:
-                        score += 2  # Exact match
+                        score += 2
                     elif kw in identifier or identifier in kw:
-                        score += 1  # Partial match
+                        score += 1
 
             if score > best_score:
                 best_score = score
@@ -468,153 +309,133 @@ class ProjectStore:
 
         return best_project if best_score > 0 else None
 
-
     # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
 
-    def update(
-        self,
-        project_id: str,
-        **updates
-    ) -> Project | None:
-        """Update a project's fields.
-        
-        Raises:
-            ValueError: If name is duplicate or status is invalid.
-        """
-        project = self.get(project_id)
+    def update(self, project_id: str, **updates) -> ProjectData | None:
+        """Update a project's fields."""
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
-        # Validate status if provided
         if 'status' in updates and not ProjectStatus.is_valid(updates['status']):
-            raise ValueError(
-                f"Invalid status: {updates['status']}. "
-                f"Must be one of: {', '.join(ProjectStatus)}"
-            )
+            raise ValueError(f"Invalid status: {updates['status']}")
 
-        # Check for duplicate name if name is being updated
         if 'name' in updates and updates['name'] != project.name:
             existing = self.get_by_name(updates['name'])
             if existing:
                 raise ValueError(f"Project with name '{updates['name']}' already exists")
 
-        # Handle tags and shortnames separately (they're in junction tables)
         tags_update = updates.pop('tags', None)
         shortnames_update = updates.pop('shortnames', None)
 
-        # Apply other updates
         for key, value in updates.items():
             if hasattr(project, key):
                 setattr(project, key, value)
 
         project.updated_at = datetime.utcnow().isoformat()
-
         self.session.commit()
         self.session.refresh(project)
 
-        # Sync tags/shortnames if provided
         if tags_update is not None:
-            self._sync_tags(project_id, tags_update)
-            project.tags = tags_update
-
+            self._sync_tags_bulk(project_id, tags_update)
         if shortnames_update is not None:
-            self._sync_shortnames(project_id, shortnames_update)
-            project.shortnames = shortnames_update
+            self._sync_shortnames_bulk(project_id, shortnames_update)
 
         return self._enrich_project(project)
 
-    def update_status(self, project_id: str, status: str) -> Project | None:
+    def update_status(self, project_id: str, status: str) -> ProjectData | None:
         """Update project status."""
         return self.update(project_id, status=status)
-
 
     # --------------------------------------------------------
     # TAGS
     # --------------------------------------------------------
 
-    def set_tags(self, project_id: str, tags: list[str]) -> Project | None:
+    def set_tags(self, project_id: str, tags: list[str]) -> ProjectData | None:
         """Replace all tags on a project."""
         return self.update(project_id, tags=tags)
 
-    def add_tag(self, project_id: str, tag: str) -> Project | None:
+    def add_tag(self, project_id: str, tag: str) -> ProjectData | None:
         """Add a tag to a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
-        if tag not in project.tags:
-            project.tags.append(tag)
-            self._sync_tags(project_id, project.tags)
+        current_tags = self._load_tags(project_id)
+        if tag not in current_tags:
+            current_tags.append(tag)
+            self._sync_tags_bulk(project_id, current_tags)
             project.updated_at = datetime.utcnow().isoformat()
             self.session.commit()
             self.session.refresh(project)
 
         return self._enrich_project(project)
 
-    def remove_tag(self, project_id: str, tag: str) -> Project | None:
+    def remove_tag(self, project_id: str, tag: str) -> ProjectData | None:
         """Remove a tag from a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
-        if tag in project.tags:
-            project.tags.remove(tag)
-            self._sync_tags(project_id, project.tags)
+        current_tags = self._load_tags(project_id)
+        if tag in current_tags:
+            current_tags.remove(tag)
+            self._sync_tags_bulk(project_id, current_tags)
             project.updated_at = datetime.utcnow().isoformat()
             self.session.commit()
             self.session.refresh(project)
 
         return self._enrich_project(project)
-
 
     # --------------------------------------------------------
     # SHORTNAMES
     # --------------------------------------------------------
 
-    def set_shortnames(self, project_id: str, shortnames: list[str]) -> Project | None:
+    def set_shortnames(self, project_id: str, shortnames: list[str]) -> ProjectData | None:
         """Replace all shortnames on a project."""
         return self.update(project_id, shortnames=shortnames)
 
-    def add_shortname(self, project_id: str, shortname: str) -> Project | None:
+    def add_shortname(self, project_id: str, shortname: str) -> ProjectData | None:
         """Add a shortname to a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
-        if shortname not in project.shortnames:
-            project.shortnames.append(shortname)
-            self._sync_shortnames(project_id, project.shortnames)
+        current_shortnames = self._load_shortnames(project_id)
+        if shortname not in current_shortnames:
+            current_shortnames.append(shortname)
+            self._sync_shortnames_bulk(project_id, current_shortnames)
             project.updated_at = datetime.utcnow().isoformat()
             self.session.commit()
             self.session.refresh(project)
 
         return self._enrich_project(project)
 
-    def remove_shortname(self, project_id: str, shortname: str) -> Project | None:
+    def remove_shortname(self, project_id: str, shortname: str) -> ProjectData | None:
         """Remove a shortname from a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
-        if shortname in project.shortnames:
-            project.shortnames.remove(shortname)
-            self._sync_shortnames(project_id, project.shortnames)
+        current_shortnames = self._load_shortnames(project_id)
+        if shortname in current_shortnames:
+            current_shortnames.remove(shortname)
+            self._sync_shortnames_bulk(project_id, current_shortnames)
             project.updated_at = datetime.utcnow().isoformat()
             self.session.commit()
             self.session.refresh(project)
 
         return self._enrich_project(project)
-
 
     # --------------------------------------------------------
     # DIRECTORIES
     # --------------------------------------------------------
 
-    def add_related_directory(self, project_id: str, directory: str) -> Project | None:
+    def add_related_directory(self, project_id: str, directory: str) -> ProjectData | None:
         """Add a related directory to a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -627,9 +448,9 @@ class ProjectStore:
 
         return self._enrich_project(project)
 
-    def remove_related_directory(self, project_id: str, directory: str) -> Project | None:
+    def remove_related_directory(self, project_id: str, directory: str) -> ProjectData | None:
         """Remove a related directory from a project."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -642,14 +463,13 @@ class ProjectStore:
 
         return self._enrich_project(project)
 
-
     # --------------------------------------------------------
     # METADATA
     # --------------------------------------------------------
 
-    def set_metadata(self, project_id: str, key: str, value: Any) -> Project | None:
+    def set_metadata(self, project_id: str, key: str, value: Any) -> ProjectData | None:
         """Set a metadata key-value pair."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -661,9 +481,9 @@ class ProjectStore:
 
         return self._enrich_project(project)
 
-    def delete_metadata(self, project_id: str, key: str) -> Project | None:
+    def delete_metadata(self, project_id: str, key: str) -> ProjectData | None:
         """Delete a metadata key."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -675,19 +495,15 @@ class ProjectStore:
 
         return self._enrich_project(project)
 
-
     # --------------------------------------------------------
     # RELATIONSHIPS
     # --------------------------------------------------------
 
     def add_relationship(
-        self,
-        project_id: str,
-        entity_type: str,
-        entity_id: str
-    ) -> Project | None:
+        self, project_id: str, entity_type: str, entity_id: str
+    ) -> ProjectData | None:
         """Add a relationship to another entity."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -704,13 +520,10 @@ class ProjectStore:
         return self._enrich_project(project)
 
     def remove_relationship(
-        self,
-        project_id: str,
-        entity_type: str,
-        entity_id: str
-    ) -> Project | None:
+        self, project_id: str, entity_type: str, entity_id: str
+    ) -> ProjectData | None:
         """Remove a relationship to another entity."""
-        project = self.get(project_id)
+        project = self.session.get(Project, project_id)
         if project is None:
             return None
 
@@ -724,18 +537,13 @@ class ProjectStore:
 
         return self._enrich_project(project)
 
-
     # --------------------------------------------------------
     # DELETE
     # --------------------------------------------------------
 
-    def delete(self, project_id: str) -> dict:
-        """Delete a project.
-        
-        Returns:
-            Dictionary with deletion result: {"deleted": bool, "project_id": str}
-        """
-        project = self.get(project_id)
+    def delete(self, project_id: str) -> dict[str, Any]:
+        """Delete a project."""
+        project = self.session.get(Project, project_id)
         if project is None:
             return {"deleted": False, "project_id": project_id, "error": "Not found"}
 
@@ -755,30 +563,4 @@ class ProjectStore:
             "deleted": True,
             "project_id": project_id,
             "name": project.name
-        }
-
-
-    # --------------------------------------------------------
-    # SERIALIZATION
-    # --------------------------------------------------------
-
-    @staticmethod
-    def to_dict(project: Project) -> dict:
-        """Convert a Project object to a dictionary for tool output."""
-        return {
-            "project_id": project.project_id,
-            "name": project.name,
-            "project_type": project.project_type,
-            "status": project.status,
-            "main_directory": project.main_directory,
-            "related_directories": project.related_directories,
-            "description": project.description,
-            "tags": project.tags,
-            "shortnames": project.shortnames,
-            "metadata": project.project_metadata,
-            "relationships": project.relationships,
-            "creator_session_id": project.creator_session_id,
-            "creator_agent_dir": project.creator_agent_dir,
-            "created_at": project.created_at,
-            "updated_at": project.updated_at,
         }
