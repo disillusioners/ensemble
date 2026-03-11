@@ -9,7 +9,7 @@ Provides CRUD operations for projects with:
 
 from langchain_core.tools import tool
 
-from ..repositories.project.protocol import ProjectRepositoryProtocol
+from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus
 
 
@@ -283,11 +283,11 @@ Returns:
 }
 
 
-def create_project_tools(store: ProjectRepositoryProtocol, current_session_id: str = "", agent_dir: str = ""):
+def create_project_tools(store: SQLModelProjectRepository, current_session_id: str = "", agent_dir: str = ""):
     """Create project management tools with injected repository.
     
     Args:
-        store: ProjectRepositoryProtocol instance for database operations.
+        store: SQLModelProjectRepository instance for database operations.
         current_session_id: The current session ID (used for creator tracking).
         agent_dir: The current agent directory (used for creator tracking).
     

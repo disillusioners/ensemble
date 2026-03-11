@@ -1,8 +1,4 @@
-"""SQLModel-based Project Repository implementation.
-
-This module provides the concrete implementation of ProjectRepositoryProtocol
-using SQLModel/SQLAlchemy, with fixes for the flush warning issue.
-"""
+"""SQLModel-based Project Repository implementation."""
 
 from __future__ import annotations
 
@@ -14,22 +10,11 @@ from sqlalchemy import delete as sql_delete, insert
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
-from .protocol import ProjectData, ProjectRepositoryProtocol
 from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType
 
 
-class SQLModelProjectRepository(ProjectRepositoryProtocol):
-    """SQLModel-based implementation of ProjectRepositoryProtocol.
-    
-    This implementation fixes the flush warning by using bulk operations
-    for junction table syncs instead of add() in a loop.
-    
-    Key improvements over ProjectStore:
-    1. Uses bulk INSERT for tags/shortnames (no flush warning)
-    2. Proper transaction management
-    3. Returns database-agnostic ProjectData DTOs
-    4. Better separation of concerns
-    """
+class SQLModelProjectRepository:
+    """SQLModel-based Project repository with bulk operations for tags/shortnames."""
     
     def __init__(self, session: Session):
         """Initialize repository with a database session."""
@@ -53,22 +38,20 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         ).all()
         return [link.shortname for link in links]
 
-    def _enrich_project(self, project: Project | None) -> ProjectData | None:
-        """Load tags/shortnames and convert to ProjectData."""
+    def _enrich_project(self, project: Project | None) -> Project | None:
+        """Load tags/shortnames onto project."""
         if project is None:
             return None
         project.tags = self._load_tags(project.project_id)
         project.shortnames = self._load_shortnames(project.project_id)
-        return project.to_data()
+        return project
 
-    def _enrich_projects(self, projects: list[Project]) -> list[ProjectData]:
+    def _enrich_projects(self, projects: list[Project]) -> list[Project]:
         """Load tags/shortnames for multiple projects."""
-        result = []
         for p in projects:
             p.tags = self._load_tags(p.project_id)
             p.shortnames = self._load_shortnames(p.project_id)
-            result.append(p.to_data())
-        return result
+        return projects
 
     def _sync_tags_bulk(self, project_id: str, tags: list[str]) -> None:
         """Sync tags using bulk operations - NO FLUSH WARNING."""
@@ -111,7 +94,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         project_id: str | None = None,
         creator_session_id: str | None = None,
         creator_agent_dir: str | None = None,
-    ) -> ProjectData:
+    ) -> Project:
         """Create a new project."""
         if not ProjectType.is_valid(project_type):
             raise ValueError(f"Invalid project_type: {project_type}")
@@ -154,19 +137,19 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # READ
     # --------------------------------------------------------
 
-    def get(self, project_id: str) -> ProjectData | None:
+    def get(self, project_id: str) -> Project | None:
         """Get a project by ID."""
         project = self.session.get(Project, project_id)
         return self._enrich_project(project)
 
-    def get_by_name(self, name: str) -> ProjectData | None:
+    def get_by_name(self, name: str) -> Project | None:
         """Get a project by name."""
         project = self.session.exec(
             select(Project).where(Project.name == name)
         ).first()
         return self._enrich_project(project)
 
-    def get_by_shortname(self, shortname: str) -> ProjectData | None:
+    def get_by_shortname(self, shortname: str) -> Project | None:
         """Get a project by shortname."""
         stmt = (
             select(Project)
@@ -176,7 +159,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         project = self.session.exec(stmt).first()
         return self._enrich_project(project)
 
-    def get_by_session(self, session_id: str) -> list[ProjectData]:
+    def get_by_session(self, session_id: str) -> list[Project]:
         """Get all projects linked to a session."""
         stmt = select(Project).where(
             (Project.creator_session_id == session_id)
@@ -191,7 +174,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
                 result.append(p)
         return self._enrich_projects(result)
 
-    def get_by_directory(self, directory: str) -> list[ProjectData]:
+    def get_by_directory(self, directory: str) -> list[Project]:
         """Get all projects that reference a directory."""
         stmt = select(Project).where(
             (Project.main_directory == directory)
@@ -215,7 +198,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         tags: list[str] | None = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[ProjectData]:
+    ) -> list[Project]:
         """List projects with optional filters."""
         if tags:
             return self._list_with_tags(status, project_type, tags, limit, offset)
@@ -237,7 +220,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         tags: list[str],
         limit: int,
         offset: int,
-    ) -> list[ProjectData]:
+    ) -> list[Project]:
         """List projects using junction table for tag filtering."""
         stmt = select(Project)
         for tag in tags:
@@ -259,7 +242,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # SEARCH
     # --------------------------------------------------------
 
-    def search(self, query: str, limit: int = 20) -> list[ProjectData]:
+    def search(self, query: str, limit: int = 20) -> list[Project]:
         """Search projects by name, description, or shortnames."""
         stmt = (
             select(Project)
@@ -276,7 +259,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         projects = list(self.session.exec(stmt))
         return self._enrich_projects(projects)
 
-    def match_by_keywords(self, keywords: list[str]) -> ProjectData | None:
+    def match_by_keywords(self, keywords: list[str]) -> Project | None:
         """Find best matching project by keywords."""
         if not keywords:
             return None
@@ -288,7 +271,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
         if not projects:
             return None
 
-        best_project: ProjectData | None = None
+        best_project: Project | None = None
         best_score = 0
 
         for project in projects:
@@ -313,7 +296,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # UPDATE
     # --------------------------------------------------------
 
-    def update(self, project_id: str, **updates) -> ProjectData | None:
+    def update(self, project_id: str, **updates) -> Project | None:
         """Update a project's fields."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -345,7 +328,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
         return self._enrich_project(project)
 
-    def update_status(self, project_id: str, status: str) -> ProjectData | None:
+    def update_status(self, project_id: str, status: str) -> Project | None:
         """Update project status."""
         return self.update(project_id, status=status)
 
@@ -353,11 +336,11 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # TAGS
     # --------------------------------------------------------
 
-    def set_tags(self, project_id: str, tags: list[str]) -> ProjectData | None:
+    def set_tags(self, project_id: str, tags: list[str]) -> Project | None:
         """Replace all tags on a project."""
         return self.update(project_id, tags=tags)
 
-    def add_tag(self, project_id: str, tag: str) -> ProjectData | None:
+    def add_tag(self, project_id: str, tag: str) -> Project | None:
         """Add a tag to a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -373,7 +356,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
         return self._enrich_project(project)
 
-    def remove_tag(self, project_id: str, tag: str) -> ProjectData | None:
+    def remove_tag(self, project_id: str, tag: str) -> Project | None:
         """Remove a tag from a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -393,11 +376,11 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # SHORTNAMES
     # --------------------------------------------------------
 
-    def set_shortnames(self, project_id: str, shortnames: list[str]) -> ProjectData | None:
+    def set_shortnames(self, project_id: str, shortnames: list[str]) -> Project | None:
         """Replace all shortnames on a project."""
         return self.update(project_id, shortnames=shortnames)
 
-    def add_shortname(self, project_id: str, shortname: str) -> ProjectData | None:
+    def add_shortname(self, project_id: str, shortname: str) -> Project | None:
         """Add a shortname to a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -413,7 +396,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
         return self._enrich_project(project)
 
-    def remove_shortname(self, project_id: str, shortname: str) -> ProjectData | None:
+    def remove_shortname(self, project_id: str, shortname: str) -> Project | None:
         """Remove a shortname from a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -433,7 +416,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # DIRECTORIES
     # --------------------------------------------------------
 
-    def add_related_directory(self, project_id: str, directory: str) -> ProjectData | None:
+    def add_related_directory(self, project_id: str, directory: str) -> Project | None:
         """Add a related directory to a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -448,7 +431,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
         return self._enrich_project(project)
 
-    def remove_related_directory(self, project_id: str, directory: str) -> ProjectData | None:
+    def remove_related_directory(self, project_id: str, directory: str) -> Project | None:
         """Remove a related directory from a project."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -467,7 +450,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
     # METADATA
     # --------------------------------------------------------
 
-    def set_metadata(self, project_id: str, key: str, value: Any) -> ProjectData | None:
+    def set_metadata(self, project_id: str, key: str, value: Any) -> Project | None:
         """Set a metadata key-value pair."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -481,7 +464,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
         return self._enrich_project(project)
 
-    def delete_metadata(self, project_id: str, key: str) -> ProjectData | None:
+    def delete_metadata(self, project_id: str, key: str) -> Project | None:
         """Delete a metadata key."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -501,7 +484,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
     def add_relationship(
         self, project_id: str, entity_type: str, entity_id: str
-    ) -> ProjectData | None:
+    ) -> Project | None:
         """Add a relationship to another entity."""
         project = self.session.get(Project, project_id)
         if project is None:
@@ -521,7 +504,7 @@ class SQLModelProjectRepository(ProjectRepositoryProtocol):
 
     def remove_relationship(
         self, project_id: str, entity_type: str, entity_id: str
-    ) -> ProjectData | None:
+    ) -> Project | None:
         """Remove a relationship to another entity."""
         project = self.session.get(Project, project_id)
         if project is None:

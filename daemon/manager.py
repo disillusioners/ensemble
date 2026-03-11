@@ -41,7 +41,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .repositories import (
-    ProjectRepositoryProtocol,
+    SQLModelProjectRepository,
     DatabaseConfig,
     create_project_repository,
 )

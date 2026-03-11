@@ -112,23 +112,22 @@ class Project(SQLModel, table=True):
     def shortnames(self, value: list[str]):
         self._shortnames = value
     
-    def to_data(self) -> "ProjectData":
-        """Convert ORM model to ProjectData DTO."""
-        from .protocol import ProjectData
-        return ProjectData(
-            project_id=self.project_id,
-            name=self.name,
-            project_type=self.project_type,
-            status=self.status,
-            main_directory=self.main_directory,
-            related_directories=list(self.related_directories),
-            description=self.description,
-            tags=list(self._tags),
-            shortnames=list(self._shortnames),
-            metadata=dict(self.project_metadata),
-            relationships=dict(self.relationships),
-            creator_session_id=self.creator_session_id,
-            creator_agent_dir=self.creator_agent_dir,
-            created_at=self.created_at,
-            updated_at=self.updated_at,
-        )
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "project_id": self.project_id,
+            "name": self.name,
+            "project_type": self.project_type,
+            "status": self.status,
+            "main_directory": self.main_directory,
+            "related_directories": list(self.related_directories),
+            "description": self.description,
+            "tags": list(self._tags),
+            "shortnames": list(self._shortnames),
+            "metadata": dict(self.project_metadata),
+            "relationships": dict(self.relationships),
+            "creator_session_id": self.creator_session_id,
+            "creator_agent_dir": self.creator_agent_dir,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
