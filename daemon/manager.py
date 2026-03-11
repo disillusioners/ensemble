@@ -42,12 +42,9 @@ from .cancellation import (
 from .request_registry import ActiveRequestRegistry
 from .repositories import (
     ProjectRepositoryProtocol,
-    SQLModelProjectRepository,
     DatabaseConfig,
     create_project_repository,
 )
-from sqlmodel import Session, SQLModel, create_engine
-from sqlalchemy import event
 
 logger = logging.getLogger(__name__)
 

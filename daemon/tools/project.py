@@ -9,8 +9,8 @@ Provides CRUD operations for projects with:
 
 from langchain_core.tools import tool
 
-from ..repositories.protocol import ProjectRepositoryProtocol
-from ..repositories.project_repository import ProjectStatus
+from ..repositories.project.protocol import ProjectRepositoryProtocol
+from ..repositories.project.models import ProjectStatus
 
 
 # Full documentation strings for each tool
