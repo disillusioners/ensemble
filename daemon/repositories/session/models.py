@@ -56,7 +56,11 @@ class Session(SQLModel, table=True):
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     
     # Runtime-only attribute (not stored in DB)
-    _children: list[str] = []
+    _children: list[str]
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        self._children: list[str] = []
     
     @property
     def children(self) -> list[str]:

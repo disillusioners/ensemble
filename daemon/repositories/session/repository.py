@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete as sql_delete
+from sqlalchemy import delete as sql_delete, func
 from sqlmodel import Session, select, col
 
 from .models import Session, SessionHierarchy, SessionStatus
@@ -158,11 +158,11 @@ class SQLModelSessionRepository:
         Returns:
             Tuple of (list of sessions, total count).
         """
-        # Get total count
-        count_stmt = select(Session)
+        # Get total count using database-level counting
+        count_stmt = select(func.count()).select_from(Session)
         if status:
             count_stmt = count_stmt.where(Session.status == status)
-        total = len(list(self.session.exec(count_stmt)))
+        total = self.session.exec(count_stmt).one()
 
         # Get paginated sessions
         stmt = select(Session)

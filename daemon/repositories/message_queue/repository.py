@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import delete as sql_delete
+from sqlalchemy import delete as sql_delete, func
 from sqlmodel import Session, select, col
 
 from .models import MessageQueue, MessageStatus
@@ -300,14 +300,16 @@ class SQLModelMessageQueueRepository:
         """Get count of messages by status."""
         counts = {}
         for status in MessageStatus:
-            stmt = select(MessageQueue).where(MessageQueue.status == status.value)
-            counts[status.value] = len(list(self.session.exec(stmt)))
+            stmt = select(func.count()).select_from(MessageQueue).where(
+                MessageQueue.status == status.value
+            )
+            counts[status.value] = self.session.exec(stmt).one()
         return counts
 
     def count_pending(self) -> int:
         """Get count of pending (ready + processing) messages."""
-        stmt = select(MessageQueue).where(
+        stmt = select(func.count()).select_from(MessageQueue).where(
             (MessageQueue.status == MessageStatus.READY.value)
             | (MessageQueue.status == MessageStatus.PROCESSING.value)
         )
-        return len(list(self.session.exec(stmt)))
+        return self.session.exec(stmt).one()
