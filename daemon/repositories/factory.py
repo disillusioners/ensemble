@@ -10,6 +10,9 @@ from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from .project.repository import SQLModelProjectRepository
+from .session.repository import SQLModelSessionRepository
+from .message_queue.repository import SQLModelMessageQueueRepository
+from .source.repository import SQLModelSourceRepository
 
 
 @dataclass
@@ -93,3 +96,106 @@ def create_project_repository(
         SQLModel.metadata.create_all(engine)
     
     return SQLModelProjectRepository(Session(engine))
+
+
+def create_session_repository(
+    config: DatabaseConfig,
+    create_tables: bool = True,
+) -> SQLModelSessionRepository:
+    """Create a SessionRepository from configuration.
+    
+    Args:
+        config: Database configuration.
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured SQLModelSessionRepository instance.
+    """
+    engine = _create_engine(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return SQLModelSessionRepository(Session(engine))
+
+
+def create_message_queue_repository(
+    config: DatabaseConfig,
+    create_tables: bool = True,
+) -> SQLModelMessageQueueRepository:
+    """Create a MessageQueueRepository from configuration.
+    
+    Args:
+        config: Database configuration.
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured SQLModelMessageQueueRepository instance.
+    """
+    engine = _create_engine(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return SQLModelMessageQueueRepository(Session(engine))
+
+
+def create_source_repository(
+    config: DatabaseConfig,
+    create_tables: bool = True,
+) -> SQLModelSourceRepository:
+    """Create a SourceRepository from configuration.
+    
+    Args:
+        config: Database configuration.
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured SQLModelSourceRepository instance.
+    """
+    engine = _create_engine(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return SQLModelSourceRepository(Session(engine))
+
+
+def _create_engine(config: DatabaseConfig):
+    """Create a database engine from configuration.
+    
+    Args:
+        config: Database configuration.
+    
+    Returns:
+        SQLAlchemy engine instance.
+    """
+    is_sqlite = "sqlite" in config.connection_string.lower()
+    
+    if is_sqlite:
+        engine = create_engine(
+            config.connection_string,
+            echo=config.echo,
+            connect_args={"check_same_thread": False},
+            pool_pre_ping=True,
+        )
+        
+        # Configure SQLite for better concurrency
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragma(dbapi_conn, connection_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    else:
+        engine = create_engine(
+            config.connection_string,
+            echo=config.echo,
+            pool_size=config.pool_size,
+            max_overflow=config.max_overflow,
+            pool_pre_ping=True,
+        )
+    
+    return engine

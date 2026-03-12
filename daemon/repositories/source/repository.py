@@ -1,0 +1,395 @@
+"""SQLModel-based Source Repository implementation."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timedelta
+from typing import Any, Optional
+
+from sqlalchemy import delete as sql_delete, insert
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select, col
+
+from .models import SourceConfig, SessionMapping, ProcessedMessage, SourceStatus
+
+
+logger = logging.getLogger(__name__)
+
+
+class SQLModelSourceRepository:
+    """SQLModel-based Source repository for source configs, session mappings, and message deduplication."""
+    
+    def __init__(self, session: Session):
+        """Initialize repository with a database session."""
+        self.session = session
+
+    # ==================== Source Config Operations ====================
+
+    def create_source_config(
+        self,
+        source_type: str,
+        name: str,
+        config: dict[str, Any],
+        credentials: Optional[str] = None,
+        enabled: bool = True,
+        source_id: Optional[str] = None,
+    ) -> SourceConfig:
+        """Create a new source configuration."""
+        now = datetime.utcnow().isoformat()
+        source_id = source_id or str(uuid.uuid4())
+        
+        source_config = SourceConfig(
+            source_id=source_id,
+            source_type=source_type,
+            name=name,
+            config=config,
+            credentials=credentials,
+            enabled=enabled,
+            status=SourceStatus.STOPPED.value,
+            error_message=None,
+            created_at=now,
+            updated_at=now,
+        )
+        
+        self.session.add(source_config)
+        self.session.commit()
+        self.session.refresh(source_config)
+        
+        logger.info(f"Created source config: source_id={source_id}, name={name}")
+        return source_config
+
+    def update_source_config(
+        self,
+        source_id: str,
+        source_type: Optional[str] = None,
+        name: Optional[str] = None,
+        config: Optional[dict[str, Any]] = None,
+        credentials: Optional[str] = None,
+        enabled: Optional[bool] = None,
+    ) -> SourceConfig | None:
+        """Update a source configuration."""
+        source_config = self.session.get(SourceConfig, source_id)
+        if source_config is None:
+            return None
+        
+        if source_type is not None:
+            source_config.source_type = source_type
+        if name is not None:
+            source_config.name = name
+        if config is not None:
+            source_config.config = config
+        if credentials is not None:
+            source_config.credentials = credentials
+        if enabled is not None:
+            source_config.enabled = enabled
+        
+        source_config.updated_at = datetime.utcnow().isoformat()
+        self.session.commit()
+        self.session.refresh(source_config)
+        
+        logger.info(f"Updated source config: source_id={source_id}")
+        return source_config
+
+    def get_source_config(self, source_id: str) -> SourceConfig | None:
+        """Get a source configuration by source_id."""
+        return self.session.get(SourceConfig, source_id)
+
+    def get_source_config_by_name(self, name: str) -> SourceConfig | None:
+        """Get a source configuration by name."""
+        stmt = select(SourceConfig).where(SourceConfig.name == name)
+        return self.session.exec(stmt).first()
+
+    def list_source_configs(
+        self,
+        enabled: Optional[bool] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[SourceConfig]:
+        """List source configurations with optional filters."""
+        stmt = select(SourceConfig)
+        
+        if enabled is not None:
+            stmt = stmt.where(SourceConfig.enabled == enabled)
+        if status is not None:
+            stmt = stmt.where(SourceConfig.status == status)
+        
+        stmt = stmt.order_by(col(SourceConfig.created_at).desc()).offset(offset).limit(limit)
+        return list(self.session.exec(stmt))
+
+    def update_source_status(
+        self,
+        source_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+    ) -> SourceConfig | None:
+        """Update the status of a source configuration."""
+        source_config = self.session.get(SourceConfig, source_id)
+        if source_config is None:
+            logger.warning(f"Source not found for status update: source_id={source_id}")
+            return None
+        
+        if not SourceStatus.is_valid(status):
+            raise ValueError(f"Invalid status: {status}")
+        
+        source_config.status = status
+        source_config.error_message = error_message
+        source_config.updated_at = datetime.utcnow().isoformat()
+        
+        self.session.commit()
+        self.session.refresh(source_config)
+        
+        logger.info(f"Updated source status: source_id={source_id}, status={status}")
+        return source_config
+
+    def delete_source_config(self, source_id: str) -> dict[str, Any]:
+        """Delete a source configuration and all associated mappings."""
+        source_config = self.session.get(SourceConfig, source_id)
+        if source_config is None:
+            logger.warning(f"Source config not found for deletion: source_id={source_id}")
+            return {"deleted": False, "source_id": source_id, "error": "Not found"}
+        
+        # Delete all mappings for this source
+        self.session.exec(
+            sql_delete(SessionMapping).where(SessionMapping.source_id == source_id)
+        )
+        
+        # Delete processed messages for this source
+        self.session.exec(
+            sql_delete(ProcessedMessage).where(ProcessedMessage.source_id == source_id)
+        )
+        
+        # Delete source config
+        self.session.delete(source_config)
+        self.session.commit()
+        
+        logger.info(f"Deleted source config and associated data: source_id={source_id}")
+        return {
+            "deleted": True,
+            "source_id": source_id,
+            "name": source_config.name
+        }
+
+    # ==================== Session Mapping Operations ====================
+
+    def create_session_mapping(
+        self,
+        source_id: str,
+        external_user_id: str,
+        agent_session_id: str,
+        agent_dir: str,
+        metadata: Optional[dict[str, Any]] = None,
+        mapping_id: Optional[str] = None,
+    ) -> SessionMapping:
+        """Create or update a session mapping."""
+        now = datetime.utcnow().isoformat()
+        mapping_id = mapping_id or str(uuid.uuid4())
+        
+        # Check if mapping exists (upsert logic)
+        existing = self.session.exec(
+            select(SessionMapping).where(
+                SessionMapping.source_id == source_id,
+                SessionMapping.external_user_id == external_user_id
+            )
+        ).first()
+        
+        if existing:
+            # Update existing mapping
+            existing.agent_session_id = agent_session_id
+            existing.agent_dir = agent_dir
+            existing.mapping_metadata = metadata or {}
+            existing.last_message_at = now
+            self.session.commit()
+            self.session.refresh(existing)
+            logger.info(
+                f"Updated session mapping: mapping_id={existing.mapping_id}, "
+                f"source_id={source_id}, external_user_id={external_user_id}"
+            )
+            return existing
+        
+        # Create new mapping
+        mapping = SessionMapping(
+            mapping_id=mapping_id,
+            source_id=source_id,
+            external_user_id=external_user_id,
+            agent_session_id=agent_session_id,
+            agent_dir=agent_dir,
+            mapping_metadata=metadata or {},
+            last_message_at=now,
+            created_at=now,
+        )
+        
+        self.session.add(mapping)
+        self.session.commit()
+        self.session.refresh(mapping)
+        
+        logger.info(
+            f"Created session mapping: mapping_id={mapping_id}, "
+            f"source_id={source_id}, external_user_id={external_user_id}"
+        )
+        return mapping
+
+    def get_session_mapping(
+        self,
+        source_id: str,
+        external_user_id: str,
+    ) -> SessionMapping | None:
+        """Get a session mapping by source_id and external_user_id."""
+        stmt = select(SessionMapping).where(
+            SessionMapping.source_id == source_id,
+            SessionMapping.external_user_id == external_user_id
+        )
+        return self.session.exec(stmt).first()
+
+    def get_session_mapping_by_session(
+        self,
+        agent_session_id: str,
+    ) -> SessionMapping | None:
+        """Get a session mapping by agent_session_id."""
+        stmt = select(SessionMapping).where(
+            SessionMapping.agent_session_id == agent_session_id
+        )
+        return self.session.exec(stmt).first()
+
+    def update_mapping_last_message(
+        self,
+        source_id: str,
+        external_user_id: str,
+    ) -> bool:
+        """Update the last_message_at timestamp for a session mapping."""
+        mapping = self.get_session_mapping(source_id, external_user_id)
+        if mapping is None:
+            return False
+        
+        mapping.last_message_at = datetime.utcnow().isoformat()
+        self.session.commit()
+        
+        logger.debug(
+            f"Updated last_message_at: source_id={source_id}, external_user_id={external_user_id}"
+        )
+        return True
+
+    def delete_session_mapping(self, mapping_id: str) -> dict[str, Any]:
+        """Delete a session mapping."""
+        mapping = self.session.get(SessionMapping, mapping_id)
+        if mapping is None:
+            logger.warning(f"Session mapping not found for deletion: mapping_id={mapping_id}")
+            return {"deleted": False, "mapping_id": mapping_id, "error": "Not found"}
+        
+        self.session.delete(mapping)
+        self.session.commit()
+        
+        logger.info(f"Deleted session mapping: mapping_id={mapping_id}")
+        return {"deleted": True, "mapping_id": mapping_id}
+
+    def list_session_mappings(
+        self,
+        source_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[SessionMapping]:
+        """List all session mappings for a source."""
+        stmt = (
+            select(SessionMapping)
+            .where(SessionMapping.source_id == source_id)
+            .order_by(col(SessionMapping.last_message_at).desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self.session.exec(stmt))
+
+    def cleanup_inactive_mappings(
+        self,
+        max_age_days: int = 30,
+    ) -> int:
+        """Clean up inactive session mappings older than max_age_days."""
+        cutoff_time = datetime.utcnow() - timedelta(days=max_age_days)
+        cutoff_str = cutoff_time.isoformat()
+        
+        # Find inactive mappings
+        stmt = select(SessionMapping).where(
+            ((SessionMapping.last_message_at == None) & (SessionMapping.created_at < cutoff_str))
+            | ((SessionMapping.last_message_at != None) & (SessionMapping.last_message_at < cutoff_str))
+        )
+        inactive_mappings = list(self.session.exec(stmt))
+        
+        # Delete them
+        for mapping in inactive_mappings:
+            self.session.delete(mapping)
+        
+        self.session.commit()
+        
+        deleted_count = len(inactive_mappings)
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} inactive session mappings older than {max_age_days}d")
+        
+        return deleted_count
+
+    # ==================== Deduplication Operations ====================
+
+    def check_and_mark_processed(
+        self,
+        source_id: str,
+        external_message_id: str,
+    ) -> bool:
+        """Check if a message has already been processed and mark it as processed.
+        
+        Uses atomic check-and-insert with UNIQUE constraint.
+        
+        Note: This is an atomic operation - if INSERT succeeds, the message
+        is marked as processed. If the caller fails to handle the message,
+        it will be permanently dropped. Callers must handle their own errors
+        before calling this if different behavior is needed.
+        
+        Returns:
+            True if message was already processed (duplicate).
+            False if this is a new message (and now marked as processed).
+        """
+        now = datetime.utcnow().isoformat()
+        
+        processed = ProcessedMessage(
+            source_id=source_id,
+            external_message_id=external_message_id,
+            processed_at=now,
+        )
+        
+        try:
+            self.session.add(processed)
+            self.session.commit()
+            return False  # New message, not a duplicate
+        except IntegrityError:
+            # Unique constraint violation - message already exists
+            self.session.rollback()
+            logger.debug(
+                f"Duplicate message detected: source_id={source_id}, "
+                f"external_message_id={external_message_id}"
+            )
+            return True  # Duplicate
+
+    def cleanup_old_processed_messages(
+        self,
+        max_age_hours: int = 24,
+    ) -> int:
+        """Clean up processed messages older than max_age_hours."""
+        cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff_str = cutoff_time.isoformat()
+        
+        # Find messages to delete first
+        count_stmt = select(ProcessedMessage).where(
+            ProcessedMessage.processed_at < cutoff_str
+        )
+        messages_to_delete = list(self.session.exec(count_stmt))
+        deleted_count = len(messages_to_delete)
+        
+        # Delete them
+        stmt = sql_delete(ProcessedMessage).where(
+            ProcessedMessage.processed_at < cutoff_str
+        )
+        self.session.exec(stmt)
+        self.session.commit()
+        
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} processed messages older than {max_age_hours}h")
+        
+        return deleted_count
