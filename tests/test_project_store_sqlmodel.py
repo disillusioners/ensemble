@@ -24,9 +24,9 @@ def session(engine):
 
 
 @pytest.fixture
-def store(session):
-    """Create ProjectStore instance with SQLModel Session."""
-    return ProjectStore(session)
+def store(engine):
+    """Create ProjectStore instance with SQLModel Engine."""
+    return ProjectStore(engine)
 
 
 class TestCreate:

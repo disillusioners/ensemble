@@ -26,7 +26,7 @@ from daemon.queue import (
 )
 from daemon.cancellation import CancellationReason
 from daemon.request_registry import ActiveRequestRegistry
-from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
+from daemon.repositories.message_queue import SQLModelMessageQueueRepository
 from daemon.repositories.message_queue.models import MessageQueue, MessageStatus as RepoMessageStatus
 from daemon.persistence import init_database
 
@@ -42,8 +42,8 @@ def db_connection(tmp_path):
 
 
 @pytest.fixture
-def db_session(tmp_path):
-    """Create a SQLModel session for repository testing."""
+def db_engine(tmp_path):
+    """Create a SQLModel engine for repository testing."""
     from sqlmodel import SQLModel, create_engine
     from daemon.repositories.message_queue.models import MessageQueue
     
@@ -51,15 +51,14 @@ def db_session(tmp_path):
     engine = create_engine(f"sqlite:///{db_path}")
     # Create all tables
     SQLModel.metadata.create_all(engine)
-    session = Session(engine)
-    yield session
-    session.close()
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture
-def queue_repository(db_session):
+def queue_repository(db_engine):
     """Create a SQLModelMessageQueueRepository instance for testing."""
-    return SQLModelMessageQueueRepository(db_session)
+    return SQLModelMessageQueueRepository(db_engine)
 
 
 @pytest.fixture
@@ -228,11 +227,12 @@ class TestInputMessageQueue:
         backoffs = []
         for retry_count in range(5):
             # Reset message to ready using repository
-            msg = queue._repository.get(message_id)
-            if msg:
-                msg.status = "ready"
-                msg.next_retry_at = None
-                queue._repository.session.commit()
+            with Session(queue._repository.engine) as session:
+                msg = session.get(MessageQueue, message_id)
+                if msg:
+                    msg.status = "ready"
+                    msg.next_retry_at = None
+                    session.commit()
             
             queue.schedule_retry(message_id, retry_count, f"Failure {retry_count}")
             
@@ -320,10 +320,11 @@ class TestInputMessageQueue:
         assert deleted == 0
         
         # Manually set completed_at to be old via repository
-        msg = queue._repository.get(mid)
-        if msg:
-            msg.completed_at = datetime.now(timezone.utc) - timedelta(hours=25)
-            queue._repository.session.commit()
+        with Session(queue._repository.engine) as session:
+            msg = session.get(MessageQueue, mid)
+            if msg:
+                msg.completed_at = datetime.now(timezone.utc) - timedelta(hours=25)
+                session.commit()
         
         # Now should be cleaned up
         deleted = queue.cleanup_completed(max_age_hours=24)
@@ -337,18 +338,17 @@ class TestInputMessageQueue:
         db_path = tmp_path / "persist_test.db"
         session_id = "test-session"
         
-        # Create repository with session, add message
+        # Create repository with engine, add message
         engine = create_engine(f"sqlite:///{db_path}")
         SQLModel.metadata.create_all(engine)
-        session1 = Session(engine)
-        repo1 = SQLModelMessageQueueRepository(session1)
+        repo1 = SQLModelMessageQueueRepository(engine)
         queue1 = InputMessageQueue(repo1)
         message_id = queue1.enqueue(session_id, "persistent message", "test")
-        session1.close()
+        engine.dispose()
         
         # Reopen and verify message exists
-        session2 = Session(engine)
-        repo2 = SQLModelMessageQueueRepository(session2)
+        engine2 = create_engine(f"sqlite:///{db_path}")
+        repo2 = SQLModelMessageQueueRepository(engine2)
         queue2 = InputMessageQueue(repo2)
         
         # Message should still be there
@@ -356,7 +356,7 @@ class TestInputMessageQueue:
         assert msg is not None
         assert msg.message_id == message_id
         assert msg.content == "persistent message"
-        session2.close()
+        engine2.dispose()
 
     def test_concurrent_enqueue_dequeue(self, queue):
         """Test thread safety of concurrent enqueue/dequeue operations."""
@@ -596,10 +596,12 @@ class TestSessionWatchdog:
         
         # Manually set processing_started_at and last_activity_at to be old
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg = queue_repository.get(message.message_id)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        queue_repository.session.commit()
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None, f"Message {message.message_id} not found"
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            session.commit()
         
         # Run stuck check
         watchdog._check_stuck_messages()
@@ -617,10 +619,12 @@ class TestSessionWatchdog:
         
         # Make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg = queue_repository.get(message.message_id)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        queue_repository.session.commit()
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            session.commit()
         
         watchdog._check_stuck_messages()
         
@@ -637,11 +641,13 @@ class TestSessionWatchdog:
         
         # Set retry count to max and make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg = queue_repository.get(message.message_id)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        msg.retry_count = MAX_RETRIES
-        queue_repository.session.commit()
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            msg.retry_count = MAX_RETRIES
+            session.commit()
         
         watchdog._check_stuck_messages()
         
@@ -657,10 +663,12 @@ class TestSessionWatchdog:
         
         # Schedule for retry in the past
         past_time = datetime.now(timezone.utc) - timedelta(seconds=10)
-        msg = queue_repository.get(message.message_id)
-        msg.status = "retrying"
-        msg.next_retry_at = past_time
-        queue_repository.session.commit()
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.status = "retrying"
+            msg.next_retry_at = past_time
+            session.commit()
         
         # Run retry check
         watchdog._check_retry_ready_messages()
@@ -682,10 +690,12 @@ class TestSessionWatchdog:
         
         # Make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg = queue_repository.get(message.message_id)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        queue_repository.session.commit()
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            session.commit()
         
         # Run check - currently this processes all sessions
         watchdog._check_stuck_messages()
@@ -730,22 +740,20 @@ class TestQueueIntegration:
         # Create all tables
         SQLModel.metadata.create_all(engine)
         
-        from sqlmodel import Session as SQLModelSession
-        session = SQLModelSession(engine)
-        repo = SQLModelMessageQueueRepository(session)
+        repo = SQLModelMessageQueueRepository(engine)
         
         watchdog = SessionWatchdog(repo)
         circuit_breaker = SessionCircuitBreaker()
         
         yield {
-            'session': session,
+            'engine': engine,
             'queue_repository': repo,
             'watchdog': watchdog,
             'circuit_breaker': circuit_breaker
         }
         
         watchdog.stop()
-        session.close()
+        engine.dispose()
 
     def test_enqueue_triggers_processing(self, full_setup):
         """Test that enqueuing a message allows it to be processed."""
@@ -793,10 +801,12 @@ class TestQueueIntegration:
         
         # Simulate stuck by setting old processing time
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg = repo.get(message.message_id)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        repo.session.commit()
+        with Session(repo.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            session.commit()
         
         # Run watchdog check
         watchdog._check_stuck_messages()
@@ -822,25 +832,34 @@ class TestQueueIntegration:
             
             # Simulate stuck
             old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-            msg.processing_started_at = old_time
-            msg.last_activity_at = old_time
-            repo.session.commit()
+            with Session(repo.engine) as session:
+                msg_obj = session.get(MessageQueue, msg.message_id)
+                assert msg_obj is not None
+                msg_obj.processing_started_at = old_time
+                msg_obj.last_activity_at = old_time
+                session.commit()
             
             # Watchdog schedules retry
             watchdog._check_stuck_messages()
             
             # Move retry-ready back to ready
-            msg.status = "ready"
-            msg.next_retry_at = None
-            repo.session.commit()
+            with Session(repo.engine) as session:
+                msg_obj = session.get(MessageQueue, msg.message_id)
+                assert msg_obj is not None
+                msg_obj.status = "ready"
+                msg_obj.next_retry_at = None
+                session.commit()
         
         # After max retries, message should be failed on next stuck check
         msg = repo.dequeue(session_id)
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        msg.processing_started_at = old_time
-        msg.last_activity_at = old_time
-        msg.retry_count = MAX_RETRIES
-        repo.session.commit()
+        with Session(repo.engine) as session:
+            msg_obj = session.get(MessageQueue, msg.message_id)
+            assert msg_obj is not None
+            msg_obj.processing_started_at = old_time
+            msg_obj.last_activity_at = old_time
+            msg_obj.retry_count = MAX_RETRIES
+            session.commit()
         
         watchdog._check_stuck_messages()
         
@@ -1013,10 +1032,13 @@ def request_registry():
 def make_message_stuck(queue_repository, message, timeout_seconds=MESSAGE_TIMEOUT_SECONDS + 100):
     """Helper to simulate a stuck message."""
     old_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
-    msg = queue_repository.get(message.message_id)
-    msg.processing_started_at = old_time
-    msg.last_activity_at = old_time
-    queue_repository.session.commit()
+    with Session(queue_repository.engine) as session:
+        msg = session.get(MessageQueue, message.message_id)
+        if msg is None:
+            raise ValueError(f"Message {message.message_id} not found")
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        session.commit()
 
 
 class TestWatchdogCancellationIntegration:
@@ -1133,10 +1155,12 @@ class TestWatchdogCancellationIntegration:
         queue_repository.dequeue("session-1")
 
         # Set retry count to max
-        msg = queue_repository.get(message.message_id)
-        msg.retry_count = MAX_RETRIES
-        queue_repository.session.commit()
-
+        with Session(queue_repository.engine) as session:
+            msg = session.get(MessageQueue, message.message_id)
+            assert msg is not None
+            msg.retry_count = MAX_RETRIES
+            session.commit()
+        
         source = request_registry.register(message.message_id, "session-1")
         make_message_stuck(queue_repository, message)
 

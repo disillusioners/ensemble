@@ -95,7 +95,7 @@ def create_project_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    return SQLModelProjectRepository(Session(engine))
+    return SQLModelProjectRepository(engine)
 
 
 def create_session_repository(
@@ -116,7 +116,7 @@ def create_session_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    return SQLModelSessionRepository(Session(engine))
+    return SQLModelSessionRepository(engine)
 
 
 def create_message_queue_repository(
@@ -137,7 +137,7 @@ def create_message_queue_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    return SQLModelMessageQueueRepository(Session(engine))
+    return SQLModelMessageQueueRepository(engine)
 
 
 def create_source_repository(
@@ -158,7 +158,7 @@ def create_source_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    return SQLModelSourceRepository(Session(engine))
+    return SQLModelSourceRepository(engine)
 
 
 def _create_engine(config: DatabaseConfig):
