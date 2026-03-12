@@ -272,8 +272,7 @@ class SessionManager:
         self._request_registry = ActiveRequestRegistry()
         
         self.watchdog = SessionWatchdog(
-            self.queue, 
-            self.conn,
+            self._queue_repository,
             request_registry=self._request_registry
         )
         self.circuit_breaker = SessionCircuitBreaker()
@@ -610,7 +609,7 @@ class SessionManager:
             
             logger.debug(f"Starting dequeue loop for session {session_id[:8]}...")
             while True:
-                msg = self.queue.dequeue(session_id, timeout=0)
+                msg = self._queue_repository.dequeue_by_session(session_id)
                 if msg is None:
                     logger.debug(f"No more messages for session {session_id[:8]}..., exiting loop")
                     break
@@ -623,7 +622,7 @@ class SessionManager:
                 is_first_message = len(existing_messages) == 0
                 
                 # Extract retry flag from metadata
-                is_retry = msg.metadata.get("is_retry", False) if msg.metadata else False
+                is_retry = msg.message_metadata.get("is_retry", False) if msg.message_metadata else False
                 
                 # Broadcast status_changed event
                 await self.broadcaster.broadcast(Event(
@@ -1335,7 +1334,7 @@ Title:"""
 
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
-        return self.queue.get_stats(session_id)
+        return self._queue_repository.get_stats(session_id)
 
     async def _has_checkpoint(self, session_id: str) -> bool:
         """Check if a checkpoint exists for this session.

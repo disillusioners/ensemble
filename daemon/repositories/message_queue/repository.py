@@ -11,6 +11,9 @@ from sqlmodel import Session, select, col
 
 from .models import MessageQueue, MessageStatus
 
+# Configuration constants
+MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
+
 
 class SQLModelMessageQueueRepository:
     """SQLModel-based MessageQueue repository for queue operations."""
@@ -77,8 +80,12 @@ class SQLModelMessageQueueRepository:
     # DEQUEUE (get next ready message)
     # --------------------------------------------------------
 
-    def dequeue(self) -> MessageQueue | None:
+    def dequeue(self, session_id: str | None = None) -> MessageQueue | None:
         """Get the next ready message for processing.
+        
+        Args:
+            session_id: Optional session ID to filter by. If provided, only
+                       messages for this session will be considered.
         
         Returns the highest priority ready message that is due for processing.
         """
@@ -94,32 +101,158 @@ class SQLModelMessageQueueRepository:
                 (MessageQueue.next_retry_at.is_(None))
                 | (MessageQueue.next_retry_at <= now)
             )
-            .order_by(
-                col(MessageQueue.priority).desc(),
-                col(MessageQueue.enqueued_at).asc()
-            )
-            .limit(1)
         )
         
-        return self.session.exec(stmt).first()
+        # Filter by session_id if provided
+        if session_id is not None:
+            stmt = stmt.where(MessageQueue.session_id == session_id)
+        
+        stmt = stmt.order_by(
+            col(MessageQueue.priority).desc(),
+            col(MessageQueue.enqueued_at).asc()
+        ).limit(1)
+        
+        message = self.session.exec(stmt).first()
+        
+        # Atomically claim the message by setting status to PROCESSING
+        if message is not None:
+            message.status = MessageStatus.PROCESSING.value
+            message.processing_started_at = now
+            message.last_activity_at = now
+            self.session.commit()
+            self.session.refresh(message)
+        
+        return message
+    
+    def find_stuck_messages(self) -> list[MessageQueue]:
+        """Find all stuck processing messages.
+        
+        A message is stuck if:
+        - status is 'processing'
+        - last_activity_at is NULL AND processing_started_at < timeout_threshold
+        - OR last_activity_at < timeout_threshold
+        
+        Args:
+            timeout_seconds: Timeout threshold in seconds.
+            
+        Returns:
+            List of stuck messages.
+        """
+        timeout_threshold = datetime.utcnow() - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
+        
+        stmt = select(MessageQueue).where(
+            MessageQueue.status == MessageStatus.PROCESSING.value
+        ).where(
+            or_(
+                MessageQueue.last_activity_at.is_(None),
+                MessageQueue.processing_started_at < timeout_threshold
+            ),
+            MessageQueue.last_activity_at < timeout_threshold
+        )
+        return list(self.session.exec(stmt))
+    
+    def find_retry_ready_messages(self) -> list[MessageQueue]:
+        """Find all retry-ready messages that can be moved to ready.
+        
+        Returns:
+            List of messages with next_retry_at <= now.
+        """
+        now = datetime.utcnow()
+        stmt = select(MessageQueue).where(
+            MessageQueue.status == MessageStatus.RETRYING.value
+        ).where(MessageQueue.next_retry_at <= now)
+        return list(self.session.exec(stmt))
+    
+    def move_retry_ready_to_ready(self, message_ids: list[str]) -> int:
+        """Move retry-ready messages back to ready status.
+        
+        Args:
+            message_ids: List of message IDs to update.
+            
+        Returns:
+            Number of messages moved.
+        """
+        count = 0
+        for msg_id in message_ids:
+            message = self.session.get(MessageQueue, msg_id)
+            if message:
+                message.status = MessageStatus.READY.value
+                message.next_retry_at = None
+                count += 1
+        self.session.commit()
+        return count
+    
+    def fail_stuck_message(self, message_id: str, error_message: str) -> MessageQueue | None:
+        """Mark a stuck message as permanently failed.
+        
+        Args:
+            message_id: The message ID to fail.
+            error_message: The error message describing the failure.
+            
+        Returns:
+            The updated message or None if not found.
+        """
+        message = self.session.get(MessageQueue, message_id)
+        if message is None:
+            return None
+        
+        message.status = MessageStatus.FAILED.value
+        message.error_message = error_message
+        message.completed_at = datetime.utcnow()
+        
+        self.session.commit()
+        self.session.refresh(message)
+        
+        return message
+    
+    def schedule_retry_for_stuck(self, message_id: str, retry_count: int, error_message: str) -> MessageQueue | None:
+        """Schedule a stuck message for retry.
+        
+        Args:
+            message_id: The message ID to retry.
+            retry_count: The new retry count.
+            error_message: The error message from the stuck condition.
+            
+        Returns:
+            The updated message or None if not found.
+        """
+        message = self.session.get(MessageQueue, message_id)
+        if message is None:
+            return None
+        
+        # Set is_retry flag in metadata
+        if message.message_metadata is None:
+            message.message_metadata = {}
+        message.message_metadata["is_retry"] = True
+        
+        # Exponential backoff: 1min, 2min, 4min, 8min, etc.
+        delay = min(60 * (2 ** (retry_count - 1)), 3600)  # Max 1 hour
+        message.next_retry_at = datetime.utcnow() + timedelta(seconds=delay)
+        message.status = MessageStatus.RETRYING.value
+        message.processing_started_at = None
+        message.error_message = error_message
+        
+        self.session.commit()
+        self.session.refresh(message)
+        
+        return message
+
+    def dequeue_by_session(self, session_id: str) -> MessageQueue | None:
+        """Get the next ready message for a specific session.
+        
+        This is a convenience wrapper around dequeue() for session-specific dequeue.
+        
+        Args:
+            session_id: The session ID to dequeue from.
+            
+        Returns:
+            The next ready message for the session, or None if no messages available.
+        """
+        return self.dequeue(session_id=session_id)
 
     # --------------------------------------------------------
     # UPDATE STATUS
     # --------------------------------------------------------
-
-    def mark_processing(self, message_id: str) -> MessageQueue | None:
-        """Update status to 'processing'."""
-        message = self.session.get(MessageQueue, message_id)
-        if message is None:
-            return None
-
-        message.status = MessageStatus.PROCESSING.value
-        message.processing_started_at = datetime.utcnow()
-        
-        self.session.commit()
-        self.session.refresh(message)
-
-        return message
 
     def complete(self, message_id: str) -> MessageQueue | None:
         """Mark message as completed."""
@@ -132,7 +265,7 @@ class SQLModelMessageQueueRepository:
         
         self.session.commit()
         self.session.refresh(message)
-
+        
         return message
 
     def fail(self, message_id: str, error_message: str) -> MessageQueue | None:
@@ -379,3 +512,56 @@ class SQLModelMessageQueueRepository:
             | (MessageQueue.status == MessageStatus.PROCESSING.value)
         )
         return self.session.exec(stmt).one()
+    
+    def get_stats(self, session_id: str) -> dict[str, Any]:
+        """Get queue statistics for a session.
+        
+        Returns a dict with:
+        - pending_count: Number of ready + retry-ready messages
+        - processing_count: Number of processing messages
+        - oldest_message_age_seconds: Age of oldest message in seconds (or None)
+        """
+        now = datetime.utcnow()
+        
+        # Pending count (ready + retrying with next_retry_at <= now)
+        pending_stmt = select(func.count()).select_from(MessageQueue).where(
+            MessageQueue.session_id == session_id
+        ).where(
+            or_(
+                MessageQueue.status == MessageStatus.READY.value,
+                and_(
+                    MessageQueue.status == MessageStatus.RETRYING.value,
+                    MessageQueue.next_retry_at <= now
+                )
+            )
+        )
+        pending_count = self.session.exec(pending_stmt).one()
+        
+        # Processing count
+        processing_stmt = select(func.count()).select_from(MessageQueue).where(
+            MessageQueue.session_id == session_id
+        ).where(
+            MessageQueue.status == MessageStatus.PROCESSING.value
+        )
+        processing_count = self.session.exec(processing_stmt).one()
+        
+        # Oldest message age
+        oldest_stmt = select(func.min(MessageQueue.enqueued_at)).where(
+            MessageQueue.session_id == session_id
+        ).where(
+            MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                MessageStatus.PROCESSING.value,
+                MessageStatus.RETRYING.value
+            ])
+        )
+        oldest = self.session.exec(oldest_stmt).one()
+        oldest_message_age_seconds = None
+        if oldest:
+            oldest_message_age_seconds = (now - oldest).total_seconds()
+        
+        return {
+            "pending_count": pending_count,
+            "processing_count": processing_count,
+            "oldest_message_age_seconds": oldest_message_age_seconds
+        }

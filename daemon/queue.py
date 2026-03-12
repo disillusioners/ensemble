@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .request_registry import ActiveRequestRegistry
     from .cancellation import CancellationReason
+    from .repositories.message_queue.repository import SQLModelMessageQueueRepository
 
 logger = logging.getLogger("daemon.queue")
 
@@ -74,7 +75,12 @@ class QueueStats:
 
 
 class InputMessageQueue:
-    """SQLite-backed message queue with per-session locking."""
+    """SQLite-backed message queue with per-session locking.
+
+    .. deprecated:: 1.0.0
+        Use SQLModelMessageQueueRepository instead.
+        Use SQLModelMessageQueueRepository.dequeue_by_session(session_id) for session-specific dequeue.
+    """
 
     def __init__(self, conn: sqlite3.Connection):
         """Initialize the queue with the given database connection."""
@@ -479,19 +485,16 @@ class SessionWatchdog:
 
     def __init__(
         self, 
-        queue: "InputMessageQueue", 
-        conn: sqlite3.Connection,
+        queue_repository: "SQLModelMessageQueueRepository",
         request_registry: Optional["ActiveRequestRegistry"] = None
     ):
         """Initialize the watchdog.
         
         Args:
-            queue: The message queue to monitor.
-            conn: Database connection.
+            queue_repository: The message queue repository for database operations.
             request_registry: Optional registry for cancelling active requests.
         """
-        self._queue = queue
-        self._conn = conn
+        self._queue_repository: "SQLModelMessageQueueRepository" = queue_repository
         self._request_registry = request_registry
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -538,22 +541,13 @@ class SessionWatchdog:
         """Find and handle stuck processing messages."""
         from .cancellation import CancellationReason
         
-        timeout_threshold = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
+        # Find stuck messages using repository
+        stuck_messages = self._queue_repository.find_stuck_messages()
         
-        cursor = self._conn.execute("""
-            SELECT message_id, session_id, retry_count, max_retries
-            FROM message_queue
-            WHERE status = 'processing'
-            AND (
-                (last_activity_at IS NULL AND processing_started_at < ?)
-                OR last_activity_at < ?
-            )
-        """, (timeout_threshold, timeout_threshold))
-        
-        stuck_messages = cursor.fetchall()
-        
-        for row in stuck_messages:
-            message_id, session_id, retry_count, max_retries = row
+        for message in stuck_messages:
+            message_id = message.message_id
+            retry_count = message.retry_count
+            max_retries = message.max_retries
             
             # Attempt to cancel the running request
             cancelled = False
@@ -567,11 +561,14 @@ class SessionWatchdog:
             
             if retry_count >= max_retries:
                 # Too many retries - mark as failed
-                self._queue.fail(message_id, "Message timed out after max retries")
+                self._queue_repository.fail_stuck_message(
+                    message_id, 
+                    "Message timed out after max retries"
+                )
                 logger.warning(f"Message {message_id} failed due to timeout (max retries exceeded)")
             else:
                 # Schedule retry
-                self._queue.schedule_retry(
+                self._queue_repository.schedule_retry_for_stuck(
                     message_id,
                     retry_count + 1,
                     f"Message stuck in processing for > {MESSAGE_TIMEOUT_SECONDS}s"
@@ -580,20 +577,10 @@ class SessionWatchdog:
 
     def _check_retry_ready_messages(self) -> None:
         """Move retry-ready messages back to ready status."""
-        now = datetime.now(timezone.utc)
+        # Find retry-ready messages using repository
+        retry_ready_messages = self._queue_repository.find_retry_ready_messages()
         
-        # Move retrying messages with next_retry_at <= now back to ready
-        cursor = self._conn.execute("""
-            UPDATE message_queue
-            SET status = 'ready',
-                next_retry_at = NULL
-            WHERE status = 'retrying'
-            AND next_retry_at <= ?
-            RETURNING message_id
-        """, (now,))
-        
-        ready_messages = cursor.fetchall()
-        self._conn.commit()
-        
-        if ready_messages:
-            logger.debug(f"Moved {len(ready_messages)} messages from retrying to ready")
+        if retry_ready_messages:
+            message_ids = [msg.message_id for msg in retry_ready_messages]
+            count = self._queue_repository.move_retry_ready_to_ready(message_ids)
+            logger.debug(f"Moved {count} messages from retrying to ready")
