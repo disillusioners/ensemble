@@ -19,32 +19,33 @@ from .config import Config
 from .graph import build_session_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
-    get_checkpointer,
     init_database,
-    list_all_sessions,
-    save_session_metadata,
-    update_session_status,
-    update_session_title,
-    get_session_metadata,
-    delete_all_sessions,
     get_session_messages,
-    get_agent_name,
+    get_checkpointer,
+    update_session_status,
 )
+from .repositories import (
+    SQLModelSessionRepository,
+    SQLModelProjectRepository,
+    SQLModelSourceRepository,
+    SQLModelMessageQueueRepository,
+    DatabaseConfig,
+    create_project_repository,
+    create_session_repository,
+    create_source_repository,
+    create_message_queue_repository,
+)
+from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
+from .repositories.session.repository import get_agent_name
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
-from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
     OperationCancelledError
 )
 from .request_registry import ActiveRequestRegistry
-from .repositories import (
-    SQLModelProjectRepository,
-    DatabaseConfig,
-    create_project_repository,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +126,9 @@ class ActivityCallbackHandler(BaseCallbackHandler):
     by the watchdog, as long as there's recent activity.
     """
     
-    def __init__(self, queue, message_id: str, update_interval_seconds: float = 5.0):
-        self.queue = queue
+    def __init__(self, queue_or_repository, message_id: str, update_interval_seconds: float = 5.0):
+        """Initialize with either InputMessageQueue or SQLModelMessageQueueRepository."""
+        self.queue_or_repository = queue_or_repository
         self.message_id = message_id
         self.update_interval = update_interval_seconds
         self._last_update = time.monotonic()
@@ -136,7 +138,7 @@ class ActivityCallbackHandler(BaseCallbackHandler):
         now = time.monotonic()
         if now - self._last_update >= self.update_interval:
             try:
-                self.queue.update_activity(self.message_id)
+                self.queue_or_repository.update_activity(self.message_id)
             except Exception as e:
                 logger.warning(f"Failed to update activity for {self.message_id}: {e}")
             self._last_update = now
@@ -262,6 +264,10 @@ class SessionManager:
         # NEW: Message queue system
         self.queue = InputMessageQueue(self.conn)
         
+        # NEW: Message queue repository for SQLModel-based operations
+        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
+        self._queue_repository = create_message_queue_repository(db_config)
+        
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
         
@@ -277,8 +283,13 @@ class SessionManager:
         # NEW: Event broadcaster for real-time SSE updates
         self.broadcaster = EventBroadcaster()
 
+        # NEW: Source repository for source config and session mapping management
+        # Must be created before SourceRegistry
+        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
+        self._source_repository = create_source_repository(db_config)
+
         # NEW: Pluggable message sources system
-        self.source_registry = SourceRegistry(conn=self.conn, manager=self)
+        self.source_registry = SourceRegistry(source_repo=self._source_repository, manager=self)
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
             registry=self.source_registry,
@@ -288,10 +299,13 @@ class SessionManager:
 
         # NEW: Project repository for project context injection
         # Using the new repository layer with proper transaction management
-        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
         self._project_repository = create_project_repository(db_config)
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
+
+        # NEW: Session repository for session management
+        # Using the new repository layer instead of legacy persistence functions
+        self._session_repository = create_session_repository(db_config)
 
         # Start watchdog
         self.watchdog.start()
@@ -346,9 +360,9 @@ class SessionManager:
 
         # Check max_children_per_session limit if parent_id is provided
         if parent_id is not None:
-            parent_meta = get_session_metadata(self.conn, parent_id)
-            if parent_meta and "children" in parent_meta:
-                child_count = len(parent_meta["children"])
+            parent_meta = self._session_repository.get(parent_id)
+            if parent_meta and parent_meta.children:
+                child_count = len(parent_meta.children)
                 if child_count >= self.config.limits.max_children_per_session:
                     raise ValueError(
                         f"Max children per session limit reached: "
@@ -384,9 +398,8 @@ class SessionManager:
             retry_config=retry_config,
         )
 
-        # Save metadata to DB
-        save_session_metadata(
-            conn=self.conn,
+        # Save metadata to DB using session repository
+        self._session_repository.create(
             session_id=session_id,
             agent_dir=agent_dir,
             parent_id=parent_id,
@@ -529,13 +542,14 @@ class SessionManager:
         # Check session exists
         self.get_session(session_id)  # raises KeyError if not found
         
-        # Enqueue the message
-        message_id = self.queue.enqueue(
+        # Enqueue the message using repository
+        msg = self._queue_repository.enqueue(
             session_id=session_id,
             content=message,
             source=source,
-            priority=priority
+            priority=priority,
         )
+        message_id = msg.message_id
         
         # Broadcast message_queued event
         await self.broadcaster.broadcast(Event(
@@ -650,16 +664,13 @@ class SessionManager:
                     # Always record success since processing completed without error
                     self.circuit_breaker.record_success(session_id)
                     
-                    cursor = self.conn.execute(
-                        "SELECT status FROM message_queue WHERE message_id = ?",
-                        (msg.message_id,)
-                    )
-                    row = cursor.fetchone()
-                    if row and row[0] == 'processing':
-                        self.queue.ack(msg.message_id)
+                    # Use repository to check status
+                    status = self._queue_repository.get_status(msg.message_id)
+                    if status == 'processing':
+                        self._queue_repository.complete(msg.message_id)
                     else:
                         logger.warning(
-                            f"Message {msg.message_id[:8]}... status changed to '{row[0] if row else 'unknown'}' "
+                            f"Message {msg.message_id[:8]}... status changed to '{status if status else 'unknown'}' "
                             f"during processing, skipping ack (success already recorded)"
                         )
                     
@@ -712,11 +723,8 @@ class SessionManager:
                     self.circuit_breaker.record_failure(session_id)
                     
                     if msg.retry_count < self.config.queue.max_retries:
-                        self.queue.schedule_retry(
-                            msg.message_id,
-                            msg.retry_count + 1,
-                            str(e)
-                        )
+                        # Use repository to schedule retry
+                        self._queue_repository.retry(msg.message_id, str(e))
                         # Broadcast retry scheduled event
                         await self.broadcaster.broadcast(Event(
                             type="status_changed",
@@ -729,7 +737,8 @@ class SessionManager:
                             }
                         ))
                     else:
-                        self.queue.fail(msg.message_id, str(e))
+                        # Use repository to mark as failed
+                        self._queue_repository.fail(msg.message_id, str(e))
                         # Broadcast error event
                         await self.broadcaster.broadcast(Event(
                             type="error",
@@ -747,9 +756,9 @@ class SessionManager:
                     self._request_registry.unregister(msg.message_id)
             
             # Queue is empty - check if this is a child session and send completion report
-            if self.queue.is_empty(session_id):
-                meta = get_session_metadata(self.conn, session_id)
-                if meta and meta.get("parent_id"):
+            if self._queue_repository.is_empty(session_id):
+                meta = self._session_repository.get(session_id)
+                if meta and meta.parent_id:
                     # This is a child session that has completed - send report to parent
                     await self._send_completion_report(session_id)
         finally:
@@ -789,9 +798,9 @@ class SessionManager:
         """
         graph = self.get_session(session_id)
         
-        # Create activity callback for this message
+        # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
-            self.queue, 
+            self._queue_repository, 
             message_id,
             update_interval_seconds=5.0
         )
@@ -1159,17 +1168,17 @@ Provide a concise summary:"""
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
         # Get session metadata
-        meta = get_session_metadata(self.conn, session_id)
+        meta = self._session_repository.get(session_id)
         if not meta:
             logger.warning(f"Cannot send completion report: session {session_id} not found")
             return
         
-        parent_id = meta.get("parent_id")
+        parent_id = meta.parent_id
         if not parent_id:
             logger.debug(f"Session {session_id} has no parent, skipping completion report")
             return
         
-        agent_name = meta.get("agent_name") or get_agent_name(meta.get("agent_dir", "Unknown"))
+        agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
         
         logger.info(f"Session {session_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
         
@@ -1179,15 +1188,15 @@ Provide a concise summary:"""
         else:
             summary = await self._get_last_assistant_message(session_id, agent_name)
         
-        # Enqueue report message to parent
-        from .queue import InputMessageQueue
-        message_id = self.queue.enqueue(
+        # Enqueue report message to parent using repository
+        msg = self._queue_repository.enqueue(
             session_id=parent_id,
             content=summary,
             source=f"report:{session_id}",
             priority=1,  # Normal priority as requested
-            metadata={"type": "completion_report", "child_session_id": session_id}
+            message_metadata={"type": "completion_report", "child_session_id": session_id}
         )
+        message_id = msg.message_id
         
         # Broadcast report event
         await self.broadcaster.broadcast(Event(
@@ -1256,8 +1265,8 @@ Provide a concise summary:"""
             return None
         
         # Check if title already exists
-        meta = get_session_metadata(self.conn, session_id)
-        if meta and meta.get("metadata", {}).get("title"):
+        meta = self._session_repository.get(session_id)
+        if meta and meta.session_metadata.get("title"):
             # Title already exists, skip
             logger.debug(f"Title already exists for session {session_id}, skipping generation")
             return None
@@ -1316,7 +1325,7 @@ Title:"""
                 title = title[:97] + "..."
             
             # Store title in session metadata
-            update_session_title(self.conn, session_id, title)
+            self._session_repository.update_title(session_id, title)
             logger.info(f"Generated title for session {session_id}: {title}")
             return title
             
@@ -1392,12 +1401,12 @@ Title:"""
             return graph
 
         # Not in memory - check database and restore if found
-        meta = get_session_metadata(self.conn, session_id)
+        meta = self._session_repository.get(session_id)
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
 
         # Session exists in DB but not in memory - restore it
-        return self._restore_session(session_id, meta["agent_dir"])
+        return self._restore_session(session_id, meta.agent_dir)
 
     def _restore_session(self, session_id: str, agent_dir: str) -> CompiledStateGraph:
         """Restore a session from database into memory.
@@ -1456,7 +1465,9 @@ Title:"""
         Returns:
             Tuple of (list of session info dictionaries, total count).
         """
-        return list_all_sessions(self.conn, limit=limit, offset=offset)
+        sessions, total = self._session_repository.list(limit=limit, offset=offset)
+        # Convert Session objects to dicts for backward compatibility
+        return [s.to_dict() for s in sessions], total
 
     def get_session_info(self, session_id: str) -> dict:
         """Get information about a specific session.
@@ -1470,10 +1481,10 @@ Title:"""
         Raises:
             KeyError: If session is not found.
         """
-        meta = get_session_metadata(self.conn, session_id)
+        meta = self._session_repository.get(session_id)
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
-        return meta
+        return meta.to_dict()
 
     async def get_messages(self, session_id: str) -> list[dict]:
         """Get message history for a session.
@@ -1505,7 +1516,7 @@ Title:"""
         self.sessions.clear()
 
         # Clear database sessions
-        return delete_all_sessions(self.conn)
+        return self._session_repository.delete_all()
     
     async def start_sources(self) -> None:
         """Start the pluggable message sources system.

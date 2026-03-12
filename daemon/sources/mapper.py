@@ -7,15 +7,14 @@ validating input, and preventing duplicate message processing.
 
 import logging
 import re
-import sqlite3
 import uuid
 from typing import TYPE_CHECKING
 
 from .base import IncomingMessage
-from . import persistence
 
 if TYPE_CHECKING:
     from .manager import SessionManager
+    from ..repositories.source.repository import SQLModelSourceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +91,14 @@ class SessionMapper:
     - Tracking last message activity
     """
     
-    def __init__(self, conn: sqlite3.Connection, manager: "SessionManager"):
+    def __init__(self, source_repo: "SQLModelSourceRepository", manager: "SessionManager"):
         """Initialize the session mapper.
         
         Args:
-            conn: SQLite database connection.
+            source_repo: SQLModelSourceRepository instance for database operations.
             manager: SessionManager instance for spawning new sessions.
         """
-        self.conn = conn
+        self.source_repo = source_repo
         self.manager = manager
     
     def get_mapping(
@@ -116,11 +115,19 @@ class SessionMapper:
         Returns:
             Mapping dictionary if exists, None otherwise.
         """
-        return persistence.get_session_mapping(
-            self.conn, 
-            source_id, 
-            external_user_id
-        )
+        mapping = self.source_repo.get_session_mapping(source_id, external_user_id)
+        if mapping:
+            return {
+                "mapping_id": mapping.mapping_id,
+                "source_id": mapping.source_id,
+                "external_user_id": mapping.external_user_id,
+                "agent_session_id": mapping.agent_session_id,
+                "agent_dir": mapping.agent_dir,
+                "metadata": mapping.mapping_metadata,
+                "last_message_at": mapping.last_message_at,
+                "created_at": mapping.created_at,
+            }
+        return None
     
     def update_last_message(
         self, 
@@ -133,11 +140,7 @@ class SessionMapper:
             source_id: The source identifier.
             external_user_id: The external user ID.
         """
-        persistence.update_mapping_last_message(
-            self.conn,
-            source_id,
-            external_user_id
-        )
+        self.source_repo.update_mapping_last_message(source_id, external_user_id)
     
     def is_duplicate(
         self, 
@@ -156,8 +159,7 @@ class SessionMapper:
         Returns:
             True if duplicate (already processed), False if new.
         """
-        return persistence.is_duplicate_message(
-            self.conn,
+        return self.source_repo.check_and_mark_processed(
             source_id,
             external_message_id
         )
@@ -213,14 +215,13 @@ class SessionMapper:
                 "external_user_id": external_user_id,
             }
             
-            persistence.save_session_mapping(
-                conn=self.conn,
-                mapping_id=mapping_id,
+            self.source_repo.create_session_mapping(
                 source_id=source_id,
                 external_user_id=external_user_id,
                 agent_session_id=agent_session_id,
                 agent_dir=agent_dir,
                 metadata=metadata,
+                mapping_id=mapping_id,
             )
             
             logger.info(

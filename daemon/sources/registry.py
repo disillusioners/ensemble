@@ -12,7 +12,6 @@ from .base import (
     SourceConfig,
     SourceStatus,
 )
-from . import persistence
 from .mapper import SessionMapper
 
 logger = logging.getLogger(__name__)
@@ -30,14 +29,14 @@ class SourceRegistry:
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
     
-    def __init__(self, conn, manager):
+    def __init__(self, source_repo, manager):
         """Initialize the source registry.
         
         Args:
-            conn: sqlite3.Connection for database operations.
+            source_repo: SQLModelSourceRepository for database operations.
             manager: SessionManager reference for handling messages.
         """
-        self._conn = conn
+        self._source_repo = source_repo
         self._manager = manager
         self._adapters: dict[str, MessageSourceAdapter] = {}
         self._supervisor_tasks: dict[str, asyncio.Task] = {}
@@ -123,7 +122,7 @@ class SourceRegistry:
         logger.info("Loading and starting all enabled adapters...")
         
         # Load configs from database
-        configs = persistence.list_source_configs(self._conn)
+        configs = self._source_repo.list_source_configs()
         
         started_count = 0
         for config_dict in configs:
@@ -159,17 +158,30 @@ class SourceRegistry:
         
         logger.info(f"Started {started_count} adapters from database")
     
-    async def _create_adapter_from_config(self, config_dict: dict):
-        """Create an adapter instance from a config dictionary.
+    async def _create_adapter_from_config(self, config):
+        """Create an adapter instance from a config.
         
         Args:
-            config_dict: Source configuration from database.
+            config: Source configuration (SourceConfig model or dict) from database.
             
         Returns:
             MessageSourceAdapter instance or None if unsupported type.
         """
         from .base import SourceConfig
         from .credentials import CredentialManager
+        
+        # Convert SQLModel object to dict if needed
+        if hasattr(config, 'source_type'):  # It's a SQLModel object
+            config_dict = {
+                "source_id": config.source_id,
+                "source_type": config.source_type,
+                "name": config.name,
+                "config": config.config,
+                "credentials": config.credentials,
+                "enabled": config.enabled,
+            }
+        else:
+            config_dict = config
         
         source_type = config_dict["source_type"]
         source_id = config_dict["source_id"]
@@ -241,7 +253,7 @@ class SourceRegistry:
         
         # Update status
         adapter._status = SourceStatus.STARTING
-        persistence.update_source_status(self._conn, source_id, SourceStatus.STARTING.value)
+        self._source_repo.update_source_status(source_id, SourceStatus.STARTING.value)
         
         # Start supervisor task
         self._running[source_id] = True
@@ -285,7 +297,7 @@ class SourceRegistry:
         
         # Update status
         adapter._status = SourceStatus.STOPPED
-        persistence.update_source_status(self._conn, source_id, SourceStatus.STOPPED.value)
+        self._source_repo.update_source_status(source_id, SourceStatus.STOPPED.value)
         
         logger.info(f"Stopped adapter: {source_id}")
         return True
@@ -305,7 +317,7 @@ class SourceRegistry:
             return False
         
         # Reload config from database
-        config_dict = persistence.get_source_config(self._conn, source_id)
+        config_dict = self._source_repo.get_source_config(source_id)
         if config_dict is None:
             logger.error(f"Config not found in database: {source_id}")
             return False
@@ -355,7 +367,7 @@ class SourceRegistry:
                 # Start the adapter
                 logger.info(f"Starting adapter: {source_id}")
                 adapter._status = SourceStatus.STARTING
-                persistence.update_source_status(self._conn, source_id, SourceStatus.STARTING.value)
+                self._source_repo.update_source_status(source_id, SourceStatus.STARTING.value)
                 
                 # Add timeout to start() to detect hung adapters
                 try:
@@ -366,7 +378,7 @@ class SourceRegistry:
                 # Adapter started successfully
                 adapter._status = SourceStatus.RUNNING
                 adapter._error = None
-                persistence.update_source_status(self._conn, source_id, SourceStatus.RUNNING.value)
+                self._source_repo.update_source_status(source_id, SourceStatus.RUNNING.value)
                 logger.info(f"Adapter running: {source_id}")
                 
                 # Record success and reset backoff
@@ -397,8 +409,8 @@ class SourceRegistry:
                 logger.error(f"Adapter crashed {source_id}: {e}")
                 adapter._status = SourceStatus.ERROR
                 adapter._error = str(e)
-                persistence.update_source_status(
-                    self._conn, source_id, SourceStatus.ERROR.value, str(e)
+                self._source_repo.update_source_status(
+                    source_id, SourceStatus.ERROR.value, str(e)
                 )
                 
                 # Stop the adapter if still running
@@ -462,8 +474,8 @@ class SourceRegistry:
             logger.debug(f"Checking for duplicate: external_msg_id={external_msg_id}")
             
             if external_msg_id:
-                is_dup = persistence.is_duplicate_message(
-                    self._conn, source_id, external_msg_id
+                is_dup = self._source_repo.check_and_mark_processed(
+                    source_id, external_msg_id
                 )
                 if is_dup:
                     logger.info(
@@ -473,7 +485,7 @@ class SourceRegistry:
                     return
             
             # Get or create session via SessionMapper
-            mapper = SessionMapper(self._conn, self._manager)
+            mapper = SessionMapper(self._source_repo, self._manager)
             
             # Determine agent_dir from metadata or use default
             agent_dir = msg.metadata.get("agent_dir") if msg.metadata else None
@@ -498,13 +510,13 @@ class SourceRegistry:
             
             if force_new:
                 # Delete existing mapping if exists
-                existing_mapping = persistence.get_session_mapping(
-                    self._conn, source_id, msg.external_user_id
+                existing_mapping = self._source_repo.get_session_mapping(
+                    source_id, msg.external_user_id
                 )
                 if existing_mapping:
-                    mapping_id = existing_mapping["mapping_id"]
-                    old_session_id = existing_mapping["agent_session_id"]
-                    persistence.delete_session_mapping(self._conn, mapping_id)
+                    mapping_id = existing_mapping.mapping_id
+                    old_session_id = existing_mapping.agent_session_id
+                    self._source_repo.delete_session_mapping(mapping_id)
                     logger.info(
                         f"🗑️ Deleted existing mapping for /new: "
                         f"user={msg.external_user_id}, old_session={old_session_id}"

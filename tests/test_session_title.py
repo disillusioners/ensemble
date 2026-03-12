@@ -75,6 +75,7 @@ class TestUpdateSessionTitle:
         
         # Verify initial title
         meta = get_session_metadata(conn, "test-session")
+        assert meta is not None
         assert meta["title"] == "Initial Title"
         
         # Update to new title
@@ -82,6 +83,7 @@ class TestUpdateSessionTitle:
         
         # Verify title was overwritten
         meta = get_session_metadata(conn, "test-session")
+        assert meta is not None
         assert meta["title"] == "Updated Title"
         
         conn.close()
@@ -101,8 +103,8 @@ class TestUpdateSessionTitle:
         assert "not found" in caplog.text.lower() or "nonexistent" in caplog.text.lower()
         
         # Should not crash - conn should still be usable
-        sessions = list_all_sessions(conn)
-        assert len(sessions) == 0
+        sessions, total = list_all_sessions(conn)
+        assert total == 0
         
         conn.close()
 
@@ -162,9 +164,9 @@ class TestListAllSessionsWithTitle:
         # session-2 has no title
         
         # List all sessions
-        sessions = list_all_sessions(conn)
+        sessions, total = list_all_sessions(conn)
         
-        assert len(sessions) == 2
+        assert total == 2
         
         # Find session-1 and verify title
         s1 = next(s for s in sessions if s["session_id"] == "session-1")
@@ -186,9 +188,9 @@ class TestListAllSessionsWithTitle:
         update_session_title(conn, "test-session", "Metadata Test")
         
         # List sessions
-        sessions = list_all_sessions(conn)
+        sessions, total = list_all_sessions(conn)
         
-        assert len(sessions) == 1
+        assert total == 1
         session = sessions[0]
         
         # Title should be at top level

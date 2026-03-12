@@ -17,7 +17,6 @@ sys.modules['langgraph.checkpoint.sqlite.aio'].AsyncSqliteSaver = mock_async_sql
 from daemon.persistence import (
     init_database,
     get_checkpointer,
-    create_checkpointer,
     save_session_metadata,
     get_session_metadata,
     update_session_status,
@@ -183,9 +182,33 @@ class TestListAllSessions:
         db_path = tmp_path / "test.db"
         conn = init_database(db_path)
 
-        sessions = list_all_sessions(conn)
+        sessions, total = list_all_sessions(conn)
 
         assert sessions == []
+        assert total == 0
+
+        conn.close()
+
+    
+    def test_list_all_sessions(self, tmp_path):
+        """Test listing sessions."""
+        db_path = tmp_path / "test.db"
+        conn = init_database(db_path)
+
+        # Create test sessions
+        save_session_metadata(conn, "session-1", "agents/test1")
+        save_session_metadata(conn, "session-2", "agents/test2")
+
+        sessions, total = list_all_sessions(conn)
+
+        # Check sessions are returned
+        assert len(sessions) == 2
+        assert total == 2
+
+        # Check that session_id is in each session dict
+        session_ids = [s["session_id"] for s in sessions]
+        assert "session-1" in session_ids
+        assert "session-2" in session_ids
 
         conn.close()
 
@@ -198,9 +221,10 @@ class TestListAllSessions:
         save_session_metadata(conn, "session-1", "agents/test1")
         save_session_metadata(conn, "session-2", "agents/test2")
 
-        sessions = list_all_sessions(conn)
+        sessions, total = list_all_sessions(conn)
 
         assert len(sessions) == 2
+        assert total == 2
         session_ids = [s["session_id"] for s in sessions]
         assert "session-1" in session_ids
         assert "session-2" in session_ids
@@ -289,7 +313,7 @@ class TestGetCheckpointer:
         """Test that get_checkpointer returns a SqliteSaver."""
         db_path = tmp_path / "test.db"
 
-        checkpointer = create_checkpointer(db_path)
+        checkpointer = get_checkpointer(db_path)
 
         # The mock is set up at module import time
         assert checkpointer is not None

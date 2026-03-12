@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import delete as sql_delete, func
+from sqlalchemy import delete as sql_delete, func, and_, or_
 from sqlmodel import Session, select, col
 
 from .models import MessageQueue, MessageStatus
@@ -150,10 +150,15 @@ class SQLModelMessageQueueRepository:
 
         return message
 
-    def retry(self, message_id: str) -> MessageQueue | None:
+    def retry(self, message_id: str, error_message: str | None = None) -> MessageQueue | None:
         """Increment retry count and set next_retry_at.
         
-        Returns None if max retries exceeded.
+        Args:
+            message_id: The message ID to retry.
+            error_message: Optional error message from previous attempt.
+        
+        Returns:
+            The updated message, or None if not found or max retries exceeded.
         """
         message = self.session.get(MessageQueue, message_id)
         if message is None:
@@ -167,6 +172,9 @@ class SQLModelMessageQueueRepository:
         else:
             # Increment retry count and set next retry time
             message.retry_count += 1
+            # Set error message if provided
+            if error_message:
+                message.error_message = error_message
             # Exponential backoff: 1min, 2min, 4min, 8min, etc.
             delay = min(60 * (2 ** (message.retry_count - 1)), 3600)  # Max 1 hour
             message.next_retry_at = datetime.utcnow() + timedelta(seconds=delay)
@@ -177,6 +185,64 @@ class SQLModelMessageQueueRepository:
         self.session.refresh(message)
 
         return message
+
+    def update_activity(self, message_id: str) -> MessageQueue | None:
+        """Update last_activity_at timestamp for a processing message.
+        
+        This is called during message processing to indicate the session
+        is still active (not stuck), even if processing takes a long time.
+        
+        Args:
+            message_id: The message ID to update.
+            
+        Returns:
+            The updated message or None if not found.
+        """
+        message = self.session.get(MessageQueue, message_id)
+        if message is None:
+            return None
+        
+        message.last_activity_at = datetime.utcnow()
+        
+        self.session.commit()
+        self.session.refresh(message)
+        
+        return message
+    
+    def get_status(self, message_id: str) -> str | None:
+        """Get the current status of a message.
+        
+        Args:
+            message_id: The message ID to check.
+            
+        Returns:
+            The status string or None if not found.
+        """
+        message = self.session.get(MessageQueue, message_id)
+        if message is None:
+            return None
+        return message.status
+    
+    def is_empty(self, session_id: str) -> bool:
+        """Check if the queue is empty for a session.
+        
+        Returns True if there are no ready, processing, or retry-ready messages.
+        """
+        now = datetime.utcnow()
+        stmt = select(func.count()).select_from(MessageQueue).where(
+            MessageQueue.session_id == session_id
+        ).where(
+            or_(
+                MessageQueue.status == MessageStatus.READY.value,
+                MessageQueue.status == MessageStatus.PROCESSING.value,
+                and_(
+                    MessageQueue.status == MessageStatus.RETRYING.value,
+                    MessageQueue.next_retry_at <= now
+                )
+            )
+        )
+        count = self.session.exec(stmt).one()
+        return count == 0
 
     # --------------------------------------------------------
     # LIST

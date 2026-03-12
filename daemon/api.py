@@ -712,21 +712,19 @@ async def stream_events(session_id: str, request: Request):
 @api_router.get("/sources", response_model=SourceListResponse)
 async def list_sources():
     """List all configured message sources."""
-    from .sources.persistence import list_source_configs
-    
-    sources_data = list_source_configs(manager.conn)
+    sources_data = manager._source_repository.list_source_configs()
     sources = []
     for src in sources_data:
         sources.append(SourceInfo(
-            source_id=src["source_id"],
-            source_type=SourceType(src["source_type"]),
-            name=src["name"],
-            config=src["config"],
-            enabled=src["enabled"],
-            status=SourceStatus(src.get("status", "stopped")),
-            error_message=src.get("error_message"),
-            created_at=datetime.fromisoformat(src["created_at"]).replace(tzinfo=timezone.utc) if isinstance(src["created_at"], str) else src["created_at"],
-            updated_at=datetime.fromisoformat(src["updated_at"]).replace(tzinfo=timezone.utc) if src.get("updated_at") and isinstance(src["updated_at"], str) else src.get("updated_at"),
+            source_id=src.source_id,
+            source_type=SourceType(src.source_type),
+            name=src.name,
+            config=src.config,
+            enabled=src.enabled,
+            status=SourceStatus(src.status.value),
+            error_message=src.error_message,
+            created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
+            updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else src.updated_at,
         ))
     return SourceListResponse(sources=sources)
 
@@ -735,10 +733,8 @@ async def list_sources():
 @api_router.post("/sources", response_model=SourceInfo, status_code=201)
 async def create_source(source_create: SourceCreate):
     """Create a new message source."""
-    from .sources.persistence import save_source_config, get_source_config
-    
     # Check if source already exists
-    existing = get_source_config(manager.conn, source_create.source_id)
+    existing = manager._source_repository.get_source_config(source_create.source_id)
     if existing:
         raise HTTPException(
             status_code=409,
@@ -773,28 +769,27 @@ async def create_source(source_create: SourceCreate):
                 ).model_dump()
             )
         credentials_json = credential_manager.encrypt(source_create.credentials)
-    save_source_config(
-        conn=manager.conn,
-        source_id=source_create.source_id,
+    
+    # Create source config using repository
+    source = manager._source_repository.create_source_config(
         source_type=source_create.source_type.value,
         name=source_create.name,
         config=source_create.config,
         credentials=credentials_json,
         enabled=source_create.enabled,
+        source_id=source_create.source_id,
     )
     
-    # Get the saved config
-    saved = get_source_config(manager.conn, source_create.source_id)
     return SourceInfo(
-        source_id=saved["source_id"],
-        source_type=SourceType(saved["source_type"]),
-        name=saved["name"],
-        config=saved["config"],
-        enabled=saved["enabled"],
-        status=SourceStatus(saved.get("status", "stopped")),
-        error_message=saved.get("error_message"),
-        created_at=datetime.fromisoformat(saved["created_at"]).replace(tzinfo=timezone.utc),
-        updated_at=datetime.fromisoformat(saved["updated_at"]).replace(tzinfo=timezone.utc) if saved.get("updated_at") else None,
+        source_id=source.source_id,
+        source_type=SourceType(source.source_type),
+        name=source.name,
+        config=source.config,
+        enabled=source.enabled,
+        status=SourceStatus(source.status.value),
+        error_message=source.error_message,
+        created_at=datetime.fromisoformat(source.created_at).replace(tzinfo=timezone.utc) if isinstance(source.created_at, str) else source.created_at,
+        updated_at=datetime.fromisoformat(source.updated_at).replace(tzinfo=timezone.utc) if source.updated_at and isinstance(source.updated_at, str) else None,
     )
 
 
@@ -840,9 +835,7 @@ async def test_source(test_request: SourceTestRequest):
 @api_router.get("/sources/{source_id}", response_model=SourceInfo)
 async def get_source(source_id: str):
     """Get a specific message source."""
-    from .sources.persistence import get_source_config
-    
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -853,15 +846,15 @@ async def get_source(source_id: str):
         )
     
     return SourceInfo(
-        source_id=source["source_id"],
-        source_type=SourceType(source["source_type"]),
-        name=source["name"],
-        config=source["config"],
-        enabled=source["enabled"],
-        status=SourceStatus(source.get("status", "stopped")),
-        error_message=source.get("error_message"),
-        created_at=datetime.fromisoformat(source["created_at"]).replace(tzinfo=timezone.utc),
-        updated_at=datetime.fromisoformat(source["updated_at"]).replace(tzinfo=timezone.utc) if source.get("updated_at") else None,
+        source_id=source.source_id,
+        source_type=SourceType(source.source_type),
+        name=source.name,
+        config=source.config,
+        enabled=source.enabled,
+        status=SourceStatus(source.status.value),
+        error_message=source.error_message,
+        created_at=datetime.fromisoformat(source.created_at).replace(tzinfo=timezone.utc),
+        updated_at=datetime.fromisoformat(source.updated_at).replace(tzinfo=timezone.utc) if source.updated_at and isinstance(source.updated_at, str) else None,
     )
 
 
@@ -869,9 +862,7 @@ async def get_source(source_id: str):
 @api_router.put("/sources/{source_id}", response_model=SourceInfo)
 async def update_source(source_id: str, source_update: SourceUpdate):
     """Update a message source configuration."""
-    from .sources.persistence import get_source_config, save_source_config
-    
-    existing = get_source_config(manager.conn, source_id)
+    existing = manager._source_repository.get_source_config(source_id)
     if not existing:
         raise HTTPException(
             status_code=404,
@@ -882,10 +873,10 @@ async def update_source(source_id: str, source_update: SourceUpdate):
         )
     
     # Merge updates
-    updated_name = source_update.name if source_update.name is not None else existing["name"]
-    updated_config = source_update.config if source_update.config is not None else existing["config"]
-    updated_credentials = source_update.credentials if source_update.credentials is not None else existing.get("credentials", {})
-    updated_enabled = source_update.enabled if source_update.enabled is not None else existing["enabled"]
+    updated_name = source_update.name if source_update.name is not None else existing.name
+    updated_config = source_update.config if source_update.config is not None else existing.config
+    updated_credentials = source_update.credentials if source_update.credentials is not None else existing.credentials
+    updated_enabled = source_update.enabled if source_update.enabled is not None else existing.enabled
     
     # Validate and encrypt credentials
     credentials_json = None
@@ -901,29 +892,26 @@ async def update_source(source_id: str, source_update: SourceUpdate):
             )
         credentials_json = credential_manager.encrypt(updated_credentials)
     
-    # Save updated config
-    save_source_config(
-        conn=manager.conn,
+    # Update source config using repository
+    updated = manager._source_repository.update_source_config(
         source_id=source_id,
-        source_type=existing["source_type"],
+        source_type=existing.source_type,
         name=updated_name,
         config=updated_config,
         credentials=credentials_json,
         enabled=updated_enabled,
     )
     
-    # Get the updated config
-    updated = get_source_config(manager.conn, source_id)
     return SourceInfo(
-        source_id=updated["source_id"],
-        source_type=SourceType(updated["source_type"]),
-        name=updated["name"],
-        config=updated["config"],
-        enabled=updated["enabled"],
-        status=SourceStatus(updated.get("status", "stopped")),
-        error_message=updated.get("error_message"),
-        created_at=datetime.fromisoformat(updated["created_at"]).replace(tzinfo=timezone.utc),
-        updated_at=datetime.fromisoformat(updated["updated_at"]).replace(tzinfo=timezone.utc),
+        source_id=updated.source_id,
+        source_type=SourceType(updated.source_type),
+        name=updated.name,
+        config=updated.config,
+        enabled=updated.enabled,
+        status=SourceStatus(updated.status.value),
+        error_message=updated.error_message,
+        created_at=datetime.fromisoformat(updated.created_at).replace(tzinfo=timezone.utc),
+        updated_at=datetime.fromisoformat(updated.updated_at).replace(tzinfo=timezone.utc),
     )
 
 
@@ -931,10 +919,8 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 @api_router.delete("/sources/{source_id}", response_model=DeleteResponse)
 async def delete_source(source_id: str):
     """Delete a message source."""
-    from .sources.persistence import delete_source_config
-    
-    deleted = delete_source_config(manager.conn, source_id)
-    if not deleted:
+    result = manager._source_repository.delete_source_config(source_id)
+    if not result.get("deleted"):
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -950,10 +936,9 @@ async def delete_source(source_id: str):
 @api_router.post("/sources/{source_id}/start", response_model=SourceActionResponse)
 async def start_source(source_id: str):
     """Start a message source adapter."""
-    from .sources.persistence import get_source_config, update_source_status
     from .sources.base import SourceConfig
     
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -963,7 +948,7 @@ async def start_source(source_id: str):
             ).model_dump()
         )
     
-    if not source["enabled"]:
+    if not source.enabled:
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
@@ -980,20 +965,20 @@ async def start_source(source_id: str):
             
             if existing_adapter is None:
                 # Create adapter from config
-                source_type = source["source_type"]
-                credentials = source.get("credentials", {})
+                source_type = source.source_type
+                credentials = source.credentials
                 
                 # Decrypt credentials if encrypted
                 if credentials and isinstance(credentials, str):
                     credentials = credential_manager.decrypt(credentials)
                 
                 config = SourceConfig(
-                    source_id=source["source_id"],
+                    source_id=source.source_id,
                     source_type=source_type,
-                    name=source["name"],
-                    config=source.get("config", {}),
+                    name=source.name,
+                    config=source.config or {},
                     credentials=credentials,
-                    enabled=source["enabled"],
+                    enabled=source.enabled,
                 )
                 
                 # Create the appropriate adapter
@@ -1011,14 +996,14 @@ async def start_source(source_id: str):
             
             # Start the adapter
             await manager.source_registry.start_adapter(source_id)
-            update_source_status(manager.conn, source_id, "running")
+            manager._source_repository.update_source_status(source_id, "running")
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.running,
                 message=f"Source {source_id} started successfully"
             )
         except Exception as e:
-            update_source_status(manager.conn, source_id, "error", str(e))
+            manager._source_repository.update_source_status(source_id, "error", str(e))
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.error,
@@ -1036,9 +1021,7 @@ async def start_source(source_id: str):
 @api_router.post("/sources/{source_id}/stop", response_model=SourceActionResponse)
 async def stop_source(source_id: str):
     """Stop a message source adapter."""
-    from .sources.persistence import get_source_config, update_source_status
-    
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1052,21 +1035,21 @@ async def stop_source(source_id: str):
     if manager.source_registry:
         try:
             await manager.source_registry.stop_adapter(source_id)
-            update_source_status(manager.conn, source_id, "stopped")
+            manager._source_repository.update_source_status(source_id, "stopped")
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.stopped,
                 message=f"Source {source_id} stopped successfully"
             )
         except Exception as e:
-            update_source_status(manager.conn, source_id, "error", str(e))
+            manager._source_repository.update_source_status(source_id, "error", str(e))
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.error,
                 message=f"Failed to stop source: {str(e)}"
             )
     
-    update_source_status(manager.conn, source_id, "stopped")
+    manager._source_repository.update_source_status(source_id, "stopped")
     return SourceActionResponse(
         source_id=source_id,
         status=SourceStatus.stopped,
@@ -1081,10 +1064,8 @@ async def stop_source(source_id: str):
 @api_router.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
 async def list_mappings(source_id: str):
     """List all session mappings for a source."""
-    from .sources.persistence import get_source_config, list_session_mappings
-    
     # Check source exists
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1094,18 +1075,18 @@ async def list_mappings(source_id: str):
             ).model_dump()
         )
     
-    mappings_data = list_session_mappings(manager.conn, source_id)
+    mappings_data = manager._source_repository.list_session_mappings(source_id)
     mappings = []
     for m in mappings_data:
         mappings.append(SessionMappingInfo(
-            mapping_id=m["mapping_id"],
-            source_id=m["source_id"],
-            external_user_id=m["external_user_id"],
-            agent_session_id=m["agent_session_id"],
-            agent_dir=m["agent_dir"],
-            metadata=m.get("metadata"),
-            last_message_at=datetime.fromisoformat(m["last_message_at"]).replace(tzinfo=timezone.utc) if m.get("last_message_at") and isinstance(m["last_message_at"], str) else m.get("last_message_at"),
-            created_at=datetime.fromisoformat(m["created_at"]).replace(tzinfo=timezone.utc) if isinstance(m["created_at"], str) else m["created_at"],
+            mapping_id=m.mapping_id,
+            source_id=m.source_id,
+            external_user_id=m.external_user_id,
+            agent_session_id=m.agent_session_id,
+            agent_dir=m.agent_dir,
+            metadata=m.mapping_metadata,
+            last_message_at=datetime.fromisoformat(m.last_message_at).replace(tzinfo=timezone.utc) if m.last_message_at and isinstance(m.last_message_at, str) else m.last_message_at,
+            created_at=datetime.fromisoformat(m.created_at).replace(tzinfo=timezone.utc) if isinstance(m.created_at, str) else m.created_at,
         ))
     return SessionMappingListResponse(mappings=mappings)
 
@@ -1114,14 +1095,13 @@ async def list_mappings(source_id: str):
 @api_router.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
 async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     """Create a session mapping for an external user."""
-    from .sources.persistence import get_source_config, get_session_mapping, save_session_mapping
     import uuid
     
     # Validate agent_dir is within allowed directory
     validate_agent_dir(mapping_create.agent_dir)
     
     # Check source exists
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1132,7 +1112,7 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
         )
     
     # Check if mapping already exists
-    existing = get_session_mapping(manager.conn, source_id, mapping_create.external_user_id)
+    existing = manager._source_repository.get_session_mapping(source_id, mapping_create.external_user_id)
     if existing:
         raise HTTPException(
             status_code=409,
@@ -1163,14 +1143,13 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     
     # Save the mapping with rollback on failure
     try:
-        save_session_mapping(
-            conn=manager.conn,
-            mapping_id=mapping_id,
+        manager._source_repository.create_session_mapping(
             source_id=source_id,
             external_user_id=mapping_create.external_user_id,
             agent_session_id=session_id,
             agent_dir=mapping_create.agent_dir,
             metadata=mapping_create.metadata,
+            mapping_id=mapping_id,
         )
     except Exception as e:
         # Rollback: terminate the orphaned session
@@ -1187,16 +1166,16 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
         )
     
     # Get the saved mapping
-    saved = get_session_mapping(manager.conn, source_id, mapping_create.external_user_id)
+    saved = manager._source_repository.get_session_mapping(source_id, mapping_create.external_user_id)
     return SessionMappingInfo(
-        mapping_id=saved["mapping_id"],
-        source_id=saved["source_id"],
-        external_user_id=saved["external_user_id"],
-        agent_session_id=saved["agent_session_id"],
-        agent_dir=saved["agent_dir"],
-        metadata=saved.get("metadata"),
-        last_message_at=datetime.fromisoformat(saved["last_message_at"]).replace(tzinfo=timezone.utc) if saved.get("last_message_at") and isinstance(saved["last_message_at"], str) else saved.get("last_message_at"),
-        created_at=datetime.fromisoformat(saved["created_at"]).replace(tzinfo=timezone.utc),
+        mapping_id=saved.mapping_id,
+        source_id=saved.source_id,
+        external_user_id=saved.external_user_id,
+        agent_session_id=saved.agent_session_id,
+        agent_dir=saved.agent_dir,
+        metadata=saved.mapping_metadata,
+        last_message_at=datetime.fromisoformat(saved.last_message_at).replace(tzinfo=timezone.utc) if saved.last_message_at and isinstance(saved.last_message_at, str) else saved.last_message_at,
+        created_at=datetime.fromisoformat(saved.created_at).replace(tzinfo=timezone.utc),
     )
 
 
@@ -1204,13 +1183,11 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
 @api_router.delete("/sources/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
 async def delete_mapping(source_id: str, mapping_id: str):
     """Delete a session mapping."""
-    from .sources.persistence import delete_session_mapping, get_session_mapping
-    
     # URL decode the mapping_id if needed
     # mapping_id format is "source_id:external_user_id"
     
-    deleted = delete_session_mapping(manager.conn, mapping_id)
-    if not deleted:
+    result = manager._source_repository.delete_session_mapping(mapping_id)
+    if not result.get("deleted"):
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -1229,10 +1206,8 @@ async def delete_mapping(source_id: str, mapping_id: str):
 @api_router.post("/webhooks/{source_id}")
 async def receive_webhook(source_id: str, request: Request):
     """Receive a webhook from an external message source."""
-    from .sources.persistence import get_source_config
-    
     # Check source exists
-    source = get_source_config(manager.conn, source_id)
+    source = manager._source_repository.get_source_config(source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1243,17 +1218,17 @@ async def receive_webhook(source_id: str, request: Request):
         )
     
     # Check source type is webhook-compatible
-    if source["source_type"] not in ("webhook", "telegram"):
+    if source.source_type not in ("webhook", "telegram"):
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=f"Source type {source['source_type']} does not support webhooks"
+                message=f"Source type {source.source_type} does not support webhooks"
             ).model_dump()
         )
     
     # Verify webhook secret if configured
-    source_config = source.get("config", {}) if isinstance(source.get("config"), dict) else json.loads(source.get("config", "{}"))
+    source_config = source.config or {}
     configured_secret = source_config.get("webhook_secret")
 
     if configured_secret:

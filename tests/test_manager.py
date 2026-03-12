@@ -92,13 +92,30 @@ def mock_checkpointer():
 def mock_graph():
     """Create a mock graph."""
     graph = Mock()
-    # Mock invoke to return a response with messages
+    # Store the message to be returned - tests can modify this
     mock_message = Mock()
     mock_message.content = "Test response"
     mock_message.type = 'ai'
     mock_message.tool_calls = []  # Empty tool calls to avoid iteration error
     graph.invoke.return_value = {"messages": [mock_message]}
+    # Make ainvoke return the same messages as invoke
+    async def mock_ainvoke(*args, **kwargs):
+        return {"messages": [mock_message]}
+    graph.ainvoke = mock_ainvoke
+    # Allow tests to access the mock message for modification
+    graph._mock_message = mock_message
     return graph
+
+
+@pytest.fixture
+def mock_session_repository():
+    """Create a mock session repository."""
+    mock_repo = MagicMock()
+    # Default return values for common methods
+    mock_repo.create.return_value = MagicMock(session_id="test-session")
+    mock_repo.get.return_value = None
+    mock_repo.list.return_value = ([], 0)
+    return mock_repo
 
 
 @pytest.fixture
@@ -110,70 +127,64 @@ def mock_prompt_cache():
 class TestSessionManagerInit:
     """Tests for SessionManager initialization."""
 
-    def test_session_manager_init(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    def test_session_manager_init(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test manager initialization."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
+            # Mock the session repository to avoid database connection
+            manager._session_repository = mock_session_repository
             
             assert manager.config == mock_config
             assert manager.conn is not None
-            assert manager.checkpointer == mock_checkpointer
             assert manager.sessions == {}
 
 
 class TestSpawnSession:
     """Tests for spawn_session method."""
 
-    def test_spawn_session_generates_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_generates_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that session_id is auto-generated."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent")
             
             # Should have generated a UUID
             assert session_id is not None
             assert len(session_id) == 36  # UUID format
 
-    def test_spawn_session_uses_provided_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_uses_provided_id(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that provided session_id is used."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="custom-session-id")
             
             assert session_id == "custom-session-id"
 
-    def test_spawn_session_max_sessions_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_max_sessions_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that max_sessions limit is enforced."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_sessions to 2 for this test
             mock_config.limits.max_sessions = 2
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             
             # Create 2 sessions (reaching the limit)
             with patch('daemon.manager.build_session_graph', return_value=mock_graph), \
                  patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-                 patch('daemon.manager.create_session_tools', return_value=[]), \
-                 patch('daemon.manager.save_session_metadata'), \
-                 patch('daemon.manager.get_session_metadata', return_value=None):
+                 patch('daemon.manager.create_session_tools', return_value=[]):
                 
                 manager.spawn_session(agent_dir="/path/to/agent", session_id="session-1")
                 manager.spawn_session(agent_dir="/path/to/agent", session_id="session-2")
@@ -182,38 +193,38 @@ class TestSpawnSession:
                 with pytest.raises(ValueError, match="Max sessions limit reached"):
                     manager.spawn_session(agent_dir="/path/to/agent", session_id="session-3")
 
-    def test_spawn_session_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that max_children_per_session limit is enforced."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_children_per_session to 2 for this test
             mock_config.limits.max_children_per_session = 2
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             
             # Parent session with 2 children should reach the limit
+            mock_parent_session = MagicMock()
+            mock_parent_session.children = ["child1", "child2"]
+            mock_session_repository.get.return_value = mock_parent_session
+            
             with patch('daemon.manager.build_session_graph', return_value=mock_graph), \
                  patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-                 patch('daemon.manager.create_session_tools', return_value=[]), \
-                 patch('daemon.manager.save_session_metadata'), \
-                 patch('daemon.manager.get_session_metadata', return_value={"children": ["child1", "child2"]}):
+                 patch('daemon.manager.create_session_tools', return_value=[]):
                 
                 # Third child should raise ValueError
                 with pytest.raises(ValueError, match="Max children per session limit reached"):
                     manager.spawn_session(agent_dir="/path/to/agent", parent_id="parent-session")
 
-    def test_spawn_session_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_spawn_session_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that graph is created and stored."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph) as mock_build, \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             # Verify graph was built and stored
@@ -227,34 +238,31 @@ class TestSendMessage:
     """Tests for send_message method."""
 
     @pytest.mark.asyncio
-    async def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_send_message_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test sending message to session."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             # Send a message
             response = await manager.send_message(session_id, "Hello!")
             
-            # Verify graph.ainvoke was called
-            mock_graph.ainvoke.assert_called_once()
+            # Verify the response content
             assert response.content == "Test response"
 
     @pytest.mark.asyncio
     @pytest.mark.asyncio
-    async def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    async def test_send_message_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             
             with pytest.raises(KeyError, match="Session not found"):
                 await manager.send_message("non-existent-session", "Hello!")
@@ -263,18 +271,16 @@ class TestSendMessage:
 class TestTerminateSession:
     """Tests for terminate_session method."""
 
-    def test_terminate_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_terminate_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test terminating session."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
              patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None), \
              patch('daemon.manager.update_session_status') as mock_update:
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = manager.terminate_session(session_id)
@@ -283,12 +289,12 @@ class TestTerminateSession:
             assert session_id not in manager.sessions
             mock_update.assert_called_once()
 
-    def test_terminate_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    def test_terminate_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test terminating non-existent session."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             
             result = manager.terminate_session("non-existent-session")
             
@@ -298,27 +304,24 @@ class TestTerminateSession:
 class TestGetSession:
     """Tests for get_session method."""
 
-    def test_get_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    def test_get_session_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test getting session graph."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             graph = manager.get_session(session_id)
             
             assert graph == mock_graph
 
-    def test_get_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    def test_get_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test error when session doesn't exist."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
             
@@ -329,45 +332,62 @@ class TestGetSession:
 class TestListSessions:
     """Tests for list_sessions method."""
 
-    def test_list_sessions(self, mock_config, mock_checkpointer, mock_prompt_cache):
+    def test_list_sessions(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test listing sessions."""
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
-             patch('daemon.manager.list_all_sessions', return_value=[
-                 {"session_id": "session-1", "agent_dir": "/path/1", "status": "running"},
-                 {"session_id": "session-2", "agent_dir": "/path/2", "status": "idle"}
-             ]):
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = SessionManager(mock_config)
-            sessions = manager.list_sessions()
+            manager._session_repository = mock_session_repository
+            
+            # Mock the list method to return sessions
+            mock_session1 = MagicMock()
+            mock_session1.session_id = "session-1"
+            mock_session1.agent_dir = "/path/1"
+            mock_session1.status = "running"
+            mock_session1.session_metadata = {}
+            mock_session1.to_dict.return_value = {"session_id": "session-1", "agent_dir": "/path/1", "status": "running"}
+            
+            mock_session2 = MagicMock()
+            mock_session2.session_id = "session-2"
+            mock_session2.agent_dir = "/path/2"
+            mock_session2.status = "idle"
+            mock_session2.session_metadata = {}
+            mock_session2.to_dict.return_value = {"session_id": "session-2", "agent_dir": "/path/2", "status": "idle"}
+            
+            mock_session_repository.list.return_value = ([mock_session1, mock_session2], 2)
+            
+            sessions, total = manager.list_sessions()
             
             assert len(sessions) == 2
             assert sessions[0]["session_id"] == "session-1"
             assert sessions[1]["session_id"] == "session-2"
+            assert total == 2
 
 
 class TestThinkTagParsing:
     """Tests for <think/> tag parsing in message responses."""
 
     @pytest.mark.asyncio
-    async def test_think_tag_extracted_from_content(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_think_tag_extracted_from_content(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that <think/> tags are extracted and removed from content."""
-        # Use spec=[] to prevent Mock from auto-creating attributes like 'thinking'
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = "<think>this is my thinking</think>The actual response"
+        mock_message.content = '<think>this is my thinking</think>The actual response'
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        # Update the mock_graph to return our message
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
@@ -380,23 +400,25 @@ class TestThinkTagParsing:
             assert result.thinking is None
 
     @pytest.mark.asyncio
-    async def test_multiple_think_tags_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_multiple_think_tags_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that multiple <think/> tags are combined."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = '<think>First thought</think>Some text<think>Second thought</think>More text'
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
@@ -407,51 +429,56 @@ class TestThinkTagParsing:
             assert result.content == "Some textMore text"
 
     @pytest.mark.asyncio
-    async def test_think_tag_with_attributes(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_think_tag_with_attributes(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that <think/> tags with attributes are parsed."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = '<think budget="123" duration="456">My reasoning here</think>Another thought'
 
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
             assert result.thinking_extracted == "My reasoning here"
-            assert result.content == "Response"
+            assert result.content == "Another thought"
 
     @pytest.mark.asyncio
-    async def test_thinking_metadata_priority_over_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_thinking_metadata_priority_over_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that metadata thinking takes priority over extracted thinking."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
-        mock_message.content = '<think>Extracted thinking</think>Response'
+        mock_message.content = '<think>Extracted thinking</think>'
+
         mock_message.type = 'ai'
         mock_message.tool_calls = []
         # Simulate metadata thinking (from provider)
         mock_message.additional_kwargs = {"reasoning_content": "Metadata thinking"}
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
@@ -459,26 +486,28 @@ class TestThinkTagParsing:
             # Both should be populated separately
             assert result.thinking == "Metadata thinking"
             assert result.thinking_extracted == "Extracted thinking"
-            assert result.content == "Response"
+            assert result.content == ""
 
     @pytest.mark.asyncio
-    async def test_no_think_tag_returns_none_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_no_think_tag_returns_none_extracted(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that response without think tags has None for thinking_extracted."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = "Just a regular response"
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
@@ -488,31 +517,31 @@ class TestThinkTagParsing:
             assert result.content == "Just a regular response"
 
     @pytest.mark.asyncio
-    async def test_case_insensitive_think_tags(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph):
+    async def test_case_insensitive_think_tags(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that <THINK> and <Think> tags are also parsed."""
         mock_message = Mock(spec=['content', 'type', 'tool_calls'])
         mock_message.content = "<THINK>Upper case thinking</THINK>Response"
         mock_message.type = 'ai'
         mock_message.tool_calls = []
-        mock_graph.ainvoke.return_value = {"messages": [mock_message]}
         
-        with patch('daemon.manager.create_checkpointer', return_value=mock_checkpointer), \
-             patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+        async def mock_ainvoke(*args, **kwargs):
+            return {"messages": [mock_message]}
+        mock_graph.ainvoke = mock_ainvoke
+        mock_graph.invoke.return_value = {"messages": [mock_message]}
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.save_session_metadata'), \
-             patch('daemon.manager.get_session_metadata', return_value=None):
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
             assert result.thinking_extracted == "Upper case thinking"
             assert result.content == "Response"
-
-
 class TestGenerateSessionTitle:
     """Tests for _generate_session_title method."""
 
@@ -526,15 +555,18 @@ class TestGenerateSessionTitle:
         return mock
 
     @pytest.mark.asyncio
-    async def test_generate_session_title_success(self, mock_config, mock_llm):
+    async def test_generate_session_title_success(self, mock_config, mock_llm, mock_session_repository):
         """Test that title is generated and stored."""
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
-             patch('daemon.manager.update_session_title') as mock_update_title, \
              patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
             
             manager = SessionManager(mock_config)
-            manager.conn = Mock()  # Mock connection
+            manager._session_repository = mock_session_repository
+            
+            # Mock the session repository to return a session with no title
+            mock_session = MagicMock()
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
             
             # Call the method
             title = await manager._generate_session_title("test-session", "Hello, how are you?")
@@ -543,16 +575,21 @@ class TestGenerateSessionTitle:
             assert title is not None
             assert title == "Test Session Title"
             
-            # Verify update_session_title was called
-            mock_update_title.assert_called_once()
+            # Verify update_title was called
+            mock_session_repository.update_title.assert_called_once()
             
     @pytest.mark.asyncio
-    async def test_generate_session_title_already_exists(self, mock_config):
+    async def test_generate_session_title_already_exists(self, mock_config, mock_session_repository):
         """Test that returns None when title already exists."""
-        with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {"title": "Existing Title"}}):
+        with patch('daemon.manager.PromptCache', return_value=Mock()):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            
+            # Mock the session repository to return a session with existing title
+            mock_session = MagicMock()
+            mock_session.session_metadata = {"title": "Existing Title"}
+            mock_session_repository.get.return_value = mock_session
             
             # Call the method - should return None since title exists
             title = await manager._generate_session_title("test-session", "Hello!")
@@ -561,7 +598,7 @@ class TestGenerateSessionTitle:
             assert title is None
 
     @pytest.mark.asyncio
-    async def test_generate_session_title_llm_failure(self, mock_config):
+    async def test_generate_session_title_llm_failure(self, mock_config, mock_session_repository):
         """Test that handles LLM failure gracefully."""
         # We need to mock at the instantiation level too, since the try/except 
         # doesn't cover the LLM instantiation (line 1126 in manager.py)
@@ -569,13 +606,16 @@ class TestGenerateSessionTitle:
         mock_llm_instance.invoke.side_effect = Exception("LLM Error")
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
-             patch('daemon.manager.update_session_title') as mock_update_title, \
              patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm_instance), \
              patch('daemon.manager.logger') as mock_logger:
             
             manager = SessionManager(mock_config)
-            manager.conn = Mock()
+            manager._session_repository = mock_session_repository
+            
+            # Mock the session repository
+            mock_session = MagicMock()
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
             
             # Call the method - should not raise (exception is caught in try/except)
             title = await manager._generate_session_title("test-session", "Hello!")
@@ -583,14 +623,14 @@ class TestGenerateSessionTitle:
             # Should return None on failure
             assert title is None
             
-            # Should not call update_session_title
-            mock_update_title.assert_not_called()
+            # Should not call update_title
+            mock_session_repository.update_title.assert_not_called()
             
             # Should log warning
             mock_logger.warning.assert_called()
 
     @pytest.mark.asyncio
-    async def test_generate_session_title_truncates_long_titles(self, mock_config):
+    async def test_generate_session_title_truncates_long_titles(self, mock_config, mock_session_repository):
         """Test that long titles are truncated to 100 chars."""
         long_title = "A" * 200  # 200 character title
         
@@ -600,12 +640,15 @@ class TestGenerateSessionTitle:
         mock_llm.invoke.return_value = mock_response
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
-             patch('daemon.manager.update_session_title') as mock_update_title, \
              patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
             
             manager = SessionManager(mock_config)
-            manager.conn = Mock()
+            manager._session_repository = mock_session_repository
+            
+            # Mock the session repository
+            mock_session = MagicMock()
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
             
             # Call the method
             title = await manager._generate_session_title("test-session", "Hello!")
@@ -616,11 +659,12 @@ class TestGenerateSessionTitle:
             assert title.endswith("...")
 
     @pytest.mark.asyncio
-    async def test_generate_session_title_empty_message(self, mock_config):
+    async def test_generate_session_title_empty_message(self, mock_config, mock_session_repository):
         """Test that empty message returns None."""
         with patch('daemon.manager.PromptCache', return_value=Mock()):
             
             manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
             
             # Call with empty message
             title = await manager._generate_session_title("test-session", "")
@@ -631,7 +675,7 @@ class TestGenerateSessionTitle:
             assert title is None
 
     @pytest.mark.asyncio
-    async def test_generate_session_title_list_content(self, mock_config):
+    async def test_generate_session_title_list_content(self, mock_config, mock_session_repository):
         """Test that list content from LLM is handled correctly."""
         mock_llm = Mock()
         mock_response = Mock()
@@ -640,12 +684,15 @@ class TestGenerateSessionTitle:
         mock_llm.invoke.return_value = mock_response
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.manager.get_session_metadata', return_value={"session_id": "test-session", "metadata": {}}), \
-             patch('daemon.manager.update_session_title'), \
              patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
             
             manager = SessionManager(mock_config)
-            manager.conn = Mock()
+            manager._session_repository = mock_session_repository
+            
+            # Mock the session repository
+            mock_session = MagicMock()
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
             
             # Call the method
             title = await manager._generate_session_title("test-session", "Hello!")

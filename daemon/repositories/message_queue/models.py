@@ -19,6 +19,7 @@ class MessageStatus(str, enum.Enum):
     """Message queue status enum."""
     READY = "ready"
     PROCESSING = "processing"
+    RETRYING = "retrying"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -49,6 +50,7 @@ class MessageQueue(SQLModel, table=True):
     
     enqueued_at: datetime = Field(default_factory=datetime.utcnow)
     processing_started_at: Optional[datetime] = None
+    last_activity_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     next_retry_at: Optional[datetime] = None
 

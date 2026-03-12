@@ -24,7 +24,7 @@ async def mock_manager():
     manager.get_session = Mock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_session = Mock(return_value=True)
-    manager.list_sessions = Mock(return_value=[
+    manager.list_sessions = Mock(return_value=([
         {
             "session_id": "session-1",
             "agent_dir": "/path/to/agent1",
@@ -34,7 +34,7 @@ async def mock_manager():
             "created_at": "2024-01-01T00:00:00",
             "updated_at": "2024-01-01T00:00:00"
         }
-    ])
+    ], 1))
     manager.get_session_info = Mock(return_value={
         "session_id": "test-session-id",
         "agent_dir": "/path/to/agent",
@@ -117,7 +117,7 @@ async def client(app_with_mock_manager):
     # Import app inside the fixture to ensure patches are applied
     from daemon.api import app
     
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as ac:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test/api") as ac:
         yield ac
 
 

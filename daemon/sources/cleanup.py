@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -17,8 +16,8 @@ class SourceCleanup:
     - Remove inactive session mappings
     """
     
-    def __init__(self, conn: sqlite3.Connection, interval_hours: int = 6):
-        self._conn = conn
+    def __init__(self, source_repo, interval_hours: int = 6):
+        self._source_repo = source_repo
         self._interval = interval_hours * 3600
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -57,18 +56,16 @@ class SourceCleanup:
     
     async def _run_cleanup(self) -> dict:
         """Run all cleanup tasks. Returns stats."""
-        from .persistence import cleanup_processed_messages, cleanup_inactive_mappings
-        
         stats = {}
         
         # 1. Cleanup old processed messages (24h TTL)
-        stats["processed_messages_deleted"] = cleanup_processed_messages(
-            self._conn, max_age_hours=24
+        stats["processed_messages_deleted"] = self._source_repo.cleanup_old_processed_messages(
+            max_age_hours=24
         )
         
         # 2. Cleanup inactive session mappings (30 day TTL)
-        stats["inactive_mappings_deleted"] = cleanup_inactive_mappings(
-            self._conn, max_age_days=30
+        stats["inactive_mappings_deleted"] = self._source_repo.cleanup_inactive_mappings(
+            max_age_days=30
         )
         
         return stats
