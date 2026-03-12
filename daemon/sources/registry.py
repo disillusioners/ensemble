@@ -125,12 +125,12 @@ class SourceRegistry:
         configs = self._source_repo.list_source_configs()
         
         started_count = 0
-        for config_dict in configs:
-            if not config_dict.get("enabled", True):
-                logger.debug(f"Skipping disabled source: {config_dict['source_id']}")
+        for config in configs:
+            if not config.enabled:
+                logger.debug(f"Skipping disabled source: {config.source_id}")
                 continue
             
-            source_id = config_dict["source_id"]
+            source_id = config.source_id
             
             # Check if adapter is already registered
             adapter = self.get(source_id)
@@ -138,7 +138,7 @@ class SourceRegistry:
                 # Create adapter from config
                 logger.info(f"Creating adapter for: {source_id}")
                 try:
-                    adapter = await self._create_adapter_from_config(config_dict)
+                    adapter = await self._create_adapter_from_config(config)
                     if adapter:
                         self.register(adapter)
                         logger.info(f"Registered adapter: {source_id}")
