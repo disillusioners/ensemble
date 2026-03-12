@@ -56,6 +56,12 @@ The migration from direct SQLite database access to the repository layer pattern
 - Updated tests to handle tuple return from `list_all_sessions()`
 - Added `mock_session_repository` fixture to test files
 
+### Phase 5: Queue Test Migration ✅ NEW
+- Updated `tests/test_queue.py` to use repository pattern for `SessionWatchdog` tests
+- Added `db_session` and `queue_repository` fixtures
+- Updated `TestSessionWatchdog`, `TestQueueIntegration`, `TestWatchdogCancellationIntegration` to use `SQLModelMessageQueueRepository`
+- Fixed `SourceCleanup` bug: changed from `self.conn` to `self._source_repository`
+
 ---
 
 ## Current Import Structure

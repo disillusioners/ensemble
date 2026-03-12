@@ -1526,7 +1526,7 @@ Title:"""
         - SourceCleanup: Periodic cleanup of old processed messages and mappings
         """
         # Start cleanup job
-        self._source_cleanup = SourceCleanup(self.conn)
+        self._source_cleanup = SourceCleanup(self._source_repository)
         self._source_cleanup.start()
         
         # Start the dispatcher (listens for completed events)
