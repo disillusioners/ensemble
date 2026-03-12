@@ -6,7 +6,7 @@ import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
 from daemon.tools.project import create_project_tools
-from daemon.project_store import ProjectStore
+from daemon.repositories import SQLModelProjectRepository as ProjectStore
 
 
 @pytest.fixture

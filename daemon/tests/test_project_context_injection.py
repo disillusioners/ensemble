@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from daemon.project_store import ProjectStore, Project
+from daemon.repositories import SQLModelProjectRepository as ProjectStore, Project
 from daemon.manager import extract_project_keywords, format_project_context
 
 

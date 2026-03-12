@@ -1,10 +1,10 @@
-"""Tests for daemon/project_store.py - SQLModel-based ProjectStore class."""
+"""Tests for daemon/repositories/project - SQLModelProjectRepository class."""
 
 import pytest
 
 from sqlmodel import Session, SQLModel, create_engine
 
-from daemon.project_store import ProjectStore, ProjectStatus, ProjectType, Project
+from daemon.repositories import SQLModelProjectRepository as ProjectStore, ProjectStatus, ProjectType, Project
 
 
 @pytest.fixture

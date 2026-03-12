@@ -186,7 +186,7 @@ class TestHelpToolWithProjectTools:
         """Test help tool works with project tools."""
         from sqlmodel import Session, SQLModel, create_engine
         from daemon.tools.project import create_project_tools
-        from daemon.project_store import ProjectStore
+        from daemon.repositories import SQLModelProjectRepository as ProjectStore
         
         engine = create_engine("sqlite:///:memory:", echo=False)
         SQLModel.metadata.create_all(engine)
