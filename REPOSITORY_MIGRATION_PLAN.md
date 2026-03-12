@@ -19,12 +19,12 @@ The migration from direct SQLite database access to the repository layer pattern
 | `SQLModelSourceRepository` | ✅ Complete | `daemon/api.py`, `daemon/sources/{mapper,cleanup,registry}.py` |
 | `SQLModelProjectRepository` | ✅ Complete | Already in use |
 
-### ⚠️ Temporary (Kept for LangGraph, Table Creation & Watchdog)
+### ⚠️ Temporary (Kept for LangGraph, Table Creation & Backward Compatibility)
 
 | File | Status | Purpose |
 |------|--------|---------|
 | `daemon/persistence.py` | ⚠️ Keep | `init_database()` for table creation, `get_checkpointer()` and `get_session_messages()` for LangGraph |
-| `daemon/queue.py` | ⚠️ Keep | `SessionWatchdog` needs `InputMessageQueue` for stuck message recovery |
+| `daemon/queue.py` | ⚠️ Keep | `InputMessageQueue` deprecated but kept for backward compatibility with tests; `SessionWatchdog` now uses repository |
 | `daemon/sources/persistence.py` | ⚠️ Keep | Backward compatibility with existing tests |
 
 ---
@@ -77,7 +77,7 @@ daemon/
 │       )
 │
 ├── persistence.py (KEPT - init_database, get_checkpointer, get_session_messages)
-├── queue.py (KEPT - InputMessageQueue for session-specific dequeue)
+├── queue.py (KEPT - InputMessageQueue deprecated, kept for test compatibility)
 │
 ├── sources/
 │   └── persistence.py (KEPT - backward compatibility with tests)
@@ -110,10 +110,11 @@ daemon/
   - `find_retry_ready_messages()` - find retry-ready messages
   - `move_retry_ready_to_ready()` - move retry-ready messages back to ready status
 - Added deprecation warning to `InputMessageQueue` class
+- ✅ `SessionWatchdog` now fully uses repository pattern for all database operations
 
-- **Remaining:** `InputMessageQueue` still used by `SessionWatchdog` (now accepts repository) and backward compatibility with tests
+- **Remaining:** `InputMessageQueue` kept only for backward compatibility with tests
 
-- **Future:** Create repository-based watchdog, remove `InputMessageQueue` entirely
+- **Future:** Migrate tests to use repository pattern, remove `InputMessageQueue` entirely
 
 ### Priority 2: LangGraph Integration
 
@@ -145,12 +146,15 @@ daemon/
 - **Rationale:** Required for database initialization and LangGraph integration
 - **Future:** Remove after LangGraph checkpointer migration
 
-### Decision 3: Keep `InputMessageQueue` ✅ → ⚠️ Partially Resolved
+### Decision 3: Keep `InputMessageQueue` ✅ → ✅ RESOLVED
 **Decision:** Keep `InputMessageQueue` for session-specific dequeue operations
 - **Rationale:** Repository didn't support session-specific dequeue yet
-- **Status:** ✅ **RESOLVED** - Added `dequeue_by_session()` to repository
-- **Remaining:** `SessionWatchdog` still uses `InputMessageQueue` for stuck message recovery
-- **Future:** Refactor `SessionWatchdog` to use repository pattern
+- **Status:** ✅ **FULLY RESOLVED**
+  - Added `dequeue_by_session()` to repository
+  - `SessionWatchdog` now uses repository pattern exclusively
+  - Added deprecation warning to `InputMessageQueue`
+- **Remaining:** `InputMessageQueue` kept only for backward compatibility with tests
+- **Future:** Migrate tests to use repository, then remove `InputMessageQueue` entirely
 
 ---
 

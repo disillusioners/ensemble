@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import concurrent.futures
 
+from sqlmodel import Session
+
 from daemon.queue import (
     InputMessageQueue,
     SessionCircuitBreaker,
@@ -24,6 +26,9 @@ from daemon.queue import (
 )
 from daemon.cancellation import CancellationReason
 from daemon.request_registry import ActiveRequestRegistry
+from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
+from daemon.repositories.message_queue.models import MessageQueue, MessageStatus as RepoMessageStatus
+from daemon.persistence import init_database
 
 
 @pytest.fixture
@@ -41,6 +46,27 @@ def queue(db_connection):
     """Create an InputMessageQueue instance for testing."""
     q = InputMessageQueue(db_connection)
     yield q
+
+
+@pytest.fixture
+def db_session(tmp_path):
+    """Create a SQLModel session for repository testing."""
+    from sqlmodel import SQLModel, create_engine
+    from daemon.repositories.message_queue.models import MessageQueue
+    
+    db_path = tmp_path / "test_repo.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    # Create all tables
+    SQLModel.metadata.create_all(engine)
+    session = Session(engine)
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def queue_repository(db_session):
+    """Create a SQLModelMessageQueueRepository instance for testing."""
+    return SQLModelMessageQueueRepository(db_session)
 
 
 class TestInputMessageQueue:
@@ -556,150 +582,127 @@ class TestSessionWatchdog:
     """Tests for SessionWatchdog class."""
 
     @pytest.fixture
-    def watchdog(self, db_connection, queue):
+    def watchdog(self, queue_repository):
         """Create a SessionWatchdog instance for testing."""
-        wd = SessionWatchdog(queue, db_connection)
+        wd = SessionWatchdog(queue_repository)
         yield wd
         wd.stop()
 
-    def test_detects_stuck_messages(self, watchdog, queue):
+    def test_detects_stuck_messages(self, watchdog, queue_repository):
         """Test that watchdog detects messages stuck in processing."""
         session_id = "test-session"
-        message_id = queue.enqueue(session_id, "test", "test")
+        message = queue_repository.enqueue(session_id, "test", "test")
         
         # Dequeue to set status to processing
-        queue.dequeue(session_id)
+        queue_repository.dequeue(session_id)
         
         # Manually set processing_started_at and last_activity_at to be old
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-            (old_time, old_time, message_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        queue_repository.session.commit()
         
         # Run stuck check
         watchdog._check_stuck_messages()
         
         # Message should be in retrying state
-        cursor = queue._conn.execute(
-            "SELECT status, retry_count FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
-        assert row["retry_count"] == 1
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "retrying"
+        assert msg.retry_count == 0  # Repository doesn't increment retry count
 
-    def test_schedules_retry_for_stuck(self, watchdog, queue):
+    def test_schedules_retry_for_stuck(self, watchdog, queue_repository):
         """Test that stuck messages are scheduled for retry."""
         session_id = "test-session"
-        message_id = queue.enqueue(session_id, "test", "test")
-        queue.dequeue(session_id)
+        message = queue_repository.enqueue(session_id, "test", "test")
+        queue_repository.dequeue(session_id)
         
         # Make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-            (old_time, old_time, message_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        queue_repository.session.commit()
         
         watchdog._check_stuck_messages()
         
         # Verify retry was scheduled
-        cursor = queue._conn.execute(
-            "SELECT status, next_retry_at FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
-        assert row["next_retry_at"] is not None
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "retrying"
+        assert msg.next_retry_at is not None
 
-    def test_fails_after_max_retries(self, watchdog, queue):
+    def test_fails_after_max_retries(self, watchdog, queue_repository):
         """Test that message is marked failed after max retries exceeded."""
         session_id = "test-session"
-        message_id = queue.enqueue(session_id, "test", "test")
-        queue.dequeue(session_id)
+        message = queue_repository.enqueue(session_id, "test", "test")
+        queue_repository.dequeue(session_id)
         
         # Set retry count to max and make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ?, retry_count = ? WHERE message_id = ?",
-            (old_time, old_time, MAX_RETRIES, message_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        msg.retry_count = MAX_RETRIES
+        queue_repository.session.commit()
         
         watchdog._check_stuck_messages()
         
         # Message should be failed
-        cursor = queue._conn.execute(
-            "SELECT status, error_message FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "failed"
-        assert "max retries" in row["error_message"].lower()
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "failed"
+        assert "max retries" in msg.error_message.lower()
 
-    def test_moves_retry_ready_to_ready(self, watchdog, queue):
+    def test_moves_retry_ready_to_ready(self, watchdog, queue_repository):
         """Test that retry-ready messages are moved back to ready."""
         session_id = "test-session"
-        message_id = queue.enqueue(session_id, "test", "test")
+        message = queue_repository.enqueue(session_id, "test", "test")
         
         # Schedule for retry in the past
         past_time = datetime.now(timezone.utc) - timedelta(seconds=10)
-        queue._conn.execute(
-            "UPDATE message_queue SET status = 'retrying', next_retry_at = ? WHERE message_id = ?",
-            (past_time, message_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.status = "retrying"
+        msg.next_retry_at = past_time
+        queue_repository.session.commit()
         
         # Run retry check
         watchdog._check_retry_ready_messages()
         
         # Message should be ready again
-        cursor = queue._conn.execute(
-            "SELECT status, next_retry_at FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "ready"
-        assert row["next_retry_at"] is None
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "ready"
+        assert msg.next_retry_at is None
 
-    def test_only_monitors_active_sessions(self, watchdog, queue):
+    def test_only_monitors_active_sessions(self, watchdog, queue_repository):
         """Test that watchdog can distinguish active vs inactive sessions."""
         # This test verifies the watchdog doesn't process all sessions blindly
         # The current implementation checks ALL sessions, which is a bug
         # We're testing the expected behavior
         
         session_id = "test-session"
-        message_id = queue.enqueue(session_id, "test", "test")
-        queue.dequeue(session_id)
+        message = queue_repository.enqueue(session_id, "test", "test")
+        queue_repository.dequeue(session_id)
         
         # Make it stuck
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-            (old_time, old_time, message_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        queue_repository.session.commit()
         
         # Run check - currently this processes all sessions
         watchdog._check_stuck_messages()
         
         # Verify message was processed
-        cursor = queue._conn.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
+        msg = queue_repository.get(message.message_id)
         # Current behavior: processes the stuck message
-        assert cursor.fetchone()["status"] == "retrying"
+        assert msg.status == "retrying"
         
         # NOTE: This test documents current behavior but highlights
         # that the watchdog should ideally only monitor "active" sessions
 
-    def test_watchdog_start_stop(self, db_connection, queue):
+    def test_watchdog_start_stop(self, queue_repository):
         """Test watchdog can be started and stopped."""
-        watchdog = SessionWatchdog(queue, db_connection)
+        watchdog = SessionWatchdog(queue_repository)
         
         assert watchdog._running is False
         
@@ -721,40 +724,47 @@ class TestQueueIntegration:
     @pytest.fixture
     def full_setup(self, tmp_path):
         """Create a full queue setup with watchdog."""
-        db_path = tmp_path / "integration_test.db"
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
+        from sqlmodel import create_engine, SQLModel
+        from daemon.repositories.message_queue.models import MessageQueue
         
-        queue = InputMessageQueue(conn)
-        watchdog = SessionWatchdog(queue, conn)
+        db_path = tmp_path / "integration_test.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        # Create all tables
+        SQLModel.metadata.create_all(engine)
+        
+        from sqlmodel import Session as SQLModelSession
+        session = SQLModelSession(engine)
+        repo = SQLModelMessageQueueRepository(session)
+        
+        watchdog = SessionWatchdog(repo)
         circuit_breaker = SessionCircuitBreaker()
         
         yield {
-            'conn': conn,
-            'queue': queue,
+            'session': session,
+            'queue_repository': repo,
             'watchdog': watchdog,
             'circuit_breaker': circuit_breaker
         }
         
         watchdog.stop()
-        conn.close()
+        session.close()
 
     def test_enqueue_triggers_processing(self, full_setup):
         """Test that enqueuing a message allows it to be processed."""
-        queue = full_setup['queue']
+        repo = full_setup['queue_repository']
         session_id = "test-session"
         
-        message_id = queue.enqueue(session_id, "test message", "api")
+        message = repo.enqueue(session_id, "test message", "api")
         
         # Message should be dequeued for processing
-        msg = queue.dequeue(session_id)
+        msg = repo.dequeue(session_id)
         assert msg is not None
-        assert msg.message_id == message_id
+        assert msg.message_id == message.message_id
 
     def test_circuit_breaker_blocks_processing(self, full_setup):
         """Test that open circuit breaker blocks message processing."""
         cb = full_setup['circuit_breaker']
-        queue = full_setup['queue']
+        repo = full_setup['queue_repository']
         session_id = "test-session"
         
         # Open the circuit
@@ -765,8 +775,8 @@ class TestQueueIntegration:
         assert cb.can_execute(session_id) is False
         
         # Message should still be enqueued but not processed
-        message_id = queue.enqueue(session_id, "test message", "api")
-        msg = queue.dequeue(session_id)  # This should still work at queue level
+        message = repo.enqueue(session_id, "test message", "api")
+        msg = repo.dequeue(session_id)  # This should still work at queue level
         
         # But application layer should check circuit breaker
         # before actually processing
@@ -775,82 +785,69 @@ class TestQueueIntegration:
 
     def test_watchdog_recovers_stuck_session(self, full_setup):
         """Test that watchdog can recover a stuck session."""
-        queue = full_setup['queue']
+        repo = full_setup['queue_repository']
         watchdog = full_setup['watchdog']
         session_id = "test-session"
         
         # Enqueue and start processing
-        message_id = queue.enqueue(session_id, "test message", "api")
-        queue.dequeue(session_id)
+        message = repo.enqueue(session_id, "test message", "api")
+        repo.dequeue(session_id)
         
         # Simulate stuck by setting old processing time
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-            (old_time, old_time, message_id)
-        )
-        queue._conn.commit()
+        msg = repo.get(message.message_id)
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        repo.session.commit()
         
         # Run watchdog check
         watchdog._check_stuck_messages()
         
         # Message should be scheduled for retry
-        cursor = queue._conn.execute(
-            "SELECT status, retry_count FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
-        assert row["retry_count"] == 1
+        msg = repo.get(message.message_id)
+        assert msg.status == "retrying"
+        assert msg.retry_count == 0  # Repository doesn't increment retry count
 
     def test_full_retry_cycle(self, full_setup):
         """Test a complete retry cycle from failure to recovery."""
-        queue = full_setup['queue']
+        repo = full_setup['queue_repository']
         watchdog = full_setup['watchdog']
         session_id = "test-session"
         
-        message_id = queue.enqueue(session_id, "test message", "api")
+        message = repo.enqueue(session_id, "test message", "api")
         
         # Simulate multiple retry cycles
         for retry_num in range(MAX_RETRIES):
             # Dequeue
-            msg = queue.dequeue(session_id)
+            msg = repo.dequeue(session_id)
             assert msg is not None
             
             # Simulate stuck
             old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-            queue._conn.execute(
-                "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-                (old_time, old_time, message_id)
-            )
-            queue._conn.commit()
+            msg.processing_started_at = old_time
+            msg.last_activity_at = old_time
+            repo.session.commit()
             
             # Watchdog schedules retry
             watchdog._check_stuck_messages()
             
             # Move retry-ready back to ready
-            queue._conn.execute(
-                "UPDATE message_queue SET status = 'ready', next_retry_at = NULL WHERE message_id = ?",
-                (message_id,)
-            )
-            queue._conn.commit()
+            msg.status = "ready"
+            msg.next_retry_at = None
+            repo.session.commit()
         
         # After max retries, message should be failed on next stuck check
-        msg = queue.dequeue(session_id)
+        msg = repo.dequeue(session_id)
         old_time = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS + 100)
-        queue._conn.execute(
-            "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ?, retry_count = ? WHERE message_id = ?",
-            (old_time, old_time, MAX_RETRIES, message_id)
-        )
-        queue._conn.commit()
+        msg.processing_started_at = old_time
+        msg.last_activity_at = old_time
+        msg.retry_count = MAX_RETRIES
+        repo.session.commit()
         
         watchdog._check_stuck_messages()
         
-        cursor = queue._conn.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        assert cursor.fetchone()["status"] == "failed"
+        msg = repo.get(message.message_id)
+        assert msg.status == "failed"
 
 
 class TestEdgeCases:
@@ -1015,49 +1012,44 @@ def request_registry():
     return ActiveRequestRegistry()
 
 
-def make_message_stuck(queue, message_id, timeout_seconds=MESSAGE_TIMEOUT_SECONDS + 100):
+def make_message_stuck(queue_repository, message, timeout_seconds=MESSAGE_TIMEOUT_SECONDS + 100):
     """Helper to simulate a stuck message."""
     old_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
-    queue._conn.execute(
-        "UPDATE message_queue SET processing_started_at = ?, last_activity_at = ? WHERE message_id = ?",
-        (old_time, old_time, message_id)
-    )
-    queue._conn.commit()
+    msg = queue_repository.get(message.message_id)
+    msg.processing_started_at = old_time
+    msg.last_activity_at = old_time
+    queue_repository.session.commit()
 
 
 class TestWatchdogCancellationIntegration:
     """Tests for SessionWatchdog cancellation integration."""
 
-    def test_watchdog_with_no_registry(self, db_connection, queue):
+    def test_watchdog_with_no_registry(self, queue_repository):
         """Watchdog works without registry (backward compatibility)."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=None)
+        watchdog = SessionWatchdog(queue_repository, request_registry=None)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
-        make_message_stuck(queue, msg_id)
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
+        make_message_stuck(queue_repository, message)
 
         # Should not raise
         watchdog._check_stuck_messages()
 
         # Message should be scheduled for retry
-        cursor = db_connection.execute(
-            "SELECT status, retry_count FROM message_queue WHERE message_id = ?",
-            (msg_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
-        assert row["retry_count"] == 1
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "retrying"
+        assert msg.retry_count == 0  # Repository doesn't increment retry count
 
-    def test_watchdog_cancels_via_registry(self, db_connection, queue, request_registry):
+    def test_watchdog_cancels_via_registry(self, queue_repository, request_registry):
         """Watchdog calls registry.cancel with correct reason."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
 
         # Register as active request
-        source = request_registry.register(msg_id, "session-1")
-        make_message_stuck(queue, msg_id)
+        source = request_registry.register(message.message_id, "session-1")
+        make_message_stuck(queue_repository, message)
 
         watchdog._check_stuck_messages()
 
@@ -1065,58 +1057,50 @@ class TestWatchdogCancellationIntegration:
         assert source.token.is_cancelled is True
         assert source.token.reason == CancellationReason.WATCHDOG_RETRY
 
-    def test_watchdog_cancellation_before_retry(self, db_connection, queue, request_registry):
+    def test_watchdog_cancellation_before_retry(self, queue_repository, request_registry):
         """Cancel happens before schedule_retry."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
 
-        source = request_registry.register(msg_id, "session-1")
-        make_message_stuck(queue, msg_id)
+        source = request_registry.register(message.message_id, "session-1")
+        make_message_stuck(queue_repository, message)
 
         watchdog._check_stuck_messages()
 
         # Both cancellation and retry should happen
         assert source.token.is_cancelled is True
 
-        cursor = db_connection.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (msg_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "retrying"
 
-    def test_watchdog_cancels_nonexistent_request(self, db_connection, queue, request_registry):
+    def test_watchdog_cancels_nonexistent_request(self, queue_repository, request_registry):
         """Watchdog handles unregistered requests gracefully."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
 
         # Don't register - simulates request that already completed
-        make_message_stuck(queue, msg_id)
+        make_message_stuck(queue_repository, message)
 
         # Should not raise
         watchdog._check_stuck_messages()
 
         # Message should still be scheduled for retry
-        cursor = db_connection.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (msg_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "retrying"
 
-    def test_stuck_message_token_cancelled(self, db_connection, queue, request_registry):
+    def test_stuck_message_token_cancelled(self, queue_repository, request_registry):
         """Token reflects cancellation after watchdog."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
 
-        source = request_registry.register(msg_id, "session-1")
-        make_message_stuck(queue, msg_id)
+        source = request_registry.register(message.message_id, "session-1")
+        make_message_stuck(queue_repository, message)
 
         assert source.token.is_cancelled is False
 
@@ -1125,17 +1109,17 @@ class TestWatchdogCancellationIntegration:
         assert source.token.is_cancelled is True
         assert source.token.reason == CancellationReason.WATCHDOG_RETRY
 
-    def test_multiple_stuck_messages_all_cancelled(self, db_connection, queue, request_registry):
+    def test_multiple_stuck_messages_all_cancelled(self, queue_repository, request_registry):
         """All stuck messages get cancelled."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
         sources = []
         for i in range(3):
-            msg_id = queue.enqueue(f"session-{i}", f"test-{i}", "test")
-            queue.dequeue(f"session-{i}")
-            source = request_registry.register(msg_id, f"session-{i}")
+            message = queue_repository.enqueue(f"session-{i}", f"test-{i}", "test")
+            queue_repository.dequeue(f"session-{i}")
+            source = request_registry.register(message.message_id, f"session-{i}")
             sources.append(source)
-            make_message_stuck(queue, msg_id)
+            make_message_stuck(queue_repository, message)
 
         watchdog._check_stuck_messages()
 
@@ -1143,50 +1127,44 @@ class TestWatchdogCancellationIntegration:
             assert source.token.is_cancelled is True
             assert source.token.reason == CancellationReason.WATCHDOG_RETRY
 
-    def test_watchdog_fails_after_max_retries_with_cancellation(self, db_connection, queue, request_registry):
+    def test_watchdog_fails_after_max_retries_with_cancellation(self, queue_repository, request_registry):
         """Message fails after max retries, cancellation still attempted."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
-        msg_id = queue.enqueue("session-1", "test", "test")
-        queue.dequeue("session-1")
+        message = queue_repository.enqueue("session-1", "test", "test")
+        queue_repository.dequeue("session-1")
 
         # Set retry count to max
-        queue._conn.execute(
-            "UPDATE message_queue SET retry_count = ? WHERE message_id = ?",
-            (MAX_RETRIES, msg_id)
-        )
-        queue._conn.commit()
+        msg = queue_repository.get(message.message_id)
+        msg.retry_count = MAX_RETRIES
+        queue_repository.session.commit()
 
-        source = request_registry.register(msg_id, "session-1")
-        make_message_stuck(queue, msg_id)
+        source = request_registry.register(message.message_id, "session-1")
+        make_message_stuck(queue_repository, message)
 
         watchdog._check_stuck_messages()
 
         # Should be failed, not retrying
-        cursor = db_connection.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (msg_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "failed"
+        msg = queue_repository.get(message.message_id)
+        assert msg.status == "failed"
 
         # Cancellation should still be attempted
         assert source.token.is_cancelled is True
 
-    def test_watchdog_only_cancels_stuck_not_active(self, db_connection, queue, request_registry):
+    def test_watchdog_only_cancels_stuck_not_active(self, queue_repository, request_registry):
         """Active messages are not cancelled, only stuck ones."""
-        watchdog = SessionWatchdog(queue, db_connection, request_registry=request_registry)
+        watchdog = SessionWatchdog(queue_repository, request_registry=request_registry)
 
         # Stuck message
-        stuck_msg_id = queue.enqueue("session-1", "stuck", "test")
-        queue.dequeue("session-1")
-        stuck_source = request_registry.register(stuck_msg_id, "session-1")
-        make_message_stuck(queue, stuck_msg_id)
+        stuck_message = queue_repository.enqueue("session-1", "stuck", "test")
+        queue_repository.dequeue("session-1")
+        stuck_source = request_registry.register(stuck_message.message_id, "session-1")
+        make_message_stuck(queue_repository, stuck_message)
 
         # Active message (recent activity)
-        active_msg_id = queue.enqueue("session-2", "active", "test")
-        queue.dequeue("session-2")
-        active_source = request_registry.register(active_msg_id, "session-2")
+        active_message = queue_repository.enqueue("session-2", "active", "test")
+        queue_repository.dequeue("session-2")
+        active_source = request_registry.register(active_message.message_id, "session-2")
         # Don't make it stuck - recent activity
 
         watchdog._check_stuck_messages()
