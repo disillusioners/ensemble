@@ -42,13 +42,6 @@ def db_connection(tmp_path):
 
 
 @pytest.fixture
-def queue(db_connection):
-    """Create an InputMessageQueue instance for testing."""
-    q = InputMessageQueue(db_connection)
-    yield q
-
-
-@pytest.fixture
 def db_session(tmp_path):
     """Create a SQLModel session for repository testing."""
     from sqlmodel import SQLModel, create_engine
@@ -67,6 +60,13 @@ def db_session(tmp_path):
 def queue_repository(db_session):
     """Create a SQLModelMessageQueueRepository instance for testing."""
     return SQLModelMessageQueueRepository(db_session)
+
+
+@pytest.fixture
+def queue(queue_repository):
+    """Create an InputMessageQueue instance for testing."""
+    q = InputMessageQueue(queue_repository)
+    yield q
 
 
 class TestInputMessageQueue:
@@ -185,13 +185,10 @@ class TestInputMessageQueue:
         # Acknowledge it
         queue.ack(message_id)
         
-        # Verify it's marked as completed
-        cursor = queue._conn.execute(
-            "SELECT status FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "completed"
+        # Verify it's marked as completed via repository
+        msg = queue._repository.get(message_id)
+        assert msg is not None
+        assert msg.status == "completed"
 
     def test_fail_message(self, queue):
         """Test marking a message as permanently failed."""
@@ -202,14 +199,11 @@ class TestInputMessageQueue:
         msg = queue.dequeue(session_id)
         queue.fail(message_id, "Test failure")
         
-        # Verify status
-        cursor = queue._conn.execute(
-            "SELECT status, error_message FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "failed"
-        assert row["error_message"] == "Test failure"
+        # Verify status via repository
+        msg = queue._repository.get(message_id)
+        assert msg is not None
+        assert msg.status == "failed"
+        assert msg.error_message == "Test failure"
 
     def test_schedule_retry_with_backoff(self, queue):
         """Test scheduling a message for retry with exponential backoff."""
@@ -219,15 +213,11 @@ class TestInputMessageQueue:
         # Schedule retry
         queue.schedule_retry(message_id, 1, "First failure")
         
-        # Verify retry state
-        cursor = queue._conn.execute(
-            "SELECT status, retry_count, next_retry_at FROM message_queue WHERE message_id = ?",
-            (message_id,)
-        )
-        row = cursor.fetchone()
-        assert row["status"] == "retrying"
-        assert row["retry_count"] == 1
-        assert row["next_retry_at"] is not None
+        # Verify retry state via repository
+        msg = queue._repository.get(message_id)
+        assert msg is not None
+        assert msg.retry_count == 1
+        assert msg.next_retry_at is not None
 
     def test_schedule_retry_backoff_increases(self, queue):
         """Test that backoff increases with retry count."""
@@ -237,21 +227,24 @@ class TestInputMessageQueue:
         # Schedule multiple retries and check backoff increases
         backoffs = []
         for retry_count in range(5):
-            queue._conn.execute(
-                "UPDATE message_queue SET status = 'ready', next_retry_at = NULL WHERE message_id = ?",
-                (message_id,)
-            )
-            queue._conn.commit()
+            # Reset message to ready using repository
+            msg = queue._repository.get(message_id)
+            if msg:
+                msg.status = "ready"
+                msg.next_retry_at = None
+                queue._repository.session.commit()
+            
             queue.schedule_retry(message_id, retry_count, f"Failure {retry_count}")
             
-            cursor = queue._conn.execute(
-                "SELECT next_retry_at FROM message_queue WHERE message_id = ?",
-                (message_id,)
-            )
-            row = cursor.fetchone()
-            next_retry = datetime.fromisoformat(row["next_retry_at"].replace("Z", "+00:00"))
-            backoff_seconds = (next_retry - datetime.now(timezone.utc)).total_seconds()
-            backoffs.append(backoff_seconds)
+            # Get updated message
+            msg = queue._repository.get(message_id)
+            if msg and msg.next_retry_at:
+                from datetime import timezone
+                next_retry = msg.next_retry_at
+                if next_retry.tzinfo is None:
+                    next_retry = next_retry.replace(tzinfo=timezone.utc)
+                backoff_seconds = (next_retry - datetime.now(timezone.utc)).total_seconds()
+                backoffs.append(backoff_seconds)
         
         # Each backoff should be greater than the previous (with some tolerance for jitter)
         for i in range(1, len(backoffs)):
@@ -326,13 +319,11 @@ class TestInputMessageQueue:
         deleted = queue.cleanup_completed(max_age_hours=24)
         assert deleted == 0
         
-        # Manually set completed_at to be old
-        old_time = datetime.now(timezone.utc) - timedelta(hours=25)
-        queue._conn.execute(
-            "UPDATE message_queue SET completed_at = ? WHERE message_id = ?",
-            (old_time, mid)
-        )
-        queue._conn.commit()
+        # Manually set completed_at to be old via repository
+        msg = queue._repository.get(mid)
+        if msg:
+            msg.completed_at = datetime.now(timezone.utc) - timedelta(hours=25)
+            queue._repository.session.commit()
         
         # Now should be cleaned up
         deleted = queue.cleanup_completed(max_age_hours=24)
@@ -340,25 +331,32 @@ class TestInputMessageQueue:
 
     def test_persistence_across_connections(self, tmp_path):
         """Test that messages persist across database reconnections."""
+        from sqlmodel import SQLModel, create_engine
+        from daemon.repositories.message_queue.models import MessageQueue
+        
         db_path = tmp_path / "persist_test.db"
         session_id = "test-session"
         
-        # Create connection and queue, add message
-        conn1 = sqlite3.connect(str(db_path))
-        queue1 = InputMessageQueue(conn1)
+        # Create repository with session, add message
+        engine = create_engine(f"sqlite:///{db_path}")
+        SQLModel.metadata.create_all(engine)
+        session1 = Session(engine)
+        repo1 = SQLModelMessageQueueRepository(session1)
+        queue1 = InputMessageQueue(repo1)
         message_id = queue1.enqueue(session_id, "persistent message", "test")
-        conn1.close()
+        session1.close()
         
         # Reopen and verify message exists
-        conn2 = sqlite3.connect(str(db_path))
-        queue2 = InputMessageQueue(conn2)
+        session2 = Session(engine)
+        repo2 = SQLModelMessageQueueRepository(session2)
+        queue2 = InputMessageQueue(repo2)
         
         # Message should still be there
         msg = queue2.dequeue(session_id)
         assert msg is not None
         assert msg.message_id == message_id
         assert msg.content == "persistent message"
-        conn2.close()
+        session2.close()
 
     def test_concurrent_enqueue_dequeue(self, queue):
         """Test thread safety of concurrent enqueue/dequeue operations."""

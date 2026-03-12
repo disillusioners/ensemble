@@ -1,17 +1,12 @@
 """Message queue implementation with SQLite backend."""
 
-import json
 import logging
-import random
 import threading
 import time
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Optional
-
-import sqlite3
 
 from typing import TYPE_CHECKING
 
@@ -19,6 +14,7 @@ if TYPE_CHECKING:
     from .request_registry import ActiveRequestRegistry
     from .cancellation import CancellationReason
     from .repositories.message_queue.repository import SQLModelMessageQueueRepository
+    from .repositories.message_queue.models import MessageQueue
 
 logger = logging.getLogger("daemon.queue")
 
@@ -28,12 +24,6 @@ MAX_QUEUE_SIZE = 100
 MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
 MAX_RETRIES = 5
 CHECK_INTERVAL_SECONDS = 30
-
-# Backoff configuration
-INITIAL_BACKOFF_SECONDS = 6
-BACKOFF_MULTIPLIER = 7
-MAX_BACKOFF_SECONDS = 300
-BACKOFF_JITTER = 0.1  # 10%
 
 # Circuit breaker configuration
 CIRCUIT_FAILURE_THRESHOLD = 5
@@ -75,56 +65,17 @@ class QueueStats:
 
 
 class InputMessageQueue:
-    """SQLite-backed message queue with per-session locking.
-
-    .. deprecated:: 1.0.0
-        Use SQLModelMessageQueueRepository instead.
-        Use SQLModelMessageQueueRepository.dequeue_by_session(session_id) for session-specific dequeue.
+    """Message queue with per-session locking.
+    
+    Delegates database operations to SQLModelMessageQueueRepository.
     """
 
-    def __init__(self, conn: sqlite3.Connection):
-        """Initialize the queue with the given database connection."""
-        self._conn = conn
+    def __init__(self, repository: "SQLModelMessageQueueRepository"):
+        """Initialize the queue with the given repository."""
+        self._repository = repository
         self._locks: dict[str, threading.Lock] = {}
         self._conditions: dict[str, threading.Condition] = {}
         self._lock_guard = threading.Lock()
-        self._initialize_tables()
-
-    def _initialize_tables(self) -> None:
-        """Create database tables if they don't exist and run migrations."""
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS message_queue (
-                message_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                source TEXT NOT NULL,
-                status TEXT DEFAULT 'ready',
-                priority INTEGER DEFAULT 1,
-                retry_count INTEGER DEFAULT 0,
-                max_retries INTEGER DEFAULT 5,
-                error_message TEXT,
-                metadata JSON,
-                enqueued_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                processing_started_at TIMESTAMP,
-                last_activity_at TIMESTAMP,
-                completed_at TIMESTAMP,
-                next_retry_at TIMESTAMP
-            )
-        """)
-        
-        # Migration: Add last_activity_at column if it doesn't exist
-        cursor = self._conn.execute("PRAGMA table_info(message_queue)")
-        columns = [row[1] for row in cursor.fetchall()]
-        if 'last_activity_at' not in columns:
-            self._conn.execute("ALTER TABLE message_queue ADD COLUMN last_activity_at TIMESTAMP")
-            logger.info("Added last_activity_at column to message_queue")
-        
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_message_queue_session_status 
-            ON message_queue(session_id, status, priority, enqueued_at)
-        """)
-        self._conn.commit()
-        logger.info("Message queue tables initialized")
 
     def _get_lock(self, session_id: str) -> threading.Lock:
         """Get or create a lock for a session."""
@@ -152,37 +103,40 @@ class InputMessageQueue:
         metadata: Optional[dict] = None
     ) -> str:
         """Add a message to the queue. Returns the message_id."""
-        message_id = str(uuid.uuid4())
-        metadata_json = json.dumps(metadata) if metadata else None
-
         with self._get_lock(session_id):
-            # Check queue size
-            cursor = self._conn.execute(
-                "SELECT COUNT(*) FROM message_queue WHERE session_id = ? AND status IN ('ready', 'processing', 'retrying')",
-                (session_id,)
-            )
-            current_count = cursor.fetchone()[0]
+            # Check queue size using repository
+            stats = self._repository.get_stats(session_id)
+            current_count = stats["pending_count"] + stats["processing_count"]
 
             if current_count >= MAX_QUEUE_SIZE:
-                # Drop oldest USER message (priority >= 1)
-                # Drop the oldest user message (FIFO), not based on priority
-                self._conn.execute("""
-                    DELETE FROM message_queue 
-                    WHERE message_id = (
-                        SELECT message_id FROM message_queue 
-                        WHERE session_id = ? AND priority >= 1 AND status = 'ready'
-                        ORDER BY enqueued_at ASC 
-                        LIMIT 1
-                    )
-                """, (session_id,))
-                logger.warning(f"Queue full for session {session_id}, dropped oldest message")
+                # Drop oldest ready message (priority >= 1) - FIFO by enqueued_at
+                # Get all ready messages and sort by enqueued_at ascending to find oldest
+                ready_messages = self._repository.list(
+                    session_id=session_id,
+                    status="ready",
+                    limit=100
+                )
+                # Sort by enqueued_at ascending to find oldest
+                ready_messages.sort(key=lambda m: m.enqueued_at)
+                # Find oldest message with priority >= 1
+                oldest_msg = None
+                for msg in ready_messages:
+                    if msg.priority >= 1:
+                        oldest_msg = msg
+                        break
+                if oldest_msg:
+                    self._repository.delete(oldest_msg.message_id)
+                    logger.warning(f"Queue full for session {session_id}, dropped oldest message")
 
-            self._conn.execute("""
-                INSERT INTO message_queue (
-                    message_id, session_id, content, source, priority, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (message_id, session_id, content, source, priority, metadata_json))
-            self._conn.commit()
+            # Use repository to enqueue
+            msg = self._repository.enqueue(
+                session_id=session_id,
+                content=content,
+                source=source,
+                priority=priority,
+                message_metadata=metadata,
+            )
+            message_id = msg.message_id
 
         # Notify any waiting dequeue calls
         condition = self._get_condition(session_id)
@@ -211,75 +165,44 @@ class InputMessageQueue:
                 if self._peek_ready_message(session_id) is None:
                     return None
 
-            # Atomically claim the message using UPDATE...RETURNING
-            # Priority: lower number = higher priority (0=system > 1=user)
-            now = datetime.now(timezone.utc)
-            cursor = self._conn.execute("""
-                UPDATE message_queue
-                SET status = 'processing', 
-                    processing_started_at = ?,
-                    last_activity_at = ?  -- NEW
-                WHERE message_id = (
-                    SELECT message_id FROM message_queue
-                    WHERE session_id = ?
-                    AND status = 'ready'
-                    AND (next_retry_at IS NULL OR next_retry_at <= ?)
-                    ORDER BY priority ASC, enqueued_at ASC
-                    LIMIT 1
-                )
-                RETURNING message_id, session_id, content, source, priority, 
-                         retry_count, metadata, enqueued_at, processing_started_at,
-                         last_activity_at, status, error_message
-            """, (now, now, session_id, now))
-            
-            row = cursor.fetchone()
-            self._conn.commit()
+            # Use repository to dequeue
+            msg = self._repository.dequeue_by_session(session_id)
 
-            if row is None:
+            if msg is None:
                 logger.debug(f"No ready message for session {session_id[:8]}...")
                 return None
 
-            msg = QueuedMessage(
-                message_id=row[0],
-                session_id=row[1],
-                content=row[2],
-                source=row[3],
-                priority=row[4],
-                retry_count=row[5],
-                metadata=json.loads(row[6]) if row[6] else {},
-                created_at=datetime.fromisoformat(row[7].replace("Z", "+00:00")) if row[7] else now,
-                processing_started_at=datetime.fromisoformat(row[8].replace("Z", "+00:00")) if row[8] else now,
-                last_activity_at=datetime.fromisoformat(row[9].replace("Z", "+00:00")) if row[9] else None,  # NEW
-                status=row[10],
-                error_message=row[11]
+            now = datetime.now(timezone.utc)
+            queued_msg = QueuedMessage(
+                message_id=msg.message_id,
+                session_id=msg.session_id,
+                content=msg.content,
+                source=msg.source,
+                priority=msg.priority,
+                retry_count=msg.retry_count,
+                metadata=msg.message_metadata or {},
+                created_at=msg.enqueued_at,
+                processing_started_at=msg.processing_started_at,
+                last_activity_at=msg.last_activity_at,
+                status=msg.status,
+                error_message=msg.error_message,
             )
-            logger.info(f"📤 Dequeued message {msg.message_id[:8]}... from session {session_id[:8]}...")
-            return msg
+            logger.info(f"📤 Dequeued message {queued_msg.message_id[:8]}... from session {session_id[:8]}...")
+            return queued_msg
 
     def _peek_ready_message(self, session_id: str) -> Optional[str]:
         """Check if there's a ready message without claiming it."""
-        # Priority: lower number = higher priority (0=system > 1=user)
-        now = datetime.now(timezone.utc)
-        cursor = self._conn.execute("""
-            SELECT message_id FROM message_queue
-            WHERE session_id = ?
-            AND status = 'ready'
-            AND (next_retry_at IS NULL OR next_retry_at <= ?)
-            ORDER BY priority ASC, enqueued_at ASC
-            LIMIT 1
-        """, (session_id, now))
-        row = cursor.fetchone()
-        return row[0] if row else None
+        # Use repository to list ready messages
+        ready_messages = self._repository.list(
+            session_id=session_id,
+            status="ready",
+            limit=1
+        )
+        return ready_messages[0].message_id if ready_messages else None
 
     def ack(self, message_id: str) -> None:
         """Mark a message as successfully processed."""
-        now = datetime.now(timezone.utc)
-        self._conn.execute("""
-            UPDATE message_queue
-            SET status = 'completed', completed_at = ?
-            WHERE message_id = ?
-        """, (now, message_id))
-        self._conn.commit()
+        self._repository.complete(message_id)
         logger.debug(f"Message {message_id} acknowledged")
 
     def update_activity(self, message_id: str) -> None:
@@ -291,92 +214,31 @@ class InputMessageQueue:
         Args:
             message_id: The message ID to update.
         """
-        now = datetime.now(timezone.utc)
-        self._conn.execute("""
-            UPDATE message_queue
-            SET last_activity_at = ?
-            WHERE message_id = ? AND status = 'processing'
-        """, (now, message_id))
-        self._conn.commit()  # Changed: Now commits
+        self._repository.update_activity(message_id)
         logger.debug(f"Updated activity for message {message_id}")
 
     def fail(self, message_id: str, error: str) -> None:
         """Mark a message as permanently failed."""
-        self._conn.execute("""
-            UPDATE message_queue
-            SET status = 'failed', error_message = ?
-            WHERE message_id = ?
-        """, (error, message_id))
-        self._conn.commit()
+        self._repository.fail(message_id, error)
         logger.warning(f"Message {message_id} marked as failed: {error}")
 
     def schedule_retry(self, message_id: str, retry_count: int, error: str) -> None:
-        """Schedule a message for retry with exponential backoff."""
-        # Calculate backoff: initial 2s, multiplier 2.5, max 300s, 10% jitter
-        backoff = min(
-            INITIAL_BACKOFF_SECONDS * (BACKOFF_MULTIPLIER ** retry_count),
-            MAX_BACKOFF_SECONDS
-        )
-        # Add jitter
-        jitter = backoff * BACKOFF_JITTER * (2 * random.random() - 1)
-        backoff = max(1, backoff + jitter)
-
-        next_retry = datetime.now(timezone.utc) + timedelta(seconds=backoff)
-
-        # Set is_retry flag in metadata using SQLite's json_set
-        self._conn.execute("""
-            UPDATE message_queue
-            SET status = 'retrying',
-                retry_count = ?,
-                error_message = ?,
-                next_retry_at = ?,
-                metadata = json_set(COALESCE(metadata, '{}'), '$.is_retry', true)
-            WHERE message_id = ?
-        """, (retry_count, error, next_retry, message_id))
-        self._conn.commit()
-        logger.debug(f"Message {message_id} scheduled for retry {retry_count} at {next_retry}")
+        """Schedule a message for retry with exponential backoff.
+        
+        Note: Uses the repository's retry logic which handles backoff calculation.
+        The retry_count parameter is informational since repository auto-increments.
+        """
+        # Use repository's retry method - it handles backoff and status changes
+        self._repository.retry(message_id, error)
+        logger.debug(f"Message {message_id} scheduled for retry")
 
     def get_stats(self, session_id: str) -> QueueStats:
         """Get queue statistics for a session."""
-        now = datetime.now(timezone.utc)
-
-        # Pending count (ready + retrying with next_retry_at <= now)
-        cursor = self._conn.execute("""
-            SELECT COUNT(*) FROM message_queue
-            WHERE session_id = ?
-            AND status IN ('ready', 'retrying')
-            AND (status = 'ready' OR next_retry_at <= ?)
-        """, (session_id, now))
-        pending_count = cursor.fetchone()[0]
-
-        # Processing count
-        cursor = self._conn.execute("""
-            SELECT COUNT(*) FROM message_queue
-            WHERE session_id = ? AND status = 'processing'
-        """, (session_id,))
-        processing_count = cursor.fetchone()[0]
-
-        # Oldest message age
-        cursor = self._conn.execute("""
-            SELECT MIN(enqueued_at) FROM message_queue
-            WHERE session_id = ? AND status IN ('ready', 'processing', 'retrying')
-        """, (session_id,))
-        oldest = cursor.fetchone()[0]
-        oldest_message_age_seconds = None
-        if oldest:
-            # Handle both timezone-aware and naive timestamps from SQLite
-            if oldest.endswith("Z"):
-                oldest_utc = datetime.fromisoformat(oldest.replace("Z", "+00:00"))
-            else:
-                oldest_utc = datetime.fromisoformat(oldest)
-                if oldest_utc.tzinfo is None:
-                    oldest_utc = oldest_utc.replace(tzinfo=timezone.utc)
-            oldest_message_age_seconds = (now - oldest_utc).total_seconds()
-
+        stats = self._repository.get_stats(session_id)
         return QueueStats(
-            pending_count=pending_count,
-            processing_count=processing_count,
-            oldest_message_age_seconds=oldest_message_age_seconds
+            pending_count=stats["pending_count"],
+            processing_count=stats["processing_count"],
+            oldest_message_age_seconds=stats["oldest_message_age_seconds"]
         )
 
     def is_empty(self, session_id: str) -> bool:
@@ -384,27 +246,11 @@ class InputMessageQueue:
         
         Returns True if there are no ready, processing, or retry-ready messages.
         """
-        now = datetime.now(timezone.utc)
-        cursor = self._conn.execute("""
-            SELECT COUNT(*) FROM message_queue
-            WHERE session_id = ?
-            AND (
-                status = 'ready'
-                OR status = 'processing'
-                OR (status = 'retrying' AND next_retry_at <= ?)
-            )
-        """, (session_id, now))
-        return cursor.fetchone()[0] == 0
+        return self._repository.is_empty(session_id)
 
     def cleanup_completed(self, max_age_hours: int = 24) -> int:
         """Remove old completed messages."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
-        cursor = self._conn.execute("""
-            DELETE FROM message_queue
-            WHERE status = 'completed' AND completed_at < ?
-        """, (cutoff,))
-        self._conn.commit()
-        deleted = cursor.rowcount
+        deleted = self._repository.cleanup_old(max_age_hours)
         if deleted > 0:
             logger.info(f"Cleaned up {deleted} completed messages older than {max_age_hours}h")
         return deleted

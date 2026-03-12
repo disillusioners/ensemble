@@ -261,12 +261,12 @@ class SessionManager:
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
 
-        # NEW: Message queue system
-        self.queue = InputMessageQueue(self.conn)
-        
         # NEW: Message queue repository for SQLModel-based operations
         db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
         self._queue_repository = create_message_queue_repository(db_config)
+        
+        # NEW: Message queue system (uses repository internally)
+        self.queue = InputMessageQueue(self._queue_repository)
         
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
