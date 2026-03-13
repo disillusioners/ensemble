@@ -1122,9 +1122,10 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
             ).model_dump()
         )
     
-    # Generate IDs
+    # Generate IDs (use standard UUID format for consistency)
     mapping_id = f"{source_id}:{mapping_create.external_user_id}"
-    session_id = f"ext-{uuid.uuid4().hex[:12]}"
+    # Let manager auto-generate a valid UUID session_id
+    session_id = None
     
     # Spawn the agent session
     try:

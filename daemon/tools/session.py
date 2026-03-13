@@ -29,23 +29,13 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     """
     
     @tool
-    def spawn_session(agent_dir: str, session_id: str | None = None) -> str:
-        """Spawn a new agent session. Use tool_help("spawn_session") for details."""
+    def spawn_session(agent_dir: str) -> str:
+        """Spawn a new agent session."""
         return manager.spawn_session(
             agent_dir=agent_dir,
-            session_id=session_id,
+            session_id=None,
             parent_id=current_session_id
         )
-    
-    spawn_session._full_doc_ = """Spawn a new agent session.
-
-Args:
-    agent_dir: The path to agent directory (e.g., 'agents/coder')
-    session_id: Optional session ID (auto-generated if omitted)
-
-Returns:
-    The session_id of the newly created session
-"""
     
     @tool
     def send_message(session_id: str, message: str) -> str:

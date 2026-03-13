@@ -35,6 +35,7 @@ from .repositories import (
     create_source_repository,
     create_message_queue_repository,
 )
+
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 from .repositories.session.repository import get_agent_name
 from .tools import create_session_tools
@@ -49,6 +50,8 @@ from .request_registry import ActiveRequestRegistry
 
 logger = logging.getLogger(__name__)
 
+# UUID validation pattern (compiled once at module level)
+_UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
 
 # Patterns for extracting project keywords from messages
 # Use [\w-]+ to match word characters and hyphens/underscores
@@ -337,7 +340,7 @@ class SessionManager:
 
         Args:
             agent_dir: Path to the agent directory.
-            session_id: Optional session ID. Auto-generated if not provided.
+            session_id: Optional session ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent session ID for hierarchical sessions.
 
         Returns:
@@ -346,8 +349,13 @@ class SessionManager:
         Raises:
             ValueError: If max_sessions or max_children_per_session limit is exceeded.
         """
-        # Generate session_id if not provided
-        if session_id is None:
+        # Validate session_id format or auto-generate
+        if session_id is None or not _UUID_PATTERN.match(session_id):
+            if session_id is not None:
+                logger.warning(
+                    f"Invalid session_id format '{session_id}', auto-generating UUID. "
+                    "Session IDs must be valid UUIDs like '550e8400-e29b-41d4-a716-446655440000'"
+                )
             session_id = str(uuid.uuid4())
 
         # Check max_sessions limit
