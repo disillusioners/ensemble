@@ -59,6 +59,7 @@ class LimitsConfig(BaseSettings):
     max_children_per_session: int = Field(default=10)
     session_timeout_minutes: int = Field(default=60)
     message_rate_limit: int = Field(default=60)
+    graph_recursion_limit: int = Field(default=100)
 
 
 class PersistenceConfig(BaseSettings):

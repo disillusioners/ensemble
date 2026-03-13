@@ -441,7 +441,10 @@ class SessionManager:
         graph = self.get_session(session_id)
 
         # Invoke with message
-        config = {"configurable": {"thread_id": session_id}}
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": self.config.limits.graph_recursion_limit,
+        }
         result = await graph.ainvoke({"messages": [message]}, config)
 
         # Extract message data from the current turn
@@ -833,7 +836,8 @@ class SessionManager:
         
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": callbacks
+            "callbacks": callbacks,
+            "recursion_limit": self.config.limits.graph_recursion_limit,
         }
         
         # Variables to collect during streaming
