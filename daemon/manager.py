@@ -260,6 +260,7 @@ class SessionManager:
         self.conn = init_database(Path(config.persistence.db_path))
         self.db_path = Path(config.persistence.db_path)
         self._checkpointer = None  # Lazy init - call await manager.initialize() to set
+        self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
@@ -330,6 +331,7 @@ class SessionManager:
         lifespan startup. This ensures the async checkpointer is created within
         an async context.
         """
+        self._loop = asyncio.get_running_loop()
         self._checkpointer = await get_checkpointer(self.db_path)
         logger.info("SessionManager initialized with async checkpointer")
 

@@ -56,20 +56,20 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
             # We're in an async context (LangGraph), schedule the processing
             asyncio.create_task(manager._process_queue(session_id))
         except RuntimeError:
-            # No running loop, try to run in a new thread
-            import threading
-            import concurrent.futures
-            
-            def run_processing():
-                import asyncio
-                new_loop = asyncio.new_event_loop()
-                try:
-                    new_loop.run_until_complete(manager._process_queue(session_id))
-                finally:
-                    new_loop.close()
-            
-            thread = threading.Thread(target=run_processing, daemon=True)
-            thread.start()
+            # No running loop - use threadsafe scheduling on the main event loop
+            # This avoids creating a new event loop which would conflict with
+            # the checkpointer's asyncio.Lock that's bound to the main loop
+            if manager._loop is not None:
+                asyncio.run_coroutine_threadsafe(
+                    manager._process_queue(session_id),
+                    manager._loop
+                )
+            else:
+                # Fallback: manager not initialized properly, log warning
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Cannot schedule queue processing: SessionManager not initialized with event loop"
+                )
         
         return message_id
     
