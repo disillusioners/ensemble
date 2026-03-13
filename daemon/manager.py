@@ -19,10 +19,8 @@ from .config import Config
 from .graph import build_session_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
-    init_database,
     get_session_messages,
     get_checkpointer,
-    update_session_status,
 )
 from .repositories import (
     SQLModelSessionRepository,
@@ -30,6 +28,7 @@ from .repositories import (
     SQLModelSourceRepository,
     SQLModelMessageQueueRepository,
     DatabaseConfig,
+    create_engine_from_config,
     create_project_repository,
     create_session_repository,
     create_source_repository,
@@ -257,17 +256,26 @@ class SessionManager:
             config: Configuration object with LLM, limits, and persistence settings.
         """
         self.config = config
-        self.conn = init_database(Path(config.persistence.db_path))
         self.db_path = Path(config.persistence.db_path)
         self._checkpointer = None  # Lazy init - call await manager.initialize() to set
+        self._checkpointer_db_path = Path(config.persistence.checkpointer_db_path)
         self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
 
-        # NEW: Message queue repository for SQLModel-based operations
+        # Create ONE shared database engine for all repositories
+        # This prevents database lock contention when multiple components
+        # (watchdog thread, async processors, etc.) access the same SQLite file
         db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
-        self._queue_repository = create_message_queue_repository(db_config)
+        self._engine = create_engine_from_config(db_config)
+        
+        # Create tables once for all repositories
+        from sqlmodel import SQLModel
+        SQLModel.metadata.create_all(self._engine)
+
+        # NEW: Message queue repository for SQLModel-based operations
+        self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
         
         # Development helper: discard all queued messages on startup
         if config.queue.discard_on_startup:
@@ -293,8 +301,7 @@ class SessionManager:
 
         # NEW: Source repository for source config and session mapping management
         # Must be created before SourceRegistry
-        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
-        self._source_repository = create_source_repository(db_config)
+        self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(source_repo=self._source_repository, manager=self)
@@ -307,13 +314,13 @@ class SessionManager:
 
         # NEW: Project repository for project context injection
         # Using the new repository layer with proper transaction management
-        self._project_repository = create_project_repository(db_config)
+        self._project_repository = create_project_repository(engine=self._engine, create_tables=False)
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
 
         # NEW: Session repository for session management
         # Using the new repository layer instead of legacy persistence functions
-        self._session_repository = create_session_repository(db_config)
+        self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
 
         # Start watchdog
         self.watchdog.start()
@@ -335,10 +342,13 @@ class SessionManager:
         Must be called after SessionManager construction, typically in the FastAPI
         lifespan startup. This ensures the async checkpointer is created within
         an async context.
+        
+        Note: The checkpointer uses a separate database file from the main
+        application database to avoid SQLite lock contention.
         """
         self._loop = asyncio.get_running_loop()
-        self._checkpointer = await get_checkpointer(self.db_path)
-        logger.info("SessionManager initialized with async checkpointer")
+        self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
+        logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     def spawn_session(
         self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
@@ -1393,8 +1403,8 @@ Title:"""
         else:
             return False
 
-        # Update DB status to terminated
-        update_session_status(self.conn, session_id, "terminated")
+        # Update DB status to terminated using repository
+        self._session_repository.update_status(session_id, "terminated")
 
         return True
 
@@ -1579,9 +1589,5 @@ Title:"""
         return self.source_registry
 
     def cleanup(self) -> None:
-        """Cleanup resources including database sessions."""
+        """Cleanup resources."""
         self.watchdog.stop()
-        if hasattr(self, '_project_session') and self._project_session:
-            self._project_session.close()
-        if hasattr(self, 'conn') and self.conn:
-            self.conn.close()

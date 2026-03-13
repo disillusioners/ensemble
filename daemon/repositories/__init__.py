@@ -19,6 +19,7 @@ from .source.models import SourceConfig, SessionMapping, ProcessedMessage, Sourc
 # Factory functions
 from .factory import (
     DatabaseConfig,
+    create_engine_from_config,
     create_project_repository,
     create_session_repository,
     create_message_queue_repository,
@@ -48,6 +49,7 @@ __all__ = [
     "SourceStatus",
     # Factory
     "DatabaseConfig",
+    "create_engine_from_config",
     "create_project_repository",
     "create_session_repository",
     "create_message_queue_repository",

@@ -68,6 +68,7 @@ class PersistenceConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PERSISTENCE_")
 
     db_path: str = Field(default="./data/sessions.db")
+    checkpointer_db_path: str = Field(default="./data/checkpoints.db")
     checkpoint_interval: int = Field(default=1)
     checkpoint_ttl_hours: int = Field(default=168)
     checkpoint_cleanup_interval: int = Field(default=24)
