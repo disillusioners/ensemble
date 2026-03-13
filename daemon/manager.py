@@ -1589,5 +1589,10 @@ Title:"""
         return self.source_registry
 
     def cleanup(self) -> None:
-        """Cleanup resources."""
+        """Cleanup resources including database connections."""
         self.watchdog.stop()
+        
+        # Dispose the shared engine to close all connections in the pool
+        if hasattr(self, '_engine') and self._engine:
+            self._engine.dispose()
+            logger.info("Database engine disposed")
