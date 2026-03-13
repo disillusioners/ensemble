@@ -517,6 +517,21 @@ class SQLModelMessageQueueRepository:
             
             return result.rowcount
 
+    def clear_all(self) -> int:
+        """Delete all messages from the queue.
+        
+        Useful for development to start with a clean queue on startup.
+        
+        Returns:
+            Number of messages deleted.
+        """
+        with Session(self.engine) as session:
+            stmt = sql_delete(MessageQueue)
+            result = session.exec(stmt)
+            session.commit()
+            
+            return result.rowcount
+
     # --------------------------------------------------------
     # STATS
     # --------------------------------------------------------

@@ -86,6 +86,9 @@ class QueueConfig(BaseSettings):
     circuit_breaker_failure_threshold: int = Field(default=5)
     circuit_breaker_recovery_timeout_seconds: int = Field(default=300)
 
+    # Development helper: discard all queued messages on startup
+    discard_on_startup: bool = Field(default=False)
+
     # LLM retry configuration
     llm_max_retries: int = Field(default=3)
     llm_retry_delay_seconds: float = Field(default=10.0)

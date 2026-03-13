@@ -269,6 +269,11 @@ class SessionManager:
         db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
         self._queue_repository = create_message_queue_repository(db_config)
         
+        # Development helper: discard all queued messages on startup
+        if config.queue.discard_on_startup:
+            count = self._queue_repository.clear_all()
+            logger.info(f"Discarded {count} messages from queue (discard_on_startup=True)")
+        
         # NEW: Message queue system (uses repository internally)
         self.queue = InputMessageQueue(self._queue_repository)
         
