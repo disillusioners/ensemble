@@ -19,7 +19,7 @@ from sqlmodel import SQLModel, Field
 class SourceStatus(str, enum.Enum):
     """Source status enum."""
     STOPPED = "stopped"
-    # STARTING = "starting"
+    STARTING = "starting"
     RUNNING = "running"
     ERROR = "error"
 

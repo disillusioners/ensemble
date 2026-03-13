@@ -875,22 +875,27 @@ async def update_source(source_id: str, source_update: SourceUpdate):
     # Merge updates
     updated_name = source_update.name if source_update.name is not None else existing.name
     updated_config = source_update.config if source_update.config is not None else existing.config
-    updated_credentials = source_update.credentials if source_update.credentials is not None else existing.credentials
     updated_enabled = source_update.enabled if source_update.enabled is not None else existing.enabled
     
-    # Validate and encrypt credentials
+    # Handle credentials separately (dict from request vs encrypted string from DB)
     credentials_json = None
-    if updated_credentials:
-        cred_str = json.dumps(updated_credentials)
-        if len(cred_str) > MAX_CREDENTIALS_SIZE:
-            raise HTTPException(
-                status_code=400,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INVALID_REQUEST,
-                    message=f"Credentials too large (max {MAX_CREDENTIALS_SIZE} bytes)"
-                ).model_dump()
-            )
-        credentials_json = credential_manager.encrypt(updated_credentials)
+    if source_update.credentials is not None:
+        # New credentials provided - validate and encrypt
+        if source_update.credentials:  # Non-empty dict
+            cred_str = json.dumps(source_update.credentials)
+            if len(cred_str) > MAX_CREDENTIALS_SIZE:
+                raise HTTPException(
+                    status_code=400,
+                    detail=ErrorResponse(
+                        code=ErrorCodes.INVALID_REQUEST,
+                        message=f"Credentials too large (max {MAX_CREDENTIALS_SIZE} bytes)"
+                    ).model_dump()
+                )
+            credentials_json = credential_manager.encrypt(source_update.credentials)
+        # else: empty dict means clear credentials (credentials_json stays None)
+    else:
+        # Keep existing encrypted credentials
+        credentials_json = existing.credentials
     
     # Update source config using repository
     updated = manager._source_repository.update_source_config(

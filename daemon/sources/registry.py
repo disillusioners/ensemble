@@ -192,11 +192,32 @@ class SourceRegistry:
             cred_manager = CredentialManager()
             credentials = cred_manager.decrypt(credentials)
         
+        # Validate credentials is a dict (not a string from malformed JSON)
+        if credentials is not None and not isinstance(credentials, dict):
+            logger.error(
+                f"Invalid credentials format for {source_id}: expected dict, got {type(credentials).__name__}. "
+                f"Credentials should be stored as JSON object, e.g., {{\"bot_token\": \"...\"}}"
+            )
+            raise ValueError(
+                f"Invalid credentials format: expected dict, got {type(credentials).__name__}. "
+                f"Store credentials as JSON object."
+            )
+        
+        # Validate config is a dict (not a string from malformed JSON)
+        config_data = config_dict.get("config", {})
+        if config_data is not None and not isinstance(config_data, dict):
+            logger.error(
+                f"Invalid config format for {source_id}: expected dict, got {type(config_data).__name__}"
+            )
+            raise ValueError(
+                f"Invalid config format: expected dict, got {type(config_data).__name__}"
+            )
+        
         config = SourceConfig(
             source_id=source_id,
             source_type=source_type,
             name=config_dict["name"],
-            config=config_dict.get("config", {}),
+            config=config_data,
             credentials=credentials,
             enabled=config_dict.get("enabled", True),
         )
