@@ -422,14 +422,25 @@ class SQLModelSourceRepository:
         self,
         schedule_id: str,
         session_id: Optional[str] = None,
+        execution_id: Optional[str] = None,
     ) -> ScheduleExecution:
-        """Record a new execution with status 'triggered'."""
+        """Record a new execution with status 'triggered'.
+        
+        Args:
+            schedule_id: The schedule that triggered this execution
+            session_id: Optional session ID associated with the execution
+            execution_id: Optional execution ID (generated if not provided)
+        """
         with Session(self.engine) as session:
             execution = ScheduleExecution(
                 schedule_id=schedule_id,
                 session_id=session_id,
                 status="triggered",
             )
+            
+            # Use provided execution_id if available
+            if execution_id:
+                execution.execution_id = execution_id
             
             session.add(execution)
             session.commit()

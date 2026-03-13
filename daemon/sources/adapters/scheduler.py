@@ -374,19 +374,38 @@ class SchedulerAdapter(MessageSourceAdapter):
         """Emit the scheduled message to the message handler."""
         execution_id = str(uuid.uuid4())
         
-        # Check concurrency limit
+        # Check concurrency limit with timeout
         if self._execution_semaphore is None:
             logger.error("Scheduler not properly initialized")
             return
         
-        if not self._execution_semaphore.locked():
-            await self._execution_semaphore.acquire()
+        # Try to acquire semaphore with timeout - skip if max concurrent reached
+        try:
+            await asyncio.wait_for(
+                self._execution_semaphore.acquire(),
+                timeout=0.1  # Short timeout - if can't acquire, skip this trigger
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Skipping scheduled execution {execution_id}: max concurrent executions reached "
+                f"(running={self._running_executions}, max={self._max_concurrent})"
+            )
+            if self._execution_callback:
+                try:
+                    self._execution_callback(
+                        execution_id=execution_id,
+                        schedule_id=self.source_id,
+                        status="skipped",
+                        session_id=None,
+                        error_message="Max concurrent executions reached",
+                    )
+                except Exception as e:
+                    logger.warning(f"Execution callback error: {e}")
+            return
         
         async def execute():
-            nonlocal running_count
             self._running_executions += 1
-            running_count = self._running_executions
-            logger.debug(f"Starting execution {execution_id}, running={running_count}")
+            logger.debug(f"Starting execution {execution_id}, running={self._running_executions}")
             
             try:
                 # Call execution callback with triggered status
@@ -474,7 +493,6 @@ class SchedulerAdapter(MessageSourceAdapter):
                 if self._execution_semaphore:
                     self._execution_semaphore.release()
         
-        running_count = 0
         await execute()
     
     async def _execute_trigger(self, execution_id: str) -> None:

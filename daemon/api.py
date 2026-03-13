@@ -1289,12 +1289,8 @@ async def trigger_schedule(schedule_id: str):
     # Trigger the schedule
     try:
         execution_id = await adapter.manual_trigger()
-        
-        # Record the execution in the database
-        manager._source_repository.record_execution_start(
-            schedule_id=schedule_id,
-            session_id=None,
-        )
+        # Note: Execution is recorded by the scheduler's execution_callback,
+        # not here, to avoid duplicate records
         
         return ScheduleTriggerResponse(
             execution_id=execution_id,

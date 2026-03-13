@@ -348,11 +348,8 @@ class TestTriggerSchedule:
         # Verify adapter was called
         mock_adapter.manual_trigger.assert_called_once()
         
-        # Verify execution was recorded
-        mock_manager._source_repository.record_execution_start.assert_called_once_with(
-            schedule_id="scheduler-1",
-            session_id=None
-        )
+        # Note: Execution recording is now handled by the scheduler's execution_callback,
+        # not by the API directly. This avoids duplicate records.
 
     @pytest.mark.asyncio
     async def test_trigger_schedule_adapter_error(self, client, mock_manager):

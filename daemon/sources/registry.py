@@ -236,7 +236,33 @@ class SourceRegistry:
             return adapter
         elif source_type == "scheduler":
             from .adapters.scheduler import SchedulerAdapter
-            adapter = SchedulerAdapter(config, on_message)
+            
+            # Create execution callback that persists to database
+            def execution_callback(
+                execution_id: str,
+                schedule_id: str,
+                status: str,
+                session_id: Optional[str] = None,
+                error_message: Optional[str] = None,
+            ):
+                """Persist execution status to database."""
+                try:
+                    if status == "triggered":
+                        self._source_repo.record_execution_start(
+                            schedule_id=schedule_id,
+                            session_id=session_id,
+                            execution_id=execution_id,
+                        )
+                    elif status in ("completed", "failed", "skipped"):
+                        self._source_repo.record_execution_complete(
+                            execution_id=execution_id,
+                            status=status,
+                            error_message=error_message,
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to record execution status: {e}")
+            
+            adapter = SchedulerAdapter(config, on_message, execution_callback)
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
         else:
