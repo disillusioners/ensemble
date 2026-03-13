@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
-from .models import SourceConfig, SessionMapping, ProcessedMessage, SourceStatus
+from .models import SourceConfig, SessionMapping, ProcessedMessage, ScheduleExecution, SourceStatus
 
 
 logger = logging.getLogger(__name__)
@@ -415,3 +415,89 @@ class SQLModelSourceRepository:
                 logger.info(f"Cleaned up {deleted_count} processed messages older than {max_age_hours}h")
             
             return deleted_count
+
+    # ==================== Schedule Execution Operations ====================
+
+    def record_execution_start(
+        self,
+        schedule_id: str,
+        session_id: Optional[str] = None,
+    ) -> ScheduleExecution:
+        """Record a new execution with status 'triggered'."""
+        with Session(self.engine) as session:
+            execution = ScheduleExecution(
+                schedule_id=schedule_id,
+                session_id=session_id,
+                status="triggered",
+            )
+            
+            session.add(execution)
+            session.commit()
+            session.refresh(execution)
+            
+            logger.info(f"Recorded execution start: execution_id={execution.execution_id}, schedule_id={schedule_id}")
+            return execution
+
+    def record_execution_complete(
+        self,
+        execution_id: str,
+        status: str = "completed",
+        error_message: Optional[str] = None,
+    ) -> Optional[ScheduleExecution]:
+        """Update execution status to completed or failed."""
+        with Session(self.engine) as session:
+            execution = session.get(ScheduleExecution, execution_id)
+            if execution is None:
+                logger.warning(f"Execution not found for update: execution_id={execution_id}")
+                return None
+            
+            execution.status = status
+            execution.error_message = error_message
+            execution.completed_at = datetime.utcnow().isoformat()
+            
+            session.commit()
+            session.refresh(execution)
+            
+            logger.info(f"Recorded execution completion: execution_id={execution_id}, status={status}")
+            return execution
+
+    def list_schedule_executions(
+        self,
+        schedule_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ScheduleExecution]:
+        """List executions for a schedule."""
+        with Session(self.engine) as session:
+            stmt = (
+                select(ScheduleExecution)
+                .where(ScheduleExecution.schedule_id == schedule_id)
+                .order_by(col(ScheduleExecution.triggered_at).desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(session.exec(stmt))
+
+    def get_latest_execution(self, schedule_id: str) -> Optional[ScheduleExecution]:
+        """Get the most recent execution for a schedule."""
+        with Session(self.engine) as session:
+            stmt = (
+                select(ScheduleExecution)
+                .where(ScheduleExecution.schedule_id == schedule_id)
+                .order_by(col(ScheduleExecution.triggered_at).desc())
+                .limit(1)
+            )
+            return session.exec(stmt).first()
+
+    def get_running_executions(self, schedule_id: str) -> list[ScheduleExecution]:
+        """Get currently running executions (status='triggered' but not completed)."""
+        with Session(self.engine) as session:
+            stmt = (
+                select(ScheduleExecution)
+                .where(
+                    ScheduleExecution.schedule_id == schedule_id,
+                    ScheduleExecution.status == "triggered",
+                )
+                .order_by(col(ScheduleExecution.triggered_at).desc())
+            )
+            return list(session.exec(stmt))

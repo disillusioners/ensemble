@@ -235,6 +235,29 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_project_shortnames_shortname ON project_shortnames(shortname)
     """)
     
+    # Create schedule_executions table for tracking scheduler execution history
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schedule_executions (
+            execution_id TEXT PRIMARY KEY,
+            schedule_id TEXT NOT NULL,
+            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            session_id TEXT,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            completed_at TIMESTAMP,
+            FOREIGN KEY (schedule_id) REFERENCES source_configs(source_id) ON DELETE CASCADE
+        )
+    """)
+    
+    # Create indexes for schedule_executions
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_schedule_executions_schedule ON schedule_executions(schedule_id)
+    """)
+    
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_schedule_executions_triggered ON schedule_executions(triggered_at)
+    """)
+    
     # Migration: Add creator columns if they don't exist
     cursor = conn.execute("PRAGMA table_info(projects)")
     columns = [row[1] for row in cursor.fetchall()]

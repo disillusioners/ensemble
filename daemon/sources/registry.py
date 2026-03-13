@@ -234,6 +234,11 @@ class SourceRegistry:
             adapter = TelegramAdapter(config, on_message)
             logger.info(f"TelegramAdapter created: default_agent={adapter._default_agent}")
             return adapter
+        elif source_type == "scheduler":
+            from .adapters.scheduler import SchedulerAdapter
+            adapter = SchedulerAdapter(config, on_message)
+            logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
+            return adapter
         else:
             logger.warning(f"Unsupported source type: {source_type}")
             return None

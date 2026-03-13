@@ -1,0 +1,589 @@
+"""Scheduler adapter for triggering agents on schedule."""
+
+import asyncio
+import logging
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Callable, Awaitable
+from zoneinfo import ZoneInfo
+from croniter import croniter
+from croniter import CroniterBadCronError
+
+from ..base import (
+    IncomingMessage,
+    MessageSourceAdapter,
+    OutgoingMessage,
+    SourceConfig,
+    SourceStatus,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class SchedulerAdapter(MessageSourceAdapter):
+    """Adapter that triggers messages on a schedule.
+    
+    Supports:
+    - Cron expressions (schedule: "0 9 * * 1-5")
+    - Interval in seconds (interval_seconds: 300)
+    - One-time triggers (run_at: "2025-03-15T10:00:00Z")
+    """
+    
+    # Schedule type constants
+    SCHEDULE_TYPE_CRON = "cron"
+    SCHEDULE_TYPE_INTERVAL = "interval"
+    SCHEDULE_TYPE_ONE_TIME = "one_time"
+    
+    def __init__(
+        self,
+        config: SourceConfig,
+        on_message: Callable[[IncomingMessage], Awaitable[None]],
+        execution_callback: Optional[Callable] = None,
+    ):
+        """Initialize the scheduler adapter.
+        
+        Args:
+            config: Source configuration containing schedule parameters
+            on_message: Callback for incoming messages
+            execution_callback: Optional callback for execution status updates.
+                Called with: (execution_id, schedule_id, status, session_id, error_message)
+        """
+        super().__init__(config, on_message)
+        self._execution_callback = execution_callback
+        
+        # Extract scheduler-specific config
+        scheduler_config = config.config
+        
+        # Schedule configuration
+        self._schedule_type: Optional[str] = None
+        self._cron_expression: Optional[str] = None
+        self._interval_seconds: Optional[int] = None
+        self._run_at: Optional[datetime] = None
+        
+        # Message configuration
+        self._agent: Optional[str] = scheduler_config.get("agent")
+        self._message_content: str = scheduler_config.get("message", "")
+        
+        # Timezone configuration
+        timezone_str = scheduler_config.get("timezone", "UTC")
+        try:
+            self._timezone = ZoneInfo(timezone_str)
+        except KeyError:
+            logger.warning(f"Unknown timezone '{timezone_str}', defaulting to UTC")
+            self._timezone = ZoneInfo("UTC")
+        
+        # Concurrency control
+        self._max_concurrent: int = scheduler_config.get("max_concurrent", 1)
+        self._running_executions: int = 0
+        self._execution_semaphore: Optional[asyncio.Semaphore] = None
+        
+        # Parse and validate schedule configuration
+        self._parse_schedule_config(scheduler_config)
+        
+        # Internal state
+        self._scheduler_task: Optional[asyncio.Task] = None
+        self._stop_event: asyncio.Event = asyncio.Event()
+        self._is_one_time_executed: bool = False
+        
+        logger.info(
+            f"SchedulerAdapter initialized: type={self._schedule_type}, "
+            f"source_id={self.source_id}, timezone={timezone_str}"
+        )
+    
+    def _parse_schedule_config(self, scheduler_config: dict) -> None:
+        """Parse and validate schedule configuration.
+        
+        Args:
+            scheduler_config: The configuration dict from SourceConfig
+            
+        Raises:
+            ValueError: If no valid schedule is configured
+        """
+        # Check for cron expression
+        if "schedule" in scheduler_config and scheduler_config["schedule"]:
+            self._schedule_type = self.SCHEDULE_TYPE_CRON
+            self._cron_expression = scheduler_config["schedule"]
+            
+            # Validate cron expression
+            try:
+                now = datetime.now(self._timezone)
+                cron = croniter(self._cron_expression, now)
+                # Try to get next run to validate
+                cron.get_next(datetime)
+                logger.info(f"Valid cron expression: {self._cron_expression}")
+            except CroniterBadCronError as e:
+                raise ValueError(f"Invalid cron expression '{self._cron_expression}': {e}")
+            
+        # Check for interval
+        elif "interval_seconds" in scheduler_config:
+            interval = scheduler_config["interval_seconds"]
+            if not isinstance(interval, int) or interval <= 0:
+                raise ValueError(f"interval_seconds must be a positive integer, got: {interval}")
+            self._schedule_type = self.SCHEDULE_TYPE_INTERVAL
+            self._interval_seconds = interval
+            logger.info(f"Interval schedule: every {interval} seconds")
+            
+        # Check for one-time execution
+        elif "run_at" in scheduler_config and scheduler_config["run_at"]:
+            run_at_str = scheduler_config["run_at"]
+            try:
+                # Try parsing ISO format
+                self._run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
+                # If no timezone info, assume UTC
+                if self._run_at.tzinfo is None:
+                    self._run_at = self._run_at.replace(tzinfo=timezone.utc)
+            except ValueError as e:
+                raise ValueError(f"Invalid run_at format '{run_at_str}': {e}")
+            
+            self._schedule_type = self.SCHEDULE_TYPE_ONE_TIME
+            logger.info(f"One-time schedule: {self._run_at}")
+            
+        else:
+            raise ValueError(
+                "No valid schedule configured. Provide one of: "
+                "'schedule' (cron), 'interval_seconds', or 'run_at'"
+            )
+        
+        # Validate agent and message
+        if not self._agent:
+            logger.warning("No 'agent' specified in scheduler config")
+        if not self._message_content:
+            logger.warning("No 'message' specified in scheduler config")
+    
+    async def start(self) -> None:
+        """Start the scheduler loop."""
+        if self._status == SourceStatus.RUNNING:
+            logger.warning(f"Scheduler already running: {self.source_id}")
+            return
+        
+        self._status = SourceStatus.STARTING
+        self._error = None
+        
+        try:
+            # Initialize semaphore for concurrency control
+            self._execution_semaphore = asyncio.Semaphore(self._max_concurrent)
+            
+            # Reset stop event
+            self._stop_event.clear()
+            
+            # Start the scheduler loop
+            self._scheduler_task = asyncio.create_task(self._run_schedule())
+            
+            self._status = SourceStatus.RUNNING
+            logger.info(f"Scheduler started: {self.source_id}, type={self._schedule_type}")
+            
+        except Exception as e:
+            self._status = SourceStatus.ERROR
+            self._error = str(e)
+            logger.error(f"Failed to start scheduler: {e}")
+            raise
+    
+    async def stop(self) -> None:
+        """Stop the scheduler gracefully."""
+        logger.info(f"Stopping scheduler: {self.source_id}")
+        
+        # Signal stop
+        self._stop_event.set()
+        
+        # Cancel scheduler task
+        if self._scheduler_task:
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+        
+        # Wait for running executions to complete (with timeout)
+        if self._running_executions > 0:
+            logger.info(
+                f"Waiting for {self._running_executions} running execution(s) to complete..."
+            )
+            # Give a grace period for running executions
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_executions(),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timeout waiting for executions to complete, "
+                    f"{self._running_executions} still running"
+                )
+        
+        self._status = SourceStatus.STOPPED
+        logger.info(f"Scheduler stopped: {self.source_id}")
+    
+    async def _wait_for_executions(self) -> None:
+        """Wait for all running executions to complete."""
+        while self._running_executions > 0:
+            await asyncio.sleep(0.5)
+    
+    async def send(self, message: OutgoingMessage) -> bool:
+        """Scheduler doesn't receive messages - this is a source adapter.
+        
+        Args:
+            message: Outgoing message (ignored)
+            
+        Returns:
+            True - always returns success as scheduler is output-only
+        """
+        # Scheduler is a one-way adapter - it triggers messages but doesn't receive
+        return True
+    
+    async def health_check(self) -> bool:
+        """Check if scheduler is healthy.
+        
+        Returns:
+            True if scheduler is running
+        """
+        if self._status != SourceStatus.RUNNING:
+            return False
+        
+        # Check if scheduler task is still running
+        if self._scheduler_task and self._scheduler_task.done():
+            # Task completed unexpectedly
+            try:
+                self._scheduler_task.result()
+            except Exception as e:
+                self._error = str(e)
+                self._status = SourceStatus.ERROR
+                return False
+        
+        return True
+    
+    async def manual_trigger(self) -> str:
+        """Manually trigger the schedule immediately.
+        
+        Returns:
+            execution_id: Unique ID for this manual execution
+        """
+        if self._status != SourceStatus.RUNNING:
+            raise RuntimeError(f"Scheduler not running: {self._status}")
+        
+        execution_id = str(uuid.uuid4())
+        logger.info(f"Manual trigger for {self.source_id}: execution_id={execution_id}")
+        
+        # Run the trigger asynchronously without waiting
+        asyncio.create_task(self._execute_trigger(execution_id))
+        
+        return execution_id
+    
+    async def _run_schedule(self) -> None:
+        """Main scheduler loop that triggers messages at scheduled times."""
+        logger.info(f"Starting scheduler loop: {self.source_id}")
+        
+        while not self._stop_event.is_set():
+            try:
+                # Check if we should trigger now
+                next_trigger = self._get_next_trigger_time()
+                
+                if next_trigger is None:
+                    # One-time trigger already executed
+                    if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+                        logger.info(f"One-time schedule completed: {self.source_id}")
+                        break
+                    logger.error(f"Could not determine next trigger time: {self.source_id}")
+                    break
+                
+                # Calculate wait time
+                now = datetime.now(self._timezone)
+                if next_trigger.tzinfo is None:
+                    next_trigger = next_trigger.replace(tzinfo=self._timezone)
+                
+                wait_seconds = (next_trigger - now).total_seconds()
+                
+                if wait_seconds > 0:
+                    # Wait until next trigger time
+                    logger.debug(
+                        f"Next trigger for {self.source_id} in {wait_seconds:.1f}s "
+                        f"(at {next_trigger.isoformat()})"
+                    )
+                    
+                    # Use wait_for with stop event to allow graceful shutdown
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(),
+                            timeout=wait_seconds
+                        )
+                        # Stop event was set, exit gracefully
+                        if self._stop_event.is_set():
+                            break
+                    except asyncio.TimeoutError:
+                        # Timeout means we reached the trigger time
+                        pass
+                
+                # Trigger the scheduled message
+                await self._emit_scheduled_message()
+                
+                # For one-time schedules, exit after execution
+                if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+                    self._is_one_time_executed = True
+                    logger.info(f"One-time schedule executed: {self.source_id}")
+                    break
+                    
+            except asyncio.CancelledError:
+                # Scheduler was cancelled
+                break
+            except Exception as e:
+                logger.error(f"Scheduler error for {self.source_id}: {e}", exc_info=True)
+                # Brief pause before retry to avoid tight loop on errors
+                await asyncio.sleep(5)
+        
+        logger.info(f"Scheduler loop ended: {self.source_id}")
+    
+    def _get_next_trigger_time(self) -> Optional[datetime]:
+        """Calculate next trigger time based on schedule type.
+        
+        Returns:
+            datetime of next trigger, or None if no more triggers
+        """
+        now = datetime.now(self._timezone)
+        
+        if self._schedule_type == self.SCHEDULE_TYPE_CRON:
+            if not self._cron_expression:
+                return None
+            try:
+                cron = croniter(self._cron_expression, now)
+                return cron.get_next(datetime)
+            except CroniterBadCronError as e:
+                logger.error(f"Cron parsing error: {e}")
+                return None
+                
+        elif self._schedule_type == self.SCHEDULE_TYPE_INTERVAL:
+            if not self._interval_seconds:
+                return None
+            # For interval, next trigger is now + interval
+            return now + timedelta(seconds=self._interval_seconds)
+            
+        elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+            if self._is_one_time_executed:
+                return None
+            # If run_at is in the past, trigger now
+            run_at = self._run_at
+            if run_at.tzinfo is None:
+                run_at = run_at.replace(tzinfo=self._timezone)
+            
+            if run_at <= now:
+                return now  # Trigger now
+            return run_at
+        
+        return None
+    
+    async def _emit_scheduled_message(self) -> None:
+        """Emit the scheduled message to the message handler."""
+        execution_id = str(uuid.uuid4())
+        
+        # Check concurrency limit
+        if self._execution_semaphore is None:
+            logger.error("Scheduler not properly initialized")
+            return
+        
+        if not self._execution_semaphore.locked():
+            await self._execution_semaphore.acquire()
+        
+        async def execute():
+            nonlocal running_count
+            self._running_executions += 1
+            running_count = self._running_executions
+            logger.debug(f"Starting execution {execution_id}, running={running_count}")
+            
+            try:
+                # Call execution callback with triggered status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="triggered",
+                            session_id=None,
+                            error_message=None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                
+                # Build the incoming message
+                metadata = {
+                    "scheduler": {
+                        "execution_id": execution_id,
+                        "schedule_type": self._schedule_type,
+                        "trigger_time": datetime.now(self._timezone).isoformat(),
+                    },
+                    "agent": self._agent,
+                }
+                
+                # Add schedule details to metadata
+                if self._schedule_type == self.SCHEDULE_TYPE_CRON:
+                    metadata["scheduler"]["cron_expression"] = self._cron_expression
+                elif self._schedule_type == self.SCHEDULE_TYPE_INTERVAL:
+                    metadata["scheduler"]["interval_seconds"] = self._interval_seconds
+                elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+                    metadata["scheduler"]["run_at"] = self._run_at.isoformat()
+                
+                incoming = IncomingMessage(
+                    external_user_id=self.source_id,  # Use source_id as user identifier
+                    content=self._message_content,
+                    source_id=self.source_id,
+                    metadata=metadata,
+                    message_type="scheduled",
+                )
+                
+                # Emit the message
+                await self._emit_message(incoming)
+                
+                logger.info(
+                    f"Scheduled message executed: source={self.source_id}, "
+                    f"execution_id={execution_id}, agent={self._agent}"
+                )
+                
+                # Call execution callback with completed status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="completed",
+                            session_id=self.source_id,
+                            error_message=None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                
+            except Exception as e:
+                logger.error(
+                    f"Failed to execute scheduled message: {execution_id}, error={e}",
+                    exc_info=True
+                )
+                
+                # Call execution callback with failed status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="failed",
+                            session_id=None,
+                            error_message=str(e),
+                        )
+                    except Exception as cb_error:
+                        logger.warning(f"Execution callback error: {cb_error}")
+                
+            finally:
+                self._running_executions -= 1
+                logger.debug(f"Execution {execution_id} finished, running={self._running_executions}")
+                if self._execution_semaphore:
+                    self._execution_semaphore.release()
+        
+        running_count = 0
+        await execute()
+    
+    async def _execute_trigger(self, execution_id: str) -> None:
+        """Execute a manual trigger.
+        
+        Args:
+            execution_id: Unique ID for this execution
+        """
+        if self._execution_semaphore is None:
+            logger.error("Scheduler not properly initialized")
+            return
+        
+        # Wait for semaphore with timeout
+        try:
+            await asyncio.wait_for(
+                self._execution_semaphore.acquire(),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Could not acquire semaphore for manual trigger: {execution_id}")
+            if self._execution_callback:
+                self._execution_callback(
+                    execution_id=execution_id,
+                    schedule_id=self.source_id,
+                    status="failed",
+                    session_id=None,
+                    error_message="Max concurrent executions reached",
+                )
+            return
+        
+        async def execute():
+            self._running_executions += 1
+            logger.debug(f"Manual trigger started: {execution_id}, running={self._running_executions}")
+            
+            try:
+                # Call execution callback with triggered status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="triggered",
+                            session_id=None,
+                            error_message=None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                
+                # Build the incoming message
+                metadata = {
+                    "scheduler": {
+                        "execution_id": execution_id,
+                        "trigger_type": "manual",
+                        "trigger_time": datetime.now(self._timezone).isoformat(),
+                    },
+                    "agent": self._agent,
+                }
+                
+                incoming = IncomingMessage(
+                    external_user_id=self.source_id,
+                    content=self._message_content,
+                    source_id=self.source_id,
+                    metadata=metadata,
+                    message_type="scheduled",
+                )
+                
+                # Emit the message
+                await self._emit_message(incoming)
+                
+                logger.info(
+                    f"Manual trigger executed: source={self.source_id}, "
+                    f"execution_id={execution_id}, agent={self._agent}"
+                )
+                
+                # Call execution callback with completed status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="completed",
+                            session_id=self.source_id,
+                            error_message=None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                
+            except Exception as e:
+                logger.error(
+                    f"Failed to execute manual trigger: {execution_id}, error={e}",
+                    exc_info=True
+                )
+                
+                # Call execution callback with failed status
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="failed",
+                            session_id=None,
+                            error_message=str(e),
+                        )
+                    except Exception as cb_error:
+                        logger.warning(f"Execution callback error: {cb_error}")
+                
+            finally:
+                self._running_executions -= 1
+                logger.debug(f"Manual trigger finished: {execution_id}, running={self._running_executions}")
+                self._execution_semaphore.release()
+        
+        await execute()

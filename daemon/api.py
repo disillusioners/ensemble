@@ -61,6 +61,10 @@ from .models import (
     SessionMappingInfo,
     SessionMappingListResponse,
     DeleteResponse,
+    # Schedule models
+    ScheduleExecutionInfo,
+    ScheduleExecutionListResponse,
+    ScheduleTriggerResponse,
 )
 from .manager import SessionManager
 from .config import Config, load_config
@@ -1203,6 +1207,176 @@ async def delete_mapping(source_id: str, mapping_id: str):
         )
     
     return DeleteResponse(deleted=True, message=f"Mapping {mapping_id} deleted")
+
+
+# ==================== Scheduler-Specific Endpoints ====================
+
+
+# GET /schedules - List only scheduler sources
+@api_router.get("/schedules", response_model=SourceListResponse)
+async def list_schedules():
+    """List all configured scheduler sources.
+    
+    This endpoint filters sources to only return those with source_type='scheduler'.
+    """
+    all_sources = manager._source_repository.list_source_configs()
+    schedules = []
+    for src in all_sources:
+        if src.source_type == "scheduler":
+            schedules.append(SourceInfo(
+                source_id=src.source_id,
+                source_type=SourceType(src.source_type),
+                name=src.name,
+                config=src.config,
+                enabled=src.enabled,
+                status=SourceStatus(src.status),
+                error_message=src.error_message,
+                created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
+                updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else src.updated_at,
+            ))
+    return SourceListResponse(sources=schedules)
+
+
+# POST /schedules/{schedule_id}/trigger - Manually trigger a schedule
+@api_router.post("/schedules/{schedule_id}/trigger", response_model=ScheduleTriggerResponse)
+async def trigger_schedule(schedule_id: str):
+    """Manually trigger a scheduled job.
+    
+    Triggers the schedule immediately, regardless of its configured schedule.
+    """
+    from .sources.base import SourceConfig
+    
+    # Check source exists and is a scheduler
+    source = manager._source_repository.get_source_config(schedule_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Schedule not found: {schedule_id}"
+            ).model_dump()
+        )
+    
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Check if registry has the source
+    if not manager.source_registry:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message="Source registry not available"
+            ).model_dump()
+        )
+    
+    adapter = manager.source_registry.get(schedule_id)
+    if not adapter:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Schedule adapter not running: {schedule_id}"
+            ).model_dump()
+        )
+    
+    # Trigger the schedule
+    try:
+        execution_id = await adapter.manual_trigger()
+        
+        # Record the execution in the database
+        manager._source_repository.record_execution_start(
+            schedule_id=schedule_id,
+            session_id=None,
+        )
+        
+        return ScheduleTriggerResponse(
+            execution_id=execution_id,
+            schedule_id=schedule_id,
+            message="Schedule triggered successfully"
+        )
+    except Exception as e:
+        logger.error(f"Failed to trigger schedule {schedule_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to trigger schedule: {str(e)}"
+            ).model_dump()
+        )
+
+
+# GET /schedules/{schedule_id}/executions - Get execution history
+@api_router.get("/schedules/{schedule_id}/executions", response_model=ScheduleExecutionListResponse)
+async def get_schedule_executions(
+    schedule_id: str,
+    limit: int = 100,
+    offset: int = 0
+):
+    """Get execution history for a scheduled job.
+    
+    Args:
+        schedule_id: The schedule to get executions for.
+        limit: Maximum number of executions to return (default: 100).
+        offset: Number of executions to skip (default: 0).
+    """
+    # Check source exists and is a scheduler
+    source = manager._source_repository.get_source_config(schedule_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Schedule not found: {schedule_id}"
+            ).model_dump()
+        )
+    
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Input validation
+    limit = max(1, min(limit, 1000))  # Clamp to 1-1000
+    offset = max(0, offset)  # Ensure non-negative
+    
+    # Get executions from repository
+    executions_data = manager._source_repository.list_schedule_executions(
+        schedule_id=schedule_id,
+        limit=limit,
+        offset=offset
+    )
+    
+    # Get total count (approximate - using len for now)
+    # For accurate total, we'd need a count method in the repository
+    total = len(executions_data)
+    
+    executions = []
+    for exec_data in executions_data:
+        executions.append(ScheduleExecutionInfo(
+            execution_id=exec_data.execution_id,
+            schedule_id=exec_data.schedule_id,
+            triggered_at=datetime.fromisoformat(exec_data.triggered_at).replace(tzinfo=timezone.utc) if isinstance(exec_data.triggered_at, str) else exec_data.triggered_at,
+            session_id=exec_data.session_id,
+            status=exec_data.status,
+            error_message=exec_data.error_message,
+            completed_at=datetime.fromisoformat(exec_data.completed_at).replace(tzinfo=timezone.utc) if exec_data.completed_at and isinstance(exec_data.completed_at, str) else exec_data.completed_at,
+        ))
+    
+    return ScheduleExecutionListResponse(
+        executions=executions,
+        total=total
+    )
 
 
 # ==================== Webhook Receiver Endpoint ====================

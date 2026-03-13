@@ -112,3 +112,28 @@ class ProcessedMessage(SQLModel, table=True):
             "external_message_id": self.external_message_id,
             "processed_at": self.processed_at,
         }
+
+
+class ScheduleExecution(SQLModel, table=True):
+    """SQLModel ScheduleExecution table for tracking scheduler execution history."""
+    __tablename__ = "schedule_executions"
+
+    execution_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    schedule_id: str = Field(foreign_key="source_configs.source_id", index=True)
+    triggered_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    session_id: Optional[str] = Field(default=None, index=True)
+    status: str = Field(default="triggered")  # 'triggered', 'completed', 'failed'
+    error_message: Optional[str] = None
+    completed_at: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "execution_id": self.execution_id,
+            "schedule_id": self.schedule_id,
+            "triggered_at": self.triggered_at,
+            "session_id": self.session_id,
+            "status": self.status,
+            "error_message": self.error_message,
+            "completed_at": self.completed_at,
+        }

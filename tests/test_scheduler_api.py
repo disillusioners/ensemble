@@ -140,7 +140,7 @@ def create_scheduler_source(source_id: str, name: str, schedule_config: dict) ->
     source.status = "stopped"
     source.error_message = None
     source.created_at = "2024-01-01T00:00:00+00:00"
-    source.updated_at = "2024-01-01T00:00:00+00:00"
+    source.updated_at = "2024-01-01T00:00:00+00:05"
     return source
 
 

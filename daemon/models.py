@@ -276,6 +276,7 @@ class SourceType(str, Enum):
     webhook = "webhook"
     whatsapp = "whatsapp"
     discord = "discord"
+    scheduler = "scheduler"
 
 
 class SourceCreate(BaseModel):
@@ -418,6 +419,66 @@ class SourceTestResponse(BaseModel):
             "example": {
                 "success": True,
                 "message": "Connected to @my_bot (My Bot)"
+            }
+        }
+    )
+
+
+class ScheduleExecutionInfo(BaseModel):
+    """Response for schedule execution information."""
+
+    execution_id: str = Field(..., description="Unique execution identifier")
+    schedule_id: str = Field(..., description="Schedule that triggered this execution")
+    triggered_at: datetime = Field(..., description="When the execution was triggered")
+    session_id: str | None = Field(default=None, description="Session that was triggered")
+    status: str = Field(..., description="Execution status (triggered, completed, failed)")
+    error_message: str | None = Field(default=None, description="Error message if failed")
+    completed_at: datetime | None = Field(default=None, description="When execution completed")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "execution_id": "exec-123",
+                "schedule_id": "morning-briefing",
+                "triggered_at": "2024-01-01T08:00:00Z",
+                "session_id": "session-456",
+                "status": "completed",
+                "error_message": None,
+                "completed_at": "2024-01-01T08:00:05Z"
+            }
+        }
+    )
+
+
+class ScheduleExecutionListResponse(BaseModel):
+    """Response for listing schedule executions."""
+
+    executions: list[ScheduleExecutionInfo] = Field(..., description="List of executions")
+    total: int = Field(..., description="Total number of executions")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "executions": [],
+                "total": 0
+            }
+        }
+    )
+
+
+class ScheduleTriggerResponse(BaseModel):
+    """Response for manually triggering a schedule."""
+
+    execution_id: str = Field(..., description="ID of the triggered execution")
+    schedule_id: str = Field(..., description="Schedule that was triggered")
+    message: str = Field(..., description="Status message")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "execution_id": "exec-789",
+                "schedule_id": "morning-briefing",
+                "message": "Schedule triggered successfully"
             }
         }
     )
