@@ -170,33 +170,35 @@ export class EditSourceModalComponent implements OnInit {
   ) {}
 
   ngOnInit(): void {
-    // Load agents first, then populate form from source
-    this.loadAgents();
-    
-    // Populate form fields from existing source
+    // Populate form fields from existing source (except simple fields which need agents)
     const source = this.data.source;
     this.sourceId.set(source.source_id);
     this.sourceType.set(source.source_type);
     this.name.set(source.name);
     this.enabled.set(source.enabled);
     
-    // Pre-populate config and credentials into simple fields
-    this.populateSimpleFieldsFromSource(source);
-    
     // Set JSON fields
     if (source.config && Object.keys(source.config).length > 0) {
       this.configJson.set(JSON.stringify(source.config, null, 2));
     }
+    
+    // Load agents first, then populate simple fields (agent dropdown needs options)
+    this.loadAgents(() => {
+      this.populateSimpleFieldsFromSource(source);
+    });
   }
   
-  private loadAgents(): void {
+  private loadAgents(onLoaded?: () => void): void {
     this.api.listAgents().subscribe({
       next: (response) => {
         this.agents.set(response.agents);
+        // Populate simple fields after agents are loaded so dropdown has options
+        onLoaded?.();
       },
       error: (err) => {
         console.error('Failed to load agents:', err);
-        // Don't show error to user - just continue without agent options
+        // Still try to populate fields even if agents failed to load
+        onLoaded?.();
       }
     });
   }
