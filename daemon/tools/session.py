@@ -1,5 +1,7 @@
 """Session management tools for multi-agent orchestration."""
 
+import asyncio
+import logging
 from pathlib import Path
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING
@@ -27,6 +29,20 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     Returns:
         List of tool functions
     """
+    logger = logging.getLogger(__name__)
+    
+    def _handle_process_result(task: asyncio.Task, session_id: str) -> None:
+        """Callback to log errors from background queue processing."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(
+                    f"Background queue processing failed for session "
+                    f"{session_id[:8]}: {exc}",
+                    exc_info=exc
+                )
+        except asyncio.CancelledError:
+            logger.debug(f"Queue processing cancelled for session {session_id[:8]}")
     
     @tool
     def spawn_session(agent_dir: str) -> str:
@@ -38,38 +54,22 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         )
     
     @tool
-    def send_message(session_id: str, message: str) -> str:
+    async def send_message(session_id: str, message: str) -> str:
         """Send a message to another session's input queue. Use tool_help("send_message") for details."""
-        import asyncio
-        
-        # Enqueue the message
+        # Enqueue the message (fast ~1-5ms DB write)
         message_id = manager.queue.enqueue(
             session_id=session_id,
             content=message,
             source=f"agent:{current_session_id}"
         )
         
-        # Trigger async processing of the target session's queue
-        # We need to schedule this since we're in a sync tool context
-        try:
-            loop = asyncio.get_running_loop()
-            # We're in an async context (LangGraph), schedule the processing
-            asyncio.create_task(manager._process_queue(session_id))
-        except RuntimeError:
-            # No running loop - use threadsafe scheduling on the main event loop
-            # This avoids creating a new event loop which would conflict with
-            # the checkpointer's asyncio.Lock that's bound to the main loop
-            if manager._loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    manager._process_queue(session_id),
-                    manager._loop
-                )
-            else:
-                # Fallback: manager not initialized properly, log warning
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"Cannot schedule queue processing: SessionManager not initialized with event loop"
-                )
+        # Fire-and-forget processing (non-blocking)
+        # Safe because: _process_queue has concurrency guard, messages are persisted,
+        # and watchdog handles failures
+        task = asyncio.create_task(manager._process_queue(session_id))
+        task.add_done_callback(
+            lambda t: _handle_process_result(t, session_id)
+        )
         
         return message_id
     

@@ -53,3 +53,4 @@ playground/
 # Config files
 config.yaml
 .env.prod
+agents-ensemble.db
