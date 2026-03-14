@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 from typing import TYPE_CHECKING
 
@@ -332,16 +332,20 @@ class SessionWatchdog:
     def __init__(
         self, 
         queue_repository: "SQLModelMessageQueueRepository",
-        request_registry: Optional["ActiveRequestRegistry"] = None
+        request_registry: Optional["ActiveRequestRegistry"] = None,
+        on_message_failed: Optional[Callable[[str, str, str], None]] = None
     ):
         """Initialize the watchdog.
         
         Args:
             queue_repository: The message queue repository for database operations.
             request_registry: Optional registry for cancelling active requests.
+            on_message_failed: Optional callback when a message is permanently failed.
+                Called with (session_id, message_id, error_message).
         """
         self._queue_repository: "SQLModelMessageQueueRepository" = queue_repository
         self._request_registry = request_registry
+        self._on_message_failed = on_message_failed
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -407,11 +411,18 @@ class SessionWatchdog:
             
             if retry_count >= max_retries:
                 # Too many retries - mark as failed
+                error_msg = "Message timed out after max retries"
                 self._queue_repository.fail_stuck_message(
                     message_id, 
-                    "Message timed out after max retries"
+                    error_msg
                 )
                 logger.warning(f"Message {message_id} failed due to timeout (max retries exceeded)")
+                # Notify callback if registered
+                if self._on_message_failed:
+                    try:
+                        self._on_message_failed(message.session_id, message_id, error_msg)
+                    except Exception as e:
+                        logger.error(f"Error in on_message_failed callback: {e}")
             else:
                 # Schedule retry
                 self._queue_repository.schedule_retry_for_stuck(

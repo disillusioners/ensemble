@@ -288,9 +288,45 @@ class SessionManager:
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
         
+        # Callback for watchdog to notify about failed messages
+        def _on_watchdog_message_failed(session_id: str, message_id: str, error: str) -> None:
+            """Handle watchdog message failure from sync thread.
+            
+            Schedules async error report using the stored event loop reference.
+            """
+            # Use stored loop reference (set during initialize())
+            loop = self._loop
+            if loop is None:
+                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop not initialized")
+                return
+            
+            if loop.is_closed():
+                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop is closed")
+                return
+            
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_error_report(
+                        session_id=session_id,
+                        error=f"Watchdog timeout: {error}",
+                        error_type="watchdog_timeout",
+                        message_id=message_id
+                    ),
+                    loop
+                )
+                # Add timeout to prevent hanging if loop is shutting down
+                future.result(timeout=5.0)
+            except RuntimeError as e:
+                logger.warning(f"Cannot send error report for {session_id[:8]}...: {e}")
+            except TimeoutError:
+                logger.warning(f"Error report timed out for {session_id[:8]}...")
+            except Exception as e:
+                logger.error(f"Unexpected error sending error report for {session_id[:8]}...: {e}")
+        
         self.watchdog = SessionWatchdog(
             self._queue_repository,
-            request_registry=self._request_registry
+            request_registry=self._request_registry,
+            on_message_failed=_on_watchdog_message_failed
         )
         self.circuit_breaker = SessionCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
@@ -633,6 +669,18 @@ class SessionManager:
         try:
             if not self.circuit_breaker.can_execute(session_id):
                 logger.warning(f"Circuit breaker open for session {session_id[:8]}...")
+                # Notify parent if this is a child session with pending messages
+                meta = self._session_repository.get(session_id)
+                if meta and meta.parent_id:
+                    # Get pending messages (single query, use count from result)
+                    pending = self._queue_repository.list(session_id=session_id, status="ready", limit=100)
+                    if pending:
+                        await self._send_error_report(
+                            session_id=session_id,
+                            error=f"Circuit breaker open - session has {len(pending)} message(s) blocked",
+                            error_type="circuit_breaker_open",
+                            message_id=pending[0].message_id
+                        )
                 return
             
             logger.debug(f"Starting dequeue loop for session {session_id[:8]}...")
@@ -777,6 +825,13 @@ class SessionManager:
                                 "retry_count": msg.retry_count
                             }
                         ))
+                        # Send error report to parent if this is a child session
+                        await self._send_error_report(
+                            session_id=session_id,
+                            error=f"Max retries ({msg.retry_count}) exceeded: {e}",
+                            error_type="max_retries_exceeded",
+                            message_id=msg.message_id
+                        )
                 
                 finally:
                     # Always unregister the request
@@ -1244,6 +1299,112 @@ Provide a concise summary:"""
         
         # Trigger parent queue processing
         asyncio.create_task(self._process_queue(parent_id))
+
+    async def _send_error_report(
+        self, 
+        session_id: str, 
+        error: str,
+        error_type: str = "execution_error",
+        message_id: str | None = None
+    ) -> None:
+        """Send error report to parent session when child fails permanently.
+        
+        Called when a child session encounters an unrecoverable error:
+        - Max retries exceeded
+        - Watchdog timeout
+        - Circuit breaker opened
+        - Unhandled exception
+        
+        Args:
+            session_id: The child session ID that has failed.
+            error: The error message describing what went wrong.
+            error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
+            message_id: Optional message ID that triggered the error.
+        """
+        try:
+            # Prevent duplicate error reports - check if we already sent one
+            if message_id:
+                meta_check = self._session_repository.get(session_id)
+                if meta_check and meta_check.parent_id:
+                    # Check for existing error report in parent's queue
+                    existing = self._queue_repository.list(
+                        session_id=meta_check.parent_id, 
+                        status="ready", 
+                        limit=10
+                    )
+                    for existing_msg in existing:
+                        if existing_msg.source == f"error_report:{session_id}":
+                            logger.debug(f"Error report already queued for session {session_id[:8]}..., skipping duplicate")
+                            return
+            
+            # Get session metadata
+            meta = self._session_repository.get(session_id)
+            if not meta:
+                logger.warning(f"Cannot send error report: session {session_id} not found")
+                return
+            
+            parent_id = meta.parent_id
+            if not parent_id:
+                logger.debug(f"Session {session_id} has no parent, skipping error report")
+                return
+            
+            agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
+            
+            logger.info(f"Session {session_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
+            
+            # Truncate error to prevent massive messages
+            truncated_error = error[:2000] if len(error) > 2000 else error
+            
+            # Determine severity based on error type
+            severity = "critical" if error_type in ["max_retries_exceeded", "circuit_breaker_open"] else "warning"
+            
+            # Format error report message
+            error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"
+            
+            # Enqueue error report message to parent using repository
+            msg = self._queue_repository.enqueue(
+                session_id=parent_id,
+                content=error_report,
+                source=f"error_report:{session_id}",
+                priority=1,  # Normal priority
+                message_metadata={
+                    "type": "error_report", 
+                    "child_session_id": session_id,
+                    "error_type": error_type,
+                    "error": truncated_error,
+                    "original_message_id": message_id,
+                    "severity": severity,
+                    "recoverable": error_type in ["watchdog_timeout", "circuit_breaker_open"],
+                }
+            )
+            report_message_id = msg.message_id
+            
+            # Broadcast error report event
+            await self.broadcaster.broadcast(Event(
+                type="error_report",
+                session_id=parent_id,
+                message_id=report_message_id,
+                data={
+                    "type": "error_report",
+                    "child_session_id": session_id,
+                    "agent_name": agent_name,
+                    "error_type": error_type,
+                    "error": truncated_error,
+                    "original_message_id": message_id,
+                    "severity": severity,
+                }
+            ))
+            
+            logger.info(f"Sent error report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+            
+            # Trigger parent queue processing so it can handle the error
+            asyncio.create_task(self._process_queue(parent_id))
+            
+        except Exception as e:
+            logger.error(
+                f"Failed to send error report for session {session_id[:8]}...: {e}. "
+                f"Original error was: {error_type}: {error[:200]}"
+            )
 
     async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
         """Get the last assistant message from session history.
