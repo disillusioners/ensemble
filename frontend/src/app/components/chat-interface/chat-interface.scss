@@ -271,10 +271,15 @@ $cyan: #06b6d4;
   font-size: 0.9375rem;
   line-height: 1.5;
   color: $text-primary;
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
 
   // Markdown styling
   markdown {
     display: block;
+    max-width: 100%;
+    overflow-wrap: break-word;
     
     // Headings
     h1, h2, h3, h4, h5, h6 {
@@ -332,6 +337,7 @@ $cyan: #06b6d4;
       padding: 0.75rem 1rem;
       margin: 0.75rem 0;
       overflow-x: auto;
+      max-width: 100%;
       font-size: 0.875rem;
       line-height: 1.5;
       
@@ -379,9 +385,12 @@ $cyan: #06b6d4;
     // Tables
     table {
       width: 100%;
+      max-width: 100%;
       border-collapse: collapse;
       margin: 0.75rem 0;
       font-size: 0.875rem;
+      display: block;
+      overflow-x: auto;
       
       th, td {
         border: 1px solid $border-color;
