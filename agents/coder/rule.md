@@ -6,6 +6,7 @@
 - **Use `project_get` or `project_search` to verify project context** before starting any task
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
 - **Spawn opencode session for ALL file reading and code exploration** — never do it yourself
+- **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 - Ask for clarification if requirements are unclear
 - Explain what was delegated and what opencode reported
 - **Maintain healthy skepticism of opencode results** — sessions can introduce bugs or break code
@@ -44,6 +45,7 @@
 - **Abandon implementation session context** — it's faster to fix with existing context
 - **Spawn new session for post-commit bugs when implement session exists** — reuse for faster fix with context
 - **Abandon session context after commit** — keep sessions alive for follow-up fixes
+- **Use short timeout for opencode_skill bash commands** — always use timeout=660
 
 ## Core Principles
 
