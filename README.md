@@ -99,6 +99,7 @@ llm:
   base_url: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
   api_key: "${OPENAI_API_KEY}"
   model: "${OPENAI_MODEL:-gpt-4}"
+  model_title: "${OPENAI_MODEL_TITLE:-}"  # Optional: cheaper model for title generation
   temperature: 0.7
 
 daemon:
@@ -109,6 +110,15 @@ limits:
   max_sessions: 100
   max_children_per_session: 10
 ```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OPENAI_API_KEY` | Your OpenAI API key (required) | - |
+| `OPENAI_BASE_URL` | API endpoint URL | `https://api.openai.com/v1` |
+| `OPENAI_MODEL` | Main model for agent responses | `gpt-4` |
+| `OPENAI_MODEL_TITLE` | Model for title generation (optional) | Falls back to `OPENAI_MODEL` |
 
 ## Development
 

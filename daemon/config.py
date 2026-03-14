@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
-from pydantic import Field, ConfigDict
+from pydantic import Field, ConfigDict, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,7 +38,15 @@ class LLMConfig(BaseSettings):
     base_url: str = Field(default="https://api.openai.com/v1")
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
+    model_title: Optional[str] = Field(default=None, description="Model for title generation (falls back to model)")
     temperature: float = Field(default=0.7)
+    
+    @model_validator(mode="after")
+    def set_title_model_fallback(self) -> "LLMConfig":
+        """Ensure model_title falls back to model if not set or empty."""
+        if not self.model_title:  # Handles None and empty string
+            self.model_title = self.model
+        return self
 
 
 class DaemonConfig(BaseSettings):

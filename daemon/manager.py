@@ -1302,10 +1302,11 @@ Provide a concise summary:"""
         from langchain_core.messages import HumanMessage, SystemMessage
         
         # Create LLM client for title generation
+        # Use dedicated title model (falls back to main model if not configured)
         llm_config = {
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
-            "model": self.config.llm.model,
+            "model": self.config.llm.model_title,
             "temperature": 0.3,  # Lower temperature for more focused titles
         }
         
