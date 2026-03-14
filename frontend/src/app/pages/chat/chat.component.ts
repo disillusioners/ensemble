@@ -96,7 +96,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.sseService.latestCompletedMessage.set(null);
         console.log('[Chat] Reset latestCompletedMessage to null');
       }
-    });
+    }, { allowSignalWrites: true });
 
     // Fallback effect: Reset isSending if streaming stopped but isSending is still true
     effect(() => {
@@ -107,7 +107,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         console.log('[Chat] Fallback: Streaming stopped, resetting isSending');
         this.isSending.set(false);
       }
-    });
+    }, { allowSignalWrites: true });
 
     // Effect to handle partial/progressive messages
     effect(() => {
@@ -124,7 +124,7 @@ export class ChatComponent implements OnInit, OnDestroy {
         console.log('[Chat] Clearing pendingMessage');
         this.pendingMessage.set(null);
       }
-    });
+    }, { allowSignalWrites: true });
 
     // Effect to handle title updates from SSE
     effect(() => {
@@ -139,10 +139,10 @@ export class ChatComponent implements OnInit, OnDestroy {
         if (this.currentSession()?.session_id === titleUpdate.session_id) {
           this.currentSession.update(s => s ? { ...s, title: titleUpdate.title } : null);
         }
-        // FIX: Reset the signal so it can trigger again
+        // Reset the signal so it can trigger again
         this.sseService.titleUpdates.set(null);
       }
-    });
+    }, { allowSignalWrites: true });
     
     // Effect to handle SSE errors - reset the signal after consumption
     effect(() => {
@@ -150,10 +150,10 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (latestError) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
-        // FIX: Reset the signal so it can trigger again
+        // Reset the signal so it can trigger again
         this.sseService.latestError.set(null);
       }
-    });
+    }, { allowSignalWrites: true });
   }
 
   ngOnDestroy(): void {
