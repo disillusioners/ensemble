@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import delete as sql_delete, func
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Session, SessionHierarchy, SessionStatus
@@ -228,6 +229,7 @@ class SQLModelSessionRepository:
                 return None
 
             session.session_metadata["title"] = title
+            flag_modified(session, "session_metadata")
             session.updated_at = datetime.utcnow().isoformat()
             db_session.commit()
             db_session.refresh(session)
@@ -242,6 +244,7 @@ class SQLModelSessionRepository:
                 return None
 
             session.session_metadata[key] = value
+            flag_modified(session, "session_metadata")
             session.updated_at = datetime.utcnow().isoformat()
             db_session.commit()
             db_session.refresh(session)
@@ -256,6 +259,7 @@ class SQLModelSessionRepository:
                 return None
 
             session.session_metadata.pop(key, None)
+            flag_modified(session, "session_metadata")
             session.updated_at = datetime.utcnow().isoformat()
             db_session.commit()
             db_session.refresh(session)
