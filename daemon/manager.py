@@ -1147,6 +1147,7 @@ class SessionManager:
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
             "temperature": 0.3,  # Lower temperature for more focused summaries
+            "default_headers": {"x-proxy-app": "ensemble"},
         }
         
         # Import here to use the same pattern as graph.py

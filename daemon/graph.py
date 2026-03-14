@@ -103,7 +103,12 @@ def build_session_graph(
     retry_config: dict | None = None,  # NEW: optional retry config
 ):
     """Build and return a compiled session graph with LLM-level retry."""
-    llm = ThinkingChatOpenAI(**llm_config)
+    # Add proxy header to all LLM requests
+    llm_config_with_headers = {
+        **llm_config,
+        "default_headers": {"x-proxy-app": "ensemble"},
+    }
+    llm = ThinkingChatOpenAI(**llm_config_with_headers)
 
     # Bind tools BEFORE wrapping with retry (RunnableRetry doesn't have bind_tools)
     llm_with_tools = llm.bind_tools(tools)
