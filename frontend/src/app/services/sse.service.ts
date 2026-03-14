@@ -25,6 +25,21 @@ export class SseService {
 
   constructor(private ngZone: NgZone) {}
 
+  /**
+   * Validates that an event belongs to the current session.
+   * This prevents race conditions where events from a previous session
+   * arrive after switching to a new session.
+   */
+  private isValidSessionEvent(data: { session_id?: string }): boolean {
+    if (data.session_id !== this.currentSessionId) {
+      console.warn(
+        `[SSE] Ignoring event from wrong session: ${data.session_id} (current: ${this.currentSessionId})`
+      );
+      return false;
+    }
+    return true;
+  }
+
   private _createEmptyMessage(messageId: string, sessionId: string): Message {
     return {
       type: 'message',
@@ -72,6 +87,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'message_queued',
@@ -91,6 +107,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'status_changed',
@@ -112,6 +129,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'content_chunk',
@@ -142,6 +160,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_call',
@@ -160,6 +179,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'thinking',
@@ -190,6 +210,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_complete',
@@ -226,6 +247,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           console.log('[SSE] Received completed event:', data.message_id, 'content length:', data.content?.length);
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
@@ -281,6 +303,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'error',
@@ -308,6 +331,7 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
+          if (!this.isValidSessionEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'title_updated',
