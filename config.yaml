@@ -6,7 +6,7 @@ llm:
   base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
   api_key: ${OPENAI_API_KEY}
   model: ${OPENAI_MODEL:-gpt-4}
-  model_title: ${OPENAI_MODEL_TITLE:-}
+  model_title: ${OPENAI_MODEL_TITLE:-}  # Optional separate model for title generation
   temperature: 0.7
 
 # Server Configuration  

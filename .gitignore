@@ -51,6 +51,6 @@ playground/
 *.db-shm
 *.db-wal
 # Config files
-config.yaml
+config.local.yaml
 .env.prod
 agents-ensemble.db
