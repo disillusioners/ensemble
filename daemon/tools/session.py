@@ -46,11 +46,26 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     
     @tool
     def spawn_session(agent_dir: str) -> str:
-        """Spawn a new agent session."""
-        return manager.spawn_session(
+        """Spawn a new agent session and return its session_id.
+        
+        IMPORTANT: After spawning, you MUST use send_message(session_id, message) 
+        to communicate with the new session. The spawned session will not do anything
+        until you send it a message.
+        
+        Args:
+            agent_dir: Path to the agent directory (e.g., "agents/coder")
+        
+        Returns:
+            The session_id of the newly spawned session. Use this with send_message().
+        """
+        new_session_id = manager.spawn_session(
             agent_dir=agent_dir,
             session_id=None,
             parent_id=current_session_id
+        )
+        return (
+            f"Successfully spawned session: {new_session_id}\n"
+            f"To communicate with this session, use: send_message(session_id=\"{new_session_id}\", message=\"your message here\")"
         )
     
     @tool
