@@ -13,6 +13,7 @@ from .project.repository import SQLModelProjectRepository
 from .session.repository import SQLModelSessionRepository
 from .message_queue.repository import SQLModelMessageQueueRepository
 from .source.repository import SQLModelSourceRepository
+from .task_queue.repository import TaskRepository
 
 
 @dataclass
@@ -219,6 +220,36 @@ def create_source_repository(
         SQLModel.metadata.create_all(engine)
     
     return SQLModelSourceRepository(engine)
+
+
+def create_task_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> TaskRepository:
+    """Create a TaskRepository from configuration or shared engine.
+    
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured TaskRepository instance.
+    
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return TaskRepository(engine)
 
 
 # Backward compatibility alias
