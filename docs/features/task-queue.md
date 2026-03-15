@@ -12,6 +12,72 @@ This document describes the Task Queue feature for agents-ensemble. The feature 
 
 ---
 
+## Implementation Status
+
+**Sprint 1: COMPLETE** ✅ (2026-03-16)
+
+### Components
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| TaskRepository | ✅ Complete | SQLite persistence with CRUD operations |
+| TaskLockManager | ✅ Complete | Per-project lock management with waiters |
+| TaskQueueService | ✅ Complete | Core enqueue/dequeue/cancel logic |
+| API Endpoints (POST/GET) | ✅ Complete | Submit and query tasks |
+| TaskProcessor | ⏳ Pending | Background worker for queued tasks |
+| DELETE /tasks/{id} | ⏳ Pending | Cancel/abort tasks |
+| SSE /tasks/{id}/events | ⏳ Pending | Real-time task updates |
+| SessionManager Integration | ⏳ Pending | Enhanced terminate_session() |
+| Scheduler Integration | ⏳ Pending | project_id routing |
+
+### Sprint 1 Commits
+
+| Commit | Description | Lines |
+|--------|-------------|-------|
+| `1350a64` | Foundation: schema, models, repository | 561 |
+| `4c1a24a` | Lock Management: TaskLockManager | 401 |
+| `b4d7ff3` | Core Service: TaskQueueService | 284 |
+| `4639a675` | Basic API: POST/GET endpoints | 431 |
+
+### Files Created
+
+```
+daemon/repositories/task_queue/
+├── __init__.py
+├── models.py           # TaskQueueItem, TaskStatus
+└── repository.py       # TaskRepository (SQLite)
+
+daemon/services/
+├── __init__.py
+├── task_lock_manager.py    # Per-project lock management
+└── task_queue_service.py   # Core queue operations
+
+daemon/routers/
+├── __init__.py
+├── schemas.py          # Pydantic request/response models
+└── tasks.py            # FastAPI router for /api/tasks
+```
+
+### What's Working
+
+- **POST /api/tasks** - Submit tasks (immediate or queued based on lock)
+- **GET /api/tasks/{task_id}** - Query task status and results
+- **GET /api/tasks** - List tasks with filters (status, project_id, limit)
+- Priority-based queue ordering (1-10 scale)
+- Per-project lock management with waiter queues
+- Crash recovery via SQLite persistence
+
+### Sprint 2 Roadmap
+
+- Background TaskProcessor worker
+- DELETE /api/tasks/{task_id} - Cancel pending/running tasks
+- GET /api/tasks/{task_id}/events - SSE endpoint
+- SessionManager.terminate_session() integration
+- Scheduler project_id routing
+- Cascade terminate to children
+
+---
+
 ## Architecture Diagram
 
 ```
@@ -1294,12 +1360,19 @@ class Config:
 
 ## Implementation Checklist
 
-- [ ] Create database table schema
-- [ ] Implement TaskRepository
-- [ ] Implement TaskLockManager
-- [ ] Implement TaskQueueService
+### Sprint 1 ✅ COMPLETE
+
+- [x] Create database table schema
+- [x] Implement TaskRepository
+- [x] Implement TaskLockManager
+- [x] Implement TaskQueueService
+- [x] Add API endpoints (POST/GET /tasks)
+
+### Sprint 2 ⏳ PENDING
+
 - [ ] Implement TaskProcessor background worker
-- [ ] Add API endpoints (POST/GET/DELETE /tasks)
+- [ ] Add DELETE /tasks/{task_id} endpoint
+- [ ] Add SSE /tasks/{task_id}/events endpoint
 - [ ] Integrate with SessionManager.terminate_session()
 - [ ] Integrate with SchedulerAdapter
 - [ ] Add configuration options
@@ -1309,5 +1382,5 @@ class Config:
 
 ---
 
-*Document Version: 1.0*  
-*Last Updated: 2025-03-15*
+*Document Version: 1.1*  
+*Last Updated: 2026-03-16*

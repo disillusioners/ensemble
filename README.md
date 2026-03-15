@@ -9,6 +9,7 @@ A **persistent multi-agent daemon** built with LangGraph. Agents are defined by 
 - **OpenAI-compatible** - works with any OpenAI-compatible endpoint
 - **Session hierarchy** - agents can spawn and communicate with other agents
 - **Persistent state** - SQLite checkpoints for crash recovery
+- **Task Queue** - priority-based task scheduling with per-project locking
 
 ## Quick Start
 
@@ -43,6 +44,10 @@ Server runs at `http://localhost:8079`
 | POST | `/sessions/:id/messages` | Send message |
 | GET | `/sessions/:id/messages` | Get message history |
 | GET | `/sessions/:id/events` | SSE event stream |
+
+### Task Queue API
+
+For priority-based task scheduling and per-project locking, see the [Task Queue Documentation](./docs/features/task-queue.md).
 
 ### Example
 
