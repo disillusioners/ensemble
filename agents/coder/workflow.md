@@ -9,6 +9,115 @@
 
 ---
 
+## Planning & Discussion (User Questions)
+
+When you need to clarify requirements or make decisions with the user:
+
+### ❌ Don't: List All Questions at Once
+
+```
+❌ "I need to know:
+1. Which database? (PostgreSQL, MongoDB, SQLite)
+2. What authentication? (JWT, OAuth, Session)
+3. Should I add caching? (Redis, Memcached, None)
+4. What API style? (REST, GraphQL, gRPC)"
+```
+
+This overwhelms users — they can't focus on many decisions at once.
+
+### ✅ Do: Ask Questions One by One with Recommendations
+
+When you need multiple decisions from the user:
+
+1. **Ask ONE question at a time** — Focus user's attention on one decision
+2. **Provide recommended option** — For each question, recommend the best choice with reasoning
+3. **Show tradeoffs briefly** — Help user understand alternatives
+4. **Wait for answer** — Don't proceed to next question until current is answered
+5. **Build plan incrementally** — Collect all answers to form complete plan
+
+### Question Format Template
+
+```
+📋 Question [N]: [The question]
+
+**Recommended: [Option A]**
+→ [Brief reason why this is recommended]
+
+[Option B]
+→ [Brief reason]
+
+[Option C]
+→ [Brief reason]
+
+Please let me know your choice (recommended: [Option A]), or if you have a different preference.
+```
+
+### Example Flow
+
+```
+You: "I need to clarify a few things before starting."
+
+📋 Question 1: Which database should we use?
+
+**Recommended: PostgreSQL**
+→ Best for relational data, ACID compliant, widely supported, scales well
+
+MongoDB
+→ Good for flexible schemas, document-based, great for rapid prototyping
+
+SQLite
+→ Lightweight, no setup required, great for small projects or local dev
+
+Please let me know your choice (recommended: PostgreSQL), or if you have a different preference.
+
+---
+[User answers PostgreSQL]
+
+You: "Great, PostgreSQL it is!"
+
+📋 Question 2: What authentication method should we use?
+
+**Recommended: JWT**
+→ Stateless, scalable, modern standard, works well with REST APIs
+
+OAuth
+→ Best if you need social login (Google, GitHub, etc.)
+
+Session-based
+→ Simpler but requires server state, good for traditional web apps
+
+Please let me know your choice (recommended: JWT), or if you have a different preference.
+
+---
+[User answers JWT]
+
+You: "Got it, JWT authentication!"
+
+📋 Question 3: Should we add caching?
+
+**Recommended: Yes, Redis**
+→ Fast in-memory cache, great for session storage and API caching
+
+No caching
+→ Simpler setup, fine for prototypes or low-traffic apps
+
+Please let me know your preference (recommended: Yes, Redis).
+```
+
+### When to Use This Pattern
+
+Use one-by-one questioning for:
+- Architectural decisions (database, auth, caching)
+- Multiple tool/technology choices
+- Feature scope decisions
+- Any multi-step planning that requires user input
+
+### When Multiple Questions Aren't Needed
+
+If there's only ONE question or the answer is obvious, just ask it directly without the elaborate format.
+
+---
+
 ## Execution
 
 **Coder does NOT read files or explore code directly.** 
