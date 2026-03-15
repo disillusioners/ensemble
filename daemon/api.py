@@ -70,6 +70,9 @@ from .manager import SessionManager
 from .config import Config, load_config
 from .events import event_to_sse
 from .sources.credentials import CredentialManager
+from .services.task_queue_service import TaskQueueService
+from .services.task_lock_manager import TaskLockManager
+from .repositories import create_task_repository, create_engine_from_config, DatabaseConfig
 
 
 def validate_agent_dir(agent_dir: str) -> Path:
@@ -139,17 +142,30 @@ MAX_CREDENTIALS_SIZE = 4096
 manager: SessionManager = None
 start_time: float = None
 credential_manager = CredentialManager()
+task_queue_service: TaskQueueService = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time
+    global manager, start_time, task_queue_service
     config = load_config()
     manager = SessionManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     start_time = time.time()
+    
+    # Initialize TaskQueueService with shared engine from manager
+    task_repository = create_task_repository(engine=manager._engine, create_tables=False)
+    task_lock_manager = TaskLockManager()
+    task_queue_service = TaskQueueService(
+        repository=task_repository,
+        lock_manager=task_lock_manager,
+    )
+    
+    # Set up dependency injection for tasks router
+    from daemon.routers.tasks import set_task_queue_service
+    set_task_queue_service(task_queue_service)
     
     # Start message sources (loads adapters from DB and starts them)
     await manager.start_sources()
@@ -1480,6 +1496,8 @@ async def receive_webhook(source_id: str, request: Request):
 
 
 # Include API router with /api prefix (must be after all routes are defined)
+from daemon.routers.tasks import router as tasks_router
+api_router.include_router(tasks_router)
 app.include_router(api_router)
 
 
