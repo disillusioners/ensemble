@@ -340,12 +340,15 @@ class SessionWatchdog:
         Args:
             queue_repository: The message queue repository for database operations.
             request_registry: Optional registry for cancelling active requests.
-            on_message_failed: Optional callback when a message is permanently failed.
-                Called with (session_id, message_id, error_message).
+                 on_message_failed: Optional callback when a message is permanently failed.
+                     Called with (session_id, message_id, error_message).
+                 on_retry_ready: Optional callback when retry-ready messages are found.
+                     Called with set of session_ids that have retry-ready messages.
         """
         self._queue_repository: "SQLModelMessageQueueRepository" = queue_repository
         self._request_registry = request_registry
         self._on_message_failed = on_message_failed
+        self._on_retry_ready = on_retry_ready
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -433,11 +436,19 @@ class SessionWatchdog:
                 logger.info(f"Message {message_id[:8]}... scheduled for retry (cancelled={cancelled})")
 
     def _check_retry_ready_messages(self) -> None:
-        """Move retry-ready messages back to ready status."""
+        """Move retry-ready messages back to ready status and trigger re-processing."""
         # Find retry-ready messages using repository
         retry_ready_messages = self._queue_repository.find_retry_ready_messages()
         
         if retry_ready_messages:
+            # Get unique session IDs
+            session_ids = list(set(msg.session_id for msg in retry_ready_messages))
+            
+            # Move to ready
             message_ids = [msg.message_id for msg in retry_ready_messages]
             count = self._queue_repository.move_retry_ready_to_ready(message_ids)
-            logger.debug(f"Moved {count} messages from retrying to ready")
+            logger.info(f"Moved {count} messages from retrying to ready for sessions: {[s[:8] for s in session_ids]}")
+            
+            # Trigger re-processing for each session via callback
+            if self._on_retry_ready:
+                self._on_retry_ready(session_ids)

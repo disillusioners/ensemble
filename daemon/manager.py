@@ -323,10 +323,43 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Unexpected error sending error report for {session_id[:8]}...: {e}")
         
+        # Callback for watchdog to trigger re-processing of retry-ready messages
+        def _on_watchdog_retry_ready(session_ids: list[str]) -> None:
+            """Handle retry-ready messages from watchdog sync thread.
+            
+            Triggers _process_queue for each session with retry-ready messages.
+            """
+            # Use stored loop reference (set during initialize())
+            loop = self._loop
+            if loop is None:
+                logger.warning("Cannot trigger retry processing: event loop not initialized")
+                return
+            
+            if loop.is_closed():
+                logger.warning("Cannot trigger retry processing: event loop is closed")
+                return
+            
+            for session_id in session_ids:
+                try:
+                    logger.info(f"Triggering retry processing for session {session_id[:8]}...")
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._process_queue(session_id),
+                        loop
+                    )
+                    # Add timeout to prevent hanging
+                    future.result(timeout=5.0)
+                except RuntimeError as e:
+                    logger.warning(f"Cannot trigger retry for {session_id[:8]}...: {e}")
+                except TimeoutError:
+                    logger.warning(f"Retry trigger timed out for {session_id[:8]}...")
+                except Exception as e:
+                    logger.error(f"Error triggering retry processing for {session_id[:8]}...: {e}")
+        
         self.watchdog = SessionWatchdog(
             self._queue_repository,
             request_registry=self._request_registry,
-            on_message_failed=_on_watchdog_message_failed
+            on_message_failed=_on_watchdog_message_failed,
+            on_retry_ready=_on_watchdog_retry_ready,
         )
         self.circuit_breaker = SessionCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
