@@ -40,6 +40,7 @@ class LLMConfig(BaseSettings):
     model: str = Field(default="gpt-4")
     model_title: Optional[str] = Field(default=None, description="Model for title generation (falls back to model)")
     temperature: float = Field(default=0.7)
+    request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
     
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":

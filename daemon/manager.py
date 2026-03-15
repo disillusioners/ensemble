@@ -442,6 +442,7 @@ class SessionManager:
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
             "temperature": self.config.llm.temperature,
+            "request_timeout": self.config.llm.request_timeout,
         }
 
         # Build retry config from queue settings
@@ -697,8 +698,8 @@ class SessionManager:
                 existing_messages = await get_session_messages(self.checkpointer, session_id)
                 is_first_message = len(existing_messages) == 0
                 
-                # Extract retry flag from metadata
-                is_retry = msg.message_metadata.get("is_retry", False) if msg.message_metadata else False
+                # Check retry_count instead of metadata flag (more reliable)
+                is_retry = msg.retry_count > 0
                 
                 # Broadcast status_changed event
                 await self.broadcaster.broadcast(Event(
@@ -926,11 +927,15 @@ class SessionManager:
         event_count = 0
         
         # Build input - on retry with checkpoint, resume from None
-        if is_retry and await self._has_checkpoint(session_id):
-            logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry)")
-            graph_input = None  # LangGraph will resume from checkpoint
+        if is_retry:
+            if await self._has_checkpoint(session_id):
+                logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry #{msg.retry_count})")
+                graph_input = None  # LangGraph will resume from checkpoint
+            else:
+                logger.warning(f"Retry for session {session_id[:8]}... but no checkpoint found, re-adding message")
+                graph_input = {"messages": [message]}
         else:
-            # First attempt or no checkpoint - add message to conversation
+            # First attempt - add message to conversation
             graph_input = {"messages": [message]}
         
         # Stream through graph execution
@@ -1625,6 +1630,7 @@ Title:"""
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
             "temperature": self.config.llm.temperature,
+            "request_timeout": self.config.llm.request_timeout,
         }
 
         # Build retry config from queue settings

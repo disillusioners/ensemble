@@ -234,10 +234,8 @@ class SQLModelMessageQueueRepository:
             if message is None:
                 return None
             
-            # Set is_retry flag in metadata
-            if message.message_metadata is None:
-                message.message_metadata = {}
-            message.message_metadata["is_retry"] = True
+            # Update retry count (retry_count > 0 is the canonical check for retry status)
+            message.retry_count = retry_count
             
             # Exponential backoff: 1min, 2min, 4min, 8min, etc.
             delay = min(60 * (2 ** (retry_count - 1)), 3600)  # Max 1 hour
