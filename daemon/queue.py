@@ -333,7 +333,8 @@ class SessionWatchdog:
         self, 
         queue_repository: "SQLModelMessageQueueRepository",
         request_registry: Optional["ActiveRequestRegistry"] = None,
-        on_message_failed: Optional[Callable[[str, str, str], None]] = None
+        on_message_failed: Optional[Callable[[str, str, str], None]] = None,
+        on_retry_ready: Optional[Callable[[list[str]], None]] = None
     ):
         """Initialize the watchdog.
         
