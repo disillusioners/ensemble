@@ -420,7 +420,11 @@ class SessionManager:
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     def spawn_session(
-        self, agent_dir: str, session_id: str | None = None, parent_id: str | None = None
+        self, 
+        agent_dir: str, 
+        session_id: str | None = None, 
+        parent_id: str | None = None,
+        project_id: str | None = None,
     ) -> str:
         """Create a new agent session.
 
@@ -428,6 +432,9 @@ class SessionManager:
             agent_dir: Path to the agent directory.
             session_id: Optional session ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent session ID for hierarchical sessions.
+        project_id: Optional project ID for project context. Use `None` to explicitly
+            indicate no project context is needed. If provided, stored in session
+            metadata so child sessions don't rely on text extraction.
 
         Returns:
             The session_id of the newly created session.
@@ -493,10 +500,23 @@ class SessionManager:
         )
 
         # Save metadata to DB using session repository
+        # Include project_id in metadata so child sessions don't rely on text extraction
+        session_metadata = {}
+        if project_id is not None:
+            # Validate project exists before storing (P1)
+            project = self._project_repository.get(project_id)
+            if project is None:
+                raise ValueError(
+                    f"Project '{project_id}' not found. "
+                    f"Use None if no project context is needed."
+                )
+            session_metadata["project_id"] = project_id
+        
         self._session_repository.create(
             session_id=session_id,
             agent_dir=agent_dir,
             parent_id=parent_id,
+            metadata=session_metadata if session_metadata else None,
         )
 
         # Store in sessions dict
@@ -753,14 +773,41 @@ class SessionManager:
                     # Project context injection on first message (BEFORE processing)
                     message_content = msg.content
                     if is_first_message:
-                        keywords = extract_project_keywords(msg.content)
-                        project = self.project_store.match_by_keywords(keywords)
-                        if project:
-                            # Format project context and prepend to message
-                            project_context = format_project_context(project)
-                            message_content = project_context + msg.content
-                            logger.debug(f"Injected project context for project: {project.name}")
-                    
+                        # PRIORITY 1: Use explicit project_id from session metadata
+                        session_meta = self._session_repository.get(session_id)
+                        explicit_project_id = (
+                            session_meta.session_metadata.get("project_id") 
+                            if session_meta and session_meta.session_metadata 
+                            else None
+                        )
+                        
+                        if explicit_project_id:
+                            # Use explicit project context (no text extraction)
+                            project = self._project_repository.get(explicit_project_id)
+                            if project:
+                                project_context = format_project_context(project)
+                                message_content = project_context + msg.content
+                                logger.debug(f"Injected explicit project context: {project.name}")
+                            else:
+                                logger.warning(
+                                    f"Project '{explicit_project_id}' not found for session {session_id[:8]}... "
+                                    f"(may have been deleted after session creation)"
+                                )
+                        else:
+                            # FALLBACK: Text extraction only if no explicit project_id
+                            keywords = extract_project_keywords(msg.content)
+                            project = self.project_store.match_by_keywords(keywords)
+                            if project:
+                                project_context = format_project_context(project)
+                                message_content = project_context + msg.content
+                                logger.debug(f"Injected inferred project context: {project.name}")
+                    result = await self._process_message_with_tracking(
+                        session_id,
+                        message_content,
+                        msg.message_id,
+                        cancellation_token=cancellation_source.token,
+                        is_retry=is_retry,
+                    )
                     result = await self._process_message_with_tracking(
                         session_id,
                         message_content,

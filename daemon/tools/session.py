@@ -45,7 +45,7 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
             logger.debug(f"Queue processing cancelled for session {session_id[:8]}")
     
     @tool
-    def spawn_session(agent_dir: str) -> str:
+    def spawn_session(agent_dir: str, project_id: str | None = None) -> str:
         """Spawn a new agent session and return its session_id.
         
         IMPORTANT: After spawning, you MUST use send_message(session_id, message) 
@@ -54,6 +54,11 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         
         Args:
             agent_dir: Path to the agent directory (e.g., "agents/coder")
+            project_id: Optional project ID for context injection. Pass None if no 
+                project context is needed. If provided, the child session will use 
+                this project context instead of extracting it from message text.
+                This ensures child sessions don't rely on text extraction - 
+                the parent must explicitly provide context.
         
         Returns:
             The session_id of the newly spawned session. Use this with send_message().
@@ -61,7 +66,8 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         new_session_id = manager.spawn_session(
             agent_dir=agent_dir,
             session_id=None,
-            parent_id=current_session_id
+            parent_id=current_session_id,
+            project_id=project_id,
         )
         return (
             f"Successfully spawned session: {new_session_id}\n"
