@@ -31,9 +31,7 @@ export class MessageInputComponent {
     return !!this.message().trim() && !this.disabled;
   }
 
-  handleSubmit(event?: Event): void {
-    event?.preventDefault();
-    
+  handleSubmit(): void {
     const trimmedMessage = this.message().trim();
     if (!trimmedMessage || this.disabled) return;
 
@@ -43,13 +41,6 @@ export class MessageInputComponent {
     // Reset textarea height
     if (this.textareaRef) {
       this.textareaRef.nativeElement.style.height = 'auto';
-    }
-  }
-
-  onKeyDown(event: KeyboardEvent): void {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      this.handleSubmit();
     }
   }
 

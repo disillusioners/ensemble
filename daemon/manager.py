@@ -808,13 +808,6 @@ class SessionManager:
                         cancellation_token=cancellation_source.token,
                         is_retry=is_retry,
                     )
-                    result = await self._process_message_with_tracking(
-                        session_id,
-                        message_content,
-                        msg.message_id,
-                        cancellation_token=cancellation_source.token,
-                        is_retry=is_retry,
-                    )
                     
                     # Pre-ACK status check to prevent race condition with watchdog
                     # Always record success since processing completed without error
