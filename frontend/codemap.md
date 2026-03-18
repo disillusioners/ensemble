@@ -20,7 +20,7 @@ Angular 21 single-page application providing the user interface for the auto-cod
 ## Build Configuration
 | Script | Command | Purpose |
 |--------|---------|---------|
-| `start` | `ng serve` | Start dev server (default: http://localhost:4200) |
+| `start` | `ng serve` | Start dev server (default: http://localhost:4199) |
 | `build` | `ng build` | Build production bundle |
 | `watch` | `ng build --watch --configuration development` | Watch mode for development |
 | `test` | `ng test` | Run unit tests |
