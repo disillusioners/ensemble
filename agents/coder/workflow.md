@@ -9,6 +9,27 @@
 
 ---
 
+## Session Reuse Strategy
+
+### Default: Always Start NEW Session
+
+**Start a fresh session for each task.** Do NOT rely on previous discussion or session context.
+
+### When to Reuse (Only in These Cases)
+
+| Scenario | Reuse? |
+|----------|--------|
+| Change is small AND low risk | ✅ Yes |
+| Otherwise | ❌ No - Spawn new session |
+
+### Decision Criteria
+
+- **Small + Low Risk?** → Reuse session (e.g., typo fix, simple variable rename)
+- **Any significant change?** → New session
+- **Not sure?** → New session
+
+---
+
 ## Planning & Discussion (User Questions)
 
 When you need to clarify requirements or make decisions with the user:
@@ -189,42 +210,23 @@ For each iteration:
 2. **Review** — Spawn review session (also via opencode)
 3. **Evaluate Review** — Check if code is good or needs fixes
 4. **Iterate or Commit:**
-   - **If review passed (no more updates needed)** → **Auto-commit immediately** (reuse review session)
-   - **If review found issues** → **Reuse implementation session to fix** (see Fix Strategy below)
+   - **If review passed (no more updates needed)** → **Auto-commit immediately (new session)**
+   - **If review found issues** → **Spawn new session to fix** (see Fix Strategy below)
 
 ---
 
 ## Fix Strategy (When Review Finds Issues)
 
-### Prefer Implementation Session
+### Spawn New Session for Fixes
 
-**Always reuse the implementation session for fixes** — it has full context and can fix issues faster.
+**Always spawn a NEW session for fixes.** The new session will have fresh context.
 
-Send fix instruction to implementation session:
-```
-"Review found these issues: [list issues]. Please fix them."
-```
+### When to Reuse (Rare Cases)
 
-### When to Spawn New Fix Session (Rare Cases)
+Only reuse an existing session if:
+- Change is small AND low risk
 
-Only spawn a **new** opencode session for fixes if the implementation session has problems:
-
-🚫 **Implementation session is unusable when:**
-- Session crashed or errored out
-- Hallucination detected in session response (claiming things that don't exist)
-- Session is stuck in a loop (same mistake repeatedly)
-- Session context is corrupted or confused
-
-✅ **Otherwise, always reuse implementation session** — even for significant fixes
-
-### Example Flow
-
-```
-1. Implementation session (S1) → implements feature
-2. Review session (S2) → reviews code, reports "found 3 issues: ..."
-3. Reuse S1 (implementation) → send "Fix these issues: ..."
-4. S1 fixes → done (or back to step 2 for re-review)
-```
+Otherwise, always spawn new.
 
 ---
 
@@ -234,7 +236,7 @@ When review session confirms code is good (no issues, no improvements needed):
 
 ### Commit Process
 
-1. **Reuse the review session** — Send commit instruction to the same session
+1. **Spawn NEW session for commit** — Don't reuse review session
 2. **Commit message format:**
    ```
    [type]: [brief description]
@@ -270,7 +272,7 @@ When review session confirms code is good (no issues, no improvements needed):
 ```
 1. Spawn implementation session → implements feature
 2. Spawn review session → reviews code, reports "looks good, no issues"
-3. Reuse review session → send "Commit with message: 'feat: add user authentication'"
+3. Spawn NEW commit session → send "Commit with message: 'feat: add user authentication'"
 4. Session commits → done
 ```
 
@@ -278,68 +280,29 @@ When review session confirms code is good (no issues, no improvements needed):
 
 ## Handling Post-Commit Bug Reports
 
-When user reports a bug or issue after a task is completed (implementation → review → commit done):
+When user reports a bug or issue after a task is completed:
 
-### Session Reuse Strategy
+### Session Strategy
 
-**Always prefer reusing existing sessions over spawning new ones:**
-
-1. **Bug Fix** → Reuse the **implementation session** (has full context of what was just built)
-2. **Re-Review** → Reuse the **review session** (already reviewed this code, quick to verify fix)
+**Spawn a NEW session for bug fixes.** Do NOT rely on previous discussion.
 
 ### Decision Flow
 
 ```
 User: "there's a bug" / "this doesn't work" / "fix this issue"
     ↓
-Check: Do I have recent implement/review sessions for this area?
+Spawn NEW session → Send: "Bug report: [description]. Please investigate and fix."
     ↓
-YES → Reuse implementation session → Send: "Bug report: [description]. Please investigate and fix."
+After fix → Spawn NEW review session → Send: "A fix was made for [bug]. Please verify."
     ↓
-After fix → Reuse review session → Send: "A fix was made for [bug]. Please verify the fix is correct."
-    ↓
-Review passed → Auto-commit (reuse review session)
+Review passed → Spawn NEW commit session → commit
 ```
 
-### When to Spawn New Session
+### When to Reuse (Only for Small + Low Risk)
 
-Only spawn a **new** opencode session if:
-- No relevant session exists (different feature/area)
-- Existing sessions are stale (>1 hour old, different context)
-- Implementation session is broken (errors, hallucination, stuck)
-
-### Example
-
-```
-Message 1 (User): "Implement login feature"
-    → Spawn implement session S1 → implements
-    → Spawn review session S2 → reviews
-    → S2 confirms good → commit
-    
-Message 2 (User): "There's a bug, it crashes on empty password"
-    → Reuse S1 (implement session) → "Fix this bug: crashes on empty password"
-    → S1 fixes → done (or re-review with S2 if significant)
-```
-
-### Intelligent Decision
-
-Use judgment:
-- **Same area/feature?** → Reuse sessions
-- **Different area/feature?** → May need new session
-- **Quick fix?** → Reuse implement session, skip full re-review
-- **Complex fix?** → Reuse implement session, then re-review with review session
-
----
-
-## Session Reuse Summary
-
-| Task | Which Session to Use |
-|------|---------------------|
-| Fix issues from review | **Implementation session** (has context) |
-| Commit after good review | **Review session** (already verified) |
-| Post-commit bug fix | **Implementation session** (has context of what was built) |
-| Verify bug fix | **Review session** (already reviewed this code) |
-| New fix session | **Only if implementation session is broken** |
+- Tiny fix (typo, single line)
+- Trivial change
+- Otherwise → New session
 
 ---
 
