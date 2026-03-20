@@ -988,6 +988,7 @@ class SessionManager:
         # Content chunk batching to reduce event rate
         content_buffer = ""
         content_buffer_size = 0
+        thinking_buffer = ""  # Accumulate reasoning_content from delta chunks
         CONTENT_BATCH_THRESHOLD = 50  # Flush after 50 characters
         CONTENT_BATCH_TIMEOUT = 0.05  # Or after 50ms (whichever comes first)
         last_content_flush = time.monotonic()  # Initialize to current time
@@ -1034,16 +1035,21 @@ class SessionManager:
                                 final_content = latest_msg.content or ""
                             
                             # Extract thinking from the message
-                            if hasattr(latest_msg, 'thinking') and latest_msg.thinking:
-                                thinking_content = latest_msg.thinking
+                            if not thinking_content:
+                                if hasattr(latest_msg, 'thinking') and latest_msg.thinking:
+                                    thinking_content = latest_msg.thinking
+                                elif hasattr(latest_msg, 'additional_kwargs'):
+                                    kwargs = latest_msg.additional_kwargs or {}
+                                    thinking_content = kwargs.get("reasoning_content") or kwargs.get("thinking")
                                 
-                                # Broadcast thinking event
-                                await self.broadcaster.broadcast(Event(
-                                    type="thinking",
-                                    session_id=session_id,
-                                    message_id=message_id,
-                                    data={"content": thinking_content}
-                                ))
+                                if thinking_content:
+                                    # Broadcast thinking event
+                                    await self.broadcaster.broadcast(Event(
+                                        type="thinking",
+                                        session_id=session_id,
+                                        message_id=message_id,
+                                        data={"content": thinking_content}
+                                    ))
                             
                             # Track tool calls from AI message for matching
                             if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
@@ -1113,6 +1119,26 @@ class SessionManager:
                             content_buffer += chunk.content
                             content_buffer_size += len(chunk.content)
                             event_count += 1
+                        
+                        # Accumulate reasoning_content from delta chunks (e.g., GLM extended thinking)
+                        if not thinking_content:
+                            chunk_reasoning = None
+                            if hasattr(chunk, 'additional_kwargs'):
+                                kwargs = chunk.additional_kwargs or {}
+                                chunk_reasoning = kwargs.get("reasoning_content") or kwargs.get("thinking")
+                            elif hasattr(chunk, 'response_metadata'):
+                                meta = chunk.response_metadata or {}
+                                chunk_reasoning = meta.get("reasoning_content") or meta.get("thinking")
+                            
+                            if chunk_reasoning:
+                                thinking_buffer += chunk_reasoning
+                                # Broadcast incrementally for real-time display
+                                await self.broadcaster.broadcast(Event(
+                                    type="thinking",
+                                    session_id=session_id,
+                                    message_id=message_id,
+                                    data={"content": thinking_buffer}
+                                ))
                             
                             # Flush if buffer exceeds threshold OR timeout elapsed
                             now = time.monotonic()
@@ -1171,6 +1197,10 @@ class SessionManager:
             ))
             raise  # Re-raise to let _process_queue handle retry logic
         
+        # Transfer accumulated thinking from streaming chunks
+        if thinking_buffer and not thinking_content:
+            thinking_content = thinking_buffer
+        
         # After streaming completes, get final result
         # Validate final_result exists
         final_result = await graph.aget_state(config)
@@ -1222,8 +1252,7 @@ class SessionManager:
                 thinking_content = last_ai_message.thinking
             elif hasattr(last_ai_message, 'additional_kwargs'):
                 kwargs = last_ai_message.additional_kwargs or {}
-                if kwargs.get("thinking"):
-                    thinking_content = kwargs["thinking"]
+                thinking_content = kwargs.get("reasoning_content") or kwargs.get("thinking")
         
         # Extract final content from last AI message if not set during streaming
         if last_ai_message and not final_content:
