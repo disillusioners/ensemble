@@ -41,12 +41,20 @@ class ChatCompletionRequest(BaseModel):
     mock_response: str | None = None
 
 
-MOCK_RESPONSES = [
+MOCK_CONTENT_RESPONSES = [
     "This is a mock response from the LLM server. The server is working correctly.",
     "Mock LLM response: I received your message and processed it successfully.",
     "Hello! I'm a mock LLM server. Your message has been received and I'm generating this response.",
     "Response from mock server: Testing the LLM integration is working as expected.",
     "Mock response: The system is functioning correctly with the configured upstream URL.",
+]
+
+MOCK_THINKING_RESPONSES = [
+    "Let me think about this... The user is asking me to respond to their message. I should provide a helpful and accurate response.",
+    "Processing the request... Analyzing the input and formulating an appropriate reply based on the context provided.",
+    "I'll help you with that. First, let me consider the key points of your question before generating a response.",
+    "Thinking through the best way to answer... I need to provide accurate information while being concise and clear.",
+    "Analyzing your message... I'll generate a response that addresses your query in a helpful manner.",
 ]
 
 
@@ -55,12 +63,13 @@ class MockLLMState:
         self.request_count = 0
         self.response_index = 0
 
-    def get_response(self, custom: str | None = None) -> str:
+    def get_response(self, custom: str | None = None) -> tuple[str, str]:
         if custom:
-            return custom
-        resp = MOCK_RESPONSES[self.response_index % len(MOCK_RESPONSES)]
+            return custom, ""
+        content = MOCK_CONTENT_RESPONSES[self.response_index % len(MOCK_CONTENT_RESPONSES)]
+        thinking = MOCK_THINKING_RESPONSES[self.response_index % len(MOCK_THINKING_RESPONSES)]
         self.response_index += 1
-        return resp
+        return content, thinking
 
     def increment(self):
         self.request_count += 1
@@ -89,7 +98,8 @@ async def stats():
     return {
         "total_requests": state.request_count,
         "response_index": state.response_index,
-        "available_responses": MOCK_RESPONSES,
+        "available_responses": MOCK_CONTENT_RESPONSES,
+        "available_thinking": MOCK_THINKING_RESPONSES,
     }
 
 
@@ -107,20 +117,24 @@ async def chat_completions(req: ChatCompletionRequest):
             user_message = msg.content
             break
 
-    response_content = req.mock_response or state.get_response()
-    response_content = response_content.replace("{user_message}", user_message)
+    if req.mock_response:
+        response_content = req.mock_response.replace("{user_message}", user_message)
+        thinking_content = ""
+    else:
+        response_content, thinking_content = state.get_response()
+        response_content = response_content.replace("{user_message}", user_message)
 
     if req.stream:
         return StreamingResponse(
-            stream_response(req.model, user_message, response_content, req),
+            stream_response(req.model, user_message, response_content, thinking_content, req),
             media_type="text/event-stream",
         )
     else:
-        return build_non_stream_response(req.model, user_message, response_content)
+        return build_non_stream_response(req.model, user_message, response_content, thinking_content)
 
 
 def build_non_stream_response(
-    model: str, user_message: str, content: str
+    model: str, user_message: str, content: str, thinking: str
 ) -> JSONResponse:
     """Build a non-streaming chat completion response."""
     return JSONResponse(
@@ -135,28 +149,38 @@ def build_non_stream_response(
                     "message": {
                         "role": "assistant",
                         "content": content,
+                        "reasoning_content": thinking or None,
                     },
                     "finish_reason": "stop",
                 }
             ],
             "usage": {
                 "prompt_tokens": len(user_message.split()),
-                "completion_tokens": len(content.split()),
-                "total_tokens": len(user_message.split()) + len(content.split()),
+                "completion_tokens": len(content.split()) + len(thinking.split()) if thinking else len(content.split()),
+                "total_tokens": len(user_message.split()) + len(content.split()) + (len(thinking.split()) if thinking else 0),
             },
         }
     )
 
 
 def stream_response(
-    model: str, user_message: str, content: str, req: ChatCompletionRequest
+    model: str, user_message: str, content: str, thinking: str, req: ChatCompletionRequest
 ) -> Generator[str, None, None]:
-    """Yield streaming response chunks."""
-    chunk_size = max(1, len(content) // 5)
-    chunks = []
-    for i in range(0, len(content), chunk_size):
-        chunk = content[i : i + chunk_size]
-        chunks.append(chunk)
+    """Yield streaming response chunks (GLM-style with reasoning_content before content)."""
+    content_chunk_size = max(1, len(content) // 5)
+    content_chunks = []
+    for i in range(0, len(content), content_chunk_size):
+        content_chunks.append(content[i : i + content_chunk_size])
+
+    # Split thinking into word-level chunks to mimic GLM streaming
+    thinking_words = thinking.split() if thinking else []
+    thinking_chunks = []
+    current_thinking = ""
+    for word in thinking_words:
+        current_thinking += word + " "
+        if len(current_thinking) >= 5 or word == thinking_words[-1]:
+            thinking_chunks.append(current_thinking)
+            current_thinking = ""
 
     # Send first chunk with role
     yield format_sse(
@@ -176,8 +200,8 @@ def stream_response(
         },
     )
 
-    # Send content chunks
-    for chunk in chunks:
+    # Send reasoning_content chunks (like GLM extended thinking)
+    for tc in thinking_chunks:
         time.sleep(req.stream_delay)
         yield format_sse(
             "chunk",
@@ -189,7 +213,27 @@ def stream_response(
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"content": chunk},
+                        "delta": {"reasoning_content": tc},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+        )
+
+    # Send content chunks
+    for cc in content_chunks:
+        time.sleep(req.stream_delay)
+        yield format_sse(
+            "chunk",
+            {
+                "id": f"mockchat-{int(time.time() * 1000)}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": cc},
                         "finish_reason": None,
                     }
                 ],
@@ -213,8 +257,8 @@ def stream_response(
             ],
             "usage": {
                 "prompt_tokens": len(user_message.split()),
-                "completion_tokens": len(content.split()),
-                "total_tokens": len(user_message.split()) + len(content.split()),
+                "completion_tokens": len(content.split()) + len(thinking.split()) if thinking else len(content.split()),
+                "total_tokens": len(user_message.split()) + len(content.split()) + (len(thinking.split()) if thinking else 0),
             },
         },
     )

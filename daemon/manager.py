@@ -1121,24 +1121,42 @@ class SessionManager:
                             event_count += 1
                         
                         # Accumulate reasoning_content from delta chunks (e.g., GLM extended thinking)
-                        if not thinking_content:
-                            chunk_reasoning = None
-                            if hasattr(chunk, 'additional_kwargs'):
-                                kwargs = chunk.additional_kwargs or {}
-                                chunk_reasoning = kwargs.get("reasoning_content") or kwargs.get("thinking")
-                            elif hasattr(chunk, 'response_metadata'):
-                                meta = chunk.response_metadata or {}
-                                chunk_reasoning = meta.get("reasoning_content") or meta.get("thinking")
-                            
-                            if chunk_reasoning:
-                                thinking_buffer += chunk_reasoning
-                                # Broadcast incrementally for real-time display
-                                await self.broadcaster.broadcast(Event(
-                                    type="thinking",
-                                    session_id=session_id,
-                                    message_id=message_id,
-                                    data={"content": thinking_buffer}
-                                ))
+                        chunk_reasoning = None
+
+                        # Try 1: additional_kwargs (standard LangChain location for reasoning_content)
+                        if hasattr(chunk, 'additional_kwargs'):
+                            kwargs = chunk.additional_kwargs or {}
+                            chunk_reasoning = kwargs.get("reasoning_content") or kwargs.get("thinking")
+
+                        # Try 2: direct reasoning_content attribute (some LangChain versions)
+                        if not chunk_reasoning and hasattr(chunk, 'reasoning_content'):
+                            chunk_reasoning = chunk.reasoning_content
+
+                        # Try 3: response_metadata (some provider-specific implementations)
+                        if not chunk_reasoning and hasattr(chunk, 'response_metadata'):
+                            meta = chunk.response_metadata or {}
+                            chunk_reasoning = meta.get("reasoning_content") or meta.get("thinking")
+
+                        # Try 4: content as list (Responses API format: [{"type": "reasoning", "reasoning": "..."}])
+                        if not chunk_reasoning and hasattr(chunk, 'content') and isinstance(chunk.content, list):
+                            for block in chunk.content:
+                                if isinstance(block, dict):
+                                    if block.get("type") == "reasoning":
+                                        chunk_reasoning = block.get("reasoning") or block.get("summary_text", "")
+                                        break
+                                    elif block.get("type") == "reasoning_summary_text":
+                                        chunk_reasoning = block.get("text", "")
+                                        break
+
+                        if chunk_reasoning:
+                            thinking_buffer += chunk_reasoning
+                            # Broadcast incrementally for real-time display
+                            await self.broadcaster.broadcast(Event(
+                                type="thinking",
+                                session_id=session_id,
+                                message_id=message_id,
+                                data={"content": thinking_buffer}
+                            ))
                             
                             # Flush if buffer exceeds threshold OR timeout elapsed
                             now = time.monotonic()
