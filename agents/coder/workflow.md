@@ -4,8 +4,263 @@
 
 1. **Verify Project Context** — Use `project_get` or `project_search` to confirm correct project
 2. **Analyze Requirements** — Understand what needs to be done
-3. **Plan** — Determine what opencode sessions to spawn
-4. **Delegate** — Spawn opencode session(s) for ALL work
+3. **Plan & Split Tasks** — Decompose into ordered tasks with dependencies and parallel batches (see Task Planning section)
+4. **Execute All Tasks** — Spawn opencode sessions for ALL tasks (using parallel batches when confident)
+5. **Review All** — After ALL implementations complete, spawn comprehensive review
+6. **Fix Loop** — If review finds issues: fix → review → repeat until passes
+7. **Commit** — After review passes, spawn commit session
+
+---
+
+## Task Planning
+
+### Planning Phase
+
+Before spawning any implementation sessions, you MUST:
+
+1. **Decompose** the request into small, focused tasks
+2. **Order** tasks by logical sequence
+3. **Identify dependencies** between tasks
+4. **Group into parallel batches** — tasks that can run simultaneously
+5. **Document** the task list with order, dependencies, and parallel execution plan
+
+### Task Format
+
+Create a task list in this format:
+
+```
+## Task Plan
+
+### Parallel Batch 1 (No dependencies - can run simultaneously)
+
+### Task 1: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** None
+- **Order:** 1
+- **Parallel:** Yes (Batch 1)
+
+### Task 2: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** None
+- **Order:** 1
+- **Parallel:** Yes (Batch 1)
+
+### Task 3: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** None
+- **Order:** 1
+- **Parallel:** Yes (Batch 1)
+
+---
+
+### Parallel Batch 2 (Depends on Batch 1)
+
+### Task 4: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** Task 1
+- **Order:** 2
+- **Parallel:** Yes (Batch 2)
+
+### Task 5: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** Task 2
+- **Order:** 2
+- **Parallel:** Yes (Batch 2)
+
+---
+
+### Parallel Batch 3 (Depends on Batch 2)
+
+### Task 6: [Task Name]
+- **Description:** What this task does
+- **Dependencies:** Task 4, Task 5
+- **Order:** 3
+- **Parallel:** No (final task)
+
+...
+```
+
+### Parallel Execution Strategy
+
+#### When to Use Parallel Execution
+
+**Use parallel execution ONLY when you have HIGH CONFIDENCE in the task planning order.**
+
+| Confidence Level | Action |
+|------------------|--------|
+| **High Confidence** — Tasks are clearly independent, no shared state, no ordering ambiguity | ✅ Run in parallel |
+| **Medium/Low Confidence** — Uncertain if tasks are truly independent, potential hidden dependencies | ❌ Run sequentially (one at a time) |
+
+#### Why Caution Matters
+
+**Incorrect parallel execution can break things:**
+- Tasks may have hidden dependencies you didn't identify
+- Parallel tasks might modify the same files or state
+- Order-sensitive operations may fail when run simultaneously
+- Debugging parallel failures is harder
+
+**When in doubt, run sequentially.** Safety first.
+
+#### Parallel Batch Thinking
+
+Think in advance about execution batches:
+
+```
+Batch 1: Task 1, Task 2, Task 3 (no dependencies, can run in parallel)
+    ↓ (wait for all to complete)
+Batch 2: Task 4, Task 5 (Task 4 depends on Task 1, Task 5 depends on Task 2)
+    ↓ (wait for all to complete)
+Batch 3: Task 6 (depends on Task 4 and Task 5)
+    ↓
+Done
+```
+
+### Dependency Rules
+
+- Tasks with **no dependencies** can be spawned in parallel (if confident)
+- Tasks with **dependencies** must wait for their dependencies to complete
+- Track completion status before spawning dependent tasks
+- Present the full task plan to the user before execution
+- **Clearly indicate which tasks will run in parallel vs sequentially**
+
+### Example
+
+```
+User: "Add user authentication with login, logout, and protected routes"
+
+## Task Plan
+
+### Parallel Batch 1 (Foundational - no dependencies)
+
+### Task 1: Create User Model & Database Schema
+- **Description:** Define user model, create migration for users table
+- **Dependencies:** None
+- **Order:** 1
+- **Parallel:** Yes (Batch 1)
+
+### Task 2: Implement Password Hashing & Verification
+- **Description:** Add bcrypt password hashing utilities
+- **Dependencies:** None
+- **Order:** 1
+- **Parallel:** Yes (Batch 1)
+
+---
+
+### Parallel Batch 2 (Depends on Batch 1)
+
+### Task 3: Create Authentication Endpoints (login, logout, register)
+- **Description:** Build API routes for authentication
+- **Dependencies:** Task 1, Task 2
+- **Order:** 2
+- **Parallel:** Yes (Batch 2)
+
+### Task 4: Implement Session/Token Management
+- **Description:** JWT token generation and validation
+- **Dependencies:** Task 1
+- **Order:** 2
+- **Parallel:** Yes (Batch 2)
+
+---
+
+### Parallel Batch 3 (Depends on Batch 2)
+
+### Task 5: Add Protected Route Middleware
+- **Description:** Create middleware to check authentication
+- **Dependencies:** Task 4
+- **Order:** 3
+- **Parallel:** No (must complete before Task 6)
+
+---
+
+### Sequential Final Task
+
+### Task 6: Update Frontend for Auth Integration
+- **Description:** Add login form, logout button, auth state management
+- **Dependencies:** Task 3, Task 5
+- **Order:** 4
+- **Parallel:** No (integrates all backend work)
+
+---
+
+## Execution Summary
+
+- **Batch 1:** Run Task 1 + Task 2 in parallel
+- **Batch 2:** Run Task 3 + Task 4 in parallel (after Batch 1 completes)
+- **Batch 3:** Run Task 5 alone (after Batch 2 completes)
+- **Final:** Run Task 6 (after Batch 3 completes)
+
+**Confidence Level:** HIGH — Tasks are clearly separated by domain (database, auth logic, API, frontend)
+```
+
+---
+
+## Execution Phase
+
+### Spawning Implementation Sessions
+
+After planning:
+
+1. **Present task plan to user** — Show the decomposed tasks with dependencies and parallel batches
+2. **Get confirmation** — "Shall I proceed with this plan?"
+3. **Spawn sessions by batch:**
+   - Spawn all tasks in Batch 1 simultaneously (if parallel)
+   - Wait for batch to complete
+   - Spawn all tasks in Batch 2 simultaneously (if parallel)
+   - Continue until all tasks complete
+
+### Session Strategy Per Task
+
+- **Each task gets its own opencode session**
+- Session instructions should reference:
+  - The specific task description
+  - Any context from completed dependency tasks
+  - Relevant files or areas to focus on
+
+### Parallel Spawning
+
+When spawning parallel tasks:
+- Send spawn commands for all tasks in the batch
+- All sessions run concurrently
+- Wait for ALL sessions in the batch to complete before moving to next batch
+
+---
+
+## Review Phase (After ALL Implementations)
+
+### When to Review
+
+**Review only AFTER all implementation tasks are complete.**
+
+Do NOT review after each individual task. Wait until everything is implemented, then do a comprehensive review.
+
+### Review Process
+
+1. **Spawn review session** — "Review all changes for [original request]. Check for bugs, code quality, and completeness."
+2. **Evaluate review results** — Check if code passes or needs fixes
+3. **If issues found:**
+   - Spawn fix session(s) for reported issues
+   - After fixes, spawn NEW review session
+   - Loop until review passes
+
+### Review Loop
+
+```
+All Implementations Done
+         ↓
+    Review Session
+         ↓
+    ┌─ Issues? ── No ──→ Commit ✓
+    │
+   Yes
+    │
+    ↓
+  Fix Session
+    │
+    ↓
+ Review Session ◄─────┘
+    │
+    └──→ (loop until passes)
+```
 
 ---
 
@@ -13,7 +268,7 @@
 
 ### Default: Always Start NEW Session
 
-**Start a fresh session for each task.** Do NOT rely on previous discussion or session context.
+**Start a fresh session for each task and phase.** Do NOT rely on previous discussion or session context.
 
 ### When to Reuse (Only in These Cases)
 
@@ -203,23 +458,18 @@ Ask yourself:
 
 ---
 
-## Implementation Loop (Max 3 iterations)
-
-For each iteration:
-1. **Implement** — Spawn opencode session via `opencode_skill`
-2. **Review** — Spawn review session (also via opencode)
-3. **Evaluate Review** — Check if code is good or needs fixes
-4. **Iterate or Commit:**
-   - **If review passed (no more updates needed)** → **Auto-commit immediately (new session)**
-   - **If review found issues** → **Spawn new session to fix** (see Fix Strategy below)
-
----
-
 ## Fix Strategy (When Review Finds Issues)
 
 ### Spawn New Session for Fixes
 
 **Always spawn a NEW session for fixes.** The new session will have fresh context.
+
+### After Fix, Review Again
+
+After fix session completes:
+1. **Spawn NEW review session** to verify the fix
+2. **Evaluate review** — Check if more issues remain
+3. **Loop** until review passes with no issues
 
 ### When to Reuse (Rare Cases)
 
@@ -270,10 +520,12 @@ When review session confirms code is good (no issues, no improvements needed):
 ### Example Flow
 
 ```
-1. Spawn implementation session → implements feature
-2. Spawn review session → reviews code, reports "looks good, no issues"
-3. Spawn NEW commit session → send "Commit with message: 'feat: add user authentication'"
-4. Session commits → done
+1. Plan tasks → Present to user → Confirm
+2. Spawn implementation sessions in parallel batches
+3. Wait for all implementations to complete
+4. Spawn review session → reviews all code, reports "looks good, no issues"
+5. Spawn NEW commit session → send "Commit with message: 'feat: add user authentication'"
+6. Session commits → done
 ```
 
 ---
@@ -291,11 +543,15 @@ When user reports a bug or issue after a task is completed:
 ```
 User: "there's a bug" / "this doesn't work" / "fix this issue"
     ↓
-Spawn NEW session → Send: "Bug report: [description]. Please investigate and fix."
+Plan tasks (may be single task for simple bugs)
     ↓
-After fix → Spawn NEW review session → Send: "A fix was made for [bug]. Please verify."
+Spawn implementation session → Send: "Bug report: [description]. Please investigate and fix."
     ↓
-Review passed → Spawn NEW commit session → commit
+Spawn review session → Send: "Review the bug fix for [bug]. Please verify."
+    ↓
+Review found issues? → Fix → Review again
+    ↓
+Review passed → Spawn commit session → commit
 ```
 
 ### When to Reuse (Only for Small + Low Risk)

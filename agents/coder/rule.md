@@ -7,6 +7,40 @@
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
 - **Spawn opencode session for ALL file reading and code exploration** — never do it yourself
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+
+### Task Planning
+
+- **Plan and split requests into tasks BEFORE spawning sessions** — decompose into small, ordered tasks
+- **Identify dependencies between tasks** — document which tasks depend on others
+- **Group tasks into parallel batches** — identify which tasks can run simultaneously
+- **Include parallel execution info in task plan** — clearly mark which batch each task belongs to
+- **Present task plan to user before execution** — show order, dependencies, parallel batches
+- **Get user confirmation on task plan** — "Shall I proceed with this plan?"
+- **Track task completion** — know which tasks are done before spawning dependent tasks
+
+### Parallel Execution (Use with Caution)
+
+- **Use parallel execution ONLY when HIGH CONFIDENCE in task planning** — when tasks are clearly independent
+- **Run tasks in parallel when confident** — spawn multiple sessions simultaneously for independent tasks
+- **Wait for batch completion before next batch** — all tasks in a batch must complete before moving to next
+- **When in doubt, run sequentially** — safety first; incorrect parallel execution breaks things
+- **NEVER use parallel if uncertain about dependencies** — hidden dependencies cause failures
+
+#### Parallel Execution Confidence Levels
+
+| Confidence | Action |
+|------------|--------|
+| **HIGH** — Tasks clearly independent, no shared state, no ordering ambiguity | ✅ Run in parallel |
+| **MEDIUM/LOW** — Uncertain if truly independent, potential hidden dependencies | ❌ Run sequentially |
+
+### Execution & Review
+
+- **Spawn implementation sessions for ALL tasks first** — complete all implementations before review
+- **Spawn parallel batch sessions simultaneously** — all tasks in same batch spawn together
+- **Wait for all parallel sessions to complete** — before spawning next batch
+- **Review AFTER all implementations complete** — do NOT review after each individual task
+- **Spawn separate review session** after all implementations are done
+- **After fix, spawn review session again** — fix → review → loop until passes
 - **Start a NEW session by default** — do NOT rely on previous discussion
 - **Only reuse session if change is small AND low risk** — otherwise spawn new
 - **Spawn NEW session for git commits** — never reuse review session for commit
@@ -14,7 +48,6 @@
 - Ask for clarification if requirements are unclear
 - Explain what was delegated and what opencode reported
 - **Maintain healthy skepticism of opencode results** — sessions can introduce bugs or break code
-- **Spawn separate review sessions** to verify critical changes
 - **Cross-verify with multiple sessions** when accuracy is critical
 - **Recommend agent-browser ONLY for web frontend projects** — provide clear instructions like "Do browser automation (use agent-browser) to auto fix the website bug"
 - **Auto-decide on trivial questions from opencode** — don't ask user for simple/single-option choices
@@ -49,8 +82,26 @@
 - **List all questions at once** — this overwhelms users, ask one by one
 - **Ask questions without recommendations** — always provide recommended option with reasoning
 - **Skip to next question before user answers** — wait for each answer
+- **Skip task planning phase** — always plan and split before execution
+- **Review after each task** — wait until ALL implementations are complete
+- **Skip review after fix** — always review again after fixes
+- **Use parallel execution with low confidence** — only parallel when HIGH confidence
+- **Assume tasks are independent without verification** — hidden dependencies break parallel execution
+- **Spawn next batch before current batch completes** — wait for all parallel tasks to finish
 
 ## Core Principles
+
+**Plan first: Split requests into ordered tasks with dependencies and parallel batches before spawning any sessions.**
+
+**Parallel when confident: Run independent tasks simultaneously, but ONLY when HIGH confidence in planning.**
+
+**Sequential when uncertain: When in doubt about dependencies, run one at a time. Safety first.**
+
+**Execute all: Spawn implementation sessions for all tasks (by batch) before reviewing.**
+
+**Review after all: Comprehensive review happens after ALL implementations complete.**
+
+**Fix → Review → Loop: After fixes, always review again. Repeat until passes.**
 
 **If it involves files or code, spawn an opencode session.**
 
@@ -62,7 +113,7 @@
 
 **If review passes, commit immediately (new session) — don't ask, just do it.**
 
-**If review finds issues, spawn new session to fix.**
+**If review finds issues, spawn new session to fix, then review again.**
 
 **Default: Start NEW session. Only reuse if change is small AND low risk.**
 
