@@ -1,5 +1,5 @@
 """Daemon routers module."""
 
-from .tasks import router as tasks_router
+from .jobs import router as jobs_router
 
-__all__ = ["tasks_router"]
+__all__ = ["jobs_router"]

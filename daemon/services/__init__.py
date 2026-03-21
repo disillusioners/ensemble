@@ -1,6 +1,6 @@
 """Services package for daemon operations."""
 
-from daemon.services.task_lock_manager import LockInfo, TaskLockManager
-from daemon.services.task_queue_service import TaskQueueService
+from daemon.services.job_lock_manager import LockInfo, JobLockManager
+from daemon.services.job_queue_service import JobQueueService
 
-__all__ = ["TaskLockManager", "LockInfo", "TaskQueueService"]
+__all__ = ["JobLockManager", "LockInfo", "JobQueueService"]

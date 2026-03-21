@@ -16,9 +16,9 @@ from .message_queue.models import MessageQueue, MessageStatus
 from .source.repository import SQLModelSourceRepository
 from .source.models import SourceConfig, SessionMapping, ProcessedMessage, SourceStatus
 
-# Task queue repository
-from .task_queue.repository import TaskRepository
-from .task_queue.models import TaskQueueItem, TaskStatus, TaskLockInfo
+# Job queue repository
+from .job_queue.repository import JobRepository
+from .job_queue.models import JobItem, JobStatus, JobLockInfo
 
 # Factory functions
 from .factory import (
@@ -28,7 +28,7 @@ from .factory import (
     create_session_repository,
     create_message_queue_repository,
     create_source_repository,
-    create_task_repository,
+    create_job_repository,
 )
 
 __all__ = [
@@ -52,11 +52,11 @@ __all__ = [
     "SessionMapping",
     "ProcessedMessage",
     "SourceStatus",
-    # Task queue
-    "TaskRepository",
-    "TaskQueueItem",
-    "TaskStatus",
-    "TaskLockInfo",
+    # Job queue
+    "JobRepository",
+    "JobItem",
+    "JobStatus",
+    "JobLockInfo",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -64,5 +64,5 @@ __all__ = [
     "create_session_repository",
     "create_message_queue_repository",
     "create_source_repository",
-    "create_task_repository",
+    "create_job_repository",
 ]

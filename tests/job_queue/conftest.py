@@ -1,4 +1,4 @@
-"""Pytest configuration and fixtures for task queue tests."""
+"""Pytest configuration and fixtures for job queue tests."""
 
 import pytest
 from datetime import datetime
@@ -6,10 +6,10 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
-from daemon.repositories.task_queue import TaskRepository
-from daemon.repositories.task_queue.models import TaskStatus
-from daemon.services.task_lock_manager import TaskLockManager
-from daemon.services.task_queue_service import TaskQueueService
+from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue.models import JobStatus
+from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.job_queue_service import JobQueueService
 
 
 @pytest.fixture
@@ -23,8 +23,8 @@ def engine():
 
 @pytest.fixture
 def repository(engine):
-    """Create TaskRepository instance with fresh database."""
-    repo = TaskRepository(engine)
+    """Create JobRepository instance with fresh database."""
+    repo = JobRepository(engine)
     yield repo
     # Clean up after test
     repo.delete_completed()
@@ -33,16 +33,16 @@ def repository(engine):
 
 @pytest.fixture
 def lock_manager():
-    """Create fresh TaskLockManager instance."""
-    manager = TaskLockManager()
+    """Create fresh JobLockManager instance."""
+    manager = JobLockManager()
     yield manager
     manager.clear()
 
 
 @pytest.fixture
-def task_queue_service(repository, lock_manager):
-    """Create TaskQueueService with repository and lock manager."""
-    return TaskQueueService(repository, lock_manager)
+def job_queue_service(repository, lock_manager):
+    """Create JobQueueService with repository and lock manager."""
+    return JobQueueService(repository, lock_manager)
 
 
 @pytest.fixture

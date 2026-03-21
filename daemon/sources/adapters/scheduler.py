@@ -18,7 +18,7 @@ from ..base import (
 )
 
 if TYPE_CHECKING:
-    from daemon.services.task_queue_service import TaskQueueService
+    from daemon.services.job_queue_service import JobQueueService
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         execution_callback: Optional[Callable] = None,
-        task_queue_service: Optional["TaskQueueService"] = None,
+        job_queue_service: Optional["JobQueueService"] = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -51,13 +51,13 @@ class SchedulerAdapter(MessageSourceAdapter):
             on_message: Callback for incoming messages
             execution_callback: Optional callback for execution status updates.
                 Called with: (execution_id, schedule_id, status, session_id, error_message)
-            task_queue_service: Optional TaskQueueService for routing tasks through queue.
-                If provided and project_id is configured, tasks will be queued instead of
+            job_queue_service: Optional JobQueueService for routing jobs through queue.
+                If provided and project_id is configured, jobs will be queued instead of
                 immediate execution.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
-        self._task_queue_service = task_queue_service
+        self._job_queue_service = job_queue_service
         
         # Extract scheduler-specific config
         scheduler_config = config.config
@@ -417,8 +417,8 @@ class SchedulerAdapter(MessageSourceAdapter):
     async def _emit_scheduled_message(self) -> None:
         """Emit the scheduled message to the message handler.
         
-        If project_id is configured and TaskQueueService is available, routes
-        through the task queue. Otherwise, uses immediate execution.
+        If project_id is configured and JobQueueService is available, routes
+        through the job queue. Otherwise, uses immediate execution.
         """
         execution_id = str(uuid.uuid4())
         
@@ -487,11 +487,11 @@ class SchedulerAdapter(MessageSourceAdapter):
                 elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
                     metadata["scheduler"]["run_at"] = self._run_at.isoformat()
                 
-                # Route through TaskQueueService if project_id is configured
-                if self._project_id and self._task_queue_service:
-                    # Route through task queue for per-project serialization
+                # Route through JobQueueService if project_id is configured
+                if self._project_id and self._job_queue_service:
+                    # Route through job queue for per-project serialization
                     logger.info(
-                        f"Routing scheduled task through queue: source={self.source_id}, "
+                        f"Routing scheduled job through queue: source={self.source_id}, "
                         f"execution_id={execution_id}, project_id={self._project_id}, "
                         f"priority={self._priority}"
                     )
@@ -503,7 +503,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                             # Construct agent_dir from agent name (will be resolved later)
                             agent_dir = self._agent
                         
-                        task_item = await self._task_queue_service.enqueue(
+                        job_item = await self._job_queue_service.enqueue(
                             agent_dir=agent_dir,
                             message=self._message_content,
                             source="scheduler",
@@ -513,9 +513,9 @@ class SchedulerAdapter(MessageSourceAdapter):
                         )
                         
                         logger.info(
-                            f"Scheduled task queued: source={self.source_id}, "
-                            f"execution_id={execution_id}, task_id={task_item.task_id}, "
-                            f"status={task_item.status}"
+                            f"Scheduled job queued: source={self.source_id}, "
+                            f"execution_id={execution_id}, job_id={job_item.job_id}, "
+                            f"status={job_item.status}"
                         )
                         
                         # Call execution callback with queued status
@@ -525,7 +525,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                                     execution_id=execution_id,
                                     schedule_id=self.source_id,
                                     status="queued",
-                                    session_id=task_item.session_id,
+                                    session_id=job_item.session_id,
                                     error_message=None,
                                 )
                             except Exception as e:
@@ -533,7 +533,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                         
                     except Exception as e:
                         logger.error(
-                            f"Failed to queue scheduled task: {execution_id}, error={e}",
+                            f"Failed to queue scheduled job: {execution_id}, error={e}",
                             exc_info=True
                         )
                         if self._execution_callback:

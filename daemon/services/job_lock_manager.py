@@ -1,6 +1,6 @@
-"""Task Lock Manager - Per-project task serialization using in-memory locks.
+"""Job Lock Manager - Per-project job serialization using in-memory locks.
 
-This module provides the lock management layer that controls per-project task
+This module provides the lock management layer that controls per-project job
 serialization using in-memory locks with waiter notification.
 """
 
@@ -11,57 +11,57 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Optional
 
-from daemon.repositories.task_queue.models import TaskLockInfo
+from daemon.repositories.job_queue.models import JobLockInfo
 
 
 class LockInfo:
     """Information about a held lock.
     
-    Internal representation used by TaskLockManager.
+    Internal representation used by JobLockManager.
     """
-    task_id: str
+    job_id: str
     project_id: str
     session_id: str
     locked_at: datetime
     
     def __init__(
         self,
-        task_id: str,
+        job_id: str,
         project_id: str,
         session_id: str,
         locked_at: datetime | None = None
     ) -> None:
-        self.task_id = task_id
+        self.job_id = job_id
         self.project_id = project_id
         self.session_id = session_id
         self.locked_at = locked_at or datetime.utcnow()
     
-    def to_lock_info(self) -> TaskLockInfo:
-        """Convert to TaskLockInfo model for external use."""
-        return TaskLockInfo(
-            task_id=self.task_id,
+    def to_lock_info(self) -> JobLockInfo:
+        """Convert to JobLockInfo model for external use."""
+        return JobLockInfo(
+            job_id=self.job_id,
             project_id=self.project_id,
             session_id=self.session_id,
             locked_at=self.locked_at
         )
 
 
-class TaskLockManager:
-    """Manages per-project locks for task execution.
+class JobLockManager:
+    """Manages per-project locks for job execution.
     
     Provides in-memory lock management with waiter notification for
-    per-project task serialization. This ensures only one task runs
+    per-project job serialization. This ensures only one job runs
     per project at a time.
     
     Attributes:
         _locks: Dictionary mapping project_id to LockInfo
-        _waiters: Dictionary mapping project_id to list of (task_id, event) tuples
+        _waiters: Dictionary mapping project_id to list of (job_id, event) tuples
         _lock: asyncio.Lock for thread-safe operations on internal state
         _max_waiters: Maximum number of waiters per project (0 = unlimited)
     """
     
     def __init__(self, max_waiters: int = 0) -> None:
-        """Initialize the TaskLockManager.
+        """Initialize the JobLockManager.
         
         Args:
             max_waiters: Maximum number of waiters per project. 
@@ -76,15 +76,15 @@ class TaskLockManager:
     async def acquire(
         self,
         project_id: str,
-        task_id: str,
+        job_id: str,
         session_id: str
     ) -> bool:
         """Try to acquire lock for project.
         
         Args:
             project_id: The project to lock
-            task_id: The task acquiring the lock
-            session_id: The session running the task
+            job_id: The job acquiring the lock
+            session_id: The session running the job
             
         Returns:
             True if lock acquired, False if already held
@@ -94,7 +94,7 @@ class TaskLockManager:
                 return False
             
             self._locks[project_id] = LockInfo(
-                task_id=task_id,
+                job_id=job_id,
                 project_id=project_id,
                 session_id=session_id,
                 locked_at=datetime.now(UTC)
@@ -104,7 +104,7 @@ class TaskLockManager:
     def acquire_sync(
         self,
         project_id: str,
-        task_id: str,
+        job_id: str,
         session_id: str
     ) -> bool:
         """Synchronous version of acquire for non-async contexts.
@@ -116,28 +116,28 @@ class TaskLockManager:
             return False
         
         self._locks[project_id] = LockInfo(
-            task_id=task_id,
+            job_id=job_id,
             project_id=project_id,
             session_id=session_id,
             locked_at=datetime.now(UTC)
         )
         return True
     
-    async def release(self, project_id: str, task_id: str) -> bool:
-        """Release lock if held by specified task.
+    async def release(self, project_id: str, job_id: str) -> bool:
+        """Release lock if held by specified job.
         
         Args:
             project_id: The project to unlock
-            task_id: The task that holds the lock
+            job_id: The job that holds the lock
             
         Returns:
-            True if released, False if not held by this task
+            True if released, False if not held by this job
         """
         async with self._lock:
             if project_id not in self._locks:
                 return False
             
-            if self._locks[project_id].task_id != task_id:
+            if self._locks[project_id].job_id != job_id:
                 return False
             
             del self._locks[project_id]
@@ -146,7 +146,7 @@ class TaskLockManager:
         await self._notify_waiter(project_id)
         return True
     
-    def release_sync(self, project_id: str, task_id: str) -> bool:
+    def release_sync(self, project_id: str, job_id: str) -> bool:
         """Synchronous version of release for non-async contexts.
         
         Note: Not thread-safe. Use async release() in async contexts.
@@ -154,7 +154,7 @@ class TaskLockManager:
         if project_id not in self._locks:
             return False
         
-        if self._locks[project_id].task_id != task_id:
+        if self._locks[project_id].job_id != job_id:
             return False
         
         del self._locks[project_id]
@@ -210,24 +210,24 @@ class TaskLockManager:
         async with self._lock:
             return project_id in self._locks
     
-    async def get_lock_info(self, project_id: str) -> Optional[TaskLockInfo]:
+    async def get_lock_info(self, project_id: str) -> Optional[JobLockInfo]:
         """Get lock info for project.
         
         Args:
             project_id: The project to get info for
             
         Returns:
-            TaskLockInfo if locked, None otherwise
+            JobLockInfo if locked, None otherwise
         """
         async with self._lock:
             lock_info = self._locks.get(project_id)
             return lock_info.to_lock_info() if lock_info else None
     
-    async def get_all_locks(self) -> dict[str, TaskLockInfo]:
+    async def get_all_locks(self) -> dict[str, JobLockInfo]:
         """Get all current locks.
         
         Returns:
-            Dictionary mapping project_id to TaskLockInfo
+            Dictionary mapping project_id to JobLockInfo
         """
         async with self._lock:
             return {
@@ -238,7 +238,7 @@ class TaskLockManager:
     async def wait_for_lock(
         self,
         project_id: str,
-        task_id: str,
+        job_id: str,
         session_id: str,
         timeout: Optional[float] = None
     ) -> bool:
@@ -249,8 +249,8 @@ class TaskLockManager:
         
         Args:
             project_id: The project to lock
-            task_id: The task that will acquire the lock
-            session_id: The session running the task
+            job_id: The job that will acquire the lock
+            session_id: The session running the job
             timeout: Maximum time to wait in seconds. None means wait forever.
             
         Returns:
@@ -264,7 +264,7 @@ class TaskLockManager:
             if project_id not in self._locks:
                 # Lock is free, acquire it immediately
                 self._locks[project_id] = LockInfo(
-                    task_id=task_id,
+                    job_id=job_id,
                     project_id=project_id,
                     session_id=session_id,
                     locked_at=datetime.now(UTC)
@@ -281,7 +281,7 @@ class TaskLockManager:
             # Ensure waiter list exists and add ourselves
             if project_id not in self._waiters:
                 self._waiters[project_id] = []
-            self._waiters[project_id].append((task_id, event))
+            self._waiters[project_id].append((job_id, event))
         
         # Wait for notification (outside the lock)
         try:
@@ -294,8 +294,8 @@ class TaskLockManager:
             async with self._lock:
                 if project_id in self._waiters:
                     self._waiters[project_id] = [
-                        (tid, evt) for tid, evt in self._waiters[project_id]
-                        if tid != task_id
+                        (jid, evt) for jid, evt in self._waiters[project_id]
+                        if jid != job_id
                     ]
                     # Clean up empty waiter lists
                     if not self._waiters[project_id]:
@@ -303,12 +303,12 @@ class TaskLockManager:
             return False
         
         # We were notified - try to acquire the lock
-        # Note: There's a small race here where another task could acquire
+        # Note: There's a small race here where another job could acquire
         # before us. This is acceptable behavior - we'll return False.
         async with self._lock:
             if project_id not in self._locks:
                 self._locks[project_id] = LockInfo(
-                    task_id=task_id,
+                    job_id=job_id,
                     project_id=project_id,
                     session_id=session_id,
                     locked_at=datetime.now(UTC)
@@ -319,7 +319,7 @@ class TaskLockManager:
             return False
     
     async def _notify_waiter(self, project_id: str) -> None:
-        """Notify next waiting task that lock is available.
+        """Notify next waiting job that lock is available.
         
         Args:
             project_id: The project whose lock was released
@@ -350,7 +350,7 @@ class TaskLockManager:
             project_id: The project to check
             
         Returns:
-            Number of waiting tasks
+            Number of waiting jobs
         """
         async with self._lock:
             return len(self._waiters.get(project_id, []))
@@ -359,7 +359,7 @@ class TaskLockManager:
     async def lock_context(
         self,
         project_id: str,
-        task_id: str,
+        job_id: str,
         session_id: str,
         timeout: Optional[float] = None
     ):
@@ -367,25 +367,25 @@ class TaskLockManager:
         
         Args:
             project_id: The project to lock
-            task_id: The task acquiring the lock
-            session_id: The session running the task
+            job_id: The job acquiring the lock
+            session_id: The session running the job
             timeout: Maximum time to wait for lock
             
         Yields:
             True if lock acquired, False if not (timeout or failed)
             
         Example:
-            async with manager.lock_context(project_id, task_id, session_id) as acquired:
+            async with manager.lock_context(project_id, job_id, session_id) as acquired:
                 if acquired:
                     # Do work
                     pass
         """
-        acquired = await self.wait_for_lock(project_id, task_id, session_id, timeout)
+        acquired = await self.wait_for_lock(project_id, job_id, session_id, timeout)
         try:
             yield acquired
         finally:
             if acquired:
-                await self.release(project_id, task_id)
+                await self.release(project_id, job_id)
     
     def clear(self) -> None:
         """Clear all locks and waiters.
@@ -394,3 +394,7 @@ class TaskLockManager:
         """
         self._locks.clear()
         self._waiters.clear()
+
+
+# Backward compatibility alias
+TaskLockManager = JobLockManager

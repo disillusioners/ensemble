@@ -1,13 +1,13 @@
-# Task Queue Feature Design Document
+# Job Queue Feature Design Document
 
 ## Overview
 
-This document describes the Task Queue feature for agents-ensemble. The feature ensures that only one session can modify a project's files at a time by implementing a per-project task queue with the following characteristics:
+This document describes the Job Queue feature for agents-ensemble. The feature ensures that only one session can modify a project's files at a time by implementing a per-project job queue with the following characteristics:
 
 - **Lock by project_id** - Trust-based locking, no filesystem enforcement
-- **Per-project serialization** - Only one task per project can run at a time
-- **Priority-based scheduling** - Higher priority tasks execute first (1-10 scale)
-- **Crash recovery** - Tasks persisted in SQLite for durability
+- **Per-project serialization** - Only one job per project can run at a time
+- **Priority-based scheduling** - Higher priority jobs execute first (1-10 scale)
+- **Crash recovery** - Jobs persisted in SQLite for durability
 - **Seamless scheduler integration** - Optional project-based queuing
 
 ---
@@ -20,11 +20,11 @@ This document describes the Task Queue feature for agents-ensemble. The feature 
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| TaskRepository | ✅ Complete | SQLite persistence with CRUD operations |
-| TaskLockManager | ✅ Complete | Per-project lock management with waiters |
-| TaskQueueService | ✅ Complete | Core enqueue/dequeue/cancel logic |
-| API Endpoints (POST/GET) | ✅ Complete | Submit and query tasks |
-| TaskProcessor | ⏳ Pending | Background worker for queued tasks |
+| JobRepository | ✅ Complete | SQLite persistence with CRUD operations |
+| JobLockManager | ✅ Complete | Per-project lock management with waiters |
+| JobQueueService | ✅ Complete | Core enqueue/dequeue/cancel logic |
+| API Endpoints (POST/GET) | ✅ Complete | Submit and query jobs |
+| JobProcessor | ⏳ Pending | Background worker for queued jobs |
 | DELETE /tasks/{id} | ⏳ Pending | Cancel/abort tasks |
 | SSE /tasks/{id}/events | ⏳ Pending | Real-time task updates |
 | SessionManager Integration | ⏳ Pending | Enhanced terminate_session() |
@@ -35,22 +35,22 @@ This document describes the Task Queue feature for agents-ensemble. The feature 
 | Commit | Description | Lines |
 |--------|-------------|-------|
 | `1350a64` | Foundation: schema, models, repository | 561 |
-| `4c1a24a` | Lock Management: TaskLockManager | 401 |
-| `b4d7ff3` | Core Service: TaskQueueService | 284 |
+| `4c1a24a` | Lock Management: JobLockManager | 401 |
+| `b4d7ff3` | Core Service: JobQueueService | 284 |
 | `4639a675` | Basic API: POST/GET endpoints | 431 |
 
 ### Files Created
 
 ```
-daemon/repositories/task_queue/
+daemon/repositories/job_queue/
 ├── __init__.py
-├── models.py           # TaskQueueItem, TaskStatus
-└── repository.py       # TaskRepository (SQLite)
+├── models.py           # JobItem, JobStatus
+└── repository.py       # JobRepository (SQLite)
 
 daemon/services/
 ├── __init__.py
 ├── task_lock_manager.py    # Per-project lock management
-└── task_queue_service.py   # Core queue operations
+└── job_queue_service.py   # Core queue operations
 
 daemon/routers/
 ├── __init__.py
@@ -69,7 +69,7 @@ daemon/routers/
 
 ### Sprint 2 Roadmap
 
-- Background TaskProcessor worker
+- Background JobProcessor worker
 - DELETE /api/tasks/{task_id} - Cancel pending/running tasks
 - GET /api/tasks/{task_id}/events - SSE endpoint
 - SessionManager.terminate_session() integration
@@ -98,10 +98,10 @@ daemon/routers/
                                                                          │
                                                                          ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                          TASK QUEUE SERVICE                                      │
+│                          JOB QUEUE SERVICE                                      │
 │                                                                                  │
 │  ┌─────────────────────┐    ┌──────────────────────────────────────────────┐ │
-│  │  TaskQueueService   │    │           TaskLockManager                      │ │
+│  │  JobQueueService   │    │           JobLockManager                      │ │
 │  │                     │    │                                              │ │
 │  │  • enqueue()       │    │  • acquire_lock(project_id) → task_id        │ │
 │  │  • dequeue()       │    │  • release_lock(project_id)                  │ │
@@ -112,7 +112,7 @@ daemon/routers/
 │            │                                                                     │
 │            │                                                                     │
 │  ┌─────────▼───────────┐    ┌──────────────────────────────────────────────┐ │
-│  │  TaskRepository      │    │           ProjectLockRegistry                │ │
+│  │  JobRepository      │    │           ProjectLockRegistry                │ │
 │  │  (SQLite)            │    │           (In-memory + SQLite)                 │ │
 │  │                      │    │                                              │ │
 │  │  • create()         │    │  _locks: dict[str, LockInfo]                  │ │
@@ -154,14 +154,14 @@ daemon/routers/
 
 ## Data Models
 
-### TaskQueueItem (SQLModel)
+### JobItem (SQLModel)
 
-Location: `daemon/repositories/task_queue/models.py`
+Location: `daemon/repositories/job_queue/models.py`
 
 ```python
-class TaskQueueItem(SQLModel, table=True):
-    """Task queue item - persisted for crash recovery."""
-    __tablename__ = "task_queue_items"
+class JobItem(SQLModel, table=True):
+    """Job queue item - persisted for crash recovery."""
+    __tablename__ = "job_queue_items"
 
     # Primary identification
     task_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
@@ -176,7 +176,7 @@ class TaskQueueItem(SQLModel, table=True):
     
     # Scheduling
     priority: int = Field(default=5, ge=1, le=10)  # 1=lowest, 10=highest
-    status: str = Field(default=TaskStatus.PENDING.value, index=True)
+    status: str = Field(default=JobStatus.PENDING.value, index=True)
     
     # Timing
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -195,7 +195,7 @@ class TaskQueueItem(SQLModel, table=True):
     cancelled_at: Optional[str] = None
 
 
-class TaskStatus(str, Enum):
+class JobStatus(str, Enum):
     """Task status values."""
     PENDING = "pending"
     PROCESSING = "processing"
@@ -215,7 +215,7 @@ class TaskLockInfo(Pydantic BaseModel):
 ### Relationships
 
 ```
-TaskQueueItem
+JobItem
 ├── project_id (FK to Project.project_id, optional)
 ├── session_id (FK to Session.session_id, optional)
 └── status (indexed for filtering)
@@ -265,7 +265,7 @@ Content-Type: application/json
     "task_id": "task-uuid",
     "status": "pending",
     "position": 3,
-    "message": "Task queued, waiting for project lock"
+    "message": "Job queued, waiting for project lock"
 }
 ```
 
@@ -602,7 +602,7 @@ Content-Type: application/json
                                     ▼
                       ┌───────────────────────────┐
                       │  Release project lock    │
-                      │  TaskLockManager.release │
+                      │  JobLockManager.release │
                       └─────────────┬─────────────┘
                                     │
                                     ▼
@@ -714,9 +714,9 @@ async def _emit_scheduled_message(self):
     }
     
     if self._config.project_id:
-        # Route through task queue
+        # Route through job queue
         task_payload["project_id"] = self._config.project_id
-        await task_queue_service.enqueue(**task_payload)
+        await job_queue_service.enqueue(**task_payload)
     else:
         # Immediate execution (existing behavior)
         incoming = IncomingMessage(...)
@@ -729,7 +729,7 @@ async def _emit_scheduled_message(self):
 
 Location: `daemon/manager.py`
 
-**Enhancement:** Add task_queue_service dependency and enhance terminate_session().
+**Enhancement:** Add job_queue_service dependency and enhance terminate_session().
 
 ```python
 # daemon/manager.py
@@ -739,12 +739,12 @@ class SessionManager:
         # Existing initialization
         ...
         
-        # NEW: Task queue service
-        self._task_queue_service: TaskQueueService | None = None
+        # NEW: Job queue service
+        self._job_queue_service: JobQueueService | None = None
     
-    def set_task_queue_service(self, service: TaskQueueService):
-        """Set task queue service for integration."""
-        self._task_queue_service = service
+    def set_job_queue_service(self, service: JobQueueService):
+        """Set job queue service for integration."""
+        self._job_queue_service = service
     
     def terminate_session(self, session_id: str) -> bool:
         """Terminate session with full cleanup."""
@@ -755,8 +755,8 @@ class SessionManager:
             self._request_registry.cancel(msg_id, CancellationReason.MANUAL)
         
         # 2. NEW: Clean up queue messages for this session
-        if self._task_queue_service:
-            self._task_queue_service.cancel_tasks_by_session(session_id)
+        if self._job_queue_service:
+            self._job_queue_service.cancel_tasks_by_session(session_id)
         
         # 3. NEW: Terminate child sessions (cascade)
         children = self._session_repository.get_children(session_id)
@@ -773,8 +773,8 @@ class SessionManager:
         self._session_repository.update_status(session_id, "terminated")
         
         # 5. NEW: Release project lock if this session held one
-        if self._task_queue_service:
-            self._task_queue_service.release_lock_by_session(session_id)
+        if self._job_queue_service:
+            self._job_queue_service.release_lock_by_session(session_id)
         
         return True
 ```
@@ -785,13 +785,13 @@ class SessionManager:
 
 Location: `daemon/queue.py`
 
-The Task Queue is orthogonal to the existing InputMessageQueue:
+The Job Queue is orthogonal to the existing InputMessageQueue:
 
 - **InputMessageQueue**: Per-session message queuing (what to send to a session)
-- **TaskQueue**: Per-project task queuing (which session can run)
+- **JobQueue**: Per-project task queuing (which session can run)
 
 They work at different layers:
-1. TaskQueue decides which task (session) can proceed
+1. JobQueue decides which task (session) can proceed
 2. Once session is running, InputMessageQueue handles its message stream
 
 ---
@@ -806,7 +806,7 @@ Location: `daemon/events.py`
 # Task events mirror session events for consistency
 
 TASK_EVENT_TYPES = [
-    "task_queued",      # Task added to queue
+    "job_queued",      # Task added to queue
     "task_started",    # Task started processing
     "task_progress",   # Progress updates
     "task_completed",  # Task finished successfully
@@ -864,8 +864,8 @@ def terminate_session(
             self._request_registry.cancel(msg_id, reason)
     
     # 2. Clean up queue messages
-    if cleanup_queue and hasattr(self, '_task_queue_service'):
-        self._task_queue_service.cancel_tasks_by_session(session_id)
+    if cleanup_queue and hasattr(self, '_job_queue_service'):
+        self._job_queue_service.cancel_tasks_by_session(session_id)
     
     # 3. Cascade to children FIRST (they hold resources too)
     if cascade_children:
@@ -891,9 +891,9 @@ def terminate_session(
     # 7. Update database status
     self._session_repository.update_status(session_id, "terminated")
     
-    # 8. Release project lock (if task queue is active)
-    if hasattr(self, '_task_queue_service') and self._task_queue_service:
-        self._task_queue_service.release_lock_by_session(session_id)
+    # 8. Release project lock (if job queue is active)
+    if hasattr(self, '_job_queue_service') and self._job_queue_service:
+        self._job_queue_service.release_lock_by_session(session_id)
     
     return True
 ```
@@ -909,7 +909,7 @@ class CancellationReason(str, Enum):
     WATCHDOG_RETRY = "watchdog_retry"  # Watchdog retry exhausted
     MANUAL = "manual"              # User手动取消
     SHUTDOWN = "shutdown"           # System shutdown
-    TASK_CANCELLED = "task_cancelled"  # Task queue cancellation (NEW)
+    JOB_CANCELLED = "job_cancelled"  # Job queue cancellation (NEW)
     CHILD_CASCADE = "child_cascade"    # Cascaded from parent termination (NEW)
 ```
 
@@ -917,25 +917,25 @@ class CancellationReason(str, Enum):
 
 ## Component Specifications
 
-### TaskQueueService
+### JobQueueService
 
-Location: `daemon/services/task_queue_service.py`
+Location: `daemon/services/job_queue_service.py`
 
 ```python
-class TaskQueueService:
+class JobQueueService:
     """Manages task queuing with per-project locking."""
     
     def __init__(
         self,
-        repository: TaskRepository,
+        repository: JobRepository,
         session_manager: SessionManager,
         event_broadcaster: EventBroadcaster
     ):
         self._repository = repository
         self._session_manager = session_manager
         self._broadcaster = event_broadcaster
-        self._lock_manager = TaskLockManager(repository)
-        self._processor: TaskProcessor | None = None
+        self._lock_manager = JobLockManager(repository)
+        self._processor: JobProcessor | None = None
     
     # ========== Public API ==========
     
@@ -946,7 +946,7 @@ class TaskQueueService:
         source: str = "api",
         project_id: str | None = None,
         priority: int = 5
-    ) -> TaskQueueItem:
+    ) -> JobItem:
         """
         Submit a task for processing.
         
@@ -957,7 +957,7 @@ class TaskQueueService:
         """
         pass
     
-    async def get_task(self, task_id: str) -> TaskQueueItem | None:
+    async def get_task(self, task_id: str) -> JobItem | None:
         """Get task by ID."""
         pass
     
@@ -967,10 +967,10 @@ class TaskQueueService:
     
     async def list_tasks(
         self,
-        status: TaskStatus | None = None,
+        status: JobStatus | None = None,
         project_id: str | None = None,
         limit: int = 50
-    ) -> list[TaskQueueItem]:
+    ) -> list[JobItem]:
         """List tasks with optional filters."""
         pass
     
@@ -1003,9 +1003,9 @@ class TaskQueueService:
         pass
 ```
 
-### TaskLockManager
+### JobLockManager
 
-Location: `daemon/services/task_lock_manager.py`
+Location: `daemon/services/job_lock_manager.py`
 
 ```python
 @dataclass
@@ -1017,10 +1017,10 @@ class LockInfo:
     locked_at: datetime
 
 
-class TaskLockManager:
+class JobLockManager:
     """Manages per-project locks for task execution."""
     
-    def __init__(self, repository: TaskRepository):
+    def __init__(self, repository: JobRepository):
         self._repository = repository
         self._locks: dict[str, LockInfo] = {}  # project_id -> LockInfo
         self._waiters: dict[str, asyncio.Queue[tuple[str, asyncio.Event]]] = {}
@@ -1095,20 +1095,20 @@ class TaskLockManager:
                 del self._waiters[project_id]
 ```
 
-### TaskProcessor (Background Worker)
+### JobProcessor (Background Worker)
 
 Location: `daemon/services/task_processor.py`
 
 ```python
-class TaskProcessor:
+class JobProcessor:
     """Background worker that processes queued tasks."""
     
     def __init__(
         self,
-        task_queue_service: TaskQueueService,
+        job_queue_service: JobQueueService,
         session_manager: SessionManager
     ):
-        self._task_queue = task_queue_service
+        self._job_queue = job_queue_service
         self._session_manager = session_manager
         self._running = False
         self._tasks: list[asyncio.Task] = []
@@ -1132,7 +1132,7 @@ class TaskProcessor:
         """Worker loop - processes tasks continuously."""
         while self._running:
             # Get all projects with pending tasks
-            projects_with_pending = await self._task_queue.get_projects_with_pending_tasks()
+            projects_with_pending = await self._job_queue.get_projects_with_pending_tasks()
             
             for project_id in projects_with_pending:
                 await self._process_project(project_id)
@@ -1143,12 +1143,12 @@ class TaskProcessor:
     async def _process_project(self, project_id: str) -> None:
         """Process next task for a project."""
         # Get next task (highest priority, then FIFO)
-        task = await self._task_queue._get_next_task(project_id)
+        task = await self._job_queue._get_next_task(project_id)
         if not task:
             return
         
         # Try to acquire lock
-        if not await self._task_queue._try_start_task(task):
+        if not await self._job_queue._try_start_task(task):
             return  # Lock not acquired, skip for now
         
         try:
@@ -1156,9 +1156,9 @@ class TaskProcessor:
             await self._execute_task(task)
         finally:
             # Release lock and process next
-            await self._task_queue._complete_task(task)
+            await self._job_queue._complete_task(task)
     
-    async def _execute_task(self, task: TaskQueueItem) -> None:
+    async def _execute_task(self, task: JobItem) -> None:
         """Execute a single task."""
         # Spawn session
         session_id = self._session_manager.spawn_session(
@@ -1168,7 +1168,7 @@ class TaskProcessor:
         
         # Update task with session
         task.session_id = session_id
-        await self._task_queue._repository.update(task)
+        await self._job_queue._repository.update(task)
         
         # Send message to session
         await self._session_manager.send_message(
@@ -1237,12 +1237,12 @@ class TaskDependency(Pydantic BaseModel):
 
 # Query for next task would become:
 """
-SELECT * FROM task_queue_items
+SELECT * FROM job_queue_items
 WHERE project_id = ?
 AND status = 'pending'
 AND NOT EXISTS (
     SELECT 1 FROM task_dependencies
-    WHERE task_id = task_queue_items.task_id
+    WHERE task_id = job_queue_items.task_id
     AND status != 'completed'
 )
 ORDER BY priority DESC, created_at ASC
@@ -1267,7 +1267,7 @@ Current implementation is single-node. For multi-node:
 
 ### Unit Tests
 
-1. **TaskQueueService**:
+1. **JobQueueService**:
    - test_enqueue_immediate_no_project
    - test_enqueue_immediate_no_lock_contention
    - test_enqueue_queued_with_contention
@@ -1276,14 +1276,14 @@ Current implementation is single-node. For multi-node:
    - test_cancel_pending
    - test_cancel_running
 
-2. **TaskLockManager**:
+2. **JobLockManager**:
    - test_acquire_release
    - test_double_acquire_fails
    - test_release_wrong_task_fails
    - test_waiter_notification
    - test_release_by_session
 
-3. **TaskProcessor**:
+3. **JobProcessor**:
    - test_processes_queued_task
    - test_respects_priority
    - test_calls_next_on_complete
@@ -1314,7 +1314,7 @@ Current implementation is single-node. For multi-node:
 New table needed:
 
 ```sql
-CREATE TABLE task_queue_items (
+CREATE TABLE job_queue_items (
     task_id TEXT PRIMARY KEY,
     agent_dir TEXT NOT NULL,
     message TEXT NOT NULL,
@@ -1332,9 +1332,9 @@ CREATE TABLE task_queue_items (
     cancelled_at TEXT
 );
 
-CREATE INDEX idx_task_queue_project ON task_queue_items(project_id) WHERE project_id IS NOT NULL;
-CREATE INDEX idx_task_queue_status ON task_queue_items(status);
-CREATE INDEX idx_task_queue_session ON task_queue_items(session_id);
+CREATE INDEX idx_job_queue_project ON job_queue_items(project_id) WHERE project_id IS NOT NULL;
+CREATE INDEX idx_job_queue_status ON job_queue_items(status);
+CREATE INDEX idx_job_queue_session ON job_queue_items(session_id);
 ```
 
 ### Configuration
@@ -1343,16 +1343,16 @@ Add to `daemon/config.py`:
 
 ```python
 class Config:
-    # Task Queue settings
-    task_queue_enabled: bool = True
-    task_queue_max_waiters_per_project: int = 100
-    task_queue_lock_timeout_seconds: int = 300
-    task_queue_processor_interval_seconds: float = 0.5
+    # Job Queue settings
+    job_queue_enabled: bool = True
+    job_queue_max_waiters_per_project: int = 100
+    job_queue_lock_timeout_seconds: int = 300
+    job_queue_processor_interval_seconds: float = 0.5
 ```
 
 ### Backward Compatibility
 
-- If task_queue service is not configured, fall back to immediate execution
+- If job_queue service is not configured, fall back to immediate execution
 - Scheduler with project_id but no queue → warning log, execute immediately
 - Existing sessions without task tracking → unaffected
 
@@ -1363,14 +1363,14 @@ class Config:
 ### Sprint 1 ✅ COMPLETE
 
 - [x] Create database table schema
-- [x] Implement TaskRepository
-- [x] Implement TaskLockManager
-- [x] Implement TaskQueueService
+- [x] Implement JobRepository
+- [x] Implement JobLockManager
+- [x] Implement JobQueueService
 - [x] Add API endpoints (POST/GET /tasks)
 
 ### Sprint 2 ⏳ PENDING
 
-- [ ] Implement TaskProcessor background worker
+- [ ] Implement JobProcessor background worker
 - [ ] Add DELETE /tasks/{task_id} endpoint
 - [ ] Add SSE /tasks/{task_id}/events endpoint
 - [ ] Integrate with SessionManager.terminate_session()

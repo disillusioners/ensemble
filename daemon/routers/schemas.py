@@ -1,4 +1,4 @@
-"""Pydantic schemas for Task Queue API."""
+"""Pydantic schemas for Job Queue API."""
 
 from datetime import datetime
 from typing import Any, Optional
@@ -6,14 +6,14 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-class TaskCreateRequest(BaseModel):
-    """Request body for creating a new task."""
+class JobCreateRequest(BaseModel):
+    """Request body for creating a new job."""
     
     agent_dir: str = Field(..., description="Path to the agent directory")
-    message: str = Field(..., description="Task message/content")
-    project_id: Optional[str] = Field(default=None, description="Optional project ID for task serialization")
-    priority: int = Field(default=5, ge=1, le=10, description="Task priority (1-10, default 5)")
-    source: str = Field(default="api", description="Source of the task")
+    message: str = Field(..., description="Job message/content")
+    project_id: Optional[str] = Field(default=None, description="Optional project ID for job serialization")
+    priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
+    source: str = Field(default="api", description="Source of the job")
     metadata: Optional[dict[str, Any]] = Field(default=None, description="Optional metadata dictionary")
     
     @field_validator("priority")
@@ -37,27 +37,27 @@ class TaskCreateRequest(BaseModel):
     }
 
 
-class TaskResponse(BaseModel):
-    """Response for a single task."""
+class JobResponse(BaseModel):
+    """Response for a single job."""
     
-    task_id: str = Field(..., description="Unique task identifier")
-    status: str = Field(..., description="Task status (pending, processing, completed, failed, cancelled)")
-    priority: int = Field(..., description="Task priority (1-10)")
+    job_id: str = Field(..., description="Unique job identifier")
+    status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled)")
+    priority: int = Field(..., description="Job priority (1-10)")
     agent_dir: str = Field(..., description="Path to the agent directory")
-    project_id: Optional[str] = Field(default=None, description="Project ID if task is serialized")
-    session_id: Optional[str] = Field(default=None, description="Session ID if task is processing/processed")
-    created_at: str = Field(..., description="Task creation timestamp")
-    started_at: Optional[str] = Field(default=None, description="Task start timestamp")
-    completed_at: Optional[str] = Field(default=None, description="Task completion timestamp")
-    result_summary: Optional[str] = Field(default=None, description="Summary of task result")
-    error_message: Optional[str] = Field(default=None, description="Error message if task failed")
-    position: Optional[int] = Field(default=None, description="Queue position if task is pending")
+    project_id: Optional[str] = Field(default=None, description="Project ID if job is serialized")
+    session_id: Optional[str] = Field(default=None, description="Session ID if job is processing/processed")
+    created_at: str = Field(..., description="Job creation timestamp")
+    started_at: Optional[str] = Field(default=None, description="Job start timestamp")
+    completed_at: Optional[str] = Field(default=None, description="Job completion timestamp")
+    result_summary: Optional[str] = Field(default=None, description="Summary of job result")
+    error_message: Optional[str] = Field(default=None, description="Error message if job failed")
+    position: Optional[int] = Field(default=None, description="Queue position if job is pending")
     message: Optional[str] = Field(default=None, description="Status message")
     
     model_config = {
         "json_schema_extra": {
             "example": {
-                "task_id": "task-uuid",
+                "job_id": "job-uuid",
                 "status": "completed",
                 "priority": 7,
                 "agent_dir": "/agents/coder",
@@ -69,24 +69,24 @@ class TaskResponse(BaseModel):
                 "result_summary": "Fixed login bug - added token refresh logic",
                 "error_message": None,
                 "position": None,
-                "message": "Task completed successfully"
+                "message": "Job completed successfully"
             }
         }
     }
 
 
-class TaskListResponse(BaseModel):
-    """Response for listing tasks."""
+class JobListResponse(BaseModel):
+    """Response for listing jobs."""
     
-    tasks: list[TaskResponse] = Field(default_factory=list, description="List of tasks")
-    total: int = Field(..., description="Total number of tasks matching the query")
+    jobs: list[JobResponse] = Field(default_factory=list, description="List of jobs")
+    total: int = Field(..., description="Total number of jobs matching the query")
     
     model_config = {
         "json_schema_extra": {
             "example": {
-                "tasks": [
+                "jobs": [
                     {
-                        "task_id": "task-uuid-1",
+                        "job_id": "job-uuid-1",
                         "status": "pending",
                         "priority": 8,
                         "agent_dir": "/agents/coder",
@@ -101,7 +101,7 @@ class TaskListResponse(BaseModel):
     }
 
 
-class TaskValidationError(BaseModel):
+class JobValidationError(BaseModel):
     """Validation error response."""
     
     error: str = Field(default="Validation Error", description="Error type")
@@ -119,17 +119,25 @@ class TaskValidationError(BaseModel):
     }
 
 
-class TaskNotFoundResponse(BaseModel):
+class JobNotFoundResponse(BaseModel):
     """Not found error response."""
     
-    error: str = Field(default="Task not found", description="Error type")
-    task_id: str = Field(..., description="The task ID that was not found")
+    error: str = Field(default="Job not found", description="Error type")
+    job_id: str = Field(..., description="The job ID that was not found")
     
     model_config = {
         "json_schema_extra": {
             "example": {
-                "error": "Task not found",
-                "task_id": "invalid-uuid"
+                "error": "Job not found",
+                "job_id": "invalid-uuid"
             }
         }
     }
+
+
+# Backward compatibility aliases
+TaskCreateRequest = JobCreateRequest
+TaskResponse = JobResponse
+TaskListResponse = JobListResponse
+TaskValidationError = JobValidationError
+TaskNotFoundResponse = JobNotFoundResponse

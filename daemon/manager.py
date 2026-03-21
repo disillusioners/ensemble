@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
 
+from langchain_core.callbacks import BaseCallbackHandler
+
 logger = logging.getLogger(__name__)
 
 # UUID validation pattern (compiled once at module level)
@@ -355,8 +357,8 @@ class SessionManager:
         # Using the new repository layer instead of legacy persistence functions
         self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
 
-        # NEW: Optional TaskQueueService reference (set via set_task_queue_service)
-        self._task_queue_service: Any = None
+        # NEW: Optional JobQueueService reference (set via set_job_queue_service)
+        self._job_queue_service: Any = None
 
         # Start watchdog
         self.watchdog.start()
@@ -386,23 +388,23 @@ class SessionManager:
         self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
-    def set_task_queue_service(self, service: Any) -> None:
-        """Set the TaskQueueService reference.
+    def set_job_queue_service(self, service: Any) -> None:
+        """Set the JobQueueService reference.
         
-        This is called by api.py after both SessionManager and TaskQueueService
+        This is called by api.py after both SessionManager and JobQueueService
         are created during application startup. The service is also wired into
-        the SourceRegistry so that SchedulerAdapter can route tasks through the
-        task queue when project_id is configured.
+        the SourceRegistry so that SchedulerAdapter can route jobs through the
+        job queue when project_id is configured.
         
         Args:
-            service: The TaskQueueService instance to use for lock management.
+            service: The JobQueueService instance to use for lock management.
         """
-        self._task_queue_service = service
-        # Wire TaskQueueService into SourceRegistry for scheduler queue routing (Task 5.4)
+        self._job_queue_service = service
+        # Wire JobQueueService into SourceRegistry for scheduler queue routing (Task 5.4)
         if hasattr(self, 'source_registry') and self.source_registry:
-            self.source_registry._task_queue_service = service
-            logger.info("TaskQueueService wired into SourceRegistry for scheduler routing")
-        logger.info("TaskQueueService connected to SessionManager")
+            self.source_registry._job_queue_service = service
+            logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
+        logger.info("JobQueueService connected to SessionManager")
 
     def spawn_session(
         self, 
@@ -1661,7 +1663,7 @@ Title:"""
         This method performs comprehensive cleanup:
         1. Cancels active requests for the session
         2. Cascades to children - terminates all child sessions first
-        3. Releases project lock if this session holds one (via TaskQueueService)
+        3. Releases project lock if this session holds one (via JobQueueService)
         4. Cleans up session state and resources
 
         Args:
@@ -1703,10 +1705,10 @@ Title:"""
         if hasattr(self, '_session_repository') and self._session_repository:
             self._session_repository.update_status(session_id, "terminated")
 
-        # 6. Release project lock if TaskQueueService is connected
-        if self._task_queue_service is not None:
+        # 6. Release project lock if JobQueueService is connected
+        if self._job_queue_service is not None:
             try:
-                released_projects = self._task_queue_service.release_lock_by_session(session_id)
+                released_projects = self._job_queue_service.release_lock_by_session(session_id)
                 if released_projects:
                     logger.info(
                         f"Released {len(released_projects)} project lock(s) for session {session_id[:8]}...: "

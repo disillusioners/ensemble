@@ -1,9 +1,9 @@
-"""Integration tests for Task Queue feature.
+"""Integration tests for Job Queue feature.
 
-This module tests the complete task queue workflow including:
+This module tests the complete job queue workflow including:
 - Full workflow: enqueue -> process -> complete
-- Multiple tasks with same project (serialization)
-- Multiple tasks with different projects (parallel)
+- Multiple jobs with same project (serialization)
+- Multiple jobs with different projects (parallel)
 - Crash recovery scenario
 """
 
@@ -13,10 +13,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
-from daemon.repositories.task_queue import TaskRepository
-from daemon.repositories.task_queue.models import TaskStatus
-from daemon.services.task_lock_manager import TaskLockManager
-from daemon.services.task_queue_service import TaskQueueService
+from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue.models import JobStatus
+from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.job_queue_service import JobQueueService
 
 
 @pytest.fixture
@@ -31,13 +31,13 @@ def integration_engine():
 @pytest.fixture
 def integration_repository(integration_engine):
     """Create repository with fresh database."""
-    return TaskRepository(integration_engine)
+    return JobRepository(integration_engine)
 
 
 @pytest.fixture
 def integration_lock_manager():
     """Create fresh lock manager."""
-    manager = TaskLockManager()
+    manager = JobLockManager()
     yield manager
     manager.clear()
 
@@ -45,7 +45,7 @@ def integration_lock_manager():
 @pytest.fixture
 def integration_service(integration_repository, integration_lock_manager):
     """Create service with fresh dependencies."""
-    return TaskQueueService(integration_repository, integration_lock_manager)
+    return JobQueueService(integration_repository, integration_lock_manager)
 
 
 class TestIntegrationBasicWorkflow:

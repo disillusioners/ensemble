@@ -15,7 +15,7 @@ from .base import (
 from .mapper import SessionMapper
 
 if TYPE_CHECKING:
-    from daemon.services.task_queue_service import TaskQueueService
+    from daemon.services.job_queue_service import JobQueueService
 
 logger = logging.getLogger(__name__)
 
@@ -32,17 +32,17 @@ class SourceRegistry:
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
     
-    def __init__(self, source_repo, manager, task_queue_service: Optional["TaskQueueService"] = None):
+    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None):
         """Initialize the source registry.
         
         Args:
             source_repo: SQLModelSourceRepository for database operations.
             manager: SessionManager reference for handling messages.
-            task_queue_service: Optional TaskQueueService for scheduler queue routing.
+            job_queue_service: Optional JobQueueService for scheduler queue routing.
         """
         self._source_repo = source_repo
         self._manager = manager
-        self._task_queue_service = task_queue_service
+        self._job_queue_service = job_queue_service
         self._adapters: dict[str, MessageSourceAdapter] = {}
         self._supervisor_tasks: dict[str, asyncio.Task] = {}
         self._running: dict[str, bool] = {}  # Track running state for each adapter
@@ -267,12 +267,12 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to record execution status: {e}")
             
-            # Pass TaskQueueService for queue routing (Task 5.4)
+            # Pass JobQueueService for queue routing (Task 5.4)
             adapter = SchedulerAdapter(
                 config,
                 on_message,
                 execution_callback,
-                task_queue_service=self._task_queue_service,
+                job_queue_service=self._job_queue_service,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter

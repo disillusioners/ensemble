@@ -1,16 +1,16 @@
-# Task Queue Implementation Guide
+# Job Queue Implementation Guide
 
 > **Sprint 1 Complete** - Last updated: 2026-03-16
 
 ## Sprint 1 Summary
 
-Sprint 1 delivered the foundational Task Queue infrastructure for agents-ensemble. The implementation ensures that only one session can modify a project's files at a time through per-project locking with priority-based queuing.
+Sprint 1 delivered the foundational Job Queue infrastructure for agents-ensemble. The implementation ensures that only one session can modify a project's files at a time through per-project locking with priority-based queuing.
 
 ### What Was Built
 
-- **Task Persistence Layer** - SQLite-backed repository with full CRUD operations
+- **Job Persistence Layer** - SQLite-backed repository with full CRUD operations
 - **Lock Management** - Per-project mutex with waiter queue support
-- **Core Service** - TaskQueueService with enqueue/dequeue/cancel/list operations
+- **Core Service** - JobQueueService with enqueue/dequeue/cancel/list operations
 - **Basic API** - POST and GET endpoints for task submission and status polling
 
 ### Commits
@@ -18,8 +18,8 @@ Sprint 1 delivered the foundational Task Queue infrastructure for agents-ensembl
 | Commit | Description | Files Changed |
 |--------|-------------|---------------|
 | `1350a64` | Foundation: schema, models, repository | 561 lines |
-| `4c1a24a` | Lock Management: TaskLockManager | 401 lines |
-| `b4d7ff3` | Core Service: TaskQueueService | 284 lines |
+| `4c1a24a` | Lock Management: JobLockManager | 401 lines |
+| `b4d7ff3` | Core Service: JobQueueService | 284 lines |
 | `4639a675` | Basic API: POST/GET endpoints | 431 lines |
 
 ---
@@ -43,10 +43,10 @@ Sprint 1 delivered the foundational Task Queue infrastructure for agents-ensembl
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    TASK QUEUE SERVICE                                │
+│                    JOB QUEUE SERVICE                                │
 │                                                                          │
 │  ┌─────────────────────┐     ┌──────────────────────────────────────┐  │
-│  │  TaskQueueService   │────▶│        TaskLockManager               │  │
+│  │  JobQueueService   │────▶│        JobLockManager               │  │
 │  │                     │     │                                      │  │
 │  │  • enqueue()        │     │  • acquire_lock(project_id)         │  │
 │  │  • get_task()       │     │  • release_lock(project_id)        │  │
@@ -55,7 +55,7 @@ Sprint 1 delivered the foundational Task Queue infrastructure for agents-ensembl
 │            │                                                         │
 │            ▼                                                         │
 │  ┌─────────────────────┐     ┌──────────────────────────────────────┐  │
-│  │  TaskRepository     │     │        ProjectLockRegistry           │  │
+│  │  JobRepository     │     │        ProjectLockRegistry           │  │
 │  │  (SQLite)           │     │        (In-memory)                  │  │
 │  │                     │     │                                      │  │
 │  │  • create()         │     │  _locks: dict[str, LockInfo]        │  │
@@ -128,7 +128,7 @@ curl -X POST http://localhost:8079/api/tasks \
   "task_id": "task-uuid",
   "status": "pending",
   "position": 2,
-  "message": "Task queued, waiting for project lock"
+  "message": "Job queued, waiting for project lock"
 }
 ```
 
@@ -185,7 +185,7 @@ The following features are planned for Sprint 2:
 | SSE /tasks/{id}/events | Real-time task progress via Server-Sent Events | ⏳ Pending |
 | TaskProcessor | Background worker that processes queued tasks | ⏳ Pending |
 | SessionManager Integration | Enhanced terminate_session() with cascade | ⏳ Pending |
-| Scheduler Integration | Route scheduled jobs through task queue | ⏳ Pending |
+| Scheduler Integration | Route scheduled jobs through job queue | ⏳ Pending |
 
 ### Workaround for Missing DELETE
 
@@ -259,16 +259,16 @@ Events:
 
 | File | Purpose |
 |------|---------|
-| `daemon/repositories/task_queue/models.py` | SQLModel definitions |
-| `daemon/repositories/task_queue/repository.py` | Database operations |
-| `daemon/services/task_lock_manager.py` | Per-project locking |
-| `daemon/services/task_queue_service.py` | Core queue logic |
-| `daemon/routers/tasks.py` | API endpoints |
+| `daemon/repositories/job_queue/models.py` | SQLModel definitions |
+| `daemon/repositories/job_queue/repository.py` | Database operations |
+| `daemon/services/job_lock_manager.py` | Per-project locking |
+| `daemon/services/job_queue_service.py` | Core queue logic |
+| `daemon/routers/jobs.py` | API endpoints |
 | `daemon/routers/schemas.py` | Request/response models |
-| `docs/features/task-queue.md` | Full design document |
+| `docs/features/job-queue.md` | Full design document |
 
 ---
 
 ## Related Documentation
 
-- [Task Queue Design Document](./task-queue.md) - Complete feature specification
+- [Job Queue Design Document](./job-queue.md) - Complete feature specification

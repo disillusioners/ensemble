@@ -70,10 +70,10 @@ from .manager import SessionManager
 from .config import Config, load_config
 from .events import event_to_sse
 from .sources.credentials import CredentialManager
-from .services.task_queue_service import TaskQueueService
-from .services.task_lock_manager import TaskLockManager
-from .services.task_processor import TaskProcessor
-from .repositories import create_task_repository, create_engine_from_config, DatabaseConfig
+from .services.job_queue_service import JobQueueService
+from .services.job_lock_manager import JobLockManager
+from .services.job_processor import JobProcessor
+from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
 
 
 def validate_agent_dir(agent_dir: str) -> Path:
@@ -143,13 +143,13 @@ MAX_CREDENTIALS_SIZE = 4096
 manager: SessionManager = None
 start_time: float = None
 credential_manager = CredentialManager()
-task_queue_service: TaskQueueService = None
-task_processor: TaskProcessor = None
+job_queue_service: JobQueueService = None
+job_processor: JobProcessor = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time, task_queue_service, task_processor
+    global manager, start_time, job_queue_service, job_processor
     config = load_config()
     manager = SessionManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
@@ -157,32 +157,32 @@ async def lifespan(app: FastAPI):
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     start_time = time.time()
     
-    # Initialize TaskQueueService with shared engine from manager
-    # Set create_tables=True to ensure task_queue_items table is created
-    # The TaskQueueItem model is registered with SQLModel.metadata when
-    # create_task_repository is imported (via its import chain)
-    task_repository = create_task_repository(engine=manager._engine, create_tables=True)
-    task_lock_manager = TaskLockManager()
-    task_queue_service = TaskQueueService(
-        repository=task_repository,
-        lock_manager=task_lock_manager,
+    # Initialize JobQueueService with shared engine from manager
+    # Set create_tables=True to ensure job_queue_items table is created
+    # The JobItem model is registered with SQLModel.metadata when
+    # create_job_repository is imported (via its import chain)
+    job_repository = create_job_repository(engine=manager._engine, create_tables=True)
+    job_lock_manager = JobLockManager()
+    job_queue_service = JobQueueService(
+        repository=job_repository,
+        lock_manager=job_lock_manager,
     )
     
-    # Set up dependency injection for tasks router
-    from daemon.routers.tasks import set_task_queue_service
-    set_task_queue_service(task_queue_service)
+    # Set up dependency injection for jobs router
+    from daemon.routers.jobs import set_job_queue_service
+    set_job_queue_service(job_queue_service)
     
-    # Wire TaskQueueService into SessionManager for proper cleanup
-    manager.set_task_queue_service(task_queue_service)
+    # Wire JobQueueService into SessionManager for proper cleanup
+    manager.set_job_queue_service(job_queue_service)
     
-    # Initialize and start TaskProcessor
-    task_processor = TaskProcessor(
-        queue_service=task_queue_service,
+    # Initialize and start JobProcessor
+    job_processor = JobProcessor(
+        queue_service=job_queue_service,
         session_manager=manager,
         poll_interval=2.0,
     )
-    await task_processor.start()
-    logger.info("TaskProcessor started")
+    await job_processor.start()
+    logger.info("JobProcessor started")
     
     # Start message sources (loads adapters from DB and starts them)
     await manager.start_sources()
@@ -192,8 +192,8 @@ async def lifespan(app: FastAPI):
     # Stop message sources on shutdown
     await manager.stop_sources()
     
-    # Stop TaskProcessor on shutdown
-    await task_processor.stop()
+    # Stop JobProcessor on shutdown
+    await job_processor.stop()
 
 
 app = FastAPI(
@@ -1516,8 +1516,8 @@ async def receive_webhook(source_id: str, request: Request):
 
 
 # Include API router with /api prefix (must be after all routes are defined)
-from daemon.routers.tasks import router as tasks_router
-api_router.include_router(tasks_router)
+from daemon.routers.jobs import router as jobs_router
+api_router.include_router(jobs_router)
 app.include_router(api_router)
 
 

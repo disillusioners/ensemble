@@ -1,14 +1,14 @@
-"""Tests for TaskLockManager.
+"""Tests for JobLockManager.
 
 This module tests the in-memory lock manager that provides per-project
-task serialization with waiter notification.
+job serialization with waiter notification.
 """
 
 import asyncio
 import pytest
 
-from daemon.services.task_lock_manager import TaskLockManager, LockInfo
-from daemon.repositories.task_queue.models import TaskLockInfo
+from daemon.services.job_lock_manager import JobLockManager, LockInfo
+from daemon.repositories.job_queue.models import JobLockInfo
 
 
 class TestLockManagerBasicOperations:

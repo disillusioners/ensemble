@@ -1,13 +1,13 @@
-"""Tests for TaskRepository.
+"""Tests for JobRepository.
 
-This module tests the SQLModel-based repository for task queue CRUD operations.
+This module tests the SQLModel-based repository for job queue CRUD operations.
 """
 
 import pytest
 import time
 
-from daemon.repositories.task_queue import TaskRepository
-from daemon.repositories.task_queue.models import TaskStatus, TaskQueueItem
+from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue.models import JobStatus, JobItem
 
 
 class TestRepositoryCreate:
@@ -597,11 +597,11 @@ class TestTaskStatusValidation:
         assert TaskStatus.is_valid("Pending") is False  # Case sensitive
 
 
-class TestTaskQueueItem:
-    """Tests for TaskQueueItem model."""
+class TestJobItem:
+    """Tests for JobItem model."""
 
     def test_to_dict(self, repository, sample_task_data):
-        """Test TaskQueueItem.to_dict() method."""
+        """Test JobItem.to_dict() method."""
         task = repository.create(**sample_task_data)
         
         task_dict = task.to_dict()
