@@ -72,6 +72,7 @@ from .events import event_to_sse
 from .sources.credentials import CredentialManager
 from .services.task_queue_service import TaskQueueService
 from .services.task_lock_manager import TaskLockManager
+from .services.task_processor import TaskProcessor
 from .repositories import create_task_repository, create_engine_from_config, DatabaseConfig
 
 
@@ -143,11 +144,12 @@ manager: SessionManager = None
 start_time: float = None
 credential_manager = CredentialManager()
 task_queue_service: TaskQueueService = None
+task_processor: TaskProcessor = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time, task_queue_service
+    global manager, start_time, task_queue_service, task_processor
     config = load_config()
     manager = SessionManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
@@ -156,7 +158,10 @@ async def lifespan(app: FastAPI):
     start_time = time.time()
     
     # Initialize TaskQueueService with shared engine from manager
-    task_repository = create_task_repository(engine=manager._engine, create_tables=False)
+    # Set create_tables=True to ensure task_queue_items table is created
+    # The TaskQueueItem model is registered with SQLModel.metadata when
+    # create_task_repository is imported (via its import chain)
+    task_repository = create_task_repository(engine=manager._engine, create_tables=True)
     task_lock_manager = TaskLockManager()
     task_queue_service = TaskQueueService(
         repository=task_repository,
@@ -167,6 +172,18 @@ async def lifespan(app: FastAPI):
     from daemon.routers.tasks import set_task_queue_service
     set_task_queue_service(task_queue_service)
     
+    # Wire TaskQueueService into SessionManager for proper cleanup
+    manager.set_task_queue_service(task_queue_service)
+    
+    # Initialize and start TaskProcessor
+    task_processor = TaskProcessor(
+        queue_service=task_queue_service,
+        session_manager=manager,
+        poll_interval=2.0,
+    )
+    await task_processor.start()
+    logger.info("TaskProcessor started")
+    
     # Start message sources (loads adapters from DB and starts them)
     await manager.start_sources()
     
@@ -174,6 +191,9 @@ async def lifespan(app: FastAPI):
     
     # Stop message sources on shutdown
     await manager.stop_sources()
+    
+    # Stop TaskProcessor on shutdown
+    await task_processor.stop()
 
 
 app = FastAPI(

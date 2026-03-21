@@ -11,42 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
 
-from langgraph.graph.state import CompiledStateGraph
-from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.outputs import LLMResult
-
-from .config import Config
-from .graph import build_session_graph
-from .loader import PromptCache, load_and_cache_prompt
-from .persistence import (
-    get_session_messages,
-    get_checkpointer,
-)
-from .repositories import (
-    SQLModelSessionRepository,
-    SQLModelProjectRepository,
-    SQLModelSourceRepository,
-    SQLModelMessageQueueRepository,
-    DatabaseConfig,
-    create_engine_from_config,
-    create_project_repository,
-    create_session_repository,
-    create_source_repository,
-    create_message_queue_repository,
-)
-
-from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
-from .repositories.session.repository import get_agent_name
-from .tools import create_session_tools
-from .events import EventBroadcaster, Event
-from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
-from .cancellation import (
-    CancellationToken, 
-    CancellationReason,
-    OperationCancelledError
-)
-from .request_registry import ActiveRequestRegistry
-
 logger = logging.getLogger(__name__)
 
 # UUID validation pattern (compiled once at module level)
@@ -391,6 +355,9 @@ class SessionManager:
         # Using the new repository layer instead of legacy persistence functions
         self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
 
+        # NEW: Optional TaskQueueService reference (set via set_task_queue_service)
+        self._task_queue_service: Any = None
+
         # Start watchdog
         self.watchdog.start()
 
@@ -418,6 +385,24 @@ class SessionManager:
         self._loop = asyncio.get_running_loop()
         self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
+
+    def set_task_queue_service(self, service: Any) -> None:
+        """Set the TaskQueueService reference.
+        
+        This is called by api.py after both SessionManager and TaskQueueService
+        are created during application startup. The service is also wired into
+        the SourceRegistry so that SchedulerAdapter can route tasks through the
+        task queue when project_id is configured.
+        
+        Args:
+            service: The TaskQueueService instance to use for lock management.
+        """
+        self._task_queue_service = service
+        # Wire TaskQueueService into SourceRegistry for scheduler queue routing (Task 5.4)
+        if hasattr(self, 'source_registry') and self.source_registry:
+            self.source_registry._task_queue_service = service
+            logger.info("TaskQueueService wired into SourceRegistry for scheduler routing")
+        logger.info("TaskQueueService connected to SessionManager")
 
     def spawn_session(
         self, 
@@ -1673,26 +1658,62 @@ Title:"""
     def terminate_session(self, session_id: str) -> bool:
         """Terminate a session.
 
+        This method performs comprehensive cleanup:
+        1. Cancels active requests for the session
+        2. Cascades to children - terminates all child sessions first
+        3. Releases project lock if this session holds one (via TaskQueueService)
+        4. Cleans up session state and resources
+
         Args:
             session_id: The ID of the session to terminate.
 
         Returns:
             True if termination was successful, False if session was not found.
         """
-        # Remove from processing set
+        # Get session metadata BEFORE modifying state (needed for children cascade)
+        # Check if _session_repository exists first (not all configs may have it)
+        meta = None
+        if hasattr(self, '_session_repository') and self._session_repository:
+            meta = self._session_repository.get(session_id)
+        
+        # Cascade to children FIRST - terminate all child sessions recursively
+        if meta and meta.children:
+            for child_id in list(meta.children):
+                logger.info(f"Cascading terminate to child session: {child_id[:8]}...")
+                self.terminate_session(child_id)
+        
+        # 1. Cancel active requests for this session
+        self._request_registry.cancel_by_session(session_id)
+        
+        # 2. Remove from processing set
         self._processing.discard(session_id)
         
-        # Clean up event broadcaster
+        # 3. Clean up event broadcaster
         self.broadcaster.cleanup_session(session_id)
 
-        # Remove from sessions dict
+        # 4. Remove from sessions dict
         if session_id in self.sessions:
             del self.sessions[session_id]
         else:
-            return False
+            # Session not in memory but might still need cleanup (children cascade)
+            if meta is None:
+                return False
 
-        # Update DB status to terminated using repository
-        self._session_repository.update_status(session_id, "terminated")
+        # 5. Update DB status to terminated using repository
+        if hasattr(self, '_session_repository') and self._session_repository:
+            self._session_repository.update_status(session_id, "terminated")
+
+        # 6. Release project lock if TaskQueueService is connected
+        if self._task_queue_service is not None:
+            try:
+                released_projects = self._task_queue_service.release_lock_by_session(session_id)
+                if released_projects:
+                    logger.info(
+                        f"Released {len(released_projects)} project lock(s) for session {session_id[:8]}...: "
+                        f"{released_projects}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to release locks for session {session_id[:8]}...: {e}")
 
         return True
 

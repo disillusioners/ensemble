@@ -114,3 +114,18 @@ class ActiveRequestRegistry:
         """Get request info by message ID."""
         with self._lock:
             return self._requests.get(message_id)
+    
+    def cancel_by_session(self, session_id: str) -> None:
+        """Cancel all active requests for a session.
+        
+        Args:
+            session_id: The session whose requests should be cancelled.
+        """
+        with self._lock:
+            message_ids = self._by_session.get(session_id, set()).copy()
+        
+        for message_id in message_ids:
+            self.cancel(message_id, CancellationReason.SESSION_TERMINATED)
+        
+        if message_ids:
+            logger.info(f"Cancelled {len(message_ids)} request(s) for session {session_id[:8]}...")

@@ -280,3 +280,133 @@ class TaskQueueService:
                 return i
         
         return len(pending) + 1
+
+    # ========== TaskProcessor Helper Methods ==========
+    
+    def get_next_pending_task(self) -> Optional[TaskQueueItem]:
+        """Get the next pending task (highest priority, oldest first).
+        
+        Returns the first pending task from all projects, ordered by
+        priority (descending) then created_at (ascending).
+        
+        Returns:
+            Next TaskQueueItem to process, or None if no pending tasks.
+        """
+        pending = self._repository.list_all_pending()
+        return pending[0] if pending else None
+    
+    async def start_task(self, task_id: str) -> Optional[TaskQueueItem]:
+        """Mark task as processing and acquire lock.
+        
+        Attempts to acquire the lock for the task's project and mark
+        the task as PROCESSING.
+        
+        Args:
+            task_id: The task ID to start.
+            
+        Returns:
+            Updated TaskQueueItem if started successfully, None if
+            task not found, cancelled, or lock acquisition failed.
+        """
+        task = self._repository.get(task_id)
+        if task is None:
+            return None
+        
+        # Check if task is still pending (could have been cancelled)
+        if task.status != TaskStatus.PENDING.value:
+            return None
+        
+        # Generate new session ID for this task
+        session_id = str(uuid.uuid4())
+        
+        # If no project_id, start immediately without locking
+        if task.project_id is None:
+            try:
+                return self._repository.start_task(task_id, session_id)
+            except ValueError:
+                return None
+        
+        # Try to acquire lock
+        acquired = await self._lock_manager.acquire(
+            project_id=task.project_id,
+            task_id=task_id,
+            session_id=session_id,
+        )
+        
+        if not acquired:
+            # Lock is held by another task
+            return None
+        
+        try:
+            return self._repository.start_task(task_id, session_id)
+        except ValueError:
+            # Task state changed between check and start
+            await self._lock_manager.release(task.project_id, task_id)
+            return None
+    
+    async def complete_task(
+        self,
+        task_id: str,
+        success: bool = True,
+        error: Optional[str] = None,
+    ) -> Optional[TaskQueueItem]:
+        """Mark task as completed or failed and release lock.
+        
+        Args:
+            task_id: The task ID to complete.
+            success: True to mark as completed, False to mark as failed.
+            error: Error message if success=False.
+            
+        Returns:
+            Updated TaskQueueItem if completed successfully, None if
+            task not found or not in a processable state.
+        """
+        task = self._repository.get(task_id)
+        if task is None:
+            return None
+        
+        # Release the lock first
+        if task.project_id:
+            await self._lock_manager.release(task.project_id, task_id)
+        
+        # Mark task based on success/failure
+        try:
+            if success:
+                return self._repository.complete_task(task_id, result_summary="Task queued successfully")
+            else:
+                return self._repository.fail_task(task_id, error_message=error or "Unknown error")
+        except ValueError:
+            # Task state changed (already completed/cancelled)
+            return None
+    
+    async def trigger_next_task(self, project_id: str) -> Optional[TaskQueueItem]:
+        """Trigger the next pending task for a project.
+        
+        Called after a task completes to process any waiting tasks
+        for the same project.
+        
+        Args:
+            project_id: The project to trigger next task for.
+            
+        Returns:
+            The next TaskQueueItem started, or None if no pending tasks.
+        """
+        next_task = self._get_next_task(project_id)
+        if next_task is None:
+            return None
+        
+        return await self.start_task(next_task.task_id)
+    
+    async def release_lock_by_session(self, session_id: str) -> list[str]:
+        """Release any locks held by a session.
+        
+        This method is called during session termination to clean up
+        any project locks that the session's tasks were holding.
+        
+        Args:
+            session_id: The session to release locks for.
+            
+        Returns:
+            List of project_ids that were released.
+        """
+        return await self._lock_manager.release_by_session(session_id)

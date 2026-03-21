@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 from zoneinfo import ZoneInfo
 from croniter import croniter
 from croniter import CroniterBadCronError
@@ -16,6 +16,9 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
+
+if TYPE_CHECKING:
+    from daemon.services.task_queue_service import TaskQueueService
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         execution_callback: Optional[Callable] = None,
+        task_queue_service: Optional["TaskQueueService"] = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -47,9 +51,13 @@ class SchedulerAdapter(MessageSourceAdapter):
             on_message: Callback for incoming messages
             execution_callback: Optional callback for execution status updates.
                 Called with: (execution_id, schedule_id, status, session_id, error_message)
+            task_queue_service: Optional TaskQueueService for routing tasks through queue.
+                If provided and project_id is configured, tasks will be queued instead of
+                immediate execution.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
+        self._task_queue_service = task_queue_service
         
         # Extract scheduler-specific config
         scheduler_config = config.config
@@ -77,6 +85,17 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._running_executions: int = 0
         self._execution_semaphore: Optional[asyncio.Semaphore] = None
         
+        # Task queue routing configuration (Tasks 5.1 & 5.3)
+        self._project_id: Optional[str] = scheduler_config.get("project_id")
+        priority_raw = scheduler_config.get("priority", 5)
+        self._priority: int = self._validate_priority(priority_raw)
+        
+        if self._project_id:
+            logger.info(
+                f"SchedulerAdapter queue routing enabled: project_id={self._project_id}, "
+                f"priority={self._priority}"
+            )
+        
         # Parse and validate schedule configuration
         self._parse_schedule_config(scheduler_config)
         
@@ -89,6 +108,31 @@ class SchedulerAdapter(MessageSourceAdapter):
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
             f"source_id={self.source_id}, timezone={timezone_str}"
         )
+    
+    def _validate_priority(self, priority: int) -> int:
+        """Validate and clamp priority to valid range.
+        
+        Args:
+            priority: Priority value to validate.
+            
+        Returns:
+            Priority clamped to 1-10 range.
+        """
+        if not isinstance(priority, int):
+            try:
+                priority = int(priority)
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid priority type: {type(priority)}, defaulting to 5")
+                return 5
+        
+        if priority < 1:
+            logger.warning(f"Priority {priority} below minimum, clamping to 1")
+            return 1
+        if priority > 10:
+            logger.warning(f"Priority {priority} above maximum, clamping to 10")
+            return 10
+        
+        return priority
     
     def _parse_schedule_config(self, scheduler_config: dict) -> None:
         """Parse and validate schedule configuration.
@@ -371,7 +415,11 @@ class SchedulerAdapter(MessageSourceAdapter):
         return None
     
     async def _emit_scheduled_message(self) -> None:
-        """Emit the scheduled message to the message handler."""
+        """Emit the scheduled message to the message handler.
+        
+        If project_id is configured and TaskQueueService is available, routes
+        through the task queue. Otherwise, uses immediate execution.
+        """
         execution_id = str(uuid.uuid4())
         
         # Check concurrency limit with timeout
@@ -421,7 +469,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
                 
-                # Build the incoming message
+                # Build metadata
                 metadata = {
                     "scheduler": {
                         "execution_id": execution_id,
@@ -439,34 +487,96 @@ class SchedulerAdapter(MessageSourceAdapter):
                 elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
                     metadata["scheduler"]["run_at"] = self._run_at.isoformat()
                 
-                incoming = IncomingMessage(
-                    external_user_id=self.source_id,  # Use source_id as user identifier
-                    content=self._message_content,
-                    source_id=self.source_id,
-                    metadata=metadata,
-                    message_type="scheduled",
-                )
-                
-                # Emit the message
-                await self._emit_message(incoming)
-                
-                logger.info(
-                    f"Scheduled message executed: source={self.source_id}, "
-                    f"execution_id={execution_id}, agent={self._agent}"
-                )
-                
-                # Call execution callback with completed status
-                if self._execution_callback:
+                # Route through TaskQueueService if project_id is configured
+                if self._project_id and self._task_queue_service:
+                    # Route through task queue for per-project serialization
+                    logger.info(
+                        f"Routing scheduled task through queue: source={self.source_id}, "
+                        f"execution_id={execution_id}, project_id={self._project_id}, "
+                        f"priority={self._priority}"
+                    )
+                    
                     try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="completed",
-                            session_id=self.source_id,
-                            error_message=None,
+                        # Get agent_dir from metadata or construct from agent name
+                        agent_dir = metadata.get("agent_dir")
+                        if not agent_dir and self._agent:
+                            # Construct agent_dir from agent name (will be resolved later)
+                            agent_dir = self._agent
+                        
+                        task_item = await self._task_queue_service.enqueue(
+                            agent_dir=agent_dir,
+                            message=self._message_content,
+                            source="scheduler",
+                            project_id=self._project_id,
+                            priority=self._priority,
+                            metadata=metadata,
                         )
+                        
+                        logger.info(
+                            f"Scheduled task queued: source={self.source_id}, "
+                            f"execution_id={execution_id}, task_id={task_item.task_id}, "
+                            f"status={task_item.status}"
+                        )
+                        
+                        # Call execution callback with queued status
+                        if self._execution_callback:
+                            try:
+                                self._execution_callback(
+                                    execution_id=execution_id,
+                                    schedule_id=self.source_id,
+                                    status="queued",
+                                    session_id=task_item.session_id,
+                                    error_message=None,
+                                )
+                            except Exception as e:
+                                logger.warning(f"Execution callback error: {e}")
+                        
                     except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
+                        logger.error(
+                            f"Failed to queue scheduled task: {execution_id}, error={e}",
+                            exc_info=True
+                        )
+                        if self._execution_callback:
+                            try:
+                                self._execution_callback(
+                                    execution_id=execution_id,
+                                    schedule_id=self.source_id,
+                                    status="failed",
+                                    session_id=None,
+                                    error_message=str(e),
+                                )
+                            except Exception as cb_error:
+                                logger.warning(f"Execution callback error: {cb_error}")
+                else:
+                    # Immediate execution (original behavior)
+                    incoming = IncomingMessage(
+                        external_user_id=self.source_id,  # Use source_id as user identifier
+                        content=self._message_content,
+                        source_id=self.source_id,
+                        metadata=metadata,
+                        message_type="scheduled",
+                    )
+                    
+                    # Emit the message
+                    await self._emit_message(incoming)
+                    
+                    logger.info(
+                        f"Scheduled message executed (immediate): source={self.source_id}, "
+                        f"execution_id={execution_id}, agent={self._agent}"
+                    )
+                    
+                    # Call execution callback with completed status
+                    if self._execution_callback:
+                        try:
+                            self._execution_callback(
+                                execution_id=execution_id,
+                                schedule_id=self.source_id,
+                                status="completed",
+                                session_id=self.source_id,
+                                error_message=None,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Execution callback error: {e}")
                 
             except Exception as e:
                 logger.error(

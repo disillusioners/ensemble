@@ -12,6 +12,7 @@ class CancellationReason(Enum):
     WATCHDOG_RETRY = "watchdog_retry"
     MANUAL = "manual"
     SHUTDOWN = "shutdown"
+    SESSION_TERMINATED = "session_terminated"
 
 
 class OperationCancelledError(Exception):

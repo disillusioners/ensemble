@@ -1,10 +1,14 @@
 """Task Queue API endpoints."""
 
-from typing import Optional
+import asyncio
+import json
+import logging
+from typing import AsyncGenerator, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.task_queue_service import TaskQueueService
 from daemon.repositories.task_queue.models import TaskStatus
@@ -15,6 +19,8 @@ from .schemas import (
     TaskValidationError,
     TaskNotFoundResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 # Create router with /api/tasks prefix
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -269,4 +275,150 @@ async def list_tasks(
     return TaskListResponse(
         tasks=task_responses,
         total=len(task_responses),  # Note: for accurate total, would need a count method
+    )
+
+
+# ==================== SSE Endpoint ====================
+
+TERMINAL_STATUSES = {
+    TaskStatus.COMPLETED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.CANCELLED.value,
+}
+
+
+@router.get(
+    "/{task_id}/events",
+    responses={
+        200: {"description": "SSE stream for task events"},
+        404: {"model": TaskNotFoundResponse, "description": "Task not found"},
+    },
+)
+async def stream_task_events(
+    task_id: str,
+    request: Request,
+    service: TaskQueueService = Depends(get_task_queue_service),
+):
+    """SSE stream for real-time task updates.
+    
+    Streams events including:
+    - connected: Initial connection event
+    - status_update: Task status changes
+    - completed: Task reached terminal state (completed, failed, or cancelled)
+    - keepalive: Periodic keepalive to prevent timeout
+    
+    The stream automatically closes when the task reaches a terminal state.
+    """
+    # Check task exists first
+    task = await service.get_task(task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail=TaskNotFoundResponse(
+                error="Task not found",
+                task_id=task_id
+            ).model_dump()
+        )
+
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        """Generate SSE events for task updates."""
+        last_status = task.status
+        
+        try:
+            # Send initial connection event with current task state
+            yield {
+                "event": "connected",
+                "data": json.dumps({
+                    "task_id": task_id,
+                    "status": task.status,
+                    "session_id": task.session_id,
+                })
+            }
+            logger.info(f"SSE connected to task {task_id}, initial status: {task.status}")
+
+            # If already in terminal state, send completed and exit
+            if task.status in TERMINAL_STATUSES:
+                yield {
+                    "event": "completed",
+                    "data": json.dumps({
+                        "task_id": task_id,
+                        "status": task.status,
+                        "result_summary": task.result_summary,
+                        "error_message": task.error_message,
+                    })
+                }
+                logger.info(f"Task {task_id} already in terminal state: {task.status}")
+                return
+
+            # Stream events until task reaches terminal state
+            while True:
+                # Check for client disconnect
+                if await request.is_disconnected():
+                    logger.info(f"Client disconnected from task {task_id} SSE stream")
+                    break
+
+                # Poll for task updates
+                current_task = await service.get_task(task_id)
+                
+                if current_task is None:
+                    # Task was deleted
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"error": "Task not found"})
+                    }
+                    break
+
+                # Check for status change
+                if current_task.status != last_status:
+                    last_status = current_task.status
+                    
+                    # Send status update event
+                    yield {
+                        "event": "status_update",
+                        "data": json.dumps({
+                            "task_id": task_id,
+                            "status": current_task.status,
+                            "session_id": current_task.session_id,
+                            "previous_status": last_status,
+                        })
+                    }
+                    logger.debug(f"Task {task_id} status changed to: {current_task.status}")
+
+                    # Check if task reached terminal state
+                    if current_task.status in TERMINAL_STATUSES:
+                        yield {
+                            "event": "completed",
+                            "data": json.dumps({
+                                "task_id": task_id,
+                                "status": current_task.status,
+                                "result_summary": current_task.result_summary,
+                                "error_message": current_task.error_message,
+                            })
+                        }
+                        logger.info(f"Task {task_id} completed with status: {current_task.status}")
+                        break
+
+                # Wait before next poll (0.5 seconds)
+                await asyncio.sleep(0.5)
+
+        except asyncio.CancelledError:
+            logger.info(f"SSE stream cancelled for task {task_id}")
+            raise
+        except Exception as e:
+            logger.exception(f"Error in task SSE stream for {task_id}: {e}")
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "Stream error", "details": str(e)})
+            }
+
+    # Return EventSourceResponse with custom keepalive
+    return EventSourceResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+        ping=5,  # Send keepalive every 5 seconds
     )
