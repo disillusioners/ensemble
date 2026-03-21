@@ -1,0 +1,184 @@
+<div class="jobs-container">
+  <!-- Header -->
+  <div class="jobs-header">
+    <div class="header-left">
+      <h1 class="page-title">Job Queue</h1>
+      @if (isConnected()) {
+        <span class="connection-status connected" title="Real-time updates connected">
+          <mat-icon>wifi</mat-icon>
+          Live
+        </span>
+      } @else {
+        <span class="connection-status disconnected" title="Real-time updates disconnected">
+          <mat-icon>wifi_off</mat-icon>
+          Offline
+        </span>
+      }
+    </div>
+    <div class="header-actions">
+      <button 
+        mat-stroked-button 
+        (click)="onRefresh()"
+        [disabled]="loading()"
+        class="refresh-btn">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        Refresh
+      </button>
+      <button 
+        mat-flat-button 
+        color="primary"
+        (click)="onOpenCreateDialog()"
+        class="create-btn">
+        <mat-icon>add</mat-icon>
+        New Job
+      </button>
+    </div>
+  </div>
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">Status:</span>
+      <mat-chip-listbox 
+        class="status-chips"
+        (change)="onStatusFilterChange($event.value)">
+        @for (option of statusOptions; track option.value) {
+          <mat-chip-option 
+            [value]="option.value"
+            [selected]="filters().status === option.value || (option.value === 'all' && !filters().status)">
+            {{ option.label }}
+          </mat-chip-option>
+        }
+      </mat-chip-listbox>
+    </div>
+
+    <div class="filter-row">
+      <mat-form-field appearance="outline" class="filter-field">
+        <mat-label>Source</mat-label>
+        <mat-select 
+          [value]="filters().source || 'all'"
+          (selectionChange)="onSourceFilterChange($event.value)">
+          @for (option of sourceOptions; track option.value) {
+            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      <mat-form-field appearance="outline" class="filter-field">
+        <mat-label>Agent</mat-label>
+        <mat-select 
+          [value]="filters().agent_dir || 'all'"
+          (selectionChange)="onAgentFilterChange($event.value)">
+          <mat-option value="all">All Agents</mat-option>
+          @for (agent of agents(); track agent.agent_dir) {
+            <mat-option [value]="agent.agent_dir">
+              {{ getAgentDisplayName(agent.agent_dir) }}
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (hasActiveFilters()) {
+        <button 
+          mat-button 
+          (click)="onClearFilters()"
+          class="clear-filters-btn">
+          <mat-icon>clear</mat-icon>
+          Clear Filters
+        </button>
+      }
+    </div>
+  </div>
+
+  <!-- Main Content with Drawer -->
+  <mat-drawer-container class="jobs-drawer-container" [hasBackdrop]="true">
+    <!-- Job List Content -->
+    <mat-drawer-content class="jobs-content">
+      
+      <!-- Loading State -->
+      @if (loading() && jobs().length === 0) {
+        <div class="loading-container">
+          @for (i of [1, 2, 3]; track i) {
+            <div class="skeleton-card">
+              <div class="skeleton-header">
+                <div class="skeleton-badge"></div>
+                <div class="skeleton-badge small"></div>
+                <div class="skeleton-time"></div>
+              </div>
+              <div class="skeleton-content">
+                <div class="skeleton-line"></div>
+                <div class="skeleton-line short"></div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Error State -->
+      @if (error()) {
+        <div class="error-container">
+          <mat-icon class="error-icon">error_outline</mat-icon>
+          <h3>Failed to load jobs</h3>
+          <p>{{ error() }}</p>
+          <button mat-stroked-button color="primary" (click)="onRefresh()">
+            <mat-icon>refresh</mat-icon>
+            Try Again
+          </button>
+        </div>
+      }
+
+      <!-- Empty State -->
+      @if (isEmptyState()) {
+        <div class="empty-container">
+          <mat-icon class="empty-icon">inbox</mat-icon>
+          <h3>No jobs found</h3>
+          @if (hasActiveFilters()) {
+            <p>Try adjusting your filters or 
+              <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
+            </p>
+          } @else {
+            <p>Get started by creating your first job</p>
+          }
+          <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
+            <mat-icon>add</mat-icon>
+            Create Job
+          </button>
+        </div>
+      }
+
+      <!-- Job List -->
+      @if (!loading() || jobs().length > 0) {
+        <div class="job-list">
+          @for (job of filteredJobs(); track job.job_id) {
+            <app-job-card
+              [job]="job"
+              (cancel)="onCancelJob(job)"
+              (retry)="onRetryJob(job)"
+              (viewDetails)="onViewJobDetails(job)">
+            </app-job-card>
+          }
+        </div>
+      }
+
+    </mat-drawer-content>
+
+    <!-- Detail Drawer -->
+    <mat-drawer 
+      #drawer 
+      position="end" 
+      [opened]="drawerOpen()"
+      (closedStart)="onCloseDrawer()"
+      class="job-detail-drawer-panel">
+      @if (selectedJob()) {
+        <app-job-detail-drawer
+          [job]="selectedJob()!"
+          [isDrawerMode]="true"
+          (close)="onCloseDrawer()"
+          (cancelJob)="onDrawerCancelJob($event)"
+          (retryJob)="onDrawerRetryJob($event)"
+          (viewSession)="onDrawerViewSession($event)">
+        </app-job-detail-drawer>
+      }
+    </mat-drawer>
+  </mat-drawer-container>
+</div>

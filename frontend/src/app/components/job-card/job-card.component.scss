@@ -1,0 +1,198 @@
+@use 'sass:color';
+
+.job-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  cursor: pointer;
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  }
+}
+
+.job-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.job-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.priority-badge {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.status-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+
+  .status-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
+.relative-time {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.job-card-content {
+  padding: 16px;
+}
+
+.agent-dir {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+
+  .dir-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: rgba(255, 255, 255, 0.6);
+  }
+
+  .dir-text {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+  }
+}
+
+.message-preview {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+  line-height: 1.5;
+  margin: 0 0 12px 0;
+}
+
+.expand-toggle {
+  width: 100%;
+  justify-content: flex-start;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+
+  mat-icon {
+    margin-right: 4px;
+  }
+}
+
+.details-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.detail-row {
+  display: flex;
+  margin-bottom: 8px;
+  font-size: 13px;
+
+  .detail-label {
+    flex: 0 0 100px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
+  .detail-value {
+    flex: 1;
+    color: rgba(255, 255, 255, 0.9);
+    word-break: break-all;
+  }
+
+  .message-full {
+    white-space: pre-wrap;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 8px;
+    border-radius: 4px;
+  }
+}
+
+.timestamps {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  .timestamp {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
+
+    mat-icon {
+      font-size: 14px;
+      width: 14px;
+      height: 14px;
+      color: rgba(255, 255, 255, 0.4);
+    }
+  }
+}
+
+.job-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+
+  button {
+    mat-icon {
+      margin-right: 4px;
+      font-size: 18px;
+      width: 18px;
+      height: 18px;
+    }
+  }
+}
+
+// Dark theme adjustments (if using dark theme)
+:host-context(.mat-mdc-dark-theme) {
+  .job-card {
+    background: #1e1e1e;
+  }
+}
+
+// Status-specific icon animations
+.status-chip mat-icon[innerHTML='sync'] {
+  animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

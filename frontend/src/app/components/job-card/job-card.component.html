@@ -1,0 +1,116 @@
+<mat-card class="job-card">
+  <div class="job-card-header">
+    <div class="job-card-badges">
+      <span 
+        class="priority-badge" 
+        [style.backgroundColor]="priorityColor()"
+        [style.color]="priorityTextColor()">
+        {{ priorityLabel() }}
+      </span>
+      <span 
+        class="status-chip"
+        [style.backgroundColor]="statusColor() + '20'"
+        [style.color]="statusColor()">
+        <mat-icon class="status-icon">{{ statusIcon() }}</mat-icon>
+        {{ statusLabel() }}
+      </span>
+    </div>
+    <span class="relative-time">{{ relativeTime() }}</span>
+  </div>
+
+  <mat-card-content class="job-card-content">
+    <div class="agent-dir">
+      <mat-icon class="dir-icon">folder</mat-icon>
+      <span class="dir-text">{{ job().agent_dir }}</span>
+    </div>
+
+    <p class="message-preview">{{ messagePreview() }}</p>
+
+    <button 
+      mat-button 
+      class="expand-toggle"
+      (click)="toggleExpanded()">
+      <mat-icon>{{ expanded() ? 'expand_less' : 'expand_more' }}</mat-icon>
+      {{ expanded() ? 'Hide Details' : 'Show Details' }}
+    </button>
+
+    @if (expanded()) {
+      <div class="details-section">
+        <div class="detail-row">
+          <span class="detail-label">Job ID:</span>
+          <span class="detail-value">{{ job().job_id }}</span>
+        </div>
+
+        @if (job().session_id) {
+          <div class="detail-row">
+            <span class="detail-label">Session ID:</span>
+            <span class="detail-value">{{ job().session_id }}</span>
+          </div>
+        }
+
+        @if (job().project_id) {
+          <div class="detail-row">
+            <span class="detail-label">Project ID:</span>
+            <span class="detail-value">{{ job().project_id }}</span>
+          </div>
+        }
+
+        <div class="detail-row">
+          <span class="detail-label">Source:</span>
+          <span class="detail-value">{{ job().source }}</span>
+        </div>
+
+        <div class="detail-row">
+          <span class="detail-label">Message:</span>
+          <span class="detail-value message-full">{{ job().message }}</span>
+        </div>
+
+        <div class="timestamps">
+          <div class="timestamp">
+            <mat-icon>schedule</mat-icon>
+            <span>Created: {{ formatTimestamp(job().created_at) }}</span>
+          </div>
+          @if (job().started_at) {
+            <div class="timestamp">
+              <mat-icon>play_arrow</mat-icon>
+              <span>Started: {{ formatTimestamp(job().started_at) }}</span>
+            </div>
+          }
+          @if (job().completed_at) {
+            <div class="timestamp">
+              <mat-icon>stop</mat-icon>
+              <span>Completed: {{ formatTimestamp(job().completed_at) }}</span>
+            </div>
+          }
+        </div>
+      </div>
+    }
+  </mat-card-content>
+
+  <mat-card-actions class="job-card-actions">
+    @if (canCancel()) {
+      <button 
+        mat-button 
+        color="warn"
+        (click)="onCancel()">
+        <mat-icon>close</mat-icon>
+        Cancel
+      </button>
+    }
+    @if (canRetry()) {
+      <button 
+        mat-button 
+        color="primary"
+        (click)="onRetry()">
+        <mat-icon>refresh</mat-icon>
+        Retry
+      </button>
+    }
+    <button 
+      mat-button 
+      (click)="onViewDetails()">
+      <mat-icon>visibility</mat-icon>
+      View
+    </button>
+  </mat-card-actions>
+</mat-card>

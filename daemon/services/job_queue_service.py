@@ -163,6 +163,40 @@ class JobQueueService:
         
         return False
     
+    async def retry_job(self, job_id: str) -> Optional[JobItem]:
+        """Retry a failed job by creating a new job with the same parameters.
+        
+        Creates a new job with the same parameters and starts it immediately
+        if possible (no lock contention), otherwise queues it.
+        
+        Args:
+            job_id: Job identifier of the failed job to retry.
+            
+        Returns:
+            New JobItem if retry successful, None if job not found or
+            not in a retryable state (not FAILED).
+        """
+        job = self._repository.get(job_id)
+        if job is None:
+            return None
+        
+        # Can only retry FAILED jobs
+        if job.status != JobStatus.FAILED.value:
+            return None
+        
+        # Create a new job and use enqueue logic to determine if it should
+        # start immediately or be queued
+        new_job = await self.enqueue(
+            agent_dir=job.agent_dir,
+            message=job.message,
+            source=job.source,
+            project_id=job.project_id,
+            priority=job.priority,
+            metadata=job.job_metadata,
+        )
+        
+        return new_job
+    
     async def list_jobs(
         self,
         status: Optional[JobStatus] = None,

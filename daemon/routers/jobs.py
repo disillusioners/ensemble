@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 # Create router with /api/jobs prefix
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+# Terminal statuses for job lifecycle
+TERMINAL_STATUSES = {
+    JobStatus.COMPLETED.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+}
 
 # Dependency to get JobQueueService
 # This will be set up in daemon/api.py during app initialization
@@ -278,13 +284,151 @@ async def list_jobs(
     )
 
 
-# ==================== SSE Endpoint ====================
+# ==================== Job Management Endpoints ====================
 
-TERMINAL_STATUSES = {
-    JobStatus.COMPLETED.value,
-    JobStatus.FAILED.value,
-    JobStatus.CANCELLED.value,
-}
+
+@router.delete(
+    "/{job_id}",
+    responses={
+        200: {"description": "Job cancelled successfully"},
+        400: {"description": "Job cannot be cancelled (already completed/failed/cancelled)"},
+        404: {"model": JobNotFoundResponse, "description": "Job not found"},
+    },
+)
+async def cancel_job(
+    job_id: str,
+    service: JobQueueService = Depends(get_job_queue_service),
+):
+    """Cancel a pending or processing job.
+    
+    - PENDING jobs are cancelled immediately
+    - PROCESSING jobs are aborted and the lock is released
+    
+    Returns:
+        200 if cancelled successfully
+        400 if job is already in a terminal state (completed/failed/cancelled)
+        404 if job not found
+    """
+    job = await service.get_job(job_id)
+    
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=JobNotFoundResponse(
+                error="Job not found",
+                job_id=job_id
+            ).model_dump()
+        )
+    
+    # Check if job is in a cancellable state
+    if job.status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job cannot be cancelled",
+                "message": f"Job is already in terminal state: {job.status}",
+                "current_status": job.status,
+            }
+        )
+    
+    # Cancel the job
+    success = await service.cancel_job(job_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Failed to cancel job",
+                "message": f"Could not cancel job in state: {job.status}",
+            }
+        )
+    
+    # Return updated job status
+    updated_job = await service.get_job(job_id)
+    return _job_to_response(
+        updated_job,
+        message="Job cancelled successfully"
+    )
+
+
+@router.post(
+    "/{job_id}/retry",
+    responses={
+        200: {"description": "New job created for retry"},
+        400: {"description": "Job is not in FAILED state"},
+        404: {"model": JobNotFoundResponse, "description": "Job not found"},
+    },
+)
+async def retry_job(
+    job_id: str,
+    service: JobQueueService = Depends(get_job_queue_service),
+):
+    """Retry a failed job by creating a new job with the same parameters.
+    
+    Creates a new job with identical:
+    - agent_dir
+    - message
+    - project_id
+    - priority
+    - metadata
+    
+    The new job will be queued and processed according to normal rules.
+    
+    Returns:
+        200 with new job details if retry successful
+        400 if original job is not in FAILED state
+        404 if job not found
+    """
+    job = await service.get_job(job_id)
+    
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=JobNotFoundResponse(
+                error="Job not found",
+                job_id=job_id
+            ).model_dump()
+        )
+    
+    # Check if job is in FAILED state
+    if job.status != JobStatus.FAILED.value:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job cannot be retried",
+                "message": f"Only FAILED jobs can be retried. Current status: {job.status}",
+                "current_status": job.status,
+            }
+        )
+    
+    # Retry the job - creates a new job with same parameters
+    new_job = await service.retry_job(job_id)
+    
+    if new_job is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Failed to retry job",
+                "message": "Could not create retry job",
+            }
+        )
+    
+    # Get position if job is pending
+    position = None
+    if new_job.status == JobStatus.PENDING.value and new_job.project_id:
+        try:
+            position = service._get_queue_position(new_job.job_id, new_job.project_id)
+        except Exception:
+            pass
+    
+    return _job_to_response(
+        new_job,
+        position=position,
+        message="Job queued for retry"
+    )
+
+
+# ==================== SSE Endpoint ====================
 
 
 @router.get(

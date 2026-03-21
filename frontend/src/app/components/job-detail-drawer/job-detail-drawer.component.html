@@ -1,0 +1,173 @@
+<div class="job-detail-drawer">
+  <!-- Header -->
+  <div class="drawer-header">
+    <div class="header-top">
+      <mat-chip [class]="'status-' + job().status">
+        {{ statusLabel() }}
+      </mat-chip>
+      <div class="header-actions">
+        <button mat-icon-button
+                matTooltip="Copy Job ID"
+                (click)="onCopyJobId()">
+          <mat-icon>content_copy</mat-icon>
+        </button>
+        @if (isDrawerMode()) {
+          <button mat-icon-button
+                  matTooltip="Close"
+                  (click)="onClose()">
+            <mat-icon>close</mat-icon>
+          </button>
+        }
+      </div>
+    </div>
+    <div class="job-id">
+      <span class="label">Job ID:</span>
+      <code class="value">{{ job().job_id }}</code>
+    </div>
+  </div>
+
+  <mat-divider></mat-divider>
+
+  <!-- Overview Section -->
+  <section class="detail-section">
+    <h3 class="section-title">Overview</h3>
+    <div class="detail-grid">
+      @if (job().agent_dir) {
+        <div class="detail-item">
+          <span class="label">Agent Directory</span>
+          <span class="value">{{ job().agent_dir }}</span>
+        </div>
+      }
+      @if (job().priority) {
+        <div class="detail-item">
+          <span class="label">Priority</span>
+          <span class="value">{{ priorityLabel() }}</span>
+        </div>
+      }
+      @if (job().source) {
+        <div class="detail-item">
+          <span class="label">Source</span>
+          <span class="value">{{ job().source }}</span>
+        </div>
+      }
+      @if (job().project_id) {
+        <div class="detail-item">
+          <span class="label">Project ID</span>
+          <span class="value">{{ job().project_id }}</span>
+        </div>
+      }
+    </div>
+  </section>
+
+  <mat-divider></mat-divider>
+
+  <!-- Timeline Section -->
+  <section class="detail-section">
+    <h3 class="section-title">Timeline</h3>
+    <div class="detail-grid">
+      <div class="detail-item">
+        <span class="label">Created At</span>
+        <span class="value">{{ formatDate(job().created_at) }}</span>
+      </div>
+      @if (job().started_at) {
+        <div class="detail-item">
+          <span class="label">Started At</span>
+          <span class="value">{{ formatDate(job().started_at) }}</span>
+        </div>
+      }
+      @if (job().completed_at) {
+        <div class="detail-item">
+          <span class="label">Completed At</span>
+          <span class="value">{{ formatDate(job().completed_at) }}</span>
+        </div>
+      }
+      @if (duration()) {
+        <div class="detail-item">
+          <span class="label">Duration</span>
+          <span class="value">{{ duration() }}</span>
+        </div>
+      }
+    </div>
+  </section>
+
+  <mat-divider></mat-divider>
+
+  <!-- Message Section -->
+  @if (job().message) {
+    <section class="detail-section">
+      <h3 class="section-title">Message</h3>
+      <pre class="code-block">{{ job().message }}</pre>
+    </section>
+    <mat-divider></mat-divider>
+  }
+
+  <!-- Result Section (if completed) -->
+  @if (job().status === 'completed' && job().result_summary) {
+    <section class="detail-section">
+      <h3 class="section-title">Result</h3>
+      <div class="result-summary">
+        {{ job().result_summary }}
+      </div>
+      @if (job().session_id) {
+        <div class="session-link">
+          <span class="label">Session ID:</span>
+          <code class="value">{{ job().session_id }}</code>
+        </div>
+      }
+    </section>
+    <mat-divider></mat-divider>
+  }
+
+  <!-- Error Section (if failed) -->
+  @if (job().status === 'failed' && job().error_message) {
+    <section class="detail-section error-section">
+      <h3 class="section-title">Error</h3>
+      <pre class="error-block">{{ job().error_message }}</pre>
+    </section>
+    <mat-divider></mat-divider>
+  }
+
+  <!-- Metadata Section -->
+  @if (formattedMetadata()) {
+    <section class="detail-section">
+      <h3 class="section-title">Metadata</h3>
+      <pre class="code-block metadata-block">{{ formattedMetadata() }}</pre>
+    </section>
+    <mat-divider></mat-divider>
+  }
+
+  <!-- Actions Section -->
+  <section class="detail-section actions-section">
+    <div class="action-buttons">
+      @if (canCancel()) {
+        <button mat-stroked-button
+                color="warn"
+                (click)="onCancel()">
+          <mat-icon>cancel</mat-icon>
+          Cancel Job
+        </button>
+      }
+      @if (canRetry()) {
+        <button mat-stroked-button
+                color="primary"
+                (click)="onRetry()">
+          <mat-icon>refresh</mat-icon>
+          Retry Job
+        </button>
+      }
+      @if (hasSession()) {
+        <button mat-stroked-button
+                color="accent"
+                (click)="onViewSession()">
+          <mat-icon>visibility</mat-icon>
+          View Session
+        </button>
+      }
+      <button mat-stroked-button
+              (click)="onCopyJobId()">
+        <mat-icon>content_copy</mat-icon>
+        Copy Job ID
+      </button>
+    </div>
+  </section>
+</div>

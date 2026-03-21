@@ -1,0 +1,140 @@
+<div class="modal-container">
+  <!-- Backdrop -->
+  <div class="modal-backdrop" (click)="handleClose()"></div>
+  
+  <!-- Modal -->
+  <div class="modal-content animate-fade-in">
+    <!-- Header -->
+    <div class="modal-header">
+      <h2 class="font-display text-xl font-semibold text-dark-50">
+        {{ data.editMode ? 'Edit Job' : 'Create New Job' }}
+      </h2>
+      <button
+        (click)="handleClose()"
+        class="close-btn"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
+      <!-- Agent Selector -->
+      <div class="form-group">
+        <label class="form-label">
+          Agent <span class="text-accent-rose">*</span>
+        </label>
+        @if (agentsLoading()) {
+          <div class="loading-placeholder">Loading agents...</div>
+        } @else {
+          <select
+            formControlName="agent_dir"
+            class="form-select"
+          >
+            <option value="" disabled>Select an agent</option>
+            @for (agent of agents(); track agent.agent_dir) {
+              <option [value]="agent.agent_dir">
+                {{ getAgentDisplayName(agent) }}
+              </option>
+            }
+          </select>
+        }
+        @if (form.get('agent_dir')?.touched && form.get('agent_dir')?.errors?.['required']) {
+          <p class="form-error">Agent is required</p>
+        }
+      </div>
+
+      <!-- Message -->
+      <div class="form-group">
+        <label class="form-label">
+          Message <span class="text-accent-rose">*</span>
+        </label>
+        <textarea
+          formControlName="message"
+          placeholder="Enter job message..."
+          rows="4"
+          class="form-textarea"
+        ></textarea>
+        @if (form.get('message')?.touched && form.get('message')?.errors?.['required']) {
+          <p class="form-error">Message is required</p>
+        }
+        @if (form.get('message')?.touched && form.get('message')?.errors?.['minlength']) {
+          <p class="form-error">Message must be at least 10 characters</p>
+        }
+      </div>
+
+      <!-- Project ID (optional) -->
+      <div class="form-group">
+        <label class="form-label">Project ID</label>
+        <input
+          type="text"
+          formControlName="project_id"
+          placeholder="Optional project ID for serialization"
+          class="form-input"
+        />
+      </div>
+
+      <!-- Priority Slider -->
+      <div class="form-group">
+        <label class="form-label">
+          Priority: <span class="priority-value">{{ form.get('priority')?.value }}</span>
+        </label>
+        <div class="slider-container">
+          <div class="slider-labels">
+            <span>1 (Low)</span>
+            <span>5 (Normal)</span>
+            <span>10 (Critical)</span>
+          </div>
+          <input
+            type="range"
+            formControlName="priority"
+            min="1"
+            max="10"
+            step="1"
+            class="form-slider"
+          />
+        </div>
+      </div>
+
+      <!-- Source Dropdown -->
+      <div class="form-group">
+        <label class="form-label">Source</label>
+        <select
+          formControlName="source"
+          class="form-select"
+        >
+          @for (option of sourceOptions; track option.value) {
+            <option [value]="option.value">{{ option.label }}</option>
+          }
+        </select>
+      </div>
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button
+          type="button"
+          (click)="handleClose()"
+          class="cancel-btn"
+          [disabled]="isLoading()"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          [disabled]="isSubmitDisabled()"
+          class="submit-btn"
+        >
+          @if (isLoading()) {
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          }
+          {{ data.editMode ? 'Update Job' : 'Create Job' }}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

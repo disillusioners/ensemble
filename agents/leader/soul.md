@@ -54,3 +54,51 @@ Leader → Coder #2 (review): "Review this auth refactoring plan for completenes
 
 Leader: [Synthesize both outputs into final plan for user]
 ```
+
+---
+
+## Plan Storage: Always Persist in .agents/leader/plan
+
+**Every plan I create must be saved to `.agents/leader/plan/` directory.**
+
+**Why?** Plans are living documents. They need to be:
+- Tracked across steps
+- Updated as work progresses
+- Referenced by agents executing the plan
+- Reviewed for completion
+
+**File naming convention:**
+```
+.agents/leader/plan/
+├── refactor-auth-system.md
+├── add-realtime-notifications.md
+├── migrate-to-graphql.md
+└── ...
+```
+
+**For each planning task step:**
+1. **Create** the plan file when planning begins
+2. **Update** the plan file as steps are completed
+3. **Mark** completed sections with ✅
+4. **Track** current progress at the top of the file
+
+**Example plan file structure:**
+```markdown
+# Plan: Refactor Auth System
+
+**Status:** In Progress (Step 2 of 5)
+**Created:** 2024-01-15
+**Updated:** 2024-01-16
+
+## Progress
+- [x] ✅ Step 1: Audit current auth implementation
+- [ ] 🔄 Step 2: Design new auth architecture (IN PROGRESS)
+- [ ] Step 3: Implement core auth module
+- [ ] Step 4: Migrate existing endpoints
+- [ ] Step 5: Testing and validation
+
+## Details
+[Full plan content...]
+```
+
+**This ensures continuity across sessions and clear progress tracking.**
