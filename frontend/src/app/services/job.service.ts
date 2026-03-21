@@ -1,7 +1,12 @@
 import { Injectable, inject, signal } from '@angular/core';
-import { HttpClient, HttpParams } from '@angular/common/http';
-import { Observable, tap, catchError, of } from 'rxjs';
+import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
+import { Observable, tap, catchError, of, map } from 'rxjs';
 import { Job, JobCreate, JobFilters } from '../models/job.model';
+
+interface JobListResponse {
+  jobs: Job[];
+  total: number;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -27,7 +32,8 @@ export class JobService {
       if (filters.project_id) params = params.set('project_id', filters.project_id);
     }
 
-    return this.http.get<Job[]>(this.API_BASE, { params }).pipe(
+    return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
+      map((response) => response.jobs),
       tap((jobs) => this.jobs.set(jobs)),
       catchError((err) => {
         this.error.set(err.message || 'Failed to fetch jobs');
