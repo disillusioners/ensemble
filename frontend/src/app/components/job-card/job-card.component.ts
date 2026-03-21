@@ -5,6 +5,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Job, JobStatus, getPriorityColor, getStatusColor } from '../../models/job.model';
 
 @Component({
@@ -16,13 +17,15 @@ import { Job, JobStatus, getPriorityColor, getStatusColor } from '../../models/j
     MatCardModule,
     MatChipsModule,
     MatIconModule,
-    MatExpansionModule
+    MatExpansionModule,
+    MatTooltipModule
   ],
   templateUrl: './job-card.component.html',
   styleUrl: './job-card.component.scss'
 })
 export class JobCardComponent {
   job = input.required<Job>();
+  projectPaused = input<boolean>(false);
 
   // Action outputs
   cancel = output<void>();
@@ -77,6 +80,10 @@ export class JobCardComponent {
   });
 
   canRetry = computed(() => this.job().status === 'failed');
+
+  showPausedBadge = computed(() => {
+    return this.job().status === 'pending' && this.projectPaused();
+  });
 
   protected onCancel(): void {
     this.cancel.emit();

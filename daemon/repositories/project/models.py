@@ -75,6 +75,8 @@ class Project(SQLModel, table=True):
     
     description: Optional[str] = None
     
+    job_queue_paused: bool = Field(default=False, description="Whether job queue is paused for this project")
+    
     # Use 'project_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     project_metadata: dict[str, Any] = Field(
         default_factory=dict,
@@ -122,6 +124,7 @@ class Project(SQLModel, table=True):
             "main_directory": self.main_directory,
             "related_directories": list(self.related_directories),
             "description": self.description,
+            "job_queue_paused": self.job_queue_paused,
             "tags": list(self._tags),
             "shortnames": list(self._shortnames),
             "metadata": dict(self.project_metadata),

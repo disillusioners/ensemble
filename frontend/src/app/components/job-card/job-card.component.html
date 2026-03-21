@@ -14,6 +14,14 @@
         <mat-icon class="status-icon">{{ statusIcon() }}</mat-icon>
         {{ statusLabel() }}
       </span>
+      @if (showPausedBadge()) {
+        <span 
+          class="paused-badge"
+          matTooltip="Waiting - project queue is paused">
+          <mat-icon>pause</mat-icon>
+          Paused
+        </span>
+      }
     </div>
     <span class="relative-time">{{ relativeTime() }}</span>
   </div>

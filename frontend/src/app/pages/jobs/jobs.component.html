@@ -88,6 +88,37 @@
         </button>
       }
     </div>
+
+    <!-- Project Pause Controls -->
+    @if (projectsWithPendingJobs().length > 0) {
+      <div class="project-queue-controls">
+        <div class="project-queue-header">
+          <mat-icon>folder</mat-icon>
+          <span>Project Queues</span>
+        </div>
+        <div class="project-queue-list">
+          @for (project of projectsWithPendingJobs(); track project.project_id) {
+            <div class="project-queue-item" [class.paused]="project.job_queue_paused">
+              <div class="project-info">
+                <span class="project-name">{{ project.name }}</span>
+                <span class="pending-count">
+                  {{ project.pendingCount }} pending
+                </span>
+              </div>
+              <div class="pause-toggle">
+                <mat-slide-toggle
+                  [checked]="!project.job_queue_paused"
+                  (change)="onToggleProjectPause(project)"
+                  color="warn"
+                  [matTooltip]="project.job_queue_paused ? 'Resume queue' : 'Pause queue'">
+                  {{ project.job_queue_paused ? 'Paused' : 'Active' }}
+                </mat-slide-toggle>
+              </div>
+            </div>
+          }
+        </div>
+      </div>
+    }
   </div>
 
   <!-- Main Content with Drawer -->
@@ -152,6 +183,7 @@
           @for (job of filteredJobs(); track job.job_id) {
             <app-job-card
               [job]="job"
+              [projectPaused]="getProjectPaused(job.project_id || '')"
               (cancel)="onCancelJob(job)"
               (retry)="onRetryJob(job)"
               (viewDetails)="onViewJobDetails(job)">

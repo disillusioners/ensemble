@@ -9,14 +9,18 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatSlideToggleModule } from '@angular/material/slide-toggle';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
+import { ProjectService } from '../../services/project.service';
 import { ApiService } from '../../services/api.service';
 import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
 import { Job, JobFilters, JobStatus, JobSource, JobEventPayload } from '../../models/job.model';
+import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 
 @Component({
@@ -33,6 +37,8 @@ import { Agent } from '../../models';
     MatSidenavModule,
     MatSnackBarModule,
     MatDialogModule,
+    MatSlideToggleModule,
+    MatTooltipModule,
     JobCardComponent,
     JobDetailDrawerComponent
   ],
@@ -42,6 +48,7 @@ import { Agent } from '../../models';
 export class JobsComponent implements OnInit, OnDestroy {
   private readonly jobService = inject(JobService);
   private readonly jobSseService = inject(JobSseService);
+  private readonly projectService = inject(ProjectService);
   private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
@@ -56,12 +63,45 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly agents = signal<Agent[]>([]);
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
+  readonly projects = this.projectService.projects;
   
   // Filter signals
   readonly filters = signal<JobFilters>({});
   
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
+
+  // Computed map of project_id -> job_queue_paused
+  readonly projectPauseMap = computed(() => {
+    const map = new Map<string, boolean>();
+    for (const project of this.projects()) {
+      map.set(project.project_id, project.job_queue_paused);
+    }
+    return map;
+  });
+
+  // Get pause state for a specific project
+  readonly getProjectPaused = (projectId: string): boolean => {
+    return this.projectPauseMap().get(projectId) ?? false;
+  };
+
+  // Projects that have pending jobs
+  readonly projectsWithPendingJobs = computed(() => {
+    const pendingJobs = this.jobs().filter(job => job.status === 'pending');
+    const projectIds = new Set<string>();
+    pendingJobs.forEach(job => {
+      if (job.project_id) {
+        projectIds.add(job.project_id);
+      }
+    });
+
+    return this.projects()
+      .filter(project => projectIds.has(project.project_id))
+      .map(project => ({
+        ...project,
+        pendingCount: pendingJobs.filter(job => job.project_id === project.project_id).length
+      }));
+  });
 
   // Computed values
   readonly filteredJobs = computed(() => {
@@ -128,6 +168,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadJobs();
     this.loadAgents();
+    this.loadProjects();
     this.startAutoRefresh();
   }
 
@@ -138,6 +179,15 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (this.sseSubscription) {
       this.sseSubscription.unsubscribe();
     }
+  }
+
+  private loadProjects(): void {
+    this.projectService.listProjects().subscribe({
+      next: () => {},
+      error: (err) => {
+        console.error('Failed to load projects:', err);
+      }
+    });
   }
 
   private loadJobs(): void {
@@ -374,5 +424,55 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected hasActiveFilters(): boolean {
     const filters = this.filters();
     return !!(filters.status || filters.source || filters.agent_dir);
+  }
+
+  protected onToggleProjectPause(project: Project): void {
+    if (project.job_queue_paused) {
+      this.resumeProjectQueue(project);
+    } else {
+      this.pauseProjectQueue(project);
+    }
+  }
+
+  private pauseProjectQueue(project: Project): void {
+    this.projectService.pauseJobQueue(project.project_id).subscribe({
+      next: () => {
+        this.snackBar.open(`Queue paused for "${project.name}"`, 'Close', {
+          duration: 3000
+        });
+      },
+      error: (err) => {
+        console.error('Failed to pause queue:', err);
+        this.snackBar.open(
+          `Failed to pause queue: ${err.message || 'Unknown error'}`,
+          'Dismiss',
+          {
+            duration: 5000,
+            panelClass: 'error-snackbar'
+          }
+        );
+      }
+    });
+  }
+
+  private resumeProjectQueue(project: Project): void {
+    this.projectService.resumeJobQueue(project.project_id).subscribe({
+      next: () => {
+        this.snackBar.open(`Queue resumed for "${project.name}"`, 'Close', {
+          duration: 3000
+        });
+      },
+      error: (err) => {
+        console.error('Failed to resume queue:', err);
+        this.snackBar.open(
+          `Failed to resume queue: ${err.message || 'Unknown error'}`,
+          'Dismiss',
+          {
+            duration: 5000,
+            panelClass: 'error-snackbar'
+          }
+        );
+      }
+    });
   }
 }

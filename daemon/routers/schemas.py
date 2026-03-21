@@ -1,9 +1,12 @@
-"""Pydantic schemas for Job Queue API."""
+"""Pydantic schemas for Router APIs."""
 
 from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+# ==================== Job Queue Schemas ====================
 
 
 class JobCreateRequest(BaseModel):
@@ -141,3 +144,93 @@ TaskResponse = JobResponse
 TaskListResponse = JobListResponse
 TaskValidationError = JobValidationError
 TaskNotFoundResponse = JobNotFoundResponse
+
+
+# ==================== Project Schemas ====================
+
+
+class ProjectResponse(BaseModel):
+    """Response for a single project."""
+    
+    project_id: str = Field(..., description="Unique project identifier")
+    name: str = Field(..., description="Project name")
+    project_type: str = Field(..., description="Project type")
+    status: str = Field(..., description="Project status (active, paused, completed, archived)")
+    main_directory: Optional[str] = Field(default=None, description="Main directory path")
+    related_directories: list[str] = Field(default_factory=list, description="Related directory paths")
+    description: Optional[str] = Field(default=None, description="Project description")
+    job_queue_paused: bool = Field(default=False, description="Whether job queue is paused")
+    tags: list[str] = Field(default_factory=list, description="Project tags")
+    shortnames: list[str] = Field(default_factory=list, description="Project shortnames")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Project metadata")
+    relationships: dict[str, list[str]] = Field(default_factory=dict, description="Project relationships")
+    creator_session_id: Optional[str] = Field(default=None, description="Creator session ID")
+    creator_agent_dir: Optional[str] = Field(default=None, description="Creator agent directory")
+    created_at: str = Field(..., description="Project creation timestamp")
+    updated_at: str = Field(..., description="Project update timestamp")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "project_id": "project-uuid",
+                "name": "My Project",
+                "project_type": "software",
+                "status": "active",
+                "main_directory": "/path/to/project",
+                "related_directories": [],
+                "description": "A sample project",
+                "job_queue_paused": False,
+                "tags": ["python", "web"],
+                "shortnames": ["myproj"],
+                "metadata": {},
+                "relationships": {},
+                "creator_session_id": "session-uuid",
+                "creator_agent_dir": "./agents/coder",
+                "created_at": "2025-03-15T10:00:00",
+                "updated_at": "2025-03-15T10:00:00"
+            }
+        }
+    }
+
+
+class ProjectListResponse(BaseModel):
+    """Response for listing projects."""
+    
+    projects: list[ProjectResponse] = Field(default_factory=list, description="List of projects")
+    total: int = Field(..., description="Total number of projects")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "projects": [
+                    {
+                        "project_id": "project-uuid-1",
+                        "name": "Project 1",
+                        "project_type": "software",
+                        "status": "active",
+                        "job_queue_paused": False,
+                        "tags": ["python"],
+                        "created_at": "2025-03-15T10:00:00",
+                        "updated_at": "2025-03-15T10:00:00"
+                    }
+                ],
+                "total": 1
+            }
+        }
+    }
+
+
+class ProjectNotFoundResponse(BaseModel):
+    """Not found error response for projects."""
+    
+    error: str = Field(default="Project not found", description="Error type")
+    project_id: str = Field(..., description="The project ID that was not found")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "error": "Project not found",
+                "project_id": "invalid-uuid"
+            }
+        }
+    }
