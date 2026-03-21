@@ -158,7 +158,7 @@ class TaskRepository:
                 select(TaskQueueItem)
                 .where(TaskQueueItem.project_id == project_id)
                 .where(TaskQueueItem.status == TaskStatus.PENDING.value)
-                .order_by(col(TaskQueueItem.priority).desc())
+                .order_by(col(TaskQueueItem.priority).desc(), TaskQueueItem.created_at.asc())
             )
             tasks = list(db_session.exec(stmt))
             return tasks

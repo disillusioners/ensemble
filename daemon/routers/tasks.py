@@ -370,6 +370,7 @@ async def stream_task_events(
 
                 # Check for status change
                 if current_task.status != last_status:
+                    previous_status = last_status
                     last_status = current_task.status
                     
                     # Send status update event
@@ -379,7 +380,7 @@ async def stream_task_events(
                             "task_id": task_id,
                             "status": current_task.status,
                             "session_id": current_task.session_id,
-                            "previous_status": last_status,
+                            "previous_status": previous_status,
                         })
                     }
                     logger.debug(f"Task {task_id} status changed to: {current_task.status}")

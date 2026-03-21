@@ -122,8 +122,12 @@ class TaskProcessor:
                 await self._queue_service.complete_task(task.task_id, success=False, error=str(e))
                 return
             
-            # Mark task as successfully queued for processing
-            await self._queue_service.complete_task(task.task_id, success=True)
+            # Mark task as being processed (not yet complete - session does the work)
+            await self._queue_service.update_task(
+                task.task_id,
+                status="processing",
+                result_summary="Task enqueued for processing"
+            )
             logger.info(f"Task {task.task_id} queued successfully for session {session_id}")
             
             # Trigger next task for this project (if any)

@@ -116,6 +116,18 @@ class TaskQueueService:
         """
         return self._repository.get(task_id)
     
+    async def update_task(self, task_id: str, **updates) -> Optional[TaskQueueItem]:
+        """Update task fields.
+        
+        Args:
+            task_id: Unique task identifier.
+            **updates: Fields to update (e.g., status, result_summary).
+            
+        Returns:
+            Updated TaskQueueItem if found, None otherwise.
+        """
+        return self._repository.update(task_id, **updates)
+    
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a pending task or abort a running task.
         

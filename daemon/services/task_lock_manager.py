@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional
 
 from daemon.repositories.task_queue.models import TaskLockInfo
@@ -97,7 +97,7 @@ class TaskLockManager:
                 task_id=task_id,
                 project_id=project_id,
                 session_id=session_id,
-                locked_at=datetime.utcnow()
+                locked_at=datetime.now(UTC)
             )
             return True
     
@@ -119,7 +119,7 @@ class TaskLockManager:
             task_id=task_id,
             project_id=project_id,
             session_id=session_id,
-            locked_at=datetime.utcnow()
+            locked_at=datetime.now(UTC)
         )
         return True
     
@@ -267,7 +267,7 @@ class TaskLockManager:
                     task_id=task_id,
                     project_id=project_id,
                     session_id=session_id,
-                    locked_at=datetime.utcnow()
+                    locked_at=datetime.now(UTC)
                 )
                 return True
             
@@ -311,7 +311,7 @@ class TaskLockManager:
                     task_id=task_id,
                     project_id=project_id,
                     session_id=session_id,
-                    locked_at=datetime.utcnow()
+                    locked_at=datetime.now(UTC)
                 )
                 return True
             
