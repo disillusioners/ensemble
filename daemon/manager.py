@@ -1010,13 +1010,21 @@ class SessionManager:
         content_buffer = ""
         content_buffer_size = 0
         thinking_buffer = ""  # Accumulate reasoning_content from delta chunks
-        CONTENT_BATCH_THRESHOLD = 50  # Flush after 50 characters
-        CONTENT_BATCH_TIMEOUT = 0.05  # Or after 50ms (whichever comes first)
+        CONTENT_BATCH_THRESHOLD = 500  # Flush after 500 characters
+        CONTENT_BATCH_TIMEOUT = 0.5  # Or after 500ms (whichever comes first)
         last_content_flush = time.monotonic()  # Initialize to current time
+        
+        # Thinking event batching to reduce event rate
+        THINKING_BATCH_THRESHOLD = 500  # chars
+        THINKING_BATCH_TIMEOUT = 0.5   # 500ms
+        thinking_buffer_size = 0
+        last_thinking_flush = time.monotonic()
         
         # Adaptive batching settings (adjusted based on queue health)
         adaptive_threshold = CONTENT_BATCH_THRESHOLD
         adaptive_timeout = CONTENT_BATCH_TIMEOUT
+        adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
+        adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
         
         # Event counter for monitoring
         event_count = 0
@@ -1171,13 +1179,24 @@ class SessionManager:
 
                         if chunk_reasoning:
                             thinking_buffer += chunk_reasoning
-                            # Broadcast incrementally for real-time display
-                            await self.broadcaster.broadcast(Event(
-                                type="thinking",
-                                session_id=session_id,
-                                message_id=message_id,
-                                data={"content": thinking_buffer}
-                            ))
+                            thinking_buffer_size = len(thinking_buffer)
+                            
+                            now = time.monotonic()
+                            should_flush = (
+                                thinking_buffer_size >= adaptive_thinking_threshold or
+                                (now - last_thinking_flush) >= adaptive_thinking_timeout
+                            )
+                            
+                            if should_flush and thinking_buffer:
+                                await self.broadcaster.broadcast(Event(
+                                    type="thinking",
+                                    session_id=session_id,
+                                    message_id=message_id,
+                                    data={"content": thinking_buffer}
+                                ))
+                                thinking_buffer = ""
+                                thinking_buffer_size = 0
+                                last_thinking_flush = now
                             
                             # Flush if buffer exceeds threshold OR timeout elapsed
                             now = time.monotonic()
@@ -1204,8 +1223,10 @@ class SessionManager:
                                 
                                 # Increase batch size when queue is > 50% full
                                 if queue_fill_ratio > 0.5:
-                                    adaptive_threshold = CONTENT_BATCH_THRESHOLD * 2  # 100 chars
-                                    adaptive_timeout = CONTENT_BATCH_TIMEOUT * 2     # 100ms
+                                    adaptive_threshold = min(CONTENT_BATCH_THRESHOLD * 1.5, 2000)  # max 2000
+                                    adaptive_timeout = min(CONTENT_BATCH_TIMEOUT * 1.5, 1.0)     # max 1.0s
+                                    adaptive_thinking_threshold = min(THINKING_BATCH_THRESHOLD * 3, 2000)  # max 2000
+                                    adaptive_thinking_timeout = min(THINKING_BATCH_TIMEOUT * 2, 1.0)     # max 1.0s
                                     if event_count == 20:  # Log once
                                         logger.info(
                                             f"Queue at {queue_fill_ratio:.0%} capacity, "
@@ -1214,6 +1235,8 @@ class SessionManager:
                                 else:
                                     adaptive_threshold = CONTENT_BATCH_THRESHOLD
                                     adaptive_timeout = CONTENT_BATCH_TIMEOUT
+                                    adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
+                                    adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
             
             # Flush any remaining content in buffer after streaming ends
             if content_buffer:
@@ -1224,6 +1247,16 @@ class SessionManager:
                     data={"chunk": content_buffer}
                 ))
                 logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
+            
+            # Flush any remaining thinking in buffer after streaming ends
+            if thinking_buffer:
+                await self.broadcaster.broadcast(Event(
+                    type="thinking",
+                    session_id=session_id,
+                    message_id=message_id,
+                    data={"content": thinking_buffer}
+                ))
+                thinking_buffer = ""
                 
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
