@@ -273,6 +273,10 @@ class SessionManager:
         # Create tables once for all repositories
         from sqlmodel import SQLModel
         SQLModel.metadata.create_all(self._engine)
+        
+        # Run migrations to add any missing columns to existing tables
+        from .repositories.factory import run_migrations
+        run_migrations(self._engine)
 
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)

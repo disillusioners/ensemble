@@ -38,7 +38,7 @@ class ProjectType(str, enum.Enum):
     
     @classmethod
     def is_valid(cls, project_type: str) -> bool:
-        return bool(project_type and project_type.strip())
+        return project_type in cls._value2member_map_
 
 
 class ProjectTagLink(SQLModel, table=True):

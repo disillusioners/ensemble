@@ -29,6 +29,7 @@ from .factory import (
     create_message_queue_repository,
     create_source_repository,
     create_job_repository,
+    run_migrations,
 )
 
 __all__ = [
@@ -65,4 +66,5 @@ __all__ = [
     "create_message_queue_repository",
     "create_source_repository",
     "create_job_repository",
+    "run_migrations",
 ]

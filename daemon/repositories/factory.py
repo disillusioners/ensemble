@@ -102,6 +102,37 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
     return engine
 
 
+def run_migrations(engine: Engine) -> None:
+    """Run database migrations to add missing columns to existing tables.
+    
+    This function checks for and adds any columns that exist in the model
+    but are missing from the actual database schema. This handles cases where
+    new columns are added to models after the database was initially created.
+    
+    Args:
+        engine: SQLAlchemy Engine instance.
+    """
+    from sqlalchemy import text
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Get the connection to check existing columns
+    with engine.connect() as conn:
+        # Check if projects table exists and has job_queue_paused column
+        try:
+            result = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'"))
+            row = result.fetchone()
+            if row:
+                table_sql = row[0] if row[0] else ""
+                if 'job_queue_paused' not in table_sql:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN job_queue_paused BOOLEAN DEFAULT 0"))
+                    conn.commit()
+                    logger.info("Migration: Added job_queue_paused column to projects table")
+        except Exception as e:
+            logger.warning(f"Migration check failed (table may not exist yet): {e}")
+
+
 def create_project_repository(
     config: DatabaseConfig | None = None,
     engine: Engine | None = None,
@@ -128,6 +159,7 @@ def create_project_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
+        run_migrations(engine)
     
     return SQLModelProjectRepository(engine)
 
@@ -158,6 +190,7 @@ def create_session_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
+        run_migrations(engine)
     
     return SQLModelSessionRepository(engine)
 
@@ -188,6 +221,7 @@ def create_message_queue_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
+        run_migrations(engine)
     
     return SQLModelMessageQueueRepository(engine)
 
@@ -218,6 +252,7 @@ def create_source_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
+        run_migrations(engine)
     
     return SQLModelSourceRepository(engine)
 
@@ -248,6 +283,7 @@ def create_job_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
+        run_migrations(engine)
     
     return JobRepository(engine)
 

@@ -10,7 +10,30 @@ Provides CRUD operations for projects with:
 from langchain_core.tools import tool
 
 from ..repositories.project.repository import SQLModelProjectRepository
-from ..repositories.project.models import ProjectStatus
+from ..repositories.project.models import ProjectStatus, ProjectType
+
+
+def _validate_directory(path: str | None) -> str | None:
+    """Validate and sanitize a directory path."""
+    if path is None:
+        return None
+    
+    # Check for null bytes
+    if '\x00' in path:
+        raise ValueError("Invalid path: null bytes not allowed")
+    
+    # Resolve to absolute path and check for traversal
+    try:
+        from pathlib import Path
+        resolved = Path(path).expanduser().resolve()
+        
+        # Block obvious path traversal attempts
+        if '..' in path:
+            raise ValueError("Invalid path: path traversal not allowed")
+        
+        return str(resolved)
+    except Exception as e:
+        raise ValueError(f"Invalid path: {e}")
 
 
 # Full documentation strings for each tool
@@ -306,12 +329,32 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         metadata: dict | None = None,
     ) -> dict:
         """Create a new project. Use tool_help("project_create") for details."""
+        # Validate project_type
+        if not ProjectType.is_valid(project_type):
+            return {
+                "error": f"Invalid project_type '{project_type}'. Must be one of: {', '.join(ProjectType._value2member_map_.keys())}"
+            }
+        
+        # Validate and sanitize paths
+        try:
+            main_directory = _validate_directory(main_directory)
+        except ValueError as e:
+            return {"error": str(e)}
+        
+        related_directories_validated = []
+        if related_directories:
+            for d in related_directories:
+                try:
+                    related_directories_validated.append(_validate_directory(d))
+                except ValueError as e:
+                    return {"error": str(e)}
+        
         try:
             project = store.create(
                 name=name,
                 project_type=project_type,
                 main_directory=main_directory,
-                related_directories=related_directories,
+                related_directories=related_directories_validated or None,
                 description=description,
                 tags=tags,
                 metadata=metadata,
@@ -324,17 +367,19 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
     project_create._full_doc_ = _FULL_DOCS["project_create"]
     
     @tool
-    def project_get(project_id: str | None = None, name: str | None = None) -> dict | None:
+    def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict | None:
         """Get a project by ID or name. Use tool_help("project_get") for details."""
         if project_id:
             project = store.get(project_id)
         elif name:
             project = store.get_by_name(name)
+        elif shortname:
+            project = store.get_by_shortname(shortname)
         else:
-            return {"error": "Must provide either project_id or name"}
+            return {"error": "Must provide either project_id, name, or shortname"}
         
         if project is None:
-            return None
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
         return project.to_dict()
     project_get._full_doc_ = _FULL_DOCS["project_get"]
     
@@ -388,6 +433,12 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         shortnames: list[str] | None = None,
     ) -> dict | None:
         """Update project fields. Use tool_help("project_update") for details."""
+        # Validate project_type if provided
+        if project_type is not None and not ProjectType.is_valid(project_type):
+            return {
+                "error": f"Invalid project_type '{project_type}'. Must be one of: {', '.join(ProjectType._value2member_map_.keys())}"
+            }
+        
         updates = {}
         if name is not None:
             updates["name"] = name
@@ -395,10 +446,24 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
             updates["project_type"] = project_type
         if description is not None:
             updates["description"] = description
+        
+        # Validate main_directory if provided
         if main_directory is not None:
-            updates["main_directory"] = main_directory
+            try:
+                updates["main_directory"] = _validate_directory(main_directory)
+            except ValueError as e:
+                return {"error": str(e)}
+        
+        # Validate related_directories if provided
         if related_directories is not None:
-            updates["related_directories"] = related_directories
+            validated_dirs = []
+            for d in related_directories:
+                try:
+                    validated_dirs.append(_validate_directory(d))
+                except ValueError as e:
+                    return {"error": str(e)}
+            updates["related_directories"] = validated_dirs
+        
         if tags is not None:
             updates["tags"] = tags
         if shortnames is not None:
@@ -406,11 +471,15 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         
         if not updates:
             project = store.get(project_id)
-            return project.to_dict() if project else None
+            if project is None:
+                return {"error": "Project not found", "error_code": "NOT_FOUND"}
+            return project.to_dict()
         
         try:
             project = store.update(project_id, **updates)
-            return project.to_dict() if project else None
+            if project is None:
+                return {"error": "Project not found", "error_code": "NOT_FOUND"}
+            return project.to_dict()
         except ValueError as e:
             return {"error": str(e)}
     project_update._full_doc_ = _FULL_DOCS["project_update"]
@@ -421,12 +490,14 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         if not ProjectStatus.is_valid(status):
             return {
                 "error": f"Invalid status '{status}'. "
-                         f"Must be one of: {', '.join(ProjectStatus)}"
+                         f"Must be one of: {', '.join(ProjectStatus._value2member_map_.keys())}"
             }
         
         try:
             project = store.update_status(project_id, status)
-            return project.to_dict() if project else None
+            if project is None:
+                return {"error": "Project not found", "error_code": "NOT_FOUND"}
+            return project.to_dict()
         except ValueError as e:
             return {"error": str(e)}
     project_set_status._full_doc_ = _FULL_DOCS["project_set_status"]
@@ -438,74 +509,109 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         as_main: bool = False
     ) -> dict | None:
         """Add a directory to a project. Use tool_help("project_add_directory") for details."""
+        try:
+            validated_dir: str = _validate_directory(directory)  # type: ignore[assignment]
+            if validated_dir is None:
+                return {"error": "Invalid directory path"}
+        except ValueError as e:
+            return {"error": str(e)}
+        
         if as_main:
-            project = store.update(project_id, main_directory=directory)
+            project = store.update(project_id, main_directory=validated_dir)
         else:
-            project = store.add_related_directory(project_id, directory)
-        return project.to_dict() if project else None
+            project = store.add_related_directory(project_id, validated_dir)
+        
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_add_directory._full_doc_ = _FULL_DOCS["project_add_directory"]
     
     @tool
     def project_remove_directory(project_id: str, directory: str) -> dict | None:
         """Remove a directory from project. Use tool_help("project_remove_directory") for details."""
         project = store.remove_related_directory(project_id, directory)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_remove_directory._full_doc_ = _FULL_DOCS["project_remove_directory"]
     
     @tool
     def project_set_tags(project_id: str, tags: list[str]) -> dict | None:
         """Replace all tags on a project. Use tool_help("project_set_tags") for details."""
         project = store.set_tags(project_id, tags)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_set_tags._full_doc_ = _FULL_DOCS["project_set_tags"]
     
     @tool
     def project_add_tag(project_id: str, tag: str) -> dict | None:
         """Add a tag to a project. Use tool_help("project_add_tag") for details."""
         project = store.add_tag(project_id, tag)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_add_tag._full_doc_ = _FULL_DOCS["project_add_tag"]
     
     @tool
     def project_remove_tag(project_id: str, tag: str) -> dict | None:
         """Remove a tag from a project. Use tool_help("project_remove_tag") for details."""
         project = store.remove_tag(project_id, tag)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_remove_tag._full_doc_ = _FULL_DOCS["project_remove_tag"]
     
     @tool
     def project_set_shortnames(project_id: str, shortnames: list[str]) -> dict | None:
         """Replace all shortnames on a project. Use tool_help("project_set_shortnames") for details."""
         project = store.set_shortnames(project_id, shortnames)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_set_shortnames._full_doc_ = _FULL_DOCS["project_set_shortnames"]
     
     @tool
     def project_add_shortname(project_id: str, shortname: str) -> dict | None:
         """Add a shortname to a project. Use tool_help("project_add_shortname") for details."""
         project = store.add_shortname(project_id, shortname)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_add_shortname._full_doc_ = _FULL_DOCS["project_add_shortname"]
     
     @tool
     def project_remove_shortname(project_id: str, shortname: str) -> dict | None:
         """Remove a shortname from a project. Use tool_help("project_remove_shortname") for details."""
         project = store.remove_shortname(project_id, shortname)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_remove_shortname._full_doc_ = _FULL_DOCS["project_remove_shortname"]
     
     @tool
     def project_set_metadata(project_id: str, key: str, value) -> dict | None:
         """Set a custom metadata field. Use tool_help("project_set_metadata") for details."""
+        # Validate that value is JSON-serializable
+        import json
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            return {"error": "Metadata value must be JSON-serializable", "error_code": "INVALID_VALUE"}
+        
         project = store.set_metadata(project_id, key, value)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_set_metadata._full_doc_ = _FULL_DOCS["project_set_metadata"]
     
     @tool
     def project_delete_metadata(project_id: str, key: str) -> dict | None:
         """Delete a metadata field. Use tool_help("project_delete_metadata") for details."""
         project = store.delete_metadata(project_id, key)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_delete_metadata._full_doc_ = _FULL_DOCS["project_delete_metadata"]
     
     @tool
@@ -516,7 +622,9 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
     ) -> dict | None:
         """Link a project to another entity. Use tool_help("project_link") for details."""
         project = store.add_relationship(project_id, entity_type, entity_id)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_link._full_doc_ = _FULL_DOCS["project_link"]
     
     @tool
@@ -527,7 +635,9 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
     ) -> dict | None:
         """Remove a link to another entity. Use tool_help("project_unlink") for details."""
         project = store.remove_relationship(project_id, entity_type, entity_id)
-        return project.to_dict() if project else None
+        if project is None:
+            return {"error": "Project not found", "error_code": "NOT_FOUND"}
+        return project.to_dict()
     project_unlink._full_doc_ = _FULL_DOCS["project_unlink"]
     
     @tool

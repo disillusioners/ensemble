@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 from typing import TYPE_CHECKING
 
 from .bash import bash
-from .filesystem import list_directory, read_file, glob_files
+from .filesystem import list_directory, read_file, glob_files, write_file, grep_files, edit_file
 from .time import time
 from .inner_soul import create_inner_soul_tool
 from .agent_mother import create_mother_tools
@@ -158,7 +158,10 @@ Returns:
         bash,
         list_directory,
         read_file,
+        write_file,
         glob_files,
+        grep_files,
+        edit_file,
         time,
         # Session management tools
         spawn_session,

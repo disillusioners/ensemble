@@ -160,3 +160,163 @@ Args:
 Returns:
     List of matching file paths, sorted by modification time (newest first)
 """
+
+
+@tool
+def write_file(
+    content: str,
+    path: str,
+    append: bool = False
+) -> str:
+    """Write or append content to a file. Use tool_help("write_file") for details."""
+    try:
+        file_path = Path(path).expanduser().resolve()
+        
+        # Create parent directories if they don't exist
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        mode = "a" if append else "w"
+        with open(file_path, mode, encoding="utf-8") as f:
+            f.write(content)
+        
+        action = "Appended to" if append else "Written to"
+        return f"SUCCESS: {action} {file_path}"
+        
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+write_file._full_doc_ = """Write or append content to a file.
+
+Args:
+    content: The text content to write
+    path: File path to write to
+    append: If True, append to existing file; if False, overwrite (default: False)
+
+Returns:
+    Success message with the file path
+"""
+
+
+@tool
+def grep_files(
+    pattern: str,
+    path: str = ".",
+    include: str = "",
+    case_sensitive: bool = False,
+    whole_word: bool = False
+) -> str:
+    """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
+    try:
+        import re
+        
+        base_path = Path(path).expanduser().resolve()
+        
+        if not base_path.exists():
+            return f"ERROR: Path does not exist: {path}"
+        
+        # Build glob pattern from include filter
+        glob_pattern = include if include else "**/*"
+        
+        # Compile regex
+        flags = 0 if case_sensitive else re.IGNORECASE
+        if whole_word:
+            pattern = rf"\b{re.escape(pattern)}\b"
+        
+        regex = re.compile(pattern, flags)
+        
+        # Search files
+        matches = []
+        for file_path in base_path.glob(glob_pattern):
+            if not file_path.is_file():
+                continue
+            
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+            except (UnicodeDecodeError, PermissionError, IsADirectoryError):
+                continue
+            
+            for line_num, line in enumerate(lines, start=1):
+                if regex.search(line):
+                    # Truncate long lines
+                    display_line = line[:500] + "..." if len(line) > 500 else line
+                    matches.append(f"{file_path}:{line_num}: {display_line}")
+        
+        if not matches:
+            return f"No matches found for: {pattern}"
+        
+        return "\n".join(matches)
+        
+    except re.error as e:
+        return f"ERROR: Invalid regex pattern: {e}"
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+grep_files._full_doc_ = """Search file contents using regex patterns.
+
+Args:
+    pattern: Regex pattern to search for
+    path: Directory to search in (default: current directory)
+    include: Glob pattern to filter files (e.g., "*.py", "*.{js,ts}")
+    case_sensitive: Whether search is case-sensitive (default: False)
+    whole_word: Match whole words only (default: False)
+
+Returns:
+    Matching lines with file path and line number (format: "path:line: content")
+"""
+
+
+@tool
+def edit_file(
+    path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False
+) -> str:
+    """Replace text in a file using exact string matching. Use tool_help("edit_file") for details."""
+    try:
+        file_path = Path(path).expanduser().resolve()
+        
+        if not file_path.exists():
+            return f"ERROR: File does not exist: {path}"
+        
+        if not file_path.is_file():
+            return f"ERROR: Not a file: {path}"
+        
+        content = file_path.read_text(encoding="utf-8")
+        
+        if old_string not in content:
+            return f"ERROR: String not found in file: {old_string[:100]}"
+        
+        count = content.count(old_string)
+        
+        if replace_all:
+            new_content = content.replace(old_string, new_string)
+            action = f"Replaced all {count} occurrences"
+        else:
+            if count > 1:
+                return f"ERROR: String found {count} times. Use replace_all=True to replace all occurrences."
+            new_content = content.replace(old_string, new_string, 1)
+            action = "Replaced 1 occurrence"
+        
+        file_path.write_text(new_content, encoding="utf-8")
+        
+        return f"SUCCESS: {action} in {file_path}"
+        
+    except Exception as e:
+        return f"ERROR: {str(e)}"
+
+edit_file._full_doc_ = """Replace text in a file using exact string matching.
+
+Args:
+    path: File path to edit
+    old_string: The exact string to find and replace (supports multi-line)
+    new_string: The replacement string
+    replace_all: If True, replace all occurrences; if False, replace only the first (default: False)
+
+Returns:
+    Success message with number of replacements made
+
+Note:
+    Use replace_all=True when the string appears multiple times and you want to replace all.
+    Omit replace_all (or set False) for single replacements to avoid unintended changes.
+"""
