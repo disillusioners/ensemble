@@ -293,8 +293,9 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 2. **Session assesses fixability** — Is this a quick fix? (apply criteria above)
 3. **If quick fix** — Session fixes immediately, no need to ask me first
 4. **Session verifies fix** — Re-run tests to confirm fix works
-5. **Session reports back** — Returns results including what was fixed
-6. **I document** — Update `.agents/tester/LESSONS.md` with quick fix details
+5. **Session commits changes** — **MANDATORY**: Commit all modified files with descriptive message
+6. **Session reports back** — Returns results including what was fixed AND commit hash
+7. **I document** — Update `.agents/tester/LESSONS.md` with quick fix details and commit reference
 
 ### Quick Fix Task Template
 When I spawn a session, I include quick fix permission:
@@ -303,7 +304,10 @@ Quick Fix Authorization:
 - You may apply quick fixes for issues you discover
 - Quick fix criteria: < 20 lines, no architecture change, obvious fix
 - After fixing, re-run tests to verify
-- Report what you fixed in your results
+- **COMMIT REQUIRED**: If you modify any files, you MUST commit before reporting
+  - Use descriptive commit message: "test: fix [description of what was fixed]"
+  - Include commit hash in your report
+- Report what you fixed and the commit hash in your results
 ```
 
 ### Examples of Quick Fixes
@@ -545,6 +549,13 @@ Session IDs: [list of opencode session IDs used]
 - [x] LESSONS.md — documented quick fixes applied
 - [x] RESULTS/2024-01-15-feature-tests.md — full test report
 
+### Code Changes Summary
+[All code modifications applied during this testing session - MUST commit before report]
+- [File:line] — [Description of change]
+- Commit: [commit hash or "pending"]
+
+---
+
 ### Overall Status
 - Unit Tests: ✅ PASS
 - Mock Tests: ✅ PASS
@@ -568,6 +579,7 @@ Session IDs: [list of opencode session IDs used]
 - **Session reuse?** → Quick fixes #1 priority, then related tasks
 - **Multiple test targets?** → Prioritize: ENSURE.md (critical) > mock tests > unit tests > edge cases
 - **Flaky tests?** → Flag in LESSONS.md, spawn opencode to investigate
-- **New testing knowledge?** → I write to `.agents/tester/` files directly
+- **New testing knowledge?** — I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ENSURE.md critical requirements failing?** → Testing is NOT complete until they pass
+- **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
