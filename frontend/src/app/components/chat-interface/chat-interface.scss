@@ -57,11 +57,16 @@ $cyan: #06b6d4;
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  position: relative;
   background-color: $bg-primary;
+  overflow: hidden;
+}
+
+.messages-scroll {
+  flex: 1;
+  overflow-y: auto;
   padding: 1.5rem;
   min-height: 0;
-  position: relative; // For scroll-to-bottom button positioning
 }
 
 .messages-wrapper {

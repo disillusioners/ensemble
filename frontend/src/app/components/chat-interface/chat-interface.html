@@ -13,11 +13,13 @@
   </div>
 } @else {
   <!-- Messages container -->
-  <div class="messages-container" #messagesContainer (scroll)="onScroll($event)">
-    <div class="messages-wrapper">
-      
-      <!-- Welcome message when no messages -->
-      @if (messages.length === 0) {
+  <div class="messages-container" #messagesContainer>
+    <!-- Scrollable area -->
+    <div class="messages-scroll" (scroll)="onScroll($event)">
+      <div class="messages-wrapper">
+        
+        <!-- Welcome message when no messages -->
+        @if (messages.length === 0) {
         <div class="welcome-message">
           <div class="welcome-icon" [style.backgroundColor]="agentColor + '20'">
             <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
@@ -188,6 +190,7 @@
 
       <!-- Auto-scroll anchor -->
       <div #messagesEnd></div>
+      </div>
     </div>
 
     <!-- Scroll to bottom button -->
