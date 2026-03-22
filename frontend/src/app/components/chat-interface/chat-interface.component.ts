@@ -60,6 +60,8 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
     // If user scrolls to bottom manually, reset the flag
     if (nearBottom) {
       this.userHasScrolled.set(false);
+    } else {
+      this.userHasScrolled.set(true);
     }
   }
 
