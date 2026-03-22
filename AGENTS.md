@@ -260,3 +260,5 @@ async def test_session_creation():
 4. **Database**: Two SQLite databases — one for persistence, one for LangGraph checkpoints. Both use aiosqlite for async access.
 
 5. **LangGraph Version**: Uses LangGraph 0.3+ with checkpoint-sqlite for state persistence.
+
+6. **SSE (Server-Sent Events)**: This project uses SSE for real-time streaming. When performing browser automation, do not wait for the network to become idle — it will never happen due to the persistent SSE connection.
