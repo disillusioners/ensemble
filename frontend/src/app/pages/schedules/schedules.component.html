@@ -1,0 +1,174 @@
+<div class="schedules-container">
+  <!-- Header -->
+  <div class="schedules-header">
+    <div class="header-left">
+      <h1 class="page-title">Schedules</h1>
+      @if (totalCount() > 0) {
+        <div class="stats-badges">
+          <span class="stat-badge active">
+            <mat-icon>play_circle</mat-icon>
+            {{ activeCount() }} active
+          </span>
+          <span class="stat-badge paused">
+            <mat-icon>pause_circle</mat-icon>
+            {{ pausedCount() }} paused
+          </span>
+        </div>
+      }
+    </div>
+    <div class="header-actions">
+      <button 
+        mat-stroked-button 
+        (click)="onRefresh()"
+        [disabled]="loading()"
+        class="refresh-btn">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        Refresh
+      </button>
+      <button 
+        mat-flat-button 
+        color="primary"
+        (click)="onOpenCreateDialog()"
+        class="create-btn">
+        <mat-icon>add</mat-icon>
+        Create Schedule
+      </button>
+    </div>
+  </div>
+
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">Status:</span>
+      <mat-chip-listbox 
+        class="status-chips"
+        (change)="onStatusFilterChange($event.value)">
+        @for (option of statusOptions; track option.value) {
+          <mat-chip-option 
+            [value]="option.value"
+            [selected]="statusFilter() === option.value">
+            {{ option.label }}
+          </mat-chip-option>
+        }
+      </mat-chip-listbox>
+    </div>
+
+    <div class="filter-row">
+      <mat-form-field appearance="outline" class="filter-field">
+        <mat-label>Type</mat-label>
+        <mat-select 
+          [value]="typeFilter()"
+          (selectionChange)="onTypeFilterChange($event.value)">
+          @for (option of typeOptions; track option.value) {
+            <mat-option [value]="option.value">{{ option.label }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+
+      @if (hasActiveFilters()) {
+        <button 
+          mat-button 
+          (click)="onClearFilters()"
+          class="clear-filters-btn">
+          <mat-icon>clear</mat-icon>
+          Clear Filters
+        </button>
+      }
+    </div>
+  </div>
+
+  <!-- Main Content with Drawer -->
+  <mat-drawer-container class="schedules-drawer-container" [hasBackdrop]="true">
+    <!-- Schedule List Content -->
+    <mat-drawer-content class="schedules-content">
+      
+      <!-- Loading State -->
+      @if (loading() && schedules().length === 0) {
+        <div class="loading-container">
+          @for (i of [1, 2, 3]; track i) {
+            <div class="skeleton-card">
+              <div class="skeleton-header">
+                <div class="skeleton-badge"></div>
+                <div class="skeleton-badge small"></div>
+                <div class="skeleton-time"></div>
+              </div>
+              <div class="skeleton-content">
+                <div class="skeleton-line"></div>
+                <div class="skeleton-line short"></div>
+              </div>
+            </div>
+          }
+        </div>
+      }
+
+      <!-- Error State -->
+      @if (error()) {
+        <div class="error-container">
+          <mat-icon class="error-icon">error_outline</mat-icon>
+          <h3>Failed to load schedules</h3>
+          <p>{{ error() }}</p>
+          <button mat-stroked-button color="primary" (click)="onRefresh()">
+            <mat-icon>refresh</mat-icon>
+            Try Again
+          </button>
+        </div>
+      }
+
+      <!-- Empty State (no schedules at all) -->
+      @if (isEmptyState()) {
+        <div class="empty-container">
+          <mat-icon class="empty-icon">schedule</mat-icon>
+          <h3>No schedules yet</h3>
+          <p>Create a schedule to automate your tasks</p>
+          <button mat-flat-button color="primary" (click)="onOpenCreateDialog()">
+            <mat-icon>add</mat-icon>
+            Create Schedule
+          </button>
+        </div>
+      }
+
+      <!-- Filtered Empty State -->
+      @if (isFilteredEmpty()) {
+        <div class="empty-container">
+          <mat-icon class="empty-icon">filter_list_off</mat-icon>
+          <h3>No schedules match your filters</h3>
+          <p>Try adjusting your filters or 
+            <button mat-button color="primary" (click)="onClearFilters()">clear all filters</button>
+          </p>
+        </div>
+      }
+
+      <!-- Schedule Grid -->
+      @if (!loading() || schedules().length > 0) {
+        <div class="schedule-grid">
+          @for (schedule of filteredSchedules(); track schedule.id) {
+            <app-schedule-card
+              [schedule]="schedule"
+              (edit)="onEditSchedule($event)"
+              (delete)="onDeleteSchedule($event)"
+              (trigger)="onTriggerSchedule($event)"
+              (toggleStatus)="onToggleScheduleStatus($event)">
+            </app-schedule-card>
+          }
+        </div>
+      }
+
+    </mat-drawer-content>
+
+    <!-- Detail Drawer -->
+    <mat-drawer 
+      #drawer 
+      position="end" 
+      [opened]="drawerOpen()"
+      (closedStart)="onCloseDrawer()"
+      class="schedule-detail-drawer-panel">
+      @if (selectedSchedule()) {
+        <app-schedule-detail-drawer
+          [schedule]="selectedSchedule()!"
+          [isDrawerMode]="true"
+          (close)="onCloseDrawer()">
+        </app-schedule-detail-drawer>
+      }
+    </mat-drawer>
+  </mat-drawer-container>
+</div>

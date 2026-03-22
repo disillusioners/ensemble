@@ -1,0 +1,142 @@
+<mat-card class="schedule-card">
+  <!-- Header with badges -->
+  <div class="schedule-card-header">
+    <div class="badges">
+      <!-- Type Badge -->
+      <span 
+        class="type-badge"
+        [style.backgroundColor]="typeColor() + '20'"
+        [style.color]="typeColor()">
+        <mat-icon class="badge-icon">{{ typeIcon() }}</mat-icon>
+        {{ typeLabel() }}
+      </span>
+
+      <!-- Status Badge -->
+      <span 
+        class="status-badge"
+        [style.backgroundColor]="statusColor() + '20'"
+        [style.color]="statusColor()">
+        <mat-icon class="badge-icon status-icon-{{ schedule().status }}">{{ statusIcon() }}</mat-icon>
+        {{ statusLabel() }}
+      </span>
+    </div>
+  </div>
+
+  <!-- Card Content -->
+  <mat-card-content class="schedule-card-content">
+    <!-- Schedule Name -->
+    <h3 class="schedule-name">{{ schedule().name }}</h3>
+
+    <!-- Config Description -->
+    <p class="config-description">
+      <mat-icon class="config-icon">settings</mat-icon>
+      {{ configDescription() }}
+    </p>
+
+    <!-- Timing Information -->
+    <div class="timing-info">
+      @if (nextRunDisplay()) {
+        <div class="timing-row">
+          <mat-icon class="timing-icon next-run">play_arrow</mat-icon>
+          <span class="timing-label">Next run:</span>
+          <span class="timing-value" [matTooltip]="nextRunDisplay()!">
+            {{ nextRunRelative() }}
+          </span>
+        </div>
+      }
+      
+      @if (lastRunDisplay()) {
+        <div class="timing-row">
+          <mat-icon class="timing-icon last-run">history</mat-icon>
+          <span class="timing-label">Last run:</span>
+          <span class="timing-value" [matTooltip]="lastRunDisplay()!">
+            {{ lastRunRelative() }}
+          </span>
+        </div>
+      }
+
+      @if (!nextRunDisplay() && !lastRunDisplay()) {
+        <div class="timing-row no-timing">
+          <mat-icon class="timing-icon">event_busy</mat-icon>
+          <span class="timing-value">Not scheduled</span>
+        </div>
+      }
+    </div>
+  </mat-card-content>
+
+  <!-- Action Toolbar -->
+  <mat-card-actions class="schedule-card-actions">
+    <!-- Start/Resume Toggle -->
+    @if (canStart()) {
+      <button 
+        mat-icon-button 
+        matTooltip="Start schedule"
+        class="action-btn start-btn"
+        (click)="onStart(); $event.stopPropagation()">
+        <mat-icon>play_arrow</mat-icon>
+      </button>
+    }
+
+    @if (canResume()) {
+      <button 
+        mat-icon-button 
+        matTooltip="Resume schedule"
+        class="action-btn start-btn"
+        (click)="onResume(); $event.stopPropagation()">
+        <mat-icon>play_arrow</mat-icon>
+      </button>
+    }
+
+    <!-- Pause -->
+    @if (canPause()) {
+      <button 
+        mat-icon-button 
+        matTooltip="Pause schedule"
+        class="action-btn pause-btn"
+        (click)="onPause(); $event.stopPropagation()">
+        <mat-icon>pause</mat-icon>
+      </button>
+    }
+
+    <!-- Stop -->
+    @if (canStop()) {
+      <button 
+        mat-icon-button 
+        matTooltip="Stop schedule"
+        class="action-btn stop-btn"
+        (click)="onStop(); $event.stopPropagation()">
+        <mat-icon>stop</mat-icon>
+      </button>
+    }
+
+    <span class="action-divider"></span>
+
+    <!-- Trigger Manual Execution -->
+    <button 
+      mat-icon-button 
+      matTooltip="Trigger now"
+      class="action-btn trigger-btn"
+      [disabled]="schedule().status === 'running'"
+      (click)="onTrigger(); $event.stopPropagation()">
+      <mat-icon>bolt</mat-icon>
+    </button>
+
+    <!-- Edit -->
+    <button 
+      mat-icon-button 
+      matTooltip="Edit schedule"
+      class="action-btn edit-btn"
+      (click)="onEdit(); $event.stopPropagation()">
+      <mat-icon>edit</mat-icon>
+    </button>
+
+    <!-- Delete -->
+    <button 
+      mat-icon-button 
+      matTooltip="Delete schedule"
+      class="action-btn delete-btn"
+      (click)="onDelete(); $event.stopPropagation()">
+      <mat-icon>delete</mat-icon>
+    </button>
+  </mat-card-actions>
+</mat-card>

@@ -1,0 +1,388 @@
+<div class="schedule-detail-drawer">
+  @if (schedule(); as sched) {
+    <!-- Header -->
+    <div class="drawer-header">
+      <div class="header-top">
+        <mat-chip [class]="'status-' + sched.status">
+          {{ statusLabel() }}
+        </mat-chip>
+        <div class="header-actions">
+          <button mat-icon-button
+                  matTooltip="Copy Schedule ID"
+                  (click)="onCopyId()">
+            <mat-icon>content_copy</mat-icon>
+          </button>
+          @if (isDrawerMode()) {
+            <button mat-icon-button
+                    matTooltip="Close"
+                    (click)="onClose()">
+              <mat-icon>close</mat-icon>
+            </button>
+          }
+        </div>
+      </div>
+      <div class="schedule-name-row">
+        @if (isEditing()) {
+          <mat-form-field appearance="outline" class="name-field">
+            <mat-label>Schedule Name</mat-label>
+            <input matInput
+                   [ngModel]="editingName()"
+                   (ngModelChange)="editingName.set($event)"
+                   placeholder="My Schedule">
+          </mat-form-field>
+        } @else {
+          <h2 class="schedule-name">{{ sched.name }}</h2>
+        }
+      </div>
+      <div class="schedule-id">
+        <span class="label">ID:</span>
+        <code class="value">{{ sched.id }}</code>
+      </div>
+    </div>
+
+    <mat-divider></mat-divider>
+
+    <!-- Configuration Panel -->
+    <section class="detail-section">
+      <div class="section-header">
+        <h3 class="section-title">Configuration</h3>
+        @if (!isEditing()) {
+          <button mat-stroked-button
+                  color="primary"
+                  (click)="onStartEdit()">
+            <mat-icon>edit</mat-icon>
+            Edit
+          </button>
+        }
+      </div>
+
+      <div class="detail-grid">
+        <!-- Schedule Type -->
+        @if (isEditing()) {
+          <div class="detail-item">
+            <span class="label">Schedule Type</span>
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-select [value]="editingConfig()?.type"
+                          (selectionChange)="onTypeChange($event.value)">
+                <mat-option value="cron">Cron</mat-option>
+                <mat-option value="interval">Interval</mat-option>
+                <mat-option value="one-time">One-time</mat-option>
+              </mat-select>
+            </mat-form-field>
+          </div>
+
+          <!-- Cron Expression -->
+          @if (editingConfig()?.type === 'cron') {
+            <div class="detail-item">
+              <span class="label">Cron Expression</span>
+              <mat-form-field appearance="outline" class="full-width">
+                <input matInput
+                       [ngModel]="editingConfig()?.expression"
+                       (ngModelChange)="onExpressionChange($event)"
+                       placeholder="0 9 * * *">
+                <mat-hint>minute hour day month weekday</mat-hint>
+              </mat-form-field>
+            </div>
+          }
+
+          <!-- Interval -->
+          @if (editingConfig()?.type === 'interval') {
+            <div class="detail-item">
+              <span class="label">Interval (seconds)</span>
+              <mat-form-field appearance="outline" class="full-width">
+                <input matInput
+                       type="number"
+                       [ngModel]="editingConfig()?.interval_seconds"
+                       (ngModelChange)="onIntervalChange($event)"
+                       placeholder="3600">
+                <mat-hint>{{ intervalDisplay() }}</mat-hint>
+              </mat-form-field>
+            </div>
+          }
+
+          <!-- One-time -->
+          @if (editingConfig()?.type === 'one-time') {
+            <div class="detail-item">
+              <span class="label">Run At</span>
+              <mat-form-field appearance="outline" class="full-width">
+                <input matInput
+                       [ngModel]="editingConfig()?.run_at"
+                       (ngModelChange)="onRunAtChange($event)"
+                       type="datetime-local">
+              </mat-form-field>
+            </div>
+          }
+
+          <!-- Agent -->
+          <div class="detail-item">
+            <span class="label">Agent</span>
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Agent</mat-label>
+              <input matInput
+                     [ngModel]="editingConfig()?.agent"
+                     (ngModelChange)="onAgentChange($event)"
+                     placeholder="agent-name">
+            </mat-form-field>
+          </div>
+
+          <!-- Message -->
+          <div class="detail-item full-width">
+            <span class="label">Message</span>
+            <mat-form-field appearance="outline" class="full-width">
+              <textarea matInput
+                        [ngModel]="editingConfig()?.message"
+                        (ngModelChange)="onMessageChange($event)"
+                        rows="4"
+                        placeholder="Message to send to the agent"></textarea>
+            </mat-form-field>
+          </div>
+
+          <!-- Timezone -->
+          <div class="detail-item">
+            <span class="label">Timezone</span>
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Timezone</mat-label>
+              <input matInput
+                     [ngModel]="editingConfig()?.timezone"
+                     (ngModelChange)="onTimezoneChange($event)"
+                     placeholder="UTC">
+            </mat-form-field>
+          </div>
+
+          <!-- Project -->
+          <div class="detail-item">
+            <span class="label">Project</span>
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Project</mat-label>
+              <input matInput
+                     [ngModel]="editingConfig()?.project"
+                     (ngModelChange)="onProjectChange($event)"
+                     placeholder="project-name">
+            </mat-form-field>
+          </div>
+
+          <!-- Edit Actions -->
+          <div class="edit-actions">
+            <button mat-stroked-button
+                    (click)="onCancelEdit()"
+                    [disabled]="actionLoading()">
+              Cancel
+            </button>
+            <button mat-flat-button
+                    color="primary"
+                    (click)="onSave()"
+                    [disabled]="actionLoading() || !hasChanges()">
+              @if (actionLoading()) {
+                <mat-spinner diameter="20"></mat-spinner>
+              } @else {
+                Save Changes
+              }
+            </button>
+          </div>
+        } @else {
+          <!-- View Mode -->
+          <div class="detail-item">
+            <span class="label">Schedule Type</span>
+            <span class="value">{{ scheduleTypeLabel() }}</span>
+          </div>
+
+          @if (sched.config.expression) {
+            <div class="detail-item">
+              <span class="label">Cron Expression</span>
+              <code class="value cron-value">{{ sched.config.expression }}</code>
+            </div>
+          }
+
+          @if (sched.config.interval_seconds) {
+            <div class="detail-item">
+              <span class="label">Interval</span>
+              <span class="value">{{ intervalDisplay() }}</span>
+            </div>
+          }
+
+          @if (sched.config.run_at) {
+            <div class="detail-item">
+              <span class="label">Run At</span>
+              <span class="value">{{ formatDate(sched.config.run_at) }}</span>
+            </div>
+          }
+
+          <div class="detail-item">
+            <span class="label">Agent</span>
+            <span class="value">{{ sched.config.agent }}</span>
+          </div>
+
+          @if (sched.config.timezone) {
+            <div class="detail-item">
+              <span class="label">Timezone</span>
+              <span class="value">{{ sched.config.timezone }}</span>
+            </div>
+          }
+
+          @if (sched.config.project) {
+            <div class="detail-item">
+              <span class="label">Project</span>
+              <span class="value">{{ sched.config.project }}</span>
+            </div>
+          }
+        }
+      </div>
+
+      <!-- Message Display (View Mode) -->
+      @if (!isEditing() && sched.config.message) {
+        <div class="message-block">
+          <span class="label">Message</span>
+          <pre class="code-block">{{ sched.config.message }}</pre>
+        </div>
+      }
+    </section>
+
+    <mat-divider></mat-divider>
+
+    <!-- Execution History -->
+    <section class="detail-section">
+      <div class="section-header">
+        <h3 class="section-title">Execution History</h3>
+        <button mat-icon-button
+                matTooltip="Refresh"
+                (click)="loadExecutions()">
+          <mat-icon>refresh</mat-icon>
+        </button>
+      </div>
+
+      @if (loadingExecutions()) {
+        <div class="loading-state">
+          <mat-spinner diameter="32"></mat-spinner>
+          <span>Loading executions...</span>
+        </div>
+      } @else if (executions().length === 0) {
+        <div class="empty-state">
+          <mat-icon>history</mat-icon>
+          <span>No executions yet</span>
+        </div>
+      } @else {
+        <div class="executions-list">
+          @for (execution of executions(); track execution.id) {
+            <div class="execution-item">
+              <div class="execution-header">
+                <mat-chip [class]="getExecutionStatusClass(execution.status)">
+                  {{ execution.status }}
+                </mat-chip>
+                <span class="execution-time">{{ formatDate(execution.started_at) }}</span>
+              </div>
+              <div class="execution-details">
+                @if (formatExecutionDuration(execution); as duration) {
+                  <span class="duration">Duration: {{ duration }}</span>
+                }
+                @if (execution.session_id) {
+                  <span class="session-link">
+                    <span class="label">Session:</span>
+                    <code class="value">{{ execution.session_id }}</code>
+                  </span>
+                }
+                @if (execution.error) {
+                  <div class="error-block">
+                    {{ execution.error }}
+                  </div>
+                }
+              </div>
+            </div>
+          }
+
+          @if (hasMoreExecutions()) {
+            <button mat-stroked-button
+                    class="load-more-btn"
+                    (click)="loadMoreExecutions()"
+                    [disabled]="loadingExecutions()">
+              Load More
+            </button>
+          }
+        </div>
+      }
+    </section>
+
+    <mat-divider></mat-divider>
+
+    <!-- Info Section -->
+    <section class="detail-section">
+      <h3 class="section-title">Schedule Info</h3>
+      <div class="detail-grid">
+        <div class="detail-item">
+          <span class="label">Created At</span>
+          <span class="value">{{ formatDate(sched.created_at) }}</span>
+        </div>
+        <div class="detail-item">
+          <span class="label">Updated At</span>
+          <span class="value">{{ formatDate(sched.updated_at) }}</span>
+        </div>
+        @if (sched.last_run_at) {
+          <div class="detail-item">
+            <span class="label">Last Run</span>
+            <span class="value">{{ formatDate(sched.last_run_at) }}</span>
+          </div>
+        }
+        @if (sched.next_run_at) {
+          <div class="detail-item">
+            <span class="label">Next Run</span>
+            <span class="value">{{ formatDate(sched.next_run_at) }}</span>
+          </div>
+        }
+      </div>
+    </section>
+
+    <mat-divider></mat-divider>
+
+    <!-- Actions Toolbar -->
+    <section class="detail-section actions-section">
+      <div class="action-buttons">
+        @if (canStart()) {
+          <button mat-stroked-button
+                  color="primary"
+                  (click)="onStart()"
+                  [disabled]="actionLoading()">
+            <mat-icon>play_arrow</mat-icon>
+            Start
+          </button>
+        }
+        @if (canStop()) {
+          <button mat-stroked-button
+                  color="warn"
+                  (click)="onStop()"
+                  [disabled]="actionLoading()">
+            <mat-icon>stop</mat-icon>
+            Stop
+          </button>
+        }
+        <button mat-stroked-button
+                (click)="onTrigger()"
+                [disabled]="actionLoading()">
+          <mat-icon>flash_on</mat-icon>
+          Trigger Now
+        </button>
+        @if (!showDeleteConfirm()) {
+          <button mat-stroked-button
+                  color="warn"
+                  (click)="showDeleteConfirm.set(true)"
+                  [disabled]="actionLoading()">
+            <mat-icon>delete</mat-icon>
+            Delete
+          </button>
+        } @else {
+          <div class="delete-confirm">
+            <span>Delete this schedule?</span>
+            <button mat-button
+                    color="warn"
+                    (click)="onDelete()"
+                    [disabled]="actionLoading()">
+              Confirm
+            </button>
+            <button mat-button
+                    (click)="showDeleteConfirm.set(false)">
+              Cancel
+            </button>
+          </div>
+        }
+      </div>
+    </section>
+  }
+</div>

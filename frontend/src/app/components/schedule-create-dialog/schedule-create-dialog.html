@@ -1,0 +1,245 @@
+<div class="modal-container">
+  <!-- Backdrop -->
+  <div class="modal-backdrop" (click)="handleClose()"></div>
+  
+  <!-- Modal -->
+  <div class="modal-content animate-fade-in">
+    <!-- Header -->
+    <div class="modal-header">
+      <h2 class="font-display text-xl font-semibold text-dark-50">
+        {{ data.editMode ? 'Edit Schedule' : 'Create New Schedule' }}
+      </h2>
+      <button
+        (click)="handleClose()"
+        class="close-btn"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
+      <!-- Name -->
+      <div class="form-group">
+        <label class="form-label">
+          Name <span class="text-accent-rose">*</span>
+        </label>
+        <input
+          type="text"
+          formControlName="name"
+          placeholder="My scheduled task"
+          class="form-input"
+        />
+        @if (form.get('name')?.touched && form.get('name')?.errors?.['required']) {
+          <p class="form-error">Name is required</p>
+        }
+        @if (form.get('name')?.touched && form.get('name')?.errors?.['minlength']) {
+          <p class="form-error">Name must be at least 2 characters</p>
+        }
+      </div>
+
+      <!-- Schedule Type -->
+      <div class="form-group">
+        <label class="form-label">
+          Schedule Type <span class="text-accent-rose">*</span>
+        </label>
+        <select
+          formControlName="type"
+          class="form-select"
+        >
+          @for (option of scheduleTypes; track option.value) {
+            <option [value]="option.value">{{ option.label }}</option>
+          }
+        </select>
+      </div>
+
+      <!-- Cron Expression (shown when type='cron') -->
+      @if (selectedType === 'cron') {
+        <div class="form-group">
+          <label class="form-label">
+            Cron Expression <span class="text-accent-rose">*</span>
+          </label>
+          <input
+            type="text"
+            formControlName="schedule"
+            placeholder="0 * * * *"
+            class="form-input"
+          />
+          <p class="form-hint">Format: minute hour day month weekday (e.g., "0 * * * *" = every hour)</p>
+          @if (getCronHint()) {
+            <p class="form-hint cron-hint">{{ getCronHint() }}</p>
+          }
+          @if (form.get('schedule')?.touched && form.get('schedule')?.errors?.['required']) {
+            <p class="form-error">Cron expression is required</p>
+          }
+        </div>
+      }
+
+      <!-- Interval Seconds (shown when type='interval') -->
+      @if (selectedType === 'interval') {
+        <div class="form-group">
+          <label class="form-label">
+            Interval (seconds) <span class="text-accent-rose">*</span>
+          </label>
+          <input
+            type="number"
+            formControlName="interval_seconds"
+            min="1"
+            step="1"
+            class="form-input"
+          />
+          <p class="form-hint">{{ getIntervalDisplay(form.get('interval_seconds')?.value || 60) }}</p>
+          @if (form.get('interval_seconds')?.touched && form.get('interval_seconds')?.errors?.['required']) {
+            <p class="form-error">Interval is required</p>
+          }
+          @if (form.get('interval_seconds')?.touched && form.get('interval_seconds')?.errors?.['min']) {
+            <p class="form-error">Interval must be at least 1 second</p>
+          }
+        </div>
+      }
+
+      <!-- Run At (shown when type='one-time') -->
+      @if (selectedType === 'one-time') {
+        <div class="form-group">
+          <label class="form-label">
+            Run At <span class="text-accent-rose">*</span>
+          </label>
+          <input
+            type="datetime-local"
+            formControlName="run_at"
+            class="form-input"
+          />
+          @if (form.get('run_at')?.touched && form.get('run_at')?.errors?.['required']) {
+            <p class="form-error">Run at datetime is required</p>
+          }
+        </div>
+      }
+
+      <!-- Agent Selector -->
+      <div class="form-group">
+        <label class="form-label">
+          Agent <span class="text-accent-rose">*</span>
+        </label>
+        @if (agentsLoading()) {
+          <div class="loading-placeholder">Loading agents...</div>
+        } @else {
+          <select
+            formControlName="agent"
+            class="form-select"
+          >
+            <option value="" disabled>Select an agent</option>
+            @for (agent of agents(); track agent.agent_dir) {
+              <option [value]="agent.agent_dir">
+                {{ getAgentDisplayName(agent) }}
+              </option>
+            }
+          </select>
+        }
+        @if (form.get('agent')?.touched && form.get('agent')?.errors?.['required']) {
+          <p class="form-error">Agent is required</p>
+        }
+      </div>
+
+      <!-- Message -->
+      <div class="form-group">
+        <label class="form-label">
+          Message <span class="text-accent-rose">*</span>
+        </label>
+        <textarea
+          formControlName="message"
+          placeholder="Enter the task/message for the agent..."
+          rows="4"
+          class="form-textarea"
+        ></textarea>
+        @if (form.get('message')?.touched && form.get('message')?.errors?.['required']) {
+          <p class="form-error">Message is required</p>
+        }
+        @if (form.get('message')?.touched && form.get('message')?.errors?.['minlength']) {
+          <p class="form-error">Message must be at least 5 characters</p>
+        }
+      </div>
+
+      <!-- Timezone -->
+      <div class="form-group">
+        <label class="form-label">Timezone</label>
+        <select
+          formControlName="timezone"
+          class="form-select"
+        >
+          @for (tz of timezones; track tz.value) {
+            <option [value]="tz.value">{{ tz.label }}</option>
+          }
+        </select>
+      </div>
+
+      <!-- Project -->
+      <div class="form-group">
+        <label class="form-label">Project</label>
+        <input
+          type="text"
+          formControlName="project"
+          placeholder="Optional project name"
+          class="form-input"
+        />
+      </div>
+
+      <!-- Validation Status -->
+      @if (isValid() !== null) {
+        <div class="validation-status" [class.valid]="isValid()" [class.invalid]="!isValid()">
+          @if (isValid()) {
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+            <span>Schedule configuration is valid</span>
+          } @else {
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+            <span>{{ validationError() || 'Invalid schedule configuration' }}</span>
+          }
+        </div>
+      }
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button
+          type="button"
+          (click)="handleClose()"
+          class="cancel-btn"
+          [disabled]="isLoading()"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          (click)="handleValidate()"
+          class="validate-btn"
+          [disabled]="isValidating() || form.invalid"
+        >
+          @if (isValidating()) {
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          }
+          Validate
+        </button>
+        <button
+          type="submit"
+          [disabled]="isSubmitDisabled()"
+          class="submit-btn"
+        >
+          @if (isLoading()) {
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          }
+          {{ data.editMode ? 'Update' : 'Create' }}
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

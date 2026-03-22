@@ -109,7 +109,7 @@ export interface SSEEvent {
 
 // Source types
 export type SourceStatus = 'stopped' | 'starting' | 'running' | 'error';
-export type SourceType = 'telegram' | 'webhook' | 'whatsapp' | 'discord';
+export type SourceType = 'telegram' | 'webhook' | 'whatsapp' | 'discord' | 'scheduler';
 
 export interface Source {
   source_id: string;

@@ -7,3 +7,4 @@ export * from './message-input/message-input.component';
 export * from './source-list/source-list.component';
 export * from './source-card/source-card.component';
 export * from './add-source-modal/add-source-modal.component';
+export * from './schedule-detail-drawer/schedule-detail-drawer.component';
