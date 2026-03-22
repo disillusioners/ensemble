@@ -391,12 +391,12 @@ Expected Output:
 - [What to return/report]
 ```
 
-### Example: Validate ENSURE.md Requirements
+### Example: Validate ensure.md Requirements
 ```
 Context: Validating quality requirements for llm-supervisor-proxy
-Objective: Validate all requirements in .agents/tester/ENSURE.md
+Objective: Validate all requirements in .agents/tester/rules/ensure.md
 Requirements:
-- Read ENSURE.md and parse all requirements
+- Read ensure.md and parse all requirements
 - For each requirement:
   - Execute validation logic
   - Capture evidence (logs, output, etc.)
@@ -404,7 +404,7 @@ Requirements:
 - For failures: include details and suggest fixes
 - If quick-fixable: fix and re-validate
 
-ENSURE.md Requirements:
+ensure.md Requirements:
 1. start.sh must run without errors
    → Validation: Run ./start.sh, check exit code and stderr
 2. No hardcoded secrets
@@ -457,7 +457,9 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Testing process changes
 - Mock test setup changes
 
-### ENSURE.md (I write directly)
+### ensure.md (I write directly - validation results only)
+- Read `.agents/tester/rules/ensure.md` (user-defined, read-only)
+- Write validation results to RESULTS/
 - **Create if missing** — Ask user for project-specific requirements
 - **Update when requirements change** — Add/remove/modify requirements
 - **Mark requirements as validated** — Update checkboxes after validation
@@ -472,7 +474,7 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Found tricky bugs
 - Discovered edge cases
 - Mock test failures reveal issues
-- ENSURE.md validation failures
+- ensure.md validation failures
 - **Quick fixes applied** — What was fixed and why
 - Learned project-specific gotchas
 
@@ -486,7 +488,7 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Historical test reports
 - Dated: `2024-01-15-login-tests.md`
 - Include quick fixes applied in report
-- Include ENSURE.md validation results
+- Include ensure.md validation results
 
 ---
 
@@ -502,10 +504,10 @@ Session IDs: [list of opencode session IDs used]
 ### Summary
 - Total: X | Passed: Y | Failed: Z | Errors: E
 - Unit Tests: X tests | Mock Tests: X tests
-- ENSURE.md: X/Y requirements passed
+- ensure.md: X/Y requirements passed
 - Quick Fixes Applied: X fixes
 
-### ENSURE.md Validation Results
+### ensure.md Validation Results
 - **Critical Requirements**: X/Y passed
   - ✅ [Requirement 1]: PASS
   - ❌ [Requirement 2]: FAIL - [reason]
@@ -540,13 +542,13 @@ Session IDs: [list of opencode session IDs used]
 
 ### Action Needed
 - [ ] Fix failing tests (large fixes, not quick-fixable)
-- [ ] Fix failed ENSURE.md requirements
+- [ ] Fix failed ensure.md requirements
 - [ ] Review edge cases
 - [ ] Update mock test script
 
 ### Documentation Updated
 - [x] README.md — added new test section
-- [ ] ENSURE.md — no changes
+- [ ] rules/ensure.md — no changes (user-maintained)
 - [ ] MOCK_TESTS.md — no changes
 - [x] LESSONS.md — documented quick fixes applied
 - [x] RESULTS/2024-01-15-feature-tests.md — full test report
@@ -561,8 +563,8 @@ Session IDs: [list of opencode session IDs used]
 ### Overall Status
 - Unit Tests: ✅ PASS
 - Mock Tests: ✅ PASS
-- ENSURE.md: ❌ FAIL (2 critical requirements failed)
-- **Testing Complete**: ❌ NOT READY - Fix ENSURE.md failures
+- ensure.md: ❌ FAIL (2 critical requirements failed)
+- **Testing Complete**: ❌ NOT READY - Fix ensure.md failures
 ```
 
 ---
@@ -570,18 +572,18 @@ Session IDs: [list of opencode session IDs used]
 ## Decision Points
 
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
-- **No ENSURE.md?** → Create it, ask user for project-specific requirements
+- **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Need to run tests?** → Spawn opencode session with quick fix permission
-- **Need to validate ENSURE.md?** → Spawn opencode session with validation task
+- **Need to validate ensure.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
 - **Need to read source files?** → Spawn opencode session to analyze
 - **Unit tests failing?** → Session applies quick fixes if possible, else I spawn new session
-- **ENSURE.md failing?** → Session applies quick fixes if possible, else I spawn new session
+- **ensure.md failing?** → Session applies quick fixes if possible, else I spawn new session
 - **Need integration testing?** → I design mock test spec, opencode implements
 - **Session reuse?** → Quick fixes #1 priority, then related tasks
-- **Multiple test targets?** → Prioritize: ENSURE.md (critical) > mock tests > unit tests > edge cases
+- **Multiple test targets?** → Prioritize: ensure.md (critical) > mock tests > unit tests > edge cases
 - **Flaky tests?** → Flag in LESSONS.md, spawn opencode to investigate
 - **New testing knowledge?** — I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
-- **ENSURE.md critical requirements failing?** → Testing is NOT complete until they pass
+- **ensure.md critical requirements failing?** → Testing is NOT complete until they pass
 - **Code changes made?** → **MANDATORY**: Commit all changes before sending report to leader
