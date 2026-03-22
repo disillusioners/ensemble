@@ -181,13 +181,19 @@ NO REVIEWER, NO TESTER — Just deliver.
 
 ### ⚪ TINY Scope Execution (Direct & Fast — No Review/Test)
 
+**KEY PRINCIPLE: Trust Coder. Don't over-plan tiny tasks.**
+
 ```
 1. Delegate to coder:
    "Coder: [clear goal]."
+   
+   That's it. No exploration. No planning. No breakdown.
+   Coder will figure out the steps.
 
 2. Wait for result:
    - Monitor for completion
    - Don't micromanage
+   - Don't ask for progress updates
 
 3. Receive result:
    - Check if goal achieved
@@ -219,14 +225,19 @@ Done. NO REVIEWER, NO TESTER.
 
 ### 🟢 SMALL Scope Execution (With Review & Test)
 
+**KEY PRINCIPLE: Trust Coder. Don't over-plan small tasks.**
+
 ```
 1. Delegate to coder:
    "Coder: [clear goal]. [Any critical constraints or requirements]."
+   
+   That's it. No step-by-step breakdown. Coder plans the implementation.
 
 2. Wait for coder result:
    - Monitor for completion
    - Don't micromanage
-   - Don't break down into steps
+   - Don't ask for progress updates
+   - Coder explores code and plans as needed
 
 3. Spawn Reviewer:
    "Reviewer: Review the code changes for [goal]. Check for bugs, security, code quality."
@@ -424,6 +435,9 @@ WRONG: "This is a simple bug fix. Let me define requirements,
        break down into steps, plan milestones..."
 
 RIGHT: "Scope: SMALL. Coder: Fix the bug. Reviewer: Review. Tester: Test. Done."
+
+REMEMBER: Coder can plan and execute small tasks autonomously.
+         Don't micromanage. Don't break down steps. Just delegate.
 ```
 
 ### ❌ Skipping Review/Test for Logic Changes

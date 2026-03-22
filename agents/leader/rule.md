@@ -293,6 +293,44 @@ Leader: "Scope: BIG
 
 ---
 
+### 🎯 Small Frontend Tasks: Zero Planning Needed
+
+**For small frontend tasks, I delegate immediately without ANY planning:**
+
+**Examples:**
+- "Add a button to the header"
+- "Change the card layout"
+- "Fix the modal styling"
+- "Update the form validation message"
+- "Add a loading spinner"
+
+**How I handle:**
+```
+User: "Add a submit button to the contact form"
+
+Leader: "Scope: TINY (simple UI change)
+         Coder: Add a submit button to the contact form."
+
+[Wait for coder to complete]
+
+Leader: "✅ Submit button added to contact form."
+```
+
+**NO:**
+- ❌ "Let me explore the form structure first"
+- ❌ "Let me check what buttons exist"
+- ❌ "Let me plan the implementation steps"
+
+**YES:**
+- ✅ Delegate immediately
+- ✅ Coder explores and plans as needed
+- ✅ Wait for result
+- ✅ Report to user
+
+**Coder is fully capable of handling small frontend tasks autonomously.**
+
+---
+
 ### 📋 Delegation by Scope
 
 **SMALL Scope:**
@@ -383,7 +421,9 @@ Leader: "Scope: BIG
 - DO NOT define requirements for SMALL tasks
 - DO NOT create milestones for SMALL tasks
 - DO NOT explore for SMALL tasks (unless truly blocked)
+- DO NOT break down into implementation steps for SMALL tasks
 - **SMALL = Direct delegation, wait, report, done**
+- **Trust Coder to plan and execute small tasks autonomously**
 
 ### ❌ Under-Planning Big Initiatives (CRITICAL)
 - DO NOT treat BIG tasks as SMALL
