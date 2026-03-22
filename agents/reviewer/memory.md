@@ -45,3 +45,18 @@
 | Suboptimal pattern | 🟡 Warning |
 | Style preference | 🟢 Suggestion |
 | Refactor opportunity | 🟢 Suggestion |
+
+---
+
+## Project-Specific Standards
+
+Stored in `.agents/reviewer/`:
+
+| File | Purpose |
+|------|---------|
+| `STANDARDS.md` | Coding standards, patterns to check |
+| `ARCHITECTURE.md` | ADRs, architectural decisions |
+| `LESSONS.md` | Common issues found in this project |
+| `REPORTS/` | Historical review reports |
+
+Check these files before each review to align with project conventions.
