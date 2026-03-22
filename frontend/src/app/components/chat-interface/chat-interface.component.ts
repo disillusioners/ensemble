@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, AfterViewChecked, signal, effect } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, AfterViewChecked, signal, OnChanges, SimpleChanges } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MarkdownModule } from 'ngx-markdown';
 import { Message, Agent, ToolCall } from '../../models';
@@ -10,8 +10,9 @@ import { Message, Agent, ToolCall } from '../../models';
   templateUrl: './chat-interface.html',
   styleUrls: ['./chat-interface.scss']
 })
-export class ChatInterfaceComponent implements AfterViewChecked {
+export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   @ViewChild('messagesEnd') messagesEndRef!: ElementRef<HTMLDivElement>;
+  @ViewChild('messagesContainer') messagesContainerRef!: ElementRef<HTMLDivElement>;
   
   @Input() messages: Message[] = [];
   @Input() pendingMessage: Message | null = null;
@@ -22,6 +23,8 @@ export class ChatInterfaceComponent implements AfterViewChecked {
   @Input() showToolCalls = true;
 
   private shouldScroll = signal(false);
+  isNearBottom = signal(true);
+  private userHasScrolled = signal(false);
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
@@ -29,12 +32,14 @@ export class ChatInterfaceComponent implements AfterViewChecked {
     'reviewer': '#8b5cf6',
   };
 
-  constructor() {
-    effect(() => {
-      if (this.messages.length > 0 || this.isLoading || this.pendingMessage) {
-        this.shouldScroll.set(true);
-      }
-    });
+  ngOnChanges(changes: SimpleChanges): void {
+    const messagesChanged = changes['messages'] && changes['messages'].currentValue?.length !== changes['messages'].previousValue?.length;
+    const pendingMessageChanged = changes['pendingMessage'];
+    const isLoadingChanged = changes['isLoading'];
+
+    if ((messagesChanged || pendingMessageChanged || isLoadingChanged) && !this.userHasScrolled()) {
+      this.shouldScroll.set(true);
+    }
   }
 
   ngAfterViewChecked(): void {
@@ -44,9 +49,25 @@ export class ChatInterfaceComponent implements AfterViewChecked {
     }
   }
 
-  private scrollToBottom(): void {
+  onScroll(event: Event): void {
+    const container = event.target as HTMLDivElement;
+    const scrollThreshold = 100; // pixels from bottom to consider "near bottom"
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    
+    const nearBottom = distanceFromBottom <= scrollThreshold;
+    this.isNearBottom.set(nearBottom);
+    
+    // If user scrolls to bottom manually, reset the flag
+    if (nearBottom) {
+      this.userHasScrolled.set(false);
+    }
+  }
+
+  scrollToBottom(): void {
     if (this.messagesEndRef) {
       this.messagesEndRef.nativeElement.scrollIntoView({ behavior: 'smooth' });
+      this.isNearBottom.set(true);
+      this.userHasScrolled.set(false);
     }
   }
 
