@@ -484,6 +484,63 @@ class ScheduleTriggerResponse(BaseModel):
     )
 
 
+class ScheduleInfo(BaseModel):
+    """Response for schedule information (matches frontend Schedule interface)."""
+
+    id: str = Field(..., description="Unique schedule identifier (maps to source_id)")
+    name: str = Field(..., description="Display name for the schedule")
+    config: dict[str, Any] = Field(..., description="Schedule configuration")
+    status: SourceStatus = Field(..., description="Current schedule status")
+    created_at: datetime = Field(..., description="Schedule creation timestamp")
+    updated_at: datetime | None = Field(default=None, description="Last update timestamp")
+    last_run_at: datetime | None = Field(default=None, description="Last execution timestamp")
+    next_run_at: datetime | None = Field(default=None, description="Next scheduled execution")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "scheduler-123",
+                "name": "Morning Briefing",
+                "config": {
+                    "type": "cron",
+                    "schedule": "0 9 * * *",
+                    "agent": "./agents/leader",
+                    "message": "Daily briefing",
+                    "timezone": "UTC"
+                },
+                "status": "running",
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T09:00:00Z",
+                "last_run_at": "2024-01-01T09:00:00Z",
+                "next_run_at": "2024-01-02T09:00:00Z"
+            }
+        }
+    )
+
+
+class ScheduleListResponse(BaseModel):
+    """Response for listing schedules (matches frontend ScheduleListResponse)."""
+
+    schedules: list[ScheduleInfo] = Field(..., description="List of configured schedules")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "schedules": [
+                    {
+                        "id": "scheduler-123",
+                        "name": "Morning Briefing",
+                        "config": {"type": "cron", "schedule": "0 9 * * *", "agent": "./agents/leader"},
+                        "status": "running",
+                        "created_at": "2024-01-01T00:00:00Z",
+                        "updated_at": "2024-01-01T09:00:00Z"
+                    }
+                ]
+            }
+        }
+    )
+
+
 class SourceActionResponse(BaseModel):
     """Response for source actions (start/stop)."""
 

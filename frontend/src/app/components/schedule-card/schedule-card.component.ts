@@ -34,6 +34,7 @@ export class ScheduleCardComponent {
   schedule = input.required<Schedule>();
 
   // Action outputs
+  view = output<Schedule>();
   edit = output<Schedule>();
   delete = output<Schedule>();
   trigger = output<Schedule>();
@@ -140,6 +141,10 @@ export class ScheduleCardComponent {
   });
 
   // Action handlers
+  protected onView(): void {
+    this.view.emit(this.schedule());
+  }
+
   protected onEdit(): void {
     this.edit.emit(this.schedule());
   }

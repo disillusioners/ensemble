@@ -62,6 +62,8 @@ from .models import (
     SessionMappingListResponse,
     DeleteResponse,
     # Schedule models
+    ScheduleInfo,
+    ScheduleListResponse,
     ScheduleExecutionInfo,
     ScheduleExecutionListResponse,
     ScheduleTriggerResponse,
@@ -1257,28 +1259,26 @@ async def delete_mapping(source_id: str, mapping_id: str):
 
 
 # GET /schedules - List only scheduler sources
-@api_router.get("/schedules", response_model=SourceListResponse)
+@api_router.get("/schedules", response_model=ScheduleListResponse)
 async def list_schedules():
     """List all configured scheduler sources.
     
     This endpoint filters sources to only return those with source_type='scheduler'.
+    Returns schedules in the format expected by the frontend.
     """
     all_sources = manager._source_repository.list_source_configs()
     schedules = []
     for src in all_sources:
         if src.source_type == "scheduler":
-            schedules.append(SourceInfo(
-                source_id=src.source_id,
-                source_type=SourceType(src.source_type),
+            schedules.append(ScheduleInfo(
+                id=src.source_id,
                 name=src.name,
                 config=src.config,
-                enabled=src.enabled,
                 status=SourceStatus(src.status),
-                error_message=src.error_message,
                 created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
-                updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else src.updated_at,
+                updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else None,
             ))
-    return SourceListResponse(sources=schedules)
+    return ScheduleListResponse(schedules=schedules)
 
 
 # POST /schedules/{schedule_id}/trigger - Manually trigger a schedule

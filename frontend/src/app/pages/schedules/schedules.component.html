@@ -144,6 +144,7 @@
           @for (schedule of filteredSchedules(); track schedule.id) {
             <app-schedule-card
               [schedule]="schedule"
+              (view)="onViewScheduleDetails($event)"
               (edit)="onEditSchedule($event)"
               (delete)="onDeleteSchedule($event)"
               (trigger)="onTriggerSchedule($event)"
