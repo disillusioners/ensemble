@@ -10,6 +10,7 @@
 - **Monitor session progress** — Track spawned sessions, follow up on results
 - **Aggregate results** — Combine session outputs into comprehensive reports
 - **Only read/write `.agents/tester/` files directly** — All other files through opencode
+- **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 
 ### Documentation (I do directly)
 - **Check `.agents/tester/README.md` before testing** — Understand project context
@@ -41,7 +42,7 @@
 - **Document specs in MOCK_TESTS.md** — Before implementation
 - **Spawn opencode to create scripts** — With complete specification
 - **Spawn opencode to run scripts** — Monitor execution, grant quick fix permission
-- **Ensure timeout protection** — All mock tests must have timeout with auto-kill
+- **Ensure timeout protection** — All mock tests script files must have timeout with auto-kill
 - **Ensure port validation** — Kill processes on required ports at script start
 - **Ensure ports > 10000** — Never use production ports
 - **Ensure cleanup** — All processes killed, ports freed after test
@@ -368,7 +369,7 @@ Before spawning opencode session, ensure task has:
 
 ## Workflow Summary
 
-```
+```raw
 1. Read .agents/tester/README.md (I do this)
 2. Read .agents/tester/rules/ensure.md (I do this - read-only)
 3. Prepare task with quick fix authorization (I do this)
