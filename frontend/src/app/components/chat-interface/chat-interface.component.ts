@@ -25,6 +25,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   private shouldScroll = signal(false);
   isNearBottom = signal(true);
   private userHasScrolled = signal(false);
+  private isAutoScrolling = false;
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
@@ -33,11 +34,17 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   };
 
   ngOnChanges(changes: SimpleChanges): void {
+    const sessionIdChanged = changes['sessionId'];
     const messagesChanged = changes['messages'] && changes['messages'].currentValue?.length !== changes['messages'].previousValue?.length;
     const pendingMessageChanged = changes['pendingMessage'];
     const isLoadingChanged = changes['isLoading'];
 
-    if ((messagesChanged || pendingMessageChanged || isLoadingChanged) && !this.userHasScrolled()) {
+    // Reset scroll state when switching sessions
+    if (sessionIdChanged) {
+      this.userHasScrolled.set(false);
+      this.isNearBottom.set(true);
+      this.shouldScroll.set(true);
+    } else if ((messagesChanged || pendingMessageChanged || isLoadingChanged) && !this.userHasScrolled()) {
       this.shouldScroll.set(true);
     }
   }
@@ -50,6 +57,11 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   }
 
   onScroll(event: Event): void {
+    // Ignore scroll events during auto-scroll animation
+    if (this.isAutoScrolling) {
+      return;
+    }
+    
     const container = event.target as HTMLDivElement;
     const scrollThreshold = 100; // pixels from bottom to consider "near bottom"
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -67,9 +79,14 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
 
   scrollToBottom(): void {
     if (this.messagesEndRef) {
+      this.isAutoScrolling = true;
       this.messagesEndRef.nativeElement.scrollIntoView({ behavior: 'smooth' });
       this.isNearBottom.set(true);
       this.userHasScrolled.set(false);
+      // Reset auto-scrolling flag after animation completes
+      setTimeout(() => {
+        this.isAutoScrolling = false;
+      }, 500);
     }
   }
 
