@@ -6,6 +6,9 @@ Use `tool_help("tool_name")` for full docs. Common tools:
 
 ```
 read_file(path, offset=1, limit=2000)     # Read file with line numbers
+write_file(content, path, append=False)   # Write or append to file
+grep_files(pattern, path=".", include="", case_sensitive=False, whole_word=False)  # Search files
+edit_file(path, old_string, new_string, replace_all=False)  # Replace text in file
 list_directory(path=".", show_hidden=False)  # List dir contents
 glob_files(pattern="**/*.py", path=".")   # Find files by pattern
 ```
@@ -31,7 +34,7 @@ get_session_info(session_id)               # Get session details
 
 ```
 project_create(name, project_type="general", main_directory=None, tags=[], metadata={})
-project_get(project_id=None, name=None)    # Get by ID or name
+project_get(project_id=None, name=None, shortname=None)  # Get by ID, name, or shortname
 project_list(status=None, tags=[], limit=50)
 project_search(query, limit=20)
 project_update(project_id, name=None, description=None, tags=None)
