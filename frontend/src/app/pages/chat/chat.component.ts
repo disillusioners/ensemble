@@ -49,6 +49,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly totalSessions = signal(0);
   readonly hasMoreSessions = signal(false);
   readonly isLoadingMore = signal(false);
+  readonly sessionNotFound = signal<string | null>(null);
 
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
@@ -238,8 +239,9 @@ export class ChatComponent implements OnInit, OnDestroy {
           const allSessions = this.sessions();
           const found = allSessions.find(s => s.session_id === currentSession.session_id);
           if (!found) {
-            // Session not found - navigate to home
-            this.router.navigate(['/']);
+            // Session not found in list - mark as not found instead of redirecting
+            console.warn('[Chat] Current session not found in sessions list:', currentSession.session_id);
+            this.sessionNotFound.set(currentSession.session_id);
           }
         }
       },
@@ -303,15 +305,20 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.api.getSession(sessionId).subscribe({
         next: (sessionData) => {
           console.log('[Chat] Got session from API, connecting SSE');
+          this.sessionNotFound.set(null);
           this.currentSession.set(sessionData);
           this.loadMessages(sessionId);
           this.sseService.clearEvents();
           this.sseService.connect(sessionId);
         },
         error: (err) => {
-          // Session not found - navigate to home
+          // Session not found - show error message instead of redirecting
           console.warn('[Chat] Session not found:', sessionId, 'error:', err);
-          this.router.navigate(['/']);
+          this.sessionNotFound.set(sessionId);
+          this.currentSession.set(null);
+          this.messages.set([]);
+          this.sseService.disconnect();
+          this.sseService.clearEvents();
         }
       });
     }

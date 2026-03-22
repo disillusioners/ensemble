@@ -81,17 +81,34 @@
       </div>
     }
     
-    <app-chat-interface
-      [messages]="messages()"
-      [pendingMessage]="pendingMessage()"
-      [isLoading]="isSending()"
-      [agent]="sessionAgent()"
-      [sessionId]="currentSession()?.session_id || null"
-      [showThinking]="showThinking()"
-      [showToolCalls]="showToolCalls()"
-    ></app-chat-interface>
+    <!-- Session not found message -->
+    @if (sessionNotFound()) {
+      <div class="session-not-found">
+        <div class="not-found-icon">⚠️</div>
+        <h2>Session Not Found</h2>
+        <p>The session <code>{{ sessionNotFound() }}</code> could not be found.</p>
+        <p class="hint">This may happen if the session was created by a job and has since been removed, or if the session ID is invalid.</p>
+        <button mat-flat-button color="primary" (click)="onBackToHome()">
+          <mat-icon>home</mat-icon>
+          Back to Home
+        </button>
+      </div>
+    }
     
-    @if (currentSession()) {
+    <!-- Chat interface (only show when session is loaded) -->
+    @if (currentSession() && !sessionNotFound()) {
+      <app-chat-interface
+        [messages]="messages()"
+        [pendingMessage]="pendingMessage()"
+        [isLoading]="isSending()"
+        [agent]="sessionAgent()"
+        [sessionId]="currentSession()?.session_id || null"
+        [showThinking]="showThinking()"
+        [showToolCalls]="showToolCalls()"
+      ></app-chat-interface>
+    }
+    
+    @if (currentSession() && !sessionNotFound()) {
       <app-message-input
         (sendMessage)="onSendMessage($event)"
         [disabled]="isSending()"
