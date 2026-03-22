@@ -107,6 +107,17 @@
       </div>
     </div>
     
+    <!-- Stop button (only for running sessions) -->
+    @if (session.status === 'running') {
+      <button
+        class="stop-btn"
+        (click)="onStopSession(session.session_id, $event)"
+        title="Stop session"
+      >
+        <mat-icon>stop</mat-icon>
+      </button>
+    }
+    
     <!-- Delete button -->
     <button
       class="delete-btn"

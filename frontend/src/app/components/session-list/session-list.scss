@@ -129,6 +129,7 @@
   &:hover {
     background-color: rgba(30, 41, 59, 0.5);
 
+    .stop-btn,
     .delete-btn {
       opacity: 1;
     }
@@ -275,6 +276,35 @@
   &:hover {
     background-color: rgba(244, 63, 94, 0.2);
     color: #f43f5e;
+  }
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+.stop-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background-color: rgba(15, 23, 42, 0.8);
+  color: #64748b;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+
+  &:hover {
+    background-color: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
   }
 
   mat-icon {

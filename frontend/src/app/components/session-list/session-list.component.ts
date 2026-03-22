@@ -105,6 +105,14 @@ export class SessionListComponent {
     }
   }
 
+  onStopSession(sessionId: string, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (confirm('Stop this running session?')) {
+      this.deleteSession.emit(sessionId);
+    }
+  }
+
   onNewSession(): void {
     this.newSession.emit();
   }
