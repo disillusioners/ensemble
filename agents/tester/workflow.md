@@ -11,30 +11,32 @@
 When starting with a new project:
 
 1. **Check `.agents/tester/`** — Read README.md if exists (I can read this directly)
-2. **Read ENSURE.md** — **CRITICAL**: Read project-specific quality requirements (I can read this directly)
+2. **Read `.agents/tester/rules/ensure.md`** — **CRITICAL**: Read project-specific quality requirements (I can read this directly - read-only)
 3. **Initialize if needed** — Create `.agents/tester/` directory and README.md (I can write this directly)
-4. **Create ENSURE.md if missing** — Ask user for project-specific quality requirements
+4. **Check if ensure.md exists** — If missing, inform user they need to create `.agents/tester/rules/ensure.md`
 5. **Spawn opencode to discover tests** — "Find all unit tests and mock tests in this project"
 6. **Document findings** — Update `.agents/tester/README.md` with test inventory
 
 ---
 
-## ENSURE.md Validation Workflow
+## ensure.md Validation Workflow
 
 **Project-specific quality gates must pass before testing is complete**
 
-### What is ENSURE.md?
+**Note:** The `.agents/tester/rules/ensure.md` file is **USER-DEFINED and READ-ONLY**. The tester agent can only read it, never modify it.
+
+### What is ensure.md?
 A project-specific file containing custom quality requirements that MUST be validated. These are not standard tests, but project-specific validation rules.
 
-### Phase 1: Review ENSURE.md
-1. Read `.agents/tester/ENSURE.md` (I do this directly)
+### Phase 1: Review ensure.md
+1. Read `.agents/tester/rules/ensure.md` (I do this directly - read-only)
 2. Parse each requirement into a testable task
 3. Prioritize requirements (critical → important → nice-to-have)
 
 ### Phase 2: Create Validation Tasks
-For each requirement in ENSURE.md, create a validation task for opencode:
+For each requirement in ensure.md, create a validation task for opencode:
 
-**Example ENSURE.md:**
+**Example ensure.md:**
 ```markdown
 # Quality Requirements
 
@@ -55,10 +57,10 @@ For each requirement in ENSURE.md, create a validation task for opencode:
 
 **Task for opencode session:**
 ```
-Task: Validate ENSURE.md Requirements
-Context: [Project path, ENSURE.md requirements]
+Task: Validate ensure.md Requirements
+Context: [Project path, ensure.md requirements]
 Requirements:
-- Validate each requirement in ENSURE.md
+- Validate each requirement in ensure.md
 - For each requirement:
   - Execute validation logic
   - Report: PASS/FAIL with evidence
@@ -66,7 +68,7 @@ Requirements:
   - If FAIL and quick-fixable: fix and re-validate
 - Return: Full validation report
 
-ENSURE.md Requirements:
+ensure.md Requirements:
 1. [Requirement 1]: [Validation approach]
 2. [Requirement 2]: [Validation approach]
 ...
@@ -96,13 +98,13 @@ Expected Output:
    - ✅ All requirements passed
    - ❌ List of failed requirements with details
 
-### When to Run ENSURE.md Validation
+### When to Run ensure.md Validation
 - **After unit tests pass** — Validate quality gates
 - **After mock tests pass** — Final quality check
 - **Before marking testing complete** — Must pass all critical requirements
 - **On user request** — Explicit validation request
 
-### ENSURE.md Validation Priority
+### ensure.md Validation Priority
 1. **Critical requirements** — MUST pass before testing is complete
 2. **Important requirements** — Should pass, flag if failed
 3. **Nice-to-have** — Report status, but don't block
@@ -115,7 +117,7 @@ Expected Output:
 
 ### Step 1: Discover & Plan
 1. Read `.agents/tester/README.md` for context
-2. Read `.agents/tester/ENSURE.md` for quality requirements
+2. Read `.agents/tester/rules/ensure.md` for quality requirements
 3. Prepare task: "Run unit test suite and report results"
 4. Spawn opencode session with clear instructions
 
@@ -150,9 +152,9 @@ Return: Structured test results + any quick fixes applied
 4. Monitor and verify fixes
 5. Document in `.agents/tester/LESSONS.md`
 
-### Step 5: Validate ENSURE.md (after unit tests pass)
-1. If unit tests pass, proceed to ENSURE.md validation
-2. Follow ENSURE.md Validation Workflow (above)
+### Step 5: Validate ensure.md (after unit tests pass)
+1. If unit tests pass, proceed to ensure.md validation
+2. Follow ensure.md Validation Workflow (above)
 3. Document results
 
 ---
@@ -164,7 +166,7 @@ Return: Structured test results + any quick fixes applied
 ### Phase 1: Design Mock Test
 1. Identify feature/workflow to test
 2. Read `.agents/tester/MOCK_TESTS.md` for existing tests
-3. Read `.agents/tester/ENSURE.md` for quality requirements
+3. Read `.agents/tester/rules/ensure.md` for quality requirements
 4. Design mock test specification:
    - What to test
    - Required mock services
@@ -220,9 +222,9 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 4. Update `.agents/tester/LESSONS.md` with findings and any quick fixes
 5. Update `.agents/tester/README.md` if procedures changed
 
-### Phase 5: Validate ENSURE.md (after mock tests pass)
-1. If mock tests pass, proceed to ENSURE.md validation
-2. Follow ENSURE.md Validation Workflow (above)
+### Phase 5: Validate ensure.md (after mock tests pass)
+1. If mock tests pass, proceed to ensure.md validation
+2. Follow ensure.md Validation Workflow (above)
 3. Document results
 
 ---
@@ -233,7 +235,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 
 ### Step 1: Setup
 1. Read `.agents/tester/README.md`
-2. Read `.agents/tester/ENSURE.md`
+2. Read `.agents/tester/rules/ensure.md`
 3. Initialize documentation if needed
 
 ### Step 2: Unit Tests
@@ -248,13 +250,13 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 4. Fix failures (quick fix or full workflow)
 5. Document results
 
-### Step 4: ENSURE.md Validation
-1. Validate all requirements in ENSURE.md
+### Step 4: ensure.md Validation
+1. Validate all requirements in ensure.md
 2. Fix failures (quick fix or full workflow)
 3. Document results
 
 ### Step 5: Final Report
-1. Aggregate all results (unit tests, mock tests, ENSURE.md)
+1. Aggregate all results (unit tests, mock tests, ensure.md)
 2. Write comprehensive report to `.agents/tester/RESULTS/`
 3. Update all documentation
 4. Report to user:
@@ -267,7 +269,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
    ### Mock Tests: [PASS/FAIL]
    - Details...
    
-   ### ENSURE.md Validation: [PASS/FAIL]
+   ### ensure.md Validation: [PASS/FAIL]
    - Critical: X/Y passed
    - Important: X/Y passed
    - Nice-to-have: X/Y passed
@@ -318,7 +320,7 @@ Quick Fix Authorization:
 - ✅ Fix test assertion value
 - ✅ Add missing import
 - ✅ Fix port number in test config
-- ✅ Fix ENSURE.md requirement (e.g., add missing env var documentation)
+- ✅ Fix ensure.md requirement (e.g., add missing env var documentation)
 
 ### Examples Requiring Full Workflow
 - ❌ Refactor error handling across multiple functions
@@ -333,7 +335,7 @@ Quick Fix Authorization:
 ## Session Management Strategy
 
 ### When to Spawn New Session
-- ✅ New testing task (unit tests, mock tests, ENSURE.md validation)
+- ✅ New testing task (unit tests, mock tests, ensure.md validation)
 - ✅ Different testing area (different feature/module)
 - ✅ Previous session completed and closed
 - ✅ Large fix needed (doesn't meet quick fix criteria)

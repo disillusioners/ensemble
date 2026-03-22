@@ -1,0 +1,1 @@
+This file for later use by user, agents don't allowed to edit files in rules directory.

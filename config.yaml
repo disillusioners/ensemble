@@ -20,6 +20,7 @@ limits:
   max_children_per_session: 10
   session_timeout_minutes: 60
   message_rate_limit: 60
+  graph_recursion_limit: 200
 
 # Persistence Settings
 persistence:
