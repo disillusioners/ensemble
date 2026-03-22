@@ -1352,7 +1352,7 @@ class SessionManager:
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
-            Formatted summary string: "{agent_name} has done: {summary}"
+            Formatted summary string: "{agent_name} has done, bellow is {agent_name} response: {summary}"
         """
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_openai import ChatOpenAI
@@ -1361,7 +1361,7 @@ class SessionManager:
         messages = await get_session_messages(self.checkpointer, session_id)
         
         if not messages:
-            return f"{agent_name} has done: No activity recorded."
+            return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
         
         # Build conversation summary for the LLM
         conversation_text = []
@@ -1375,7 +1375,7 @@ class SessionManager:
                 conversation_text.append(f"{role}: {content}")
         
         if not conversation_text:
-            return f"{agent_name} has done: No messages to summarize."
+            return f"{agent_name} has done, bellow is {agent_name} response: No messages to summarize."
         
         conversation = "\n".join(conversation_text)
         
@@ -1418,11 +1418,11 @@ Provide a concise summary:"""
                 summary = " ".join(text_parts)
             else:
                 summary = str(content) if content else ""
-            return f"{agent_name} has done: {summary}"
+            return f"{agent_name} has done, bellow is {agent_name} response: {summary}"
         except Exception as e:
             logger.warning(f"Failed to summarize session {session_id}: {e}")
             # Fallback: count messages and provide basic summary
-            return f"{agent_name} has done: Completed {len(messages)} message(s)."
+            return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
     async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
         """Send completion report to parent session when child is done.
@@ -1614,10 +1614,10 @@ Provide a concise summary:"""
                     break
         
         if last_assistant_content:
-            return f"{agent_name} has done:\n{last_assistant_content}"
+            return f"{agent_name} has done, bellow is {agent_name} response:\n{last_assistant_content}"
         else:
             # Fallback if no assistant message found
-            return f"{agent_name} has done: Task completed (no response message)."
+            return f"{agent_name} has done, bellow is {agent_name} response: Task completed (no response message)."
 
         
     async def _generate_session_title(self, session_id: str, first_message: str) -> str | None:
