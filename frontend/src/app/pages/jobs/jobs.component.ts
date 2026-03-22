@@ -1,4 +1,5 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
+import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -11,7 +12,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Subscription } from 'rxjs';
+import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
@@ -46,6 +47,7 @@ import { Agent } from '../../models';
   styleUrl: './jobs.component.scss'
 })
 export class JobsComponent implements OnInit, OnDestroy {
+  private readonly router = inject(Router);
   private readonly jobService = inject(JobService);
   private readonly jobSseService = inject(JobSseService);
   private readonly projectService = inject(ProjectService);
@@ -70,6 +72,10 @@ export class JobsComponent implements OnInit, OnDestroy {
   
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
+  readonly retryAttempt = this.jobSseService.retryAttempt;
+  readonly isRetrying = this.jobSseService.isRetrying;
+  readonly isFailed = this.jobSseService.isFailed;
+  readonly connectionState = this.jobSseService.connectionState;
 
   // Computed map of project_id -> job_queue_paused
   readonly projectPauseMap = computed(() => {
@@ -152,15 +158,30 @@ export class JobsComponent implements OnInit, OnDestroy {
       }
     });
 
-    // Effect to handle SSE errors
+    // Effect to handle SSE errors with user-friendly messages
     effect(() => {
       const latestError = this.jobSseService.latestError();
+      const state = this.jobSseService.connectionState();
+      const attempt = this.retryAttempt();
+      
       if (latestError) {
         console.error('[Jobs] SSE error:', latestError);
-        this.snackBar.open(`Connection error: ${latestError}`, 'Dismiss', {
+        // Show user-friendly error message based on state
+        let displayMessage = latestError;
+        
+        if (state === 'retrying') {
+          displayMessage = `Connection lost. Reconnecting... (attempt ${attempt})`;
+        } else if (state === 'failed') {
+          displayMessage = latestError;
+        }
+        
+        this.snackBar.open(displayMessage, 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar'
         });
+        
+        // Clear the error after showing it to prevent duplicate notifications
+        this.jobSseService.clearError();
       }
     });
   }
@@ -408,12 +429,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onDrawerViewSession(sessionId: string): void {
-    // Navigate to session page
-    // This would typically use Router, but we're keeping it simple
-    console.log('[Jobs] View session:', sessionId);
-    this.snackBar.open(`Session ID: ${sessionId}`, 'Close', {
-      duration: 3000
-    });
+    this.router.navigate(['/sessions', sessionId]);
   }
 
   protected getAgentDisplayName(agentDir: string): string {

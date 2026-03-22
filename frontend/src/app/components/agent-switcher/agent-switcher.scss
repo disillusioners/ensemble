@@ -120,6 +120,26 @@
       color: var(--item-color, #10a7f7);
     }
   }
+
+  &.focused {
+    background-color: #334155;
+    outline: 2px solid var(--item-color, #10a7f7);
+    outline-offset: -2px;
+
+    .item-name {
+      color: #f1f5f9;
+    }
+  }
+
+  &:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(16, 167, 247, 0.4);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--item-color, #10a7f7);
+    outline-offset: 2px;
+  }
 }
 
 .item-icon {

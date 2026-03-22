@@ -27,3 +27,4 @@
 13. **Spawn opencode to find patterns** — Use AST/search tools via opencode
 14. **Spawn opencode to run linters** — Use `--sync` for quick validation
 15. **Use opencode to cross-reference** — Find usages, dependencies via opencode
+16. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time

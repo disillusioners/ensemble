@@ -1,10 +1,16 @@
 <div class="agent-switcher-container">
   <!-- Dropdown trigger button -->
   <button
+    #triggerButton
     class="dropdown-trigger"
     [class.active]="isOpen()"
     [style.--active-color]="activeColor"
+    [attr.aria-expanded]="isOpen()"
+    [attr.aria-haspopup]="'listbox'"
+    [attr.aria-controls]="'agent-dropdown-menu'"
+    [attr.aria-activedescendant]="isOpen() ? activeDescendant : null"
     (click)="toggleDropdown()"
+    (keydown)="onTriggerKeydown($event)"
   >
     <!-- Agent icon -->
     <div 
@@ -27,14 +33,33 @@
 
   <!-- Dropdown menu -->
   @if (isOpen()) {
-    <div class="dropdown-menu">
+    <div 
+      #dropdownMenu
+      id="agent-dropdown-menu"
+      class="dropdown-menu"
+      role="listbox"
+      [attr.aria-label]="'Select an agent'"
+      [attr.aria-activedescendant]="activeDescendant"
+      tabindex="-1"
+      (focus)="onMenuFocus()"
+    >
       <div class="menu-content">
-        @for (agent of selectableAgents(); track agent.id) {
+        @for (agent of selectableAgents(); track agent.id; let i = $index) {
           <button
+            #menuItem
             class="menu-item"
             [class.selected]="selectedAgent?.id === agent.id"
+            [class.focused]="focusedAgentId === agent.id"
             [style.--item-color]="getAgentColor(agent)"
+            [attr.role]="'option'"
+            [attr.id]="'agent-option-' + agent.id"
+            [attr.aria-selected]="selectedAgent?.id === agent.id"
+            [attr.aria-label]="agent.name + ': ' + agent.description"
+            [tabindex]="focusedAgentId === agent.id ? '0' : '-1'"
             (click)="selectAgent(agent)"
+            (keydown)="onOptionKeydown($event, agent)"
+            (mouseenter)="onOptionMouseEnter(i)"
+            (focus)="onOptionFocus(i)"
           >
             <!-- Agent icon -->
             <div 

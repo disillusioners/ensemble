@@ -50,7 +50,20 @@ ng serve
 
 ## Test Results
 
-### Latest Test Run: 2026-03-22 (Job Queue Backend API)
+### Latest Test Run: 2026-03-23 (Job Queue Frontend - Browser Automation)
+- **Test Type**: Browser Automation (Playwright)
+- **Status**: ⚠️ PARTIAL PASS (9/9 features work, 3 bugs found)
+- **Report**: `.agents/tester/RESULTS/2026-03-23-job-queue-frontend-browser-automation.md`
+- **Screenshots**: `test-results/job-queue/` (21 screenshots)
+- **Execution Time**: ~15 minutes
+- **Bugs Found**: 3 (1 High, 2 Medium)
+  - HIGH: Connection error alert (backend connectivity)
+  - MEDIUM: View Session button doesn't work
+  - MEDIUM: Agent dropdown accessibility issues
+- **Quick Fixes Applied**: 0 (bugs require investigation)
+- **Session ID**: ses_2e90bd87cffeu3C8RD5kkk6IH4
+
+### Previous Test Run: 2026-03-22 (Job Queue Backend API)
 - **Test Type**: Mock Tests (Backend API with pytest)
 - **Status**: ✅ READY (48/48 tests passed)
 - **Report**: `.agents/tester/RESULTS/2026-03-22-job-queue-backend-api-mock-tests.md`

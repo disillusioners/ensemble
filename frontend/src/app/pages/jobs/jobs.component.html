@@ -8,6 +8,16 @@
           <mat-icon>wifi</mat-icon>
           Live
         </span>
+      } @else if (isRetrying()) {
+        <span class="connection-status retrying" title="Reconnecting to server...">
+          <mat-icon class="spinning">sync</mat-icon>
+          Reconnecting ({{ retryAttempt() }}/5)
+        </span>
+      } @else if (isFailed()) {
+        <span class="connection-status disconnected" title="Connection failed - click refresh to retry">
+          <mat-icon>wifi_off</mat-icon>
+          Offline
+        </span>
       } @else {
         <span class="connection-status disconnected" title="Real-time updates disconnected">
           <mat-icon>wifi_off</mat-icon>

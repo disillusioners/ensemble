@@ -69,6 +69,15 @@
     background: rgba(244, 67, 54, 0.15);
     color: #f44336;
   }
+
+  &.retrying {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+
+    mat-icon {
+      animation: spin 1s linear infinite;
+    }
+  }
 }
 
 // Filter Bar Styles

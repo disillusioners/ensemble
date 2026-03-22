@@ -1,6 +1,9 @@
-import { Injectable, NgZone, signal } from '@angular/core';
+import { Injectable, NgZone, signal, computed } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
 import type { JobEvent, JobEventPayload } from '../models/job.model';
+
+/** Connection states for UI display */
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'retrying' | 'failed';
 
 @Injectable({ providedIn: 'root' })
 export class JobSseService {
@@ -8,6 +11,7 @@ export class JobSseService {
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly INITIAL_RECONNECT_DELAY = 1000;
   private readonly MAX_RECONNECT_DELAY = 30000;
+  private readonly ERROR_DEBOUNCE_MS = 2000; // Prevent error spam
 
   private eventSource: EventSource | null = null;
   private reconnectAttempts = 0;
@@ -15,12 +19,20 @@ export class JobSseService {
   private currentJobId: string | null = null;
   private eventSubject = new Subject<JobEvent>();
   private currentObserver: Observer<JobEvent> | null = null;
+  private errorDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastErrorShown: string | null = null;
 
   // Signals for reactive state
   readonly isConnected = signal(false);
+  readonly connectionState = signal<ConnectionState>('disconnected');
   readonly events = signal<JobEvent[]>([]);
   readonly latestStatus = signal<JobEventPayload | null>(null);
   readonly latestError = signal<string | null>(null);
+  readonly retryAttempt = signal(0);
+
+  // Computed for UI convenience
+  readonly isRetrying = computed(() => this.connectionState() === 'retrying');
+  readonly isFailed = computed(() => this.connectionState() === 'failed');
 
   constructor(private ngZone: NgZone) {}
 
@@ -48,6 +60,9 @@ export class JobSseService {
       return;
     }
 
+    // Set connecting state
+    this.connectionState.set('connecting');
+
     const url = `${this.API_BASE}/jobs/${this.currentJobId}/events`;
     console.log('[JobSse] Creating EventSource with URL:', url);
 
@@ -57,7 +72,10 @@ export class JobSseService {
       this.ngZone.run(() => {
         console.log('[JobSse] Connected to job:', this.currentJobId);
         this.reconnectAttempts = 0;
+        this.retryAttempt.set(0);
         this.isConnected.set(true);
+        this.connectionState.set('connected');
+        this.clearErrorDebounce();
 
         const event: JobEvent = {
           event: 'connected',
@@ -134,6 +152,8 @@ export class JobSseService {
         // Attempt reconnection with exponential backoff
         if (this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
           this.reconnectAttempts++;
+          this.retryAttempt.set(this.reconnectAttempts);
+          this.connectionState.set('retrying');
           const delay = Math.min(
             this.INITIAL_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts - 1),
             this.MAX_RECONNECT_DELAY
@@ -143,10 +163,38 @@ export class JobSseService {
           this.reconnectTimeout = setTimeout(() => this.connectInternal(), delay);
         } else {
           console.error('[JobSse] Max reconnection attempts reached');
-          this.latestError.set('Connection failed after multiple attempts');
+          this.connectionState.set('failed');
+          this.retryAttempt.set(0);
+          // Debounce the error message to prevent spam
+          this.setDebouncedError('Unable to connect to server. Please check your connection and refresh the page.');
         }
       });
     };
+  }
+
+  /**
+   * Set error with debouncing to prevent spam
+   */
+  private setDebouncedError(message: string): void {
+    // Skip if same error is already being shown
+    if (this.lastErrorShown === message && this.latestError() !== null) {
+      return;
+    }
+
+    // Clear any existing timer
+    this.clearErrorDebounce();
+
+    this.lastErrorShown = message;
+    this.errorDebounceTimer = setTimeout(() => {
+      this.latestError.set(message);
+    }, this.ERROR_DEBOUNCE_MS);
+  }
+
+  private clearErrorDebounce(): void {
+    if (this.errorDebounceTimer) {
+      clearTimeout(this.errorDebounceTimer);
+      this.errorDebounceTimer = null;
+    }
   }
 
   private emitEvent(event: JobEvent): void {
@@ -166,8 +214,12 @@ export class JobSseService {
    */
   disconnect(): void {
     this.clearReconnectTimeout();
+    this.clearErrorDebounce();
     this.isConnected.set(false);
+    this.connectionState.set('disconnected');
     this.reconnectAttempts = 0;
+    this.retryAttempt.set(0);
+    this.lastErrorShown = null;
 
     if (this.eventSource) {
       this.eventSource.close();
@@ -188,7 +240,9 @@ export class JobSseService {
    * Clear error state.
    */
   clearError(): void {
+    this.clearErrorDebounce();
     this.latestError.set(null);
+    this.lastErrorShown = null;
   }
 }
 
