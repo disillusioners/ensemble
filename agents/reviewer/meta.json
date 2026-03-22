@@ -1,0 +1,7 @@
+{
+  "id": "reviewer",
+  "name": "Reviewer",
+  "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
+  "icon": "🔍",
+  "color": "accent-purple"
+}
