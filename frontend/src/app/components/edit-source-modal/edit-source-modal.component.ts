@@ -98,6 +98,21 @@ export class EditSourceModalComponent implements OnInit {
         { key: 'application_id', label: 'Application ID', type: 'text', placeholder: '123456789', hint: 'From Discord Developer Portal', required: true, section: 'credentials' },
         { key: 'guild_id', label: 'Server ID (Guild)', type: 'text', placeholder: '987654321', hint: 'Optional: Restrict to specific server', section: 'config' },
       ]
+    },
+    scheduler: {
+      fields: [
+        { key: 'schedule_type', label: 'Schedule Type', type: 'select', placeholder: 'Select type...', hint: 'How to schedule the job', section: 'config', options: [
+          { value: 'cron', label: 'Cron Expression' },
+          { value: 'interval', label: 'Interval (seconds)' },
+          { value: 'one-time', label: 'One-time' }
+        ]},
+        { key: 'cron_expression', label: 'Cron Expression', type: 'text', placeholder: '0 9 * * 1-5', hint: 'e.g., 0 9 * * 1-5 for weekdays at 9 AM', section: 'config' },
+        { key: 'interval_seconds', label: 'Interval (seconds)', type: 'number', placeholder: '3600', hint: 'e.g., 3600 for hourly', section: 'config' },
+        { key: 'run_at', label: 'Run At', type: 'text', placeholder: '2025-12-25T10:00:00Z', hint: 'ISO datetime for one-time execution', section: 'config' },
+        { key: 'agent', label: 'Agent', type: 'select', placeholder: 'Select an agent...', hint: 'Agent to handle the scheduled task', section: 'config' },
+        { key: 'message', label: 'Message', type: 'text', placeholder: 'Task description or command', hint: 'The message to send to the agent', section: 'config' },
+        { key: 'timezone', label: 'Timezone', type: 'text', placeholder: 'UTC', hint: 'Timezone for schedule (default: UTC)', section: 'config' },
+      ]
     }
   };
   
