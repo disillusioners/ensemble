@@ -11,9 +11,101 @@
 When starting with a new project:
 
 1. **Check `.agents/tester/`** — Read README.md if exists (I can read this directly)
-2. **Initialize if needed** — Create `.agents/tester/` directory and README.md (I can write this directly)
-3. **Spawn opencode to discover tests** — "Find all unit tests and mock tests in this project"
-4. **Document findings** — Update `.agents/tester/README.md` with test inventory
+2. **Read ENSURE.md** — **CRITICAL**: Read project-specific quality requirements (I can read this directly)
+3. **Initialize if needed** — Create `.agents/tester/` directory and README.md (I can write this directly)
+4. **Create ENSURE.md if missing** — Ask user for project-specific quality requirements
+5. **Spawn opencode to discover tests** — "Find all unit tests and mock tests in this project"
+6. **Document findings** — Update `.agents/tester/README.md` with test inventory
+
+---
+
+## ENSURE.md Validation Workflow
+
+**Project-specific quality gates must pass before testing is complete**
+
+### What is ENSURE.md?
+A project-specific file containing custom quality requirements that MUST be validated. These are not standard tests, but project-specific validation rules.
+
+### Phase 1: Review ENSURE.md
+1. Read `.agents/tester/ENSURE.md` (I do this directly)
+2. Parse each requirement into a testable task
+3. Prioritize requirements (critical → important → nice-to-have)
+
+### Phase 2: Create Validation Tasks
+For each requirement in ENSURE.md, create a validation task for opencode:
+
+**Example ENSURE.md:**
+```markdown
+# Quality Requirements
+
+## Critical
+- [ ] The `start.sh` script must run without any bug/error
+- [ ] All API endpoints must return valid JSON responses
+- [ ] No hardcoded secrets in source code
+
+## Important
+- [ ] Database migrations must be reversible
+- [ ] All environment variables documented in README
+- [ ] Application starts within 5 seconds
+
+## Nice-to-have
+- [ ] No compiler warnings in production build
+- [ ] All functions have documentation comments
+```
+
+**Task for opencode session:**
+```
+Task: Validate ENSURE.md Requirements
+Context: [Project path, ENSURE.md requirements]
+Requirements:
+- Validate each requirement in ENSURE.md
+- For each requirement:
+  - Execute validation logic
+  - Report: PASS/FAIL with evidence
+  - If FAIL: include error details, logs, evidence
+  - If FAIL and quick-fixable: fix and re-validate
+- Return: Full validation report
+
+ENSURE.md Requirements:
+1. [Requirement 1]: [Validation approach]
+2. [Requirement 2]: [Validation approach]
+...
+
+Quick Fix Authorization: YES
+- You may fix issues that meet quick fix criteria
+- After fixing, re-validate the requirement
+- Report what you fixed
+
+Expected Output:
+- Status for each requirement (PASS/FAIL)
+- Evidence for each validation
+- List of quick fixes applied (if any)
+```
+
+### Phase 3: Execute Validation
+1. Spawn opencode session with validation task
+2. Monitor execution
+3. Receive validation results
+
+### Phase 4: Report & Document
+1. Analyze validation results
+2. Identify failing requirements
+3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md`
+4. Update `.agents/tester/LESSONS.md` with issues found
+5. Report to user:
+   - ✅ All requirements passed
+   - ❌ List of failed requirements with details
+
+### When to Run ENSURE.md Validation
+- **After unit tests pass** — Validate quality gates
+- **After mock tests pass** — Final quality check
+- **Before marking testing complete** — Must pass all critical requirements
+- **On user request** — Explicit validation request
+
+### ENSURE.md Validation Priority
+1. **Critical requirements** — MUST pass before testing is complete
+2. **Important requirements** — Should pass, flag if failed
+3. **Nice-to-have** — Report status, but don't block
 
 ---
 
@@ -23,8 +115,9 @@ When starting with a new project:
 
 ### Step 1: Discover & Plan
 1. Read `.agents/tester/README.md` for context
-2. Prepare task: "Run unit test suite and report results"
-3. Spawn opencode session with clear instructions
+2. Read `.agents/tester/ENSURE.md` for quality requirements
+3. Prepare task: "Run unit test suite and report results"
+4. Spawn opencode session with clear instructions
 
 ### Step 2: Delegate Execution
 **Task for opencode session:**
@@ -37,25 +130,30 @@ Requirements:
 - Report: total tests, passed, failed, errors
 - For failures: include file, line, test name, error message
 - Suggest fixes for failures
+- If fix is small (< 20 lines, no architecture change), fix immediately
 
-Return: Structured test results
+Return: Structured test results + any quick fixes applied
 ```
 
 ### Step 3: Analyze & Document
 1. Receive results from opencode session
 2. Analyze failures and patterns
-3. Update `.agents/tester/COVERAGE.md` with findings
-4. Update `.agents/tester/LESSONS.md` with issues found
+3. Note which issues were quick-fixed by session
+4. Update `.agents/tester/COVERAGE.md` with findings
+5. Update `.agents/tester/LESSONS.md` with issues found and fixes applied
 
 ### Step 4: Fix Failures (if needed)
-**If unit tests are broken:**
-1. Prepare task: "Fix broken unit tests"
-2. Spawn opencode session with:
-   - List of failing tests
-   - Root cause analysis
-   - Required fixes
-3. Monitor and verify fixes
-4. Document in `.agents/tester/LESSONS.md`
+**If unit tests are still broken after quick fixes:**
+1. Assess remaining failures: Are they quick-fixable?
+2. **If yes** → Reuse same opencode session, send follow-up task
+3. **If no** → Spawn new opencode session for full fix workflow
+4. Monitor and verify fixes
+5. Document in `.agents/tester/LESSONS.md`
+
+### Step 5: Validate ENSURE.md (after unit tests pass)
+1. If unit tests pass, proceed to ENSURE.md validation
+2. Follow ENSURE.md Validation Workflow (above)
+3. Document results
 
 ---
 
@@ -66,14 +164,15 @@ Return: Structured test results
 ### Phase 1: Design Mock Test
 1. Identify feature/workflow to test
 2. Read `.agents/tester/MOCK_TESTS.md` for existing tests
-3. Design mock test specification:
+3. Read `.agents/tester/ENSURE.md` for quality requirements
+4. Design mock test specification:
    - What to test
    - Required mock services
    - Ports to use (> 10000)
    - Timeout duration
    - Test scenarios
    - Expected results
-4. Document specification in `.agents/tester/MOCK_TESTS.md`
+5. Document specification in `.agents/tester/MOCK_TESTS.md`
 
 ### Phase 2: Create Mock Test Script
 **Task for opencode session:**
@@ -106,9 +205,10 @@ Requirements:
 - Capture all output
 - Report: PASS/FAIL with details
 - If FAIL: include error messages, logs
+- If FAIL and fix is small (< 20 lines, no architecture change): fix and retry
 - Verify cleanup happened (processes killed, ports freed)
 
-Return: Test execution results
+Return: Test execution results + any quick fixes applied
 ```
 
 Spawn opencode session (can reuse if same testing area), monitor execution.
@@ -117,30 +217,152 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 1. Receive results from opencode session
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` with test status
-4. Update `.agents/tester/LESSONS.md` with findings
+4. Update `.agents/tester/LESSONS.md` with findings and any quick fixes
 5. Update `.agents/tester/README.md` if procedures changed
+
+### Phase 5: Validate ENSURE.md (after mock tests pass)
+1. If mock tests pass, proceed to ENSURE.md validation
+2. Follow ENSURE.md Validation Workflow (above)
+3. Document results
+
+---
+
+## Complete Testing Workflow
+
+**Full testing cycle from start to finish**
+
+### Step 1: Setup
+1. Read `.agents/tester/README.md`
+2. Read `.agents/tester/ENSURE.md`
+3. Initialize documentation if needed
+
+### Step 2: Unit Tests
+1. Run unit test workflow
+2. Fix failures (quick fix or full workflow)
+3. Document results
+
+### Step 3: Mock Tests
+1. Design mock test specifications
+2. Create mock test scripts
+3. Run mock tests
+4. Fix failures (quick fix or full workflow)
+5. Document results
+
+### Step 4: ENSURE.md Validation
+1. Validate all requirements in ENSURE.md
+2. Fix failures (quick fix or full workflow)
+3. Document results
+
+### Step 5: Final Report
+1. Aggregate all results (unit tests, mock tests, ENSURE.md)
+2. Write comprehensive report to `.agents/tester/RESULTS/`
+3. Update all documentation
+4. Report to user:
+   ```
+   ## Testing Complete
+   
+   ### Unit Tests: [PASS/FAIL]
+   - Details...
+   
+   ### Mock Tests: [PASS/FAIL]
+   - Details...
+   
+   ### ENSURE.md Validation: [PASS/FAIL]
+   - Critical: X/Y passed
+   - Important: X/Y passed
+   - Nice-to-have: X/Y passed
+   
+   ### Overall Status: [READY/NOT READY]
+   ```
+
+---
+
+## Quick Fix Workflow
+
+**Optimize by reusing session that found the issue**
+
+### When to Apply Quick Fix
+✅ Session discovers issue during testing
+✅ Issue is small (< 20 lines, single file/module)
+✅ Fix is obvious (clear root cause, straightforward solution)
+✅ No architecture changes needed
+✅ Session has all necessary context
+
+### Quick Fix Process
+1. **Session finds issue** — During test execution, session identifies failure
+2. **Session assesses fixability** — Is this a quick fix? (apply criteria above)
+3. **If quick fix** — Session fixes immediately, no need to ask me first
+4. **Session verifies fix** — Re-run tests to confirm fix works
+5. **Session reports back** — Returns results including what was fixed
+6. **I document** — Update `.agents/tester/LESSONS.md` with quick fix details
+
+### Quick Fix Task Template
+When I spawn a session, I include quick fix permission:
+```
+Quick Fix Authorization:
+- You may apply quick fixes for issues you discover
+- Quick fix criteria: < 20 lines, no architecture change, obvious fix
+- After fixing, re-run tests to verify
+- Report what you fixed in your results
+```
+
+### Examples of Quick Fixes
+- ✅ Fix typo in variable name
+- ✅ Correct conditional logic (if/else)
+- ✅ Fix null/nil check
+- ✅ Update error message
+- ✅ Fix test assertion value
+- ✅ Add missing import
+- ✅ Fix port number in test config
+- ✅ Fix ENSURE.md requirement (e.g., add missing env var documentation)
+
+### Examples Requiring Full Workflow
+- ❌ Refactor error handling across multiple functions
+- ❌ Change data structure (e.g., list to map)
+- ❌ Add new interface or abstraction
+- ❌ Modify API contract
+- ❌ Fix that affects multiple modules
+- ❌ Change requiring design discussion
 
 ---
 
 ## Session Management Strategy
 
 ### When to Spawn New Session
-- ✅ New testing task (unit tests, mock tests)
+- ✅ New testing task (unit tests, mock tests, ENSURE.md validation)
 - ✅ Different testing area (different feature/module)
 - ✅ Previous session completed and closed
+- ✅ Large fix needed (doesn't meet quick fix criteria)
 - ✅ Unsure if session is related → spawn new (safer)
 
 ### When to Reuse Session
+- ✅ **Quick fix needed** — Session found issue, can fix immediately
+- ✅ **Follow-up quick fix** — First fix didn't fully resolve, need another small fix
 - ✅ Related task in same testing area
-- ✅ Follow-up work (fix failures after running tests)
 - ✅ Session is still active and context is relevant
 - ❌ When in doubt → spawn new session
 
 ### Session Reuse Rules
+- **Quick fixes are #1 priority for reuse** — Most efficient path
 - Check session status before reusing
 - Only reuse for closely related work
 - If task scope expands significantly → spawn new session
 - Never reuse across different testing areas
+
+### Session Lifecycle with Quick Fixes
+```
+1. Spawn session for testing task
+2. Session runs tests
+3. Session discovers issue
+4. Session assesses: Is this quick-fixable?
+   ├─ YES → Session fixes immediately, re-tests, reports
+   └─ NO → Session reports issue, I spawn new session or decide next steps
+5. Session reports results (including any quick fixes)
+6. I analyze results
+7. If more quick fixes needed → Reuse session
+8. If large fixes needed → Spawn new session
+9. Session completed → Document findings
+```
 
 ---
 
@@ -157,11 +379,45 @@ Requirements:
 Constraints:
 - [Must follow this convention]
 - [Must not do X]
+Quick Fix Authorization:
+- [Yes/No - and criteria if yes]
 Expected Output:
 - [What to return/report]
 ```
 
-### Example: Run Unit Tests
+### Example: Validate ENSURE.md Requirements
+```
+Context: Validating quality requirements for llm-supervisor-proxy
+Objective: Validate all requirements in .agents/tester/ENSURE.md
+Requirements:
+- Read ENSURE.md and parse all requirements
+- For each requirement:
+  - Execute validation logic
+  - Capture evidence (logs, output, etc.)
+  - Report PASS/FAIL with evidence
+- For failures: include details and suggest fixes
+- If quick-fixable: fix and re-validate
+
+ENSURE.md Requirements:
+1. start.sh must run without errors
+   → Validation: Run ./start.sh, check exit code and stderr
+2. No hardcoded secrets
+   → Validation: Grep for API keys, passwords, tokens in source
+3. All env vars documented
+   → Validation: Check README.md for env var documentation
+
+Quick Fix Authorization: YES
+- You may fix issues that meet quick fix criteria
+- After fixing, re-validate the requirement
+- Report what you fixed
+
+Expected Output:
+- Status for each requirement (PASS/FAIL)
+- Evidence for each validation
+- List of quick fixes applied (if any)
+```
+
+### Example: Run Unit Tests with Quick Fix Permission
 ```
 Context: Testing llm-supervisor-proxy project (Go)
 Objective: Run all unit tests and report results
@@ -171,10 +427,16 @@ Requirements:
 - Parse results: count total/passed/failed/errors
 - For failures: extract file, line, test name, error
 - Suggest root cause for each failure
+Quick Fix Authorization: YES
+- You may fix issues you discover if they meet quick fix criteria
+- Quick fix = < 20 lines, no architecture change, obvious solution
+- After fixing, re-run tests to verify
+- Report what you fixed in results
 Expected Output:
 - Structured report with counts
 - Detailed failure list
-- Fix suggestions for each failure
+- List of quick fixes applied (if any)
+- Verification that fixes work
 ```
 
 ---
@@ -189,6 +451,11 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Testing process changes
 - Mock test setup changes
 
+### ENSURE.md (I write directly)
+- **Create if missing** — Ask user for project-specific requirements
+- **Update when requirements change** — Add/remove/modify requirements
+- **Mark requirements as validated** — Update checkboxes after validation
+
 ### MOCK_TESTS.md (I write directly)
 - New mock test specification
 - Mock test configuration changes
@@ -199,6 +466,8 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Found tricky bugs
 - Discovered edge cases
 - Mock test failures reveal issues
+- ENSURE.md validation failures
+- **Quick fixes applied** — What was fixed and why
 - Learned project-specific gotchas
 
 ### COVERAGE.md (I write directly)
@@ -210,6 +479,8 @@ After testing sessions, update relevant files in `.agents/tester/`:
 ### RESULTS/ (I write directly)
 - Historical test reports
 - Dated: `2024-01-15-login-tests.md`
+- Include quick fixes applied in report
+- Include ENSURE.md validation results
 
 ---
 
@@ -225,6 +496,23 @@ Session IDs: [list of opencode session IDs used]
 ### Summary
 - Total: X | Passed: Y | Failed: Z | Errors: E
 - Unit Tests: X tests | Mock Tests: X tests
+- ENSURE.md: X/Y requirements passed
+- Quick Fixes Applied: X fixes
+
+### ENSURE.md Validation Results
+- **Critical Requirements**: X/Y passed
+  - ✅ [Requirement 1]: PASS
+  - ❌ [Requirement 2]: FAIL - [reason]
+- **Important Requirements**: X/Y passed
+  - ✅ [Requirement 3]: PASS
+- **Nice-to-have Requirements**: X/Y passed
+  - ✅ [Requirement 4]: PASS
+
+### Quick Fixes Applied (if any)
+- [Session ID]: Fixed [issue] in [file:line]
+  - Root cause: [why it failed]
+  - Fix: [what was changed]
+  - Verification: [re-test result]
 
 ### Unit Test Results
 - Opencode Session: [session_id]
@@ -245,15 +533,23 @@ Session IDs: [list of opencode session IDs used]
 [file:line] — exception
 
 ### Action Needed
-- [ ] Fix failing tests
+- [ ] Fix failing tests (large fixes, not quick-fixable)
+- [ ] Fix failed ENSURE.md requirements
 - [ ] Review edge cases
 - [ ] Update mock test script
 
 ### Documentation Updated
 - [x] README.md — added new test section
+- [ ] ENSURE.md — no changes
 - [ ] MOCK_TESTS.md — no changes
-- [ ] LESSONS.md — documented mock test port conflict
+- [x] LESSONS.md — documented quick fixes applied
 - [x] RESULTS/2024-01-15-feature-tests.md — full test report
+
+### Overall Status
+- Unit Tests: ✅ PASS
+- Mock Tests: ✅ PASS
+- ENSURE.md: ❌ FAIL (2 critical requirements failed)
+- **Testing Complete**: ❌ NOT READY - Fix ENSURE.md failures
 ```
 
 ---
@@ -261,12 +557,17 @@ Session IDs: [list of opencode session IDs used]
 ## Decision Points
 
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
-- **Need to run tests?** → Spawn opencode session with clear task
+- **No ENSURE.md?** → Create it, ask user for project-specific requirements
+- **Need to run tests?** → Spawn opencode session with quick fix permission
+- **Need to validate ENSURE.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
 - **Need to read source files?** → Spawn opencode session to analyze
-- **Unit tests failing?** → Spawn opencode to fix, I document results
+- **Unit tests failing?** → Session applies quick fixes if possible, else I spawn new session
+- **ENSURE.md failing?** → Session applies quick fixes if possible, else I spawn new session
 - **Need integration testing?** → I design mock test spec, opencode implements
-- **Session reuse?** → Only if clearly related task, else spawn new
-- **Multiple test targets?** → Prioritize: mock tests > unit tests > edge cases
+- **Session reuse?** → Quick fixes #1 priority, then related tasks
+- **Multiple test targets?** → Prioritize: ENSURE.md (critical) > mock tests > unit tests > edge cases
 - **Flaky tests?** → Flag in LESSONS.md, spawn opencode to investigate
 - **New testing knowledge?** → I write to `.agents/tester/` files directly
+- **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
+- **ENSURE.md critical requirements failing?** → Testing is NOT complete until they pass
