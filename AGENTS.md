@@ -1,0 +1,262 @@
+# Agent Guidelines for Ensemble
+
+This is a **multi-agent orchestration daemon** using LangGraph where agents are defined by markdown files rather than code. The system manages persistent conversations with crash recovery, job queuing, and pluggable message sources.
+
+## Tech Stack
+
+- **Backend**: Python 3.11+, FastAPI, LangGraph, SQLModel, aiosqlite
+- **Frontend**: Angular 21 (TypeScript)
+- **Database**: SQLite (persistence + checkpointing)
+- **Package Manager**: `uv` (Python), `npm` (frontend)
+
+---
+
+## Build / Test Commands
+
+### Python Backend
+
+```bash
+# Install dependencies
+make sync                    # Uses uv sync
+make install                 # Full production install
+
+# Development
+./dev.sh                     # Auto-reload server (recommended)
+python -m uvicorn daemon.api:app --reload --port 8000
+
+# Run tests
+pytest tests/ -v             # All tests with verbose output
+pytest tests/ -v -k "test_name"           # Single test by name
+pytest tests/ -v --tb=short                # With short traceback
+pytest tests/unit/ -v                        # Unit tests only
+pytest tests/integration/ -v                # Integration tests only
+
+# Watch mode (if pytest-watch installed)
+ptw tests/ -v
+```
+
+### Angular Frontend
+
+```bash
+cd frontend
+npm install
+npm start                    # Dev server on port 4200
+npm test                     # Karma/Jasmine tests
+npm run build                # Production build
+```
+
+### Process Management
+
+**CRITICAL**: Never use `pkill -f "uvicorn daemon.api"` — it is forbidden in this project.
+
+To find and kill processes:
+```bash
+# Find PID by port
+lsof -ti:8000 | xargs kill   # Kill process on port 8000
+# Or use:
+fuser -k 8000/tcp            # Alternative method
+
+# Kill by PID (get PID first)
+ps aux | grep uvicorn
+kill <PID>
+```
+
+---
+
+## Code Style Guidelines
+
+### Python Conventions
+
+1. **Type Hints**: Required for all function signatures
+   ```python
+   def process_message(message: str, session_id: str) -> dict[str, Any]:
+   ```
+
+2. **Logging**: Use module-level logger
+   ```python
+   logger = logging.getLogger(__name__)
+   ```
+
+3. **Docstrings**: Required for public methods and classes
+   ```python
+   async def fetch_session(session_id: str) -> Session | None:
+       """Fetch a session by ID or return None if not found.
+       
+       Args:
+           session_id: Unique session identifier
+       
+       Returns:
+           Session object or None
+       """
+   ```
+
+4. **Async/Await**: Use for all I/O operations
+   ```python
+   async with aiosqlite.connect(db_path) as db:
+       result = await db.execute("SELECT * FROM sessions")
+   ```
+
+5. **Imports**: Relative imports within daemon package
+   ```python
+   from .models import Session
+   from ..graph import build_session_graph
+   ```
+
+6. **Error Handling**: Use Pydantic validation + explicit exception handling
+   ```python
+   try:
+       result = await risky_operation()
+   except ValueError as e:
+       logger.warning(f"Invalid input: {e}")
+       raise HTTPException(status_code=400, detail=str(e))
+   ```
+
+### Naming Conventions
+
+| Type | Convention | Example |
+|------|------------|---------|
+| Variables | snake_case | `session_id`, `message_count` |
+| Functions | snake_case | `fetch_session()`, `build_graph()` |
+| Classes | PascalCase | `SessionManager`, `ThinkingChatOpenAI` |
+| Constants | SCREAMING_SNAKE | `MAX_RETRIES`, `DEFAULT_TIMEOUT` |
+| Private | _prefix | `_internal_state`, `_cache` |
+| Type aliases | PascalCase | `MessageHandler`, `ToolResult` |
+
+### Pydantic Models
+
+All API request/response models should use Pydantic v2:
+
+```python
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class SessionCreate(BaseModel):
+    project: str = Field(..., description="Project name")
+    agent_id: str = Field(default="leader", description="Agent to use")
+    
+class SessionResponse(BaseModel):
+    id: str
+    project: str
+    created_at: datetime
+    status: SessionStatus
+```
+
+### File Organization
+
+```
+daemon/
+├── __main__.py          # Entry point
+├── api.py               # FastAPI routes (1500+ lines)
+├── graph.py             # LangGraph definition
+├── manager.py           # Session orchestration
+├── loader.py            # Agent/markdown loader
+├── models.py            # Pydantic models
+├── config.py            # Configuration loading
+├── tools/               # Agent tools
+│   ├── bash.py
+│   ├── filesystem.py
+│   └── session.py
+└── sources/             # Message source adapters
+    ├── telegram.py
+    └── scheduler.py
+```
+
+---
+
+## Agent Definition Structure
+
+Agents are defined in markdown files under `agents/<agent_id>/`:
+
+```
+agents/
+├── <agent_id>/
+│   ├── meta.json          # Agent metadata
+│   ├── soul.md            # Identity/personality
+│   ├── rule.md            # Constraints (highest priority)
+│   ├── skill.md           # Capabilities (single, optional)
+│   ├── skills/            # Multiple skills directory
+│   │   └── <skill>/
+│   │       └── skill.md
+│   ├── tools.md           # Tool documentation
+│   ├── workflow.md        # Methodology
+│   ├── memory.md          # Long-term knowledge
+│   └── memories/          # Persistent memories
+```
+
+**Prompt Composition Order**: soul → rule → skill → skills → tools → workflow → memory
+
+---
+
+## Configuration
+
+### config.yaml (Main Configuration)
+
+```yaml
+llm:
+  model: gpt-4o
+  temperature: 0.7
+  max_tokens: 4096
+
+daemon:
+  host: 0.0.0.0
+  port: 8000
+
+limits:
+  max_concurrent_sessions: 10
+  session_timeout_minutes: 60
+
+persistence:
+  database: data/ensemble.db
+  checkpoint_database: data/checkpoints.db
+```
+
+### Environment Variables (.env)
+
+```
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...   # Optional
+LOG_LEVEL=INFO
+```
+
+---
+
+## Testing Guidelines
+
+1. **Mock External APIs**: Use `tests/conftest.py` fixtures that mock langgraph modules
+2. **Unit Tests**: Place in `tests/unit/`
+3. **Integration Tests**: Place in `tests/integration/`
+4. **Async Tests**: Use `pytest-asyncio` with `async def test_`
+5. **Mock LLM Server**: Use `tests/mock_llm_server.py` for testing with real graph execution
+
+```python
+# Example test
+import pytest
+from daemon.manager import SessionManager
+
+@pytest.mark.asyncio
+async def test_session_creation():
+    manager = SessionManager()
+    session = await manager.create_session(project="test")
+    assert session.id is not None
+    assert session.project == "test"
+```
+
+---
+
+## Important Notes
+
+1. **No Linting Config**: Project lacks ruff/black/mypy configuration. Maintain clean, consistent code manually.
+
+2. **Frontend Prettier Config** (`frontend/package.json`):
+   - Print width: 100
+   - Single quotes: true
+   - Angular HTML files use angular parser
+
+3. **Process Kill Command**: The command `pkill -f "uvicorn daemon.api"` is **forbidden**. Use port-based PID finding instead:
+   ```bash
+   lsof -ti:8000 | xargs kill
+   ```
+
+4. **Database**: Two SQLite databases — one for persistence, one for LangGraph checkpoints. Both use aiosqlite for async access.
+
+5. **LangGraph Version**: Uses LangGraph 0.3+ with checkpoint-sqlite for state persistence.
