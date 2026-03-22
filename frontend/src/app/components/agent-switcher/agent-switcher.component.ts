@@ -67,6 +67,11 @@ export class AgentSwitcherComponent {
     if (this.isOpen()) {
       // When opening, focus the trigger button and set initial focused index
       const agents = this.selectableAgents();
+      if (agents.length === 0) {
+        this.focusedIndex.set(-1);
+        setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
+        return;
+      }
       const currentIndex = agents.findIndex(a => a.id === this.selectedAgent?.id);
       this.focusedIndex.set(currentIndex >= 0 ? currentIndex : 0);
       setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
@@ -104,10 +109,14 @@ export class AgentSwitcherComponent {
       case 'ArrowDown':
         event.preventDefault();
         if (!this.isOpen()) {
+          const agents = this.selectableAgents();
+          if (agents.length === 0) return;
           this.isOpen.set(true);
           this.focusedIndex.set(0);
           setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
         } else {
+          const agents = this.selectableAgents();
+          if (agents.length === 0) return;
           const nextIndex = currentIndex < agents.length - 1 ? currentIndex + 1 : 0;
           this.focusedIndex.set(nextIndex);
           this.scrollToFocused(nextIndex);
@@ -117,10 +126,14 @@ export class AgentSwitcherComponent {
       case 'ArrowUp':
         event.preventDefault();
         if (!this.isOpen()) {
+          const agents = this.selectableAgents();
+          if (agents.length === 0) return;
           this.isOpen.set(true);
           this.focusedIndex.set(agents.length - 1);
           setTimeout(() => this.triggerButton?.nativeElement?.focus(), 0);
         } else {
+          const agents = this.selectableAgents();
+          if (agents.length === 0) return;
           const prevIndex = currentIndex > 0 ? currentIndex - 1 : agents.length - 1;
           this.focusedIndex.set(prevIndex);
           this.scrollToFocused(prevIndex);
@@ -129,7 +142,7 @@ export class AgentSwitcherComponent {
 
       case 'Home':
         event.preventDefault();
-        if (this.isOpen()) {
+        if (this.isOpen() && agents.length > 0) {
           this.focusedIndex.set(0);
           this.scrollToFocused(0);
         }
@@ -137,7 +150,7 @@ export class AgentSwitcherComponent {
 
       case 'End':
         event.preventDefault();
-        if (this.isOpen()) {
+        if (this.isOpen() && agents.length > 0) {
           const lastIndex = agents.length - 1;
           this.focusedIndex.set(lastIndex);
           this.scrollToFocused(lastIndex);
@@ -191,6 +204,7 @@ export class AgentSwitcherComponent {
 
   private handleArrowDown(): void {
     const agents = this.selectableAgents();
+    if (agents.length === 0) return;
     const currentIndex = this.focusedIndex();
     const nextIndex = currentIndex < agents.length - 1 ? currentIndex + 1 : 0;
     this.focusedIndex.set(nextIndex);
@@ -200,6 +214,7 @@ export class AgentSwitcherComponent {
 
   private handleArrowUp(): void {
     const agents = this.selectableAgents();
+    if (agents.length === 0) return;
     const currentIndex = this.focusedIndex();
     const prevIndex = currentIndex > 0 ? currentIndex - 1 : agents.length - 1;
     this.focusedIndex.set(prevIndex);
@@ -231,8 +246,10 @@ export class AgentSwitcherComponent {
 
   onMenuFocus(): void {
     // Ensure focusedIndex is valid when menu receives focus
+    const agents = this.selectableAgents();
+    if (agents.length === 0) return;
     if (this.focusedIndex() < 0) {
-      const currentIndex = this.selectableAgents().findIndex(a => a.id === this.selectedAgent?.id);
+      const currentIndex = agents.findIndex(a => a.id === this.selectedAgent?.id);
       this.focusedIndex.set(currentIndex >= 0 ? currentIndex : 0);
     }
   }

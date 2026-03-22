@@ -186,6 +186,10 @@ export class JobSseService {
 
     this.lastErrorShown = message;
     this.errorDebounceTimer = setTimeout(() => {
+      // Guard: don't fire if service was disconnected
+      if (this.connectionState() === 'disconnected') {
+        return;
+      }
       this.latestError.set(message);
     }, this.ERROR_DEBOUNCE_MS);
   }
