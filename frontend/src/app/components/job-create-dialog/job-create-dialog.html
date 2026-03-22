@@ -23,7 +23,7 @@
     <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
       <!-- Agent Selector -->
       <div class="form-group">
-        <label class="form-label">
+        <label id="agent-label" class="form-label">
           Agent <span class="text-accent-rose">*</span>
         </label>
         @if (agentsLoading()) {
@@ -32,6 +32,8 @@
           <select
             formControlName="agent_dir"
             class="form-select"
+            aria-labelledby="agent-label"
+            aria-required="true"
           >
             <option value="" disabled>Select an agent</option>
             @for (agent of agents(); track agent.agent_dir) {
