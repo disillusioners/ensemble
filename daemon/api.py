@@ -790,7 +790,7 @@ async def create_source(source_create: SourceCreate):
         )
     
     # Validate source type is supported
-    supported_types = {"telegram", "webhook", "whatsapp", "discord"}
+    supported_types = {"telegram", "webhook", "whatsapp", "discord", "scheduler"}
     if source_create.source_type.value not in supported_types:
         raise HTTPException(
             status_code=400,
@@ -870,6 +870,9 @@ async def test_source(test_request: SourceTestRequest):
     elif test_request.source_type == SourceType.discord:
         # Discord not implemented yet
         success, message = False, "Discord adapter not yet implemented"
+    elif test_request.source_type == SourceType.scheduler:
+        # Scheduler doesn't require external connection test
+        success, message = True, "Scheduler sources don't require connection testing"
     else:
         success, message = False, f"Unknown source type: {test_request.source_type}"
     
