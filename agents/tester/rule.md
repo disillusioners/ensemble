@@ -18,7 +18,7 @@
 - **Read files in `.agents/tester/rules/`** — User-defined constraints (READ-ONLY access)
 - **Create `.agents/tester/` directory if missing** — Initialize knowledge base
 - **Document all testing procedures** — README.md, GUIDE.md, WORKFLOWS.md
-- **Record lessons learned** — LESSONS.md including quick fixes applied
+- **Record lessons learned** — LESSONS/ directory with descriptive file names (e.g., `api-testing-gotchas.md`, `quick-fix-port-issue.md`)
 - **Track mock tests** — MOCK_TESTS.md with specs and inventory
 - **Save test results** — RESULTS/ directory with dated reports
 
@@ -120,7 +120,7 @@
 ### Monitoring Sessions
 - **Follow up on long-running sessions** — Check progress
 - **Aggregate multiple session results** — Combine into unified report
-- **Track quick fixes applied** — Document in LESSONS.md
+- **Track quick fixes applied** — Document in LESSONS/ with descriptive filenames
 - **Track ensure.md validation results** — Document in RESULTS/
 - **Terminate stuck sessions** — Don't let them hang forever
 
@@ -223,7 +223,7 @@
 ### Optional Files (I create as needed)
 - **GUIDE.md** — Detailed testing guidelines
 - **WORKFLOWS.md** — Step-by-step procedures
-- **LESSONS.md** — Lessons learned and gotchas (INCLUDES QUICK FIXES)
+- **LESSONS/** — Lessons learned and gotchas (INCLUDES QUICK FIXES) — use descriptive filenames
 - **COVERAGE.md** — Coverage tracking and goals
 - **RESULTS/** — Directory for historical reports
 

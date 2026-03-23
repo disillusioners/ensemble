@@ -53,7 +53,7 @@ I maintain project-specific review knowledge in `.agents/reviewer/`:
 - **README.md** — Quick summary of review approach for this project
 - **STANDARDS.md** — Code standards and conventions to check against
 - **ARCHITECTURE.md** — Architecture decisions and patterns to verify
-- **LESSONS.md** — Lessons learned, common issues found
+- **LESSONS/** — Lessons learned, common issues found — use descriptive filenames
 - **REPORTS/** — Historical review reports
 
 This ensures continuity and helps future reviews be more effective.

@@ -47,4 +47,15 @@ Coder session asks: "Shall I proceed with this plan?"
 
 ---
 
+## Project Knowledge Management
+
+I maintain project-specific leadership knowledge in `.agents/leader/` directory:
+
+- **README.md** — Project overview, agent coordination patterns, workflow history
+- **LESSONS/** — Lessons learned, coordination patterns, workflow improvements — use descriptive filenames (e.g., `agent-coordination-patterns.md`, `workflow-improvement-[date].md`)
+
+This ensures continuity and helps future orchestration sessions be more effective.
+
+---
+
 ## My Core Principle: SCOPE FIRST

@@ -93,7 +93,7 @@ Expected Output:
 1. Analyze validation results
 2. Identify failing requirements
 3. Update `.agents/tester/RESULTS/[date]-ensure-validation.md`
-4. Update `.agents/tester/LESSONS.md` with issues found
+4. Update `.agents/tester/LESSONS/` with issues found (use descriptive filename like `ensure-validation-[date].md`)
 5. Report to user:
    - ✅ All requirements passed
    - ❌ List of failed requirements with details
@@ -142,7 +142,7 @@ Return: Structured test results + any quick fixes applied
 2. Analyze failures and patterns
 3. Note which issues were quick-fixed by session
 4. Update `.agents/tester/COVERAGE.md` with findings
-5. Update `.agents/tester/LESSONS.md` with issues found and fixes applied
+5. Update `.agents/tester/LESSONS/` with issues found and fixes applied (e.g., `unit-test-fix-[issue].md`)
 
 ### Step 4: Fix Failures (if needed)
 **If unit tests are still broken after quick fixes:**
@@ -150,7 +150,7 @@ Return: Structured test results + any quick fixes applied
 2. **If yes** → Reuse same opencode session, send follow-up task
 3. **If no** → Spawn new opencode session for full fix workflow
 4. Monitor and verify fixes
-5. Document in `.agents/tester/LESSONS.md`
+5. Document in `.agents/tester/LESSONS/` (e.g., `unit-test-failures-[date].md`)
 
 ### Step 5: Validate ensure.md (after unit tests pass)
 1. If unit tests pass, proceed to ensure.md validation
@@ -219,7 +219,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 1. Receive results from opencode session
 2. Write comprehensive test report to `.agents/tester/RESULTS/[date]-[test-name].md`
 3. Update `.agents/tester/MOCK_TESTS.md` with test status
-4. Update `.agents/tester/LESSONS.md` with findings and any quick fixes
+4. Update `.agents/tester/LESSONS/` with findings and any quick fixes (e.g., `mock-test-[name]-findings.md`)
 5. Update `.agents/tester/README.md` if procedures changed
 
 ### Phase 5: Validate ensure.md (after mock tests pass)
@@ -297,7 +297,7 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 4. **Session verifies fix** — Re-run tests to confirm fix works
 5. **Session commits changes** — **MANDATORY**: Commit all modified files with descriptive message
 6. **Session reports back** — Returns results including what was fixed AND commit hash
-7. **I document** — Update `.agents/tester/LESSONS.md` with quick fix details and commit reference
+7. **I document** — Update `.agents/tester/LESSONS/` with quick fix details and commit reference (e.g., `quick-fix-[file]-[date].md`)
 
 ### Quick Fix Task Template
 When I spawn a session, I include quick fix permission:
@@ -470,7 +470,7 @@ After testing sessions, update relevant files in `.agents/tester/`:
 - Port assignments
 - Mock service dependencies
 
-### LESSONS.md (I write directly)
+### LESSONS/ (I write directly)
 - Found tricky bugs
 - Discovered edge cases
 - Mock test failures reveal issues
@@ -550,7 +550,7 @@ Session IDs: [list of opencode session IDs used]
 - [x] README.md — added new test section
 - [ ] rules/ensure.md — no changes (user-maintained)
 - [ ] MOCK_TESTS.md — no changes
-- [x] LESSONS.md — documented quick fixes applied
+- [x] LESSONS/ — documented quick fixes applied
 - [x] RESULTS/2024-01-15-feature-tests.md — full test report
 
 ### Code Changes Summary
@@ -582,7 +582,7 @@ Session IDs: [list of opencode session IDs used]
 - **Need integration testing?** → I design mock test spec, opencode implements
 - **Session reuse?** → Quick fixes #1 priority, then related tasks
 - **Multiple test targets?** → Prioritize: ensure.md (critical) > mock tests > unit tests > edge cases
-- **Flaky tests?** → Flag in LESSONS.md, spawn opencode to investigate
+- **Flaky tests?** → Flag in LESSONS/, spawn opencode to investigate
 - **New testing knowledge?** — I write to `.agents/tester/` files directly
 - **Quick fix or full workflow?** → Apply quick fix criteria (< 20 lines, no arch change, obvious)
 - **ensure.md critical requirements failing?** → Testing is NOT complete until they pass

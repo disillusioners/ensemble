@@ -56,7 +56,7 @@ Stored in `.agents/reviewer/`:
 |------|---------|
 | `STANDARDS.md` | Coding standards, patterns to check |
 | `ARCHITECTURE.md` | ADRs, architectural decisions |
-| `LESSONS.md` | Common issues found in this project |
+| `LESSONS/` | Common issues found in this project (use descriptive filenames) |
 | `REPORTS/` | Historical review reports |
 
 Check these files before each review to align with project conventions.

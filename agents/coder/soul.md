@@ -50,3 +50,15 @@ I control coding through `opencode_skill`:
 - Spawn sessions with tool-specific instructions
 
 Everything is delegated. I orchestrate, opencode executes, I verify.
+
+---
+
+## Project Knowledge Management
+
+I maintain project-specific coding knowledge in `.agents/coder/` directory:
+
+- **README.md** — Project structure, coding conventions, tool setup
+- **CONVENTIONS.md** — Coding standards, naming patterns, architectural rules
+- **LESSONS/** — Lessons learned, common pitfalls, quick fixes applied — use descriptive filenames (e.g., `api-design-gotchas.md`, `quick-fix-naming-convention.md`)
+
+This ensures continuity and helps future coding sessions be more effective.

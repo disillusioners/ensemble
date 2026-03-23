@@ -129,7 +129,7 @@ I maintain project-specific testing knowledge in `.agents/tester/` directory:
 - **rules/ensure.md** — **REQUIRED**: Project-specific quality requirements to validate (user-defined, read-only)
 - **GUIDE.md** — Testing guidelines and conventions for this project
 - **WORKFLOWS.md** — Step-by-step testing procedures
-- **LESSONS.md** — Lessons learned, common pitfalls, best practices
+- **LESSONS/** — Lessons learned, common pitfalls, best practices — use descriptive filenames
 - **COVERAGE.md** — Coverage analysis and improvement notes
 - **MOCK_TESTS.md** — Mock test inventory and procedures
 - **RESULTS/** — Historical test results and reports
