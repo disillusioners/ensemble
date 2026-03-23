@@ -1316,11 +1316,6 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         merged_config = {**existing.config, **schedule_update.config}
         updated_config = merged_config
     
-    # Handle status update
-    updated_status = None
-    if schedule_update.status is not None:
-        updated_status = schedule_update.status.value if isinstance(schedule_update.status, SourceStatus) else schedule_update.status
-    
     # Update source config using repository
     updated = manager._source_repository.update_source_config(
         source_id=schedule_id,
@@ -1330,11 +1325,6 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         credentials=existing.credentials,
         enabled=existing.enabled,
     )
-    
-    # Handle status update if provided
-    if updated_status:
-        manager._source_repository.update_source_status(schedule_id, updated_status)
-        updated = manager._source_repository.get_source_config(schedule_id)
     
     return ScheduleInfo(
         id=updated.source_id,
