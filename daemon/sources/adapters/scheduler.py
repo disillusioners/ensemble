@@ -42,6 +42,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         execution_callback: Optional[Callable] = None,
+        on_complete_callback: Optional[Callable[[str, bool], None]] = None,  # NEW
         job_queue_service: Optional["JobQueueService"] = None,
     ):
         """Initialize the scheduler adapter.
@@ -51,12 +52,15 @@ class SchedulerAdapter(MessageSourceAdapter):
             on_message: Callback for incoming messages
             execution_callback: Optional callback for execution status updates.
                 Called with: (execution_id, schedule_id, status, session_id, error_message)
+            on_complete_callback: Optional callback to notify adapter completion.
+                Called with: (source_id, completed=True) when one-time schedule finishes.
             job_queue_service: Optional JobQueueService for routing jobs through queue.
                 If provided and project_id is configured, jobs will be queued instead of
                 immediate execution.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
+        self._on_complete_callback = on_complete_callback  # NEW
         self._job_queue_service = job_queue_service
         
         # Extract scheduler-specific config
@@ -143,8 +147,19 @@ class SchedulerAdapter(MessageSourceAdapter):
         Raises:
             ValueError: If no valid schedule is configured
         """
+        # Check for conflicting schedule types
+        has_schedule = "schedule" in scheduler_config and scheduler_config["schedule"]
+        has_interval = "interval_seconds" in scheduler_config
+        has_run_at = "run_at" in scheduler_config and scheduler_config["run_at"]
+        
+        if has_schedule and has_interval:
+            logger.warning(
+                f"Both cron and interval specified for {self.source_id}. "
+                f"Using cron, ignoring interval_seconds={scheduler_config['interval_seconds']}"
+            )
+        
         # Check for cron expression
-        if "schedule" in scheduler_config and scheduler_config["schedule"]:
+        if has_schedule:
             self._schedule_type = self.SCHEDULE_TYPE_CRON
             self._cron_expression = scheduler_config["schedule"]
             
@@ -157,7 +172,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                 logger.info(f"Valid cron expression: {self._cron_expression}")
             except CroniterBadCronError as e:
                 raise ValueError(f"Invalid cron expression '{self._cron_expression}': {e}")
-            
+        
         # Check for interval
         elif "interval_seconds" in scheduler_config:
             interval = scheduler_config["interval_seconds"]
@@ -364,6 +379,12 @@ class SchedulerAdapter(MessageSourceAdapter):
                 if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
                     self._is_one_time_executed = True
                     logger.info(f"One-time schedule executed: {self.source_id}")
+                    # NEW: Notify completion so adapter can disable itself
+                    if self._on_complete_callback:
+                        try:
+                            self._on_complete_callback(self.source_id, completed=True)
+                        except Exception as e:
+                            logger.warning(f"on_complete_callback failed: {e}")
                     break
                     
             except asyncio.CancelledError:

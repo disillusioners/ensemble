@@ -168,6 +168,11 @@ class SQLModelSourceRepository:
                 sql_delete(ProcessedMessage).where(ProcessedMessage.source_id == source_id)
             )
             
+            # Delete schedule executions for this source
+            session.exec(
+                sql_delete(ScheduleExecution).where(ScheduleExecution.schedule_id == source_id)
+            )
+            
             # Delete source config
             session.delete(source_config)
             session.commit()

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Optional
 
 from .base import (
@@ -18,6 +19,9 @@ if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
 
 logger = logging.getLogger(__name__)
+
+# Module-level executor for async-safe callbacks (P2 Issue #7)
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 class SourceRegistry:
@@ -77,6 +81,16 @@ class SourceRegistry:
             logger.warning(f"Adapter not found for unregistration: {source_id}")
             return False
         
+        adapter = self._adapters[source_id]
+        
+        # Stop the adapter if running (P1 Issue #5)
+        if self._running.get(source_id, False):
+            try:
+                # Create task to stop adapter without blocking
+                asyncio.create_task(self._stop_adapter_async(adapter, source_id))
+            except Exception as e:
+                logger.warning(f"Error initiating adapter stop during unregister: {e}")
+        
         # Cancel supervisor task if running
         if source_id in self._supervisor_tasks:
             task = self._supervisor_tasks.pop(source_id)
@@ -88,6 +102,14 @@ class SourceRegistry:
         self._running.pop(source_id, None)
         logger.info(f"Unregistered adapter: source_id={source_id}")
         return True
+    
+    async def _stop_adapter_async(self, adapter: MessageSourceAdapter, source_id: str) -> None:
+        """Helper to stop adapter asynchronously."""
+        try:
+            await adapter.stop()
+            logger.debug(f"Stopped adapter during unregister: {source_id}")
+        except Exception as e:
+            logger.warning(f"Error stopping adapter {source_id} during unregister: {e}")
     
     def get(self, source_id: str) -> Optional[MessageSourceAdapter]:
         """Get an adapter by source_id.
@@ -247,24 +269,25 @@ class SourceRegistry:
         elif source_type == "scheduler":
             from .adapters.scheduler import SchedulerAdapter
             
-            # Create execution callback that persists to database
-            def execution_callback(
+            # Thread-safe wrapper for execution callback (P2 Issue #7)
+            def _safe_sync_callback(
+                repo,
                 execution_id: str,
                 schedule_id: str,
                 status: str,
                 session_id: Optional[str] = None,
                 error_message: Optional[str] = None,
             ):
-                """Persist execution status to database."""
+                """Thread-safe wrapper for execution callback."""
                 try:
                     if status == "triggered":
-                        self._source_repo.record_execution_start(
+                        repo.record_execution_start(
                             schedule_id=schedule_id,
                             session_id=session_id,
                             execution_id=execution_id,
                         )
                     elif status in ("completed", "failed", "skipped", "queued"):
-                        self._source_repo.record_execution_complete(
+                        repo.record_execution_complete(
                             execution_id=execution_id,
                             status=status,
                             error_message=error_message,
@@ -272,11 +295,42 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to record execution status: {e}")
             
+            def execution_callback(
+                execution_id: str,
+                schedule_id: str,
+                status: str,
+                session_id: Optional[str] = None,
+                error_message: Optional[str] = None,
+            ):
+                """Sync callback - run in thread pool to avoid blocking."""
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(
+                    _executor,
+                    _safe_sync_callback,
+                    self._source_repo,
+                    execution_id, schedule_id, status, session_id, error_message
+                )
+            
+            def on_complete_callback(source_id: str, completed: bool):
+                """Disable scheduler after one-time execution completes.
+                
+                This callback is invoked by SchedulerAdapter when a one-time
+                schedule finishes execution. We disable the source so it
+                won't run again.
+                """
+                try:
+                    self._source_repo.update_source_status(source_id, "stopped")
+                    self._source_repo.update_source_enabled(source_id, False)
+                    logger.info(f"Disabled one-time scheduler after completion: {source_id}")
+                except Exception as e:
+                    logger.error(f"Failed to disable scheduler {source_id}: {e}")
+            
             # Pass JobQueueService for queue routing (Task 5.4)
             adapter = SchedulerAdapter(
                 config,
                 on_message,
                 execution_callback,
+                on_complete_callback=on_complete_callback,
                 job_queue_service=self._job_queue_service,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
@@ -515,7 +569,9 @@ class SourceRegistry:
                 # Exponential backoff
                 backoff = min(backoff * multiplier, max_backoff)
         
-        # Clean up on exit
+        # Clean up on exit (P2 Issue #8)
+        self._running.pop(source_id, None)  # Clean up running state
+        self._supervisor_tasks.pop(source_id, None)
         logger.info(f"Supervisor exiting for adapter: {source_id}")
     
     async def _handle_message(self, source_id: str, msg: IncomingMessage) -> None:

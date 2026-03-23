@@ -827,16 +827,6 @@ async def create_source(source_create: SourceCreate):
             ).model_dump()
         )
     
-    # Scheduler sources cannot be enabled/disabled
-    if source_create.source_type.value == "scheduler" and source_create.enabled:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
-                "message": "Scheduler sources manage their own lifecycle and cannot be controlled via API."
-            }
-        )
-    
     # Validate and encrypt credentials
     credentials_json = None
     if source_create.credentials:
@@ -1026,8 +1016,9 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 @api_router.delete("/sources/{source_id}", response_model=DeleteResponse)
 async def delete_source(source_id: str):
     """Delete a message source."""
-    result = manager._source_repository.delete_source_config(source_id)
-    if not result.get("deleted"):
+    # Get source to check type first
+    existing = manager._source_repository.get_source_config(source_id)
+    if not existing:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -1035,6 +1026,19 @@ async def delete_source(source_id: str):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
+    
+    # Stop and unregister adapter if running
+    try:
+        adapter = manager.source_registry.get(source_id)
+        if adapter:
+            await manager.source_registry.stop_adapter(source_id)
+            manager.source_registry.unregister(source_id)
+            logger.info(f"Stopped and unregistered adapter: {source_id}")
+    except Exception as e:
+        logger.warning(f"Failed to stop adapter during delete {source_id}: {e}")
+    
+    # Delete from database
+    result = manager._source_repository.delete_source_config(source_id)
     
     return DeleteResponse(deleted=True, message=f"Source {source_id} deleted")
 
@@ -1383,6 +1387,15 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         enabled=existing.enabled,
     )
     
+    # Calculate next_run_at from adapter if available
+    next_run_at = None
+    adapter = manager.source_registry.get(updated.source_id)
+    if adapter and hasattr(adapter, '_get_next_trigger_time'):
+        try:
+            next_run_at = adapter._get_next_trigger_time()
+        except Exception:
+            pass
+    
     return ScheduleInfo(
         id=updated.source_id,
         name=updated.name,
@@ -1390,6 +1403,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         status=SourceStatus(updated.status),
         created_at=datetime.fromisoformat(updated.created_at).replace(tzinfo=timezone.utc) if isinstance(updated.created_at, str) else updated.created_at,
         updated_at=datetime.fromisoformat(updated.updated_at).replace(tzinfo=timezone.utc) if updated.updated_at and isinstance(updated.updated_at, str) else None,
+        last_run_at=None,
+        next_run_at=next_run_at,
     )
 
 
@@ -1492,9 +1507,11 @@ async def start_schedule(schedule_id: str):
     # Start the scheduler adapter
     try:
         await manager.source_registry.start_adapter(schedule_id)
+        adapter = manager.source_registry.get(schedule_id)
+        status = adapter.status if adapter else None
         return SourceActionResponse(
             source_id=schedule_id,
-            success=True,
+            status=status,
             message=f"Scheduler {schedule_id} started successfully"
         )
     except Exception as e:
@@ -1538,7 +1555,7 @@ async def stop_schedule(schedule_id: str):
         await manager.source_registry.stop_adapter(schedule_id)
         return SourceActionResponse(
             source_id=schedule_id,
-            success=True,
+            status=SourceStatus.STOPPED,
             message=f"Scheduler {schedule_id} stopped successfully"
         )
     except Exception as e:
