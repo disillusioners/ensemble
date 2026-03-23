@@ -108,6 +108,9 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._stop_event: asyncio.Event = asyncio.Event()
         self._is_one_time_executed: bool = False
         
+        # Response handling
+        self._store_responses: bool = scheduler_config.get("store_responses", False)
+        
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
             f"source_id={self.source_id}, timezone={timezone_str}"
@@ -279,16 +282,42 @@ class SchedulerAdapter(MessageSourceAdapter):
             await asyncio.sleep(0.5)
     
     async def send(self, message: OutgoingMessage) -> bool:
-        """Scheduler doesn't receive messages - this is a source adapter.
+        """Handle responses from scheduled tasks (e.g., child agent outputs).
+        
+        Since scheduler is a one-way source, responses are logged for monitoring
+        rather than sent to an external destination. This method exists to satisfy
+        the MessageSourceAdapter interface and handle responses from child sessions
+        that inherit the scheduler's root_source.
         
         Args:
-            message: Outgoing message (ignored)
+            message: Outgoing message containing agent response
             
         Returns:
-            True - always returns success as scheduler is output-only
+            True - responses are logged/monitored, always success
         """
-        # Scheduler is a one-way adapter - it triggers messages but doesn't receive
+        # Log the response for monitoring/debugging scheduled tasks
+        content_preview = message.content[:200] + "..." if len(message.content) > 200 else message.content
+        logger.info(
+            f"Scheduled task response for {message.external_user_id}: {content_preview}"
+        )
+        
+        # If configured, store or emit the response for downstream consumers
+        # (e.g., webhook callbacks, storage, etc.)
+        if self._store_responses:
+            await self._store_response(message)
+        
         return True
+    
+    async def _store_response(self, message: OutgoingMessage) -> None:
+        """Store response for downstream processing.
+        
+        Args:
+            message: The response message to store
+        """
+        # TODO: Implement response storage (DB, webhook, etc.)
+        # This allows scheduled tasks to produce outputs that can be consumed
+        # by external systems or viewed in the dashboard
+        logger.debug(f"Response storage not yet implemented for {self.source_id}")
     
     async def health_check(self) -> bool:
         """Check if scheduler is healthy.
