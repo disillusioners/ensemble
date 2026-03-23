@@ -18,7 +18,7 @@ import { ScheduleCreateDialogComponent, ScheduleCreateDialogResult } from '../..
 import { Schedule, ScheduleStatus, ScheduleType } from '../../models/scheduler.model';
 import { Agent } from '../../models';
 
-type ActionType = 'start' | 'stop' | 'pause';
+type ActionType = 'start' | 'stop';
 
 @Component({
   selector: 'app-schedules',
@@ -88,8 +88,8 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly activeCount = computed((): number => 
     this.schedules().filter((s: Schedule) => s.status === 'running').length
   );
-  readonly pausedCount = computed((): number => 
-    this.schedules().filter((s: Schedule) => s.status === 'paused' || s.status === 'stopped').length
+  readonly stoppedCount = computed((): number => 
+    this.schedules().filter((s: Schedule) => s.status === 'stopped').length
   );
   readonly totalCount = computed((): number => this.schedules().length);
 
@@ -97,7 +97,6 @@ export class SchedulesComponent implements OnInit, OnDestroy {
   readonly statusOptions: { value: ScheduleStatus | 'all'; label: string }[] = [
     { value: 'all', label: 'All' },
     { value: 'running', label: 'Running' },
-    { value: 'paused', label: 'Paused' },
     { value: 'stopped', label: 'Stopped' }
   ];
 

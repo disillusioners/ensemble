@@ -74,8 +74,6 @@ export class ScheduleDetailDrawerComponent {
         return 'primary';
       case 'stopped':
         return 'warn';
-      case 'paused':
-        return 'accent';
       default:
         return 'primary';
     }
@@ -89,7 +87,7 @@ export class ScheduleDetailDrawerComponent {
 
   canStart = computed(() => {
     const schedule = this.schedule();
-    return schedule?.status === 'stopped' || schedule?.status === 'paused';
+    return schedule?.status === 'stopped';
   });
 
   canStop = computed(() => {

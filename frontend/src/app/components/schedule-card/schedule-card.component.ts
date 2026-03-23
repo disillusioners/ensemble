@@ -13,7 +13,7 @@ import {
   getScheduleStatusColor
 } from '../../models/scheduler.model';
 
-type ActionType = 'start' | 'stop' | 'pause';
+type ActionType = 'start' | 'stop';
 
 @Component({
   selector: 'app-schedule-card',
@@ -83,19 +83,16 @@ export class ScheduleCardComponent {
     switch (this.schedule().status) {
       case 'running': return 'play_circle';
       case 'stopped': return 'stop_circle';
-      case 'paused': return 'pause_circle';
       default: return 'help';
     }
   });
 
   canStart = computed(() => {
     const status = this.schedule().status;
-    return status === 'stopped' || status === 'paused';
+    return status === 'stopped';
   });
 
   canStop = computed(() => this.schedule().status === 'running');
-  canPause = computed(() => this.schedule().status === 'running');
-  canResume = computed(() => this.schedule().status === 'paused');
 
   nextRunDisplay = computed(() => {
     const nextRun = this.schedule().next_run_at;
@@ -163,14 +160,6 @@ export class ScheduleCardComponent {
 
   protected onStop(): void {
     this.toggleStatus.emit({ schedule: this.schedule(), action: 'stop' });
-  }
-
-  protected onPause(): void {
-    this.toggleStatus.emit({ schedule: this.schedule(), action: 'pause' });
-  }
-
-  protected onResume(): void {
-    this.toggleStatus.emit({ schedule: this.schedule(), action: 'start' });
   }
 
   // Utility methods

@@ -1,7 +1,7 @@
 // Scheduler Models for Frontend
 
 // Schedule status type
-export type ScheduleStatus = 'running' | 'stopped' | 'paused';
+export type ScheduleStatus = 'running' | 'stopped';
 
 // Schedule type (how the schedule is configured)
 export type ScheduleType = 'cron' | 'interval' | 'one-time';
@@ -54,7 +54,6 @@ export interface ScheduleCreateRequest {
 export interface ScheduleUpdateRequest {
   name?: string;
   config?: Partial<ScheduleConfiguration>;
-  status?: ScheduleStatus;
 }
 
 // List response types
@@ -78,8 +77,6 @@ export function getScheduleStatusColor(status: ScheduleStatus): string {
       return '#22C55E'; // green-500
     case 'stopped':
       return '#9CA3AF'; // gray-400
-    case 'paused':
-      return '#F59E0B'; // amber-500
     default:
       return '#9CA3AF'; // gray-400
   }

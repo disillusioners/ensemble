@@ -77,27 +77,6 @@
       </button>
     }
 
-    @if (canResume()) {
-      <button 
-        mat-icon-button 
-        matTooltip="Resume schedule"
-        class="action-btn start-btn"
-        (click)="onResume(); $event.stopPropagation()">
-        <mat-icon>play_arrow</mat-icon>
-      </button>
-    }
-
-    <!-- Pause -->
-    @if (canPause()) {
-      <button 
-        mat-icon-button 
-        matTooltip="Pause schedule"
-        class="action-btn pause-btn"
-        (click)="onPause(); $event.stopPropagation()">
-        <mat-icon>pause</mat-icon>
-      </button>
-    }
-
     <!-- Stop -->
     @if (canStop()) {
       <button 
