@@ -96,7 +96,7 @@ async def get_project(
 
 
 @router.get(
-    "/",
+    "",
     response_model=ProjectListResponse,
 )
 async def list_projects(
@@ -107,6 +107,24 @@ async def list_projects(
     Returns:
         200 with list of projects
     """
+    projects = repo.list_projects()
+    
+    return ProjectListResponse(
+        projects=[_project_to_response(p) for p in projects],
+        total=len(projects)
+    )
+
+
+# Also support trailing slash for compatibility
+@router.get(
+    "/",
+    response_model=ProjectListResponse,
+    include_in_schema=False,
+)
+async def list_projects_trailing(
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> ProjectListResponse:
+    """List all projects (trailing slash variant)."""
     projects = repo.list_projects()
     
     return ProjectListResponse(
