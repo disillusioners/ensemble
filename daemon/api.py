@@ -1352,6 +1352,112 @@ async def trigger_schedule(schedule_id: str):
         )
 
 
+# POST /schedules/{schedule_id}/start - Start a scheduler
+@api_router.post("/schedules/{schedule_id}/start", response_model=SourceActionResponse)
+async def start_schedule(schedule_id: str):
+    """Start a scheduler source."""
+    # Check source exists and is a scheduler
+    source = manager._source_repository.get_source_config(schedule_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Schedule not found: {schedule_id}"
+            ).model_dump()
+        )
+    
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Start via registry
+    if manager.source_registry:
+        try:
+            await manager.source_registry.start_adapter(schedule_id)
+            manager._source_repository.update_source_status(schedule_id, "running")
+            return SourceActionResponse(
+                source_id=schedule_id,
+                status=SourceStatus.running,
+                message=f"Schedule {schedule_id} started successfully"
+            )
+        except Exception as e:
+            logger.error(f"Failed to start schedule {schedule_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=f"Failed to start schedule: {str(e)}"
+                ).model_dump()
+            )
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.SERVICE_UNAVAILABLE,
+                message="Source registry not available"
+            ).model_dump()
+        )
+
+
+# POST /schedules/{schedule_id}/stop - Stop a scheduler
+@api_router.post("/schedules/{schedule_id}/stop", response_model=SourceActionResponse)
+async def stop_schedule(schedule_id: str):
+    """Stop a scheduler source."""
+    # Check source exists and is a scheduler
+    source = manager._source_repository.get_source_config(schedule_id)
+    if not source:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Schedule not found: {schedule_id}"
+            ).model_dump()
+        )
+    
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Stop via registry
+    if manager.source_registry:
+        try:
+            await manager.source_registry.stop_adapter(schedule_id)
+            manager._source_repository.update_source_status(schedule_id, "stopped")
+            return SourceActionResponse(
+                source_id=schedule_id,
+                status=SourceStatus.stopped,
+                message=f"Schedule {schedule_id} stopped successfully"
+            )
+        except Exception as e:
+            logger.error(f"Failed to stop schedule {schedule_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=f"Failed to stop schedule: {str(e)}"
+                ).model_dump()
+            )
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail=ErrorResponse(
+                code=ErrorCodes.SERVICE_UNAVAILABLE,
+                message="Source registry not available"
+            ).model_dump()
+        )
+
+
 # GET /schedules/{schedule_id}/executions - Get execution history
 @api_router.get("/schedules/{schedule_id}/executions", response_model=ScheduleExecutionListResponse)
 async def get_schedule_executions(
