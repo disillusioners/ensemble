@@ -68,7 +68,7 @@ export class JobCardComponent {
   isProcessing = computed(() => this.job().status === 'processing');
 
   messagePreview = computed(() => {
-    const msg = this.job().message;
+    const msg = this.job().message ?? '';
     return msg.length > 100 ? msg.substring(0, 100) + '...' : msg;
   });
 
