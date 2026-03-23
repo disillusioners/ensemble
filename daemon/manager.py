@@ -675,7 +675,7 @@ class SessionManager:
         Args:
             session_id: The ID of the target session.
             message: The message content.
-            source: Source identifier (e.g., "api", "web", "agent:<id>").
+            source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
         
         Returns:
@@ -683,6 +683,38 @@ class SessionManager:
         """
         # Check session exists
         self.get_session(session_id)  # raises KeyError if not found
+        
+        # Check if this is the first message for this session
+        # If so, store the source as root_source in session metadata
+        # This preserves the original external source for child sessions that inherit it
+        session_meta = self._session_repository.get(session_id)
+        if session_meta and session_meta.session_metadata is not None:
+            if "root_source" not in session_meta.session_metadata:
+                # First message for this session - store the source as root_source
+                # Skip storing for internal agent sources (they start with "agent:")
+                if not source.startswith("agent:"):
+                    self._session_repository.set_metadata(
+                        session_id=session_id,
+                        key="root_source",
+                        value=source
+                    )
+                    logger.debug(f"Stored root_source='{source}' for session {session_id[:8]}...")
+                else:
+                    # For child sessions spawned via agent tools, propagate root_source from parent
+                    # The parent session's metadata should have root_source if it was from external source
+                    parent_meta = None
+                    if session_meta.parent_id:
+                        parent_meta = self._session_repository.get(session_meta.parent_id)
+                    
+                    if parent_meta and parent_meta.session_metadata:
+                        parent_root = parent_meta.session_metadata.get("root_source")
+                        if parent_root:
+                            self._session_repository.set_metadata(
+                                session_id=session_id,
+                                key="root_source",
+                                value=parent_root
+                            )
+                            logger.debug(f"Propagated root_source='{parent_root}' from parent for child session {session_id[:8]}...")
         
         # Enqueue the message using repository
         msg = self._queue_repository.enqueue(
@@ -863,19 +895,45 @@ class SessionManager:
                         except Exception as e:
                             logger.warning(f"Failed to generate title for session {session_id}: {e}")
                     
-                    # Broadcast completed event
-                    await self.broadcaster.broadcast(Event(
-                        type="completed",
-                        session_id=session_id,
-                        message_id=msg.message_id,
-                        data={
-                            "content": result.content,
-                            "thinking": result.thinking,
-                            "thinking_extracted": result.thinking_extracted,
-                            "tool_calls": result.tool_calls,
-                            "source": msg.source,  # Required for ResponseDispatcher routing
-                        }
-                    ))
+                    # Determine the source for the completed event
+                    # Root source inheritance: child sessions don't broadcast completed events
+                    # Only the root session (parentless) broadcasts with the original external source
+                    meta = self._session_repository.get(session_id)
+                    
+                    # Skip broadcast entirely if this is a child session
+                    if meta and meta.parent_id:
+                        # Child session - internal completion only, no broadcast
+                        # The parent session will handle the response
+                        logger.debug(
+                            f"Child session {session_id[:8]}... completed internally "
+                            f"(parent={meta.parent_id[:8]}...), skipping broadcast"
+                        )
+                    else:
+                        # Root session - broadcast completed event
+                        # Use root_source from metadata if available, otherwise fallback to msg.source
+                        session_metadata = meta.session_metadata if meta else None
+                        root_source = session_metadata.get("root_source") if session_metadata else None
+                        
+                        if root_source is None:
+                            # Fallback to msg.source (shouldn't happen for properly initialized sessions)
+                            root_source = msg.source
+                            logger.warning(
+                                f"Session {session_id[:8]}... missing root_source in metadata, "
+                                f"falling back to msg.source='{root_source}'"
+                            )
+                        
+                        await self.broadcaster.broadcast(Event(
+                            type="completed",
+                            session_id=session_id,
+                            message_id=msg.message_id,
+                            data={
+                                "content": result.content,
+                                "thinking": result.thinking,
+                                "thinking_extracted": result.thinking_extracted,
+                                "tool_calls": result.tool_calls,
+                                "source": root_source,  # Use root_source for external routing
+                            }
+                        ))
                     
                 except OperationCancelledError as e:
                     logger.info(f"Message {msg.message_id[:8]}... was cancelled: {e.reason.value}")
