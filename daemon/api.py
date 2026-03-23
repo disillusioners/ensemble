@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 from pathlib import Path
 import os
 import secrets
@@ -827,6 +827,23 @@ async def create_source(source_create: SourceCreate):
             ).model_dump()
         )
     
+    # For scheduler sources, validate session_mode in config
+    final_config = source_create.config
+    if source_create.source_type.value == "scheduler" and source_create.config:
+        session_mode = source_create.config.get("session_mode")
+        validated = validate_session_mode(
+            session_mode=session_mode,
+            config=source_create.config
+        )
+        final_config = {**source_create.config, **validated}
+        
+        # If session_mode is reuse_session, enforce max_concurrent = 1
+        if final_config.get("session_mode") == "reuse_session":
+            current_max = final_config.get("max_concurrent")
+            if current_max is not None and current_max != 1:
+                logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_session mode")
+                final_config["max_concurrent"] = 1
+    
     # Validate and encrypt credentials
     credentials_json = None
     if source_create.credentials:
@@ -846,7 +863,7 @@ async def create_source(source_create: SourceCreate):
     source = manager._source_repository.create_source_config(
         source_type=source_create.source_type.value,
         name=source_create.name,
-        config=source_create.config,
+        config=final_config,
         credentials=credentials_json,
         enabled=source_create.enabled,
         source_id=source_create.source_id,
@@ -1353,6 +1370,54 @@ async def list_schedules():
     return ScheduleListResponse(schedules=schedules)
 
 
+def validate_session_mode(session_mode: str | None, schedule_type: str | None = None, config: dict | None = None) -> dict[str, Any]:
+    """Validate session_mode and return processed config.
+    
+    Args:
+        session_mode: The session mode to validate ('new_session', 'reuse_session', or None).
+        schedule_type: The schedule type ('cron', 'interval', 'one_time') if known.
+        config: The schedule config dict to potentially modify.
+        
+    Returns:
+        Processed config dict with session_mode set appropriately.
+        
+    Raises:
+        HTTPException: If session_mode is invalid.
+    """
+    VALID_SESSION_MODES = {"new_session", "reuse_session"}
+    default_session_mode = "new_session"
+    
+    # Determine schedule type from config if not provided
+    if schedule_type is None and config:
+        if "run_at" in config and config["run_at"]:
+            schedule_type = "one_time"
+        elif "interval_seconds" in config:
+            schedule_type = "interval"
+        elif "schedule" in config:
+            schedule_type = "cron"
+    
+    # For one_time schedules: ALWAYS force to new_session
+    if schedule_type == "one_time":
+        if session_mode is not None and session_mode != "new_session":
+            logger.info("Forcing session_mode to 'new_session' for one_time schedule")
+        return {"session_mode": "new_session"}
+    
+    # Validate session_mode if provided
+    if session_mode is not None and session_mode not in VALID_SESSION_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Invalid session_mode: '{session_mode}'. Valid options: {list(VALID_SESSION_MODES)}"
+            ).model_dump()
+        )
+    
+    # Use provided value or default
+    resolved_mode = session_mode if session_mode is not None else default_session_mode
+    
+    return {"session_mode": resolved_mode}
+
+
 # PUT /schedules/{schedule_id} - Update a schedule
 @api_router.put("/schedules/{schedule_id}", response_model=ScheduleInfo)
 async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
@@ -1386,6 +1451,20 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         # Merge partial config with existing config
         merged_config = {**existing.config, **schedule_update.config}
         updated_config = merged_config
+    
+    # Validate and process session_mode
+    session_mode_config = validate_session_mode(
+        session_mode=schedule_update.session_mode,
+        config=updated_config
+    )
+    updated_config["session_mode"] = session_mode_config["session_mode"]
+    
+    # If session_mode is reuse_session, enforce max_concurrent = 1
+    if updated_config.get("session_mode") == "reuse_session":
+        current_max = updated_config.get("max_concurrent")
+        if current_max is not None and current_max != 1:
+            logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_session mode")
+            updated_config["max_concurrent"] = 1
     
     # Update source config using repository
     updated = manager._source_repository.update_source_config(

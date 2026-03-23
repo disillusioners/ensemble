@@ -168,7 +168,8 @@ class SessionMapper:
         self,
         source_id: str,
         external_user_id: str,
-        agent_dir: str
+        agent_dir: str,
+        force_new: bool = False,
     ) -> str:
         """Get existing session or create a new one.
         
@@ -180,6 +181,7 @@ class SessionMapper:
             source_id: The source identifier.
             external_user_id: The external user ID.
             agent_dir: The agent directory path for new sessions.
+            force_new: If True, delete any existing mapping and create a fresh session.
             
         Returns:
             The agent_session_id (UUID string).
@@ -191,12 +193,21 @@ class SessionMapper:
         mapping = self.get_mapping(source_id, external_user_id)
         
         if mapping is not None:
-            logger.debug(
-                f"Found existing session: source_id={source_id}, "
-                f"external_user_id={external_user_id}, "
-                f"agent_session_id={mapping['agent_session_id']}"
-            )
-            return mapping["agent_session_id"]
+            if force_new:
+                # Delete existing mapping to force new session creation
+                logger.info(
+                    f"force_new=True: Deleting existing mapping: source_id={source_id}, "
+                    f"external_user_id={external_user_id}, "
+                    f"old_agent_session_id={mapping['agent_session_id']}"
+                )
+                self.source_repo.delete_session_mapping(mapping["mapping_id"])
+            else:
+                logger.debug(
+                    f"Found existing session: source_id={source_id}, "
+                    f"external_user_id={external_user_id}, "
+                    f"agent_session_id={mapping['agent_session_id']}"
+                )
+                return mapping["agent_session_id"]
         
         # No mapping exists - create new session
         logger.info(

@@ -15,6 +15,13 @@ class SessionStatus(str, Enum):
     terminated = "terminated"
 
 
+class SchedulerSessionMode(str, Enum):
+    """Session mode for scheduler executions."""
+
+    NEW_SESSION = "new_session"
+    REUSE_SESSION = "reuse_session"
+
+
 class ErrorCodes(str, Enum):
     """Error codes for API responses."""
 
@@ -526,12 +533,17 @@ class ScheduleUpdate(BaseModel):
 
     name: str | None = Field(default=None, description="Display name for the schedule", min_length=1, max_length=128)
     config: dict[str, Any] | None = Field(default=None, description="Schedule configuration (partial updates)")
+    session_mode: str | None = Field(
+        default=None,
+        description="Session mode: 'new_session' (default) creates new session per execution, 'reuse_session' reuses existing session. Note: For one_time schedules, session_mode is always forced to 'new_session'."
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "name": "Updated Schedule Name",
-                "config": {"interval_seconds": 600}
+                "config": {"interval_seconds": 600},
+                "session_mode": "new_session"
             }
         }
     )

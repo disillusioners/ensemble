@@ -94,6 +94,37 @@ class SQLModelSourceRepository:
             logger.info(f"Updated source config: source_id={source_id}")
             return source_config
 
+    def increment_scheduler_run_counter(self, source_id: str) -> int | None:
+        """Atomically increment and return the scheduler run counter for a source.
+        
+        The counter is stored in the source's config field (_run_counter) so it persists
+        even if sessions crash. Initializes to 0 if not present.
+        
+        Args:
+            source_id: The source ID to increment the counter for.
+            
+        Returns:
+            The new counter value, or None if the source was not found.
+        """
+        with Session(self.engine) as session:
+            source_config = session.get(SourceConfig, source_id)
+            if source_config is None:
+                logger.warning(f"Source not found for run counter increment: source_id={source_id}")
+                return None
+            
+            # Get current counter from config, initialize to 0 if not present
+            current_counter = source_config.config.get("_run_counter", 0)
+            new_counter = current_counter + 1
+            
+            # Update the config with new counter value
+            source_config.config["_run_counter"] = new_counter
+            source_config.updated_at = datetime.utcnow().isoformat()
+            
+            session.commit()
+            
+            logger.debug(f"Incremented run counter: source_id={source_id}, new_value={new_counter}")
+            return new_counter
+
     def get_source_config(self, source_id: str) -> SourceConfig | None:
         """Get a source configuration by source_id."""
         with Session(self.engine) as session:

@@ -16,9 +16,11 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
+from daemon.models import SchedulerSessionMode
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
+    from daemon.repositories.source.repository import SourceRepository as SourceRepositoryType
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         execution_callback: Optional[Callable] = None,
         on_complete_callback: Optional[Callable[[str, bool], None]] = None,  # NEW
         job_queue_service: Optional["JobQueueService"] = None,
+        source_repo: Optional["SourceRepositoryType"] = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -57,14 +60,25 @@ class SchedulerAdapter(MessageSourceAdapter):
             job_queue_service: Optional JobQueueService for routing jobs through queue.
                 If provided and project_id is configured, jobs will be queued instead of
                 immediate execution.
+            source_repo: Optional SourceRepository for session mode run counter tracking.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
         self._on_complete_callback = on_complete_callback  # NEW
         self._job_queue_service = job_queue_service
+        self._source_repo = source_repo
         
         # Extract scheduler-specific config
         scheduler_config = config.config
+        
+        # Session mode configuration (Task 6)
+        session_mode_str = scheduler_config.get("session_mode", "new_session")
+        # Force new_session for one-time schedules
+        if scheduler_config.get("run_at"):
+            self._session_mode = SchedulerSessionMode.NEW_SESSION
+            logger.debug(f"Force new_session for one-time schedule: {self.source_id}")
+        else:
+            self._session_mode = SchedulerSessionMode(session_mode_str)
         
         # Schedule configuration
         self._schedule_type: Optional[str] = None
@@ -113,7 +127,8 @@ class SchedulerAdapter(MessageSourceAdapter):
         
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
-            f"source_id={self.source_id}, timezone={timezone_str}"
+            f"source_id={self.source_id}, timezone={timezone_str}, "
+            f"session_mode={self._session_mode.value}"
         )
     
     def _validate_priority(self, priority: int) -> int:
@@ -464,6 +479,33 @@ class SchedulerAdapter(MessageSourceAdapter):
         
         return None
     
+    def _format_continuation_message(self, original_message: str, run_number: int) -> str:
+        """Format a continuation message with #N prefix for reuse_session mode.
+        
+        Args:
+            original_message: The original scheduled message content.
+            run_number: The current run number for this session.
+            
+        Returns:
+            Formatted message with continuation prefix and instructions.
+        """
+        continuation_template = f"""#{run_number}
+
+[CONTINUATION - Run #{run_number}]
+
+This is scheduled execution #{run_number} of a multi-run session.
+The previous runs have been completed. Continue the work incrementally:
+
+1. Review the context and progress from prior runs (if any)
+2. Build upon previous work, do not repeat what was already done
+3. Focus on advancing the task rather than restarting from scratch
+4. Provide incremental progress reports
+
+Original scheduled task:
+{original_message}
+"""
+        return continuation_template
+    
     async def _emit_scheduled_message(self) -> None:
         """Emit the scheduled message to the message handler.
         
@@ -519,14 +561,48 @@ class SchedulerAdapter(MessageSourceAdapter):
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
                 
-                # Build metadata
+                # Determine session mode and run number (Task 6)
+                run_number: int | None = None
+                if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
+                    # Increment run counter for reuse_session mode
+                    if self._source_repo:
+                        run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
+                        if run_number is None:
+                            logger.warning(
+                                f"Failed to get run counter for {self.source_id}, using 1"
+                            )
+                            run_number = 1
+                    else:
+                        logger.warning(
+                            f"source_repo not available for {self.source_id}, cannot track run counter"
+                        )
+                        run_number = 1
+                    logger.info(
+                        f"reuse_session mode: run_number={run_number} for {self.source_id}"
+                    )
+                
+                # Format message based on session mode (Task 6)
+                if self._session_mode == SchedulerSessionMode.REUSE_SESSION and run_number:
+                    formatted_message = self._format_continuation_message(
+                        self._message_content, run_number
+                    )
+                else:
+                    formatted_message = self._message_content
+                
+                # Determine force_new_session flag (Task 6)
+                force_new_session = self._session_mode == SchedulerSessionMode.NEW_SESSION
+                
+                # Build metadata with session mode info (Task 6)
                 metadata = {
                     "scheduler": {
                         "execution_id": execution_id,
                         "schedule_type": self._schedule_type,
                         "trigger_time": datetime.now(self._timezone).isoformat(),
+                        "session_mode": self._session_mode.value,
+                        "run_number": run_number,
                     },
                     "agent": self._agent,
+                    "force_new_session": force_new_session,
                 }
                 
                 # Add schedule details to metadata
@@ -555,7 +631,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                         
                         job_item = await self._job_queue_service.enqueue(
                             agent_dir=agent_dir,
-                            message=self._message_content,
+                            message=formatted_message,
                             source="scheduler",
                             project_id=self._project_id,
                             priority=self._priority,
@@ -601,7 +677,7 @@ class SchedulerAdapter(MessageSourceAdapter):
                     # Immediate execution (original behavior)
                     incoming = IncomingMessage(
                         external_user_id=self.source_id,  # Use source_id as user identifier
-                        content=self._message_content,
+                        content=formatted_message,
                         source_id=self.source_id,
                         metadata=metadata,
                         message_type="scheduled",
@@ -701,19 +777,44 @@ class SchedulerAdapter(MessageSourceAdapter):
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
                 
-                # Build the incoming message
+                # Determine session mode and run number for manual trigger (Task 6)
+                run_number: int | None = None
+                if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
+                    # Increment run counter for reuse_session mode
+                    if self._source_repo:
+                        run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
+                        if run_number is None:
+                            run_number = 1
+                    else:
+                        run_number = 1
+                
+                # Format message based on session mode (Task 6)
+                if self._session_mode == SchedulerSessionMode.REUSE_SESSION and run_number:
+                    formatted_message = self._format_continuation_message(
+                        self._message_content, run_number
+                    )
+                else:
+                    formatted_message = self._message_content
+                
+                # Determine force_new_session flag (Task 6)
+                force_new_session = self._session_mode == SchedulerSessionMode.NEW_SESSION
+                
+                # Build the incoming message with session mode metadata
                 metadata = {
                     "scheduler": {
                         "execution_id": execution_id,
                         "trigger_type": "manual",
                         "trigger_time": datetime.now(self._timezone).isoformat(),
+                        "session_mode": self._session_mode.value,
+                        "run_number": run_number,
                     },
                     "agent": self._agent,
+                    "force_new_session": force_new_session,
                 }
                 
                 incoming = IncomingMessage(
                     external_user_id=self.source_id,
-                    content=self._message_content,
+                    content=formatted_message,
                     source_id=self.source_id,
                     metadata=metadata,
                     message_type="scheduled",

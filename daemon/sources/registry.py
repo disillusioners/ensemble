@@ -325,13 +325,14 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
             
-            # Pass JobQueueService for queue routing (Task 5.4)
+            # Pass JobQueueService and SourceRepository for queue routing and session mode (Tasks 5.4 & 6)
             adapter = SchedulerAdapter(
                 config,
                 on_message,
                 execution_callback,
                 on_complete_callback=on_complete_callback,
                 job_queue_service=self._job_queue_service,
+                source_repo=self._source_repo,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
@@ -658,7 +659,8 @@ class SourceRegistry:
             session_id = await mapper.get_or_create_session(
                 source_id=source_id,
                 external_user_id=msg.external_user_id,
-                agent_dir=agent_dir
+                agent_dir=agent_dir,
+                force_new=force_new,
             )
             
             logger.debug(f"Got session_id={session_id}")
