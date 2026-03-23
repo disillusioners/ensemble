@@ -135,6 +135,30 @@ def validate_agent_dir(agent_dir: str) -> Path:
     return agent_path
 
 
+async def _reject_scheduler_lifecycle(source_id: str) -> None:
+    """Raise error if source is a scheduler type.
+    
+    Scheduler sources manage their own lifecycle automatically and cannot be
+    controlled via API. This helper checks if a source is a scheduler and
+    raises an HTTPException if so.
+    
+    Args:
+        source_id: The source ID to check.
+        
+    Raises:
+        HTTPException: If the source is a scheduler type.
+    """
+    source = manager._source_repository.get_source_config(source_id)
+    if source and source.source_type == "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
+                "message": "Scheduler sources manage their own lifecycle and cannot be controlled via API."
+            }
+        )
+
+
 # Determine the base path
 BASE_DIR = Path(__file__).parent.parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
@@ -803,6 +827,16 @@ async def create_source(source_create: SourceCreate):
             ).model_dump()
         )
     
+    # Scheduler sources cannot be enabled/disabled
+    if source_create.source_type.value == "scheduler" and source_create.enabled:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
+                "message": "Scheduler sources manage their own lifecycle and cannot be controlled via API."
+            }
+        )
+    
     # Validate and encrypt credentials
     credentials_json = None
     if source_create.credentials:
@@ -923,6 +957,16 @@ async def update_source(source_id: str, source_update: SourceUpdate):
             ).model_dump()
         )
     
+    # Scheduler sources cannot be enabled/disabled
+    if existing.source_type == "scheduler" and source_update.enabled is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
+                "message": "Scheduler sources manage their own lifecycle and cannot be controlled via API."
+            }
+        )
+    
     # Merge updates
     updated_name = source_update.name if source_update.name is not None else existing.name
     updated_config = source_update.config if source_update.config is not None else existing.config
@@ -1003,6 +1047,9 @@ async def start_source(source_id: str):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
+    
+    # Reject lifecycle operations for scheduler sources
+    await _reject_scheduler_lifecycle(source_id)
     
     if not source.enabled:
         raise HTTPException(
@@ -1086,6 +1133,9 @@ async def stop_source(source_id: str):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
+    
+    # Reject lifecycle operations for scheduler sources
+    await _reject_scheduler_lifecycle(source_id)
     
     # Check if registry has the source
     if manager.source_registry:
@@ -1410,8 +1460,12 @@ async def trigger_schedule(schedule_id: str):
 # POST /schedules/{schedule_id}/start - Start a scheduler
 @api_router.post("/schedules/{schedule_id}/start", response_model=SourceActionResponse)
 async def start_schedule(schedule_id: str):
-    """Start a scheduler source."""
-    # Check source exists and is a scheduler
+    """Start a scheduler source.
+    
+    Note: Scheduler sources manage their own lifecycle automatically.
+    This endpoint will reject all requests with SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED.
+    """
+    # Check source exists
     source = manager._source_repository.get_source_config(schedule_id)
     if not source:
         raise HTTPException(
@@ -1422,49 +1476,19 @@ async def start_schedule(schedule_id: str):
             ).model_dump()
         )
     
-    if source.source_type != "scheduler":
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
-            ).model_dump()
-        )
-    
-    # Start via registry
-    if manager.source_registry:
-        try:
-            await manager.source_registry.start_adapter(schedule_id)
-            manager._source_repository.update_source_status(schedule_id, "running")
-            return SourceActionResponse(
-                source_id=schedule_id,
-                status=SourceStatus.running,
-                message=f"Schedule {schedule_id} started successfully"
-            )
-        except Exception as e:
-            logger.error(f"Failed to start schedule {schedule_id}: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INTERNAL_ERROR,
-                    message=f"Failed to start schedule: {str(e)}"
-                ).model_dump()
-            )
-    else:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorResponse(
-                code=ErrorCodes.SERVICE_UNAVAILABLE,
-                message="Source registry not available"
-            ).model_dump()
-        )
+    # Reject lifecycle operations for scheduler sources
+    await _reject_scheduler_lifecycle(schedule_id)
 
 
 # POST /schedules/{schedule_id}/stop - Stop a scheduler
 @api_router.post("/schedules/{schedule_id}/stop", response_model=SourceActionResponse)
 async def stop_schedule(schedule_id: str):
-    """Stop a scheduler source."""
-    # Check source exists and is a scheduler
+    """Stop a scheduler source.
+    
+    Note: Scheduler sources manage their own lifecycle automatically.
+    This endpoint will reject all requests with SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED.
+    """
+    # Check source exists
     source = manager._source_repository.get_source_config(schedule_id)
     if not source:
         raise HTTPException(
@@ -1475,42 +1499,8 @@ async def stop_schedule(schedule_id: str):
             ).model_dump()
         )
     
-    if source.source_type != "scheduler":
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
-            ).model_dump()
-        )
-    
-    # Stop via registry
-    if manager.source_registry:
-        try:
-            await manager.source_registry.stop_adapter(schedule_id)
-            manager._source_repository.update_source_status(schedule_id, "stopped")
-            return SourceActionResponse(
-                source_id=schedule_id,
-                status=SourceStatus.stopped,
-                message=f"Schedule {schedule_id} stopped successfully"
-            )
-        except Exception as e:
-            logger.error(f"Failed to stop schedule {schedule_id}: {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INTERNAL_ERROR,
-                    message=f"Failed to stop schedule: {str(e)}"
-                ).model_dump()
-            )
-    else:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorResponse(
-                code=ErrorCodes.SERVICE_UNAVAILABLE,
-                message="Source registry not available"
-            ).model_dump()
-        )
+    # Reject lifecycle operations for scheduler sources
+    await _reject_scheduler_lifecycle(schedule_id)
 
 
 # GET /schedules/{schedule_id}/executions - Get execution history

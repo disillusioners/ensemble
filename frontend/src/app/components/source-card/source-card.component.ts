@@ -28,7 +28,8 @@ export class SourceCardComponent {
     telegram: { type: 'telegram', label: 'Telegram', icon: 'telegram', color: '#229ED9' },
     webhook: { type: 'webhook', label: 'Webhook', icon: 'webhook', color: '#10b981' },
     whatsapp: { type: 'whatsapp', label: 'WhatsApp', icon: 'whatsapp', color: '#25D366' },
-    discord: { type: 'discord', label: 'Discord', icon: 'discord', color: '#5865F2' }
+    discord: { type: 'discord', label: 'Discord', icon: 'discord', color: '#5865F2' },
+    scheduler: { type: 'scheduler', label: 'Scheduler', icon: 'scheduler', color: '#6366f1' }
   };
 
   protected get sourceTypeInfo(): SourceTypeInfo {
