@@ -989,3 +989,326 @@ class TestSessionModeEdgeCases:
         
         with pytest.raises(ValueError):
             SchedulerAdapter(config, mock_on_message)
+
+
+# ==================== Skip Session Running Tests ====================
+
+
+@pytest.fixture
+def mock_session_repo():
+    """Create a mock SessionRepository."""
+    repo = MagicMock()
+    return repo
+
+
+class TestSkipSessionRunning:
+    """Tests for skipping execution when mapped session is still running."""
+
+    def test_is_session_active_returns_false_for_new_session_mode(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns False for new_session mode."""
+        config = make_config("test-skip-new-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "new_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        # new_session mode should return False regardless of session state
+        assert is_active is False
+        assert session_id is None
+        assert status is None
+
+    def test_is_session_active_returns_false_when_no_mapping(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns False when no session mapping exists."""
+        mock_source_repo.get_session_mapping.return_value = None
+        
+        config = make_config("test-skip-no-mapping", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is False
+        assert session_id is None
+        assert status is None
+
+    def test_is_session_active_returns_false_when_session_idle(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns False when session is idle."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-123"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "idle"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-idle-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is False
+        assert session_id == "session-123"
+        assert status == "idle"
+
+    def test_is_session_active_returns_true_when_session_running(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns True when session is running."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-123"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "running"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-running-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is True
+        assert session_id == "session-123"
+        assert status == "running"
+
+    def test_is_session_active_returns_true_when_session_waiting(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns True when session is waiting."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-456"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "waiting"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-waiting-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is True
+        assert session_id == "session-456"
+        assert status == "waiting"
+
+    def test_is_session_active_returns_false_when_session_error(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns False when session is in error state."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-789"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "error"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-error-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is False
+        assert session_id == "session-789"
+        assert status == "error"
+
+    def test_is_session_active_returns_false_when_session_terminated(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_session_active returns False when session is terminated."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-terminated"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "terminated"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-terminated-session", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        assert is_active is False
+        assert session_id == "session-terminated"
+        assert status == "terminated"
+
+    def test_is_session_active_handles_missing_session_repo(self, mock_on_message, mock_source_repo):
+        """Test that _is_session_active handles missing session_repo gracefully."""
+        config = make_config("test-skip-no-session-repo", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=None)
+        
+        is_active, session_id, status = adapter._is_session_active()
+        
+        # Should return False when session_repo is not available
+        assert is_active is False
+        assert session_id is None
+        assert status is None
+
+    @pytest.mark.asyncio
+    async def test_skip_execution_when_session_running(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that execution is skipped when mapped session is still running."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-running"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "running"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-execution-running", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(
+            config, 
+            mock_on_message, 
+            execution_callback=mock_execution_callback,
+            source_repo=mock_source_repo, 
+            session_repo=mock_session_repo
+        )
+        await adapter.start()
+        
+        await adapter.manual_trigger()
+        await asyncio.sleep(0.1)
+        
+        # Should not emit any message
+        assert mock_on_message.call_count == 0
+        
+        # Should call execution callback with skipped status
+        skipped_calls = [
+            c for c in mock_execution_callback.call_args_list
+            if c.kwargs.get("status") == "skipped"
+        ]
+        assert len(skipped_calls) == 1
+        assert skipped_calls[0].kwargs.get("session_id") == "session-running"
+        assert "still running" in skipped_calls[0].kwargs.get("error_message", "")
+        
+        await adapter.stop()
+
+    @pytest.mark.asyncio
+    async def test_execute_when_session_idle(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that execution proceeds when mapped session is idle."""
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-idle"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "idle"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-skip-execution-idle", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Execute this",
+            "session_mode": "reuse_session",
+        })
+        
+        adapter = SchedulerAdapter(
+            config, 
+            mock_on_message, 
+            execution_callback=mock_execution_callback,
+            source_repo=mock_source_repo, 
+            session_repo=mock_session_repo
+        )
+        await adapter.start()
+        
+        await adapter.manual_trigger()
+        await asyncio.sleep(0.1)
+        
+        # Should emit message
+        assert mock_on_message.call_count == 1
+        
+        # Should have triggered callback (not skipped)
+        triggered_calls = [
+            c for c in mock_execution_callback.call_args_list
+            if c.kwargs.get("status") == "triggered"
+        ]
+        assert len(triggered_calls) == 1
+        
+        await adapter.stop()
+
+    @pytest.mark.asyncio
+    async def test_new_session_mode_never_skips(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that new_session mode never skips regardless of session state."""
+        # Even if session is "running", new_session should not check session state
+        mock_mapping = MagicMock()
+        mock_mapping.agent_session_id = "session-running"
+        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        
+        mock_session = MagicMock()
+        mock_session.status = "running"
+        mock_session_repo.get.return_value = mock_session
+        
+        config = make_config("test-new-session-never-skips", {
+            "interval_seconds": 60,
+            "agent": "./agents/coder",
+            "message": "Execute this",
+            "session_mode": "new_session",
+        })
+        
+        adapter = SchedulerAdapter(
+            config, 
+            mock_on_message, 
+            execution_callback=mock_execution_callback,
+            source_repo=mock_source_repo, 
+            session_repo=mock_session_repo
+        )
+        await adapter.start()
+        
+        await adapter.manual_trigger()
+        await asyncio.sleep(0.1)
+        
+        # Should emit message (new_session mode doesn't check session state)
+        assert mock_on_message.call_count == 1
+        
+        # Should not have any skipped calls
+        skipped_calls = [
+            c for c in mock_execution_callback.call_args_list
+            if c.kwargs.get("status") == "skipped"
+        ]
+        assert len(skipped_calls) == 0
+        
+        await adapter.stop()

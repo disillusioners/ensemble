@@ -376,8 +376,16 @@ class SessionManager:
         # Must be created before SourceRegistry
         self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
 
+        # NEW: Session repository for session management
+        # Must be created before SourceRegistry for scheduler session mode
+        self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
+
         # NEW: Pluggable message sources system
-        self.source_registry = SourceRegistry(source_repo=self._source_repository, manager=self)
+        self.source_registry = SourceRegistry(
+            source_repo=self._source_repository,
+            manager=self,
+            session_repo=self._session_repository,
+        )
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
             registry=self.source_registry,
@@ -390,10 +398,6 @@ class SessionManager:
         self._project_repository = create_project_repository(engine=self._engine, create_tables=False)
         # Keep backward compatible name for tools
         self.project_store = self._project_repository
-
-        # NEW: Session repository for session management
-        # Using the new repository layer instead of legacy persistence functions
-        self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
 
         # NEW: Optional JobQueueService reference (set via set_job_queue_service)
         self._job_queue_service: Any = None

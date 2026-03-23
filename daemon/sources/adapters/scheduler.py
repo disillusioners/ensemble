@@ -16,9 +16,10 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
-from daemon.models import SchedulerSessionMode
+from daemon.models import SchedulerSessionMode, SessionStatus
 
 if TYPE_CHECKING:
+    from daemon.repositories.session.repository import SQLModelSessionRepository
     from daemon.services.job_queue_service import JobQueueService
     from daemon.repositories.source.repository import SourceRepository as SourceRepositoryType
 
@@ -44,9 +45,10 @@ class SchedulerAdapter(MessageSourceAdapter):
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         execution_callback: Optional[Callable] = None,
-        on_complete_callback: Optional[Callable[[str, bool], None]] = None,  # NEW
+        on_complete_callback: Optional[Callable[[str, bool], None]] = None,
         job_queue_service: Optional["JobQueueService"] = None,
         source_repo: Optional["SourceRepositoryType"] = None,
+        session_repo: Optional["SQLModelSessionRepository"] = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -61,12 +63,14 @@ class SchedulerAdapter(MessageSourceAdapter):
                 If provided and project_id is configured, jobs will be queued instead of
                 immediate execution.
             source_repo: Optional SourceRepository for session mode run counter tracking.
+            session_repo: Optional SessionRepository for checking session status in reuse_session mode.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
         self._on_complete_callback = on_complete_callback  # NEW
         self._job_queue_service = job_queue_service
         self._source_repo = source_repo
+        self._session_repo = session_repo
         
         # Extract scheduler-specific config
         scheduler_config = config.config
@@ -506,6 +510,64 @@ Original scheduled task:
 """
         return continuation_template
     
+    def _is_session_active(self) -> tuple[bool, str | None, str | None]:
+        """Check if the mapped session is currently active (running or waiting).
+        
+        For reuse_session mode, checks if the mapped session exists and is active.
+        If the session is running or waiting, execution should be skipped.
+        
+        Returns:
+            Tuple of (is_active, session_id, session_status).
+            - is_active: True if session exists and status is running/waiting.
+            - session_id: The session ID if mapping exists, None otherwise.
+            - session_status: The session status string if mapping exists, None otherwise.
+        """
+        # Only applicable for reuse_session mode
+        if self._session_mode != SchedulerSessionMode.REUSE_SESSION:
+            return False, None, None
+        
+        # Check if we have the required dependencies
+        if not self._source_repo or not self._session_repo:
+            logger.debug(
+                f"Cannot check session status: source_repo={self._source_repo is not None}, "
+                f"session_repo={self._session_repo is not None}"
+            )
+            return False, None, None
+        
+        # Get session mapping (source_id is used as external_user_id for scheduler)
+        try:
+            mapping = self._source_repo.get_session_mapping(
+                self.source_id, 
+                self.source_id
+            )
+        except Exception as e:
+            logger.warning(f"Failed to get session mapping: {e}")
+            return False, None, None
+        
+        if not mapping:
+            logger.debug(f"No session mapping found for {self.source_id}")
+            return False, None, None
+        
+        # Get session status
+        try:
+            session = self._session_repo.get(mapping.agent_session_id)
+        except Exception as e:
+            logger.warning(f"Failed to get session: {e}")
+            return False, None, None
+        
+        if not session:
+            logger.debug(f"Session not found: {mapping.agent_session_id}")
+            return False, None, None
+        
+        # Check if session is active (running or waiting)
+        # Note: session.status is a string, compare with enum values
+        is_active = session.status in (
+            SessionStatus.running.value,
+            SessionStatus.waiting.value,
+        )
+        
+        return is_active, mapping.agent_session_id, session.status
+    
     async def _emit_scheduled_message(self) -> None:
         """Emit the scheduled message to the message handler.
         
@@ -542,6 +604,30 @@ Original scheduled task:
                 except Exception as e:
                     logger.warning(f"Execution callback error: {e}")
             return
+        
+        # Check if mapped session is still active (for reuse_session mode)
+        if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
+            is_active, session_id, session_status = self._is_session_active()
+            if is_active and session_id:
+                logger.info(
+                    f"Skipping scheduled execution {execution_id}: session {session_id} "
+                    f"is still {session_status} (reuse_session mode)"
+                )
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="skipped",
+                            session_id=session_id,
+                            error_message=f"Session still {session_status}",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                # Release semaphore before returning
+                if self._execution_semaphore:
+                    self._execution_semaphore.release()
+                return
         
         async def execute():
             self._running_executions += 1
@@ -758,6 +844,30 @@ Original scheduled task:
                     error_message="Max concurrent executions reached",
                 )
             return
+        
+        # Check if mapped session is still active (for reuse_session mode)
+        if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
+            is_active, session_id, session_status = self._is_session_active()
+            if is_active and session_id:
+                logger.info(
+                    f"Skipping manual trigger {execution_id}: session {session_id} "
+                    f"is still {session_status} (reuse_session mode)"
+                )
+                if self._execution_callback:
+                    try:
+                        self._execution_callback(
+                            execution_id=execution_id,
+                            schedule_id=self.source_id,
+                            status="skipped",
+                            session_id=session_id,
+                            error_message=f"Session still {session_status}",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Execution callback error: {e}")
+                # Release semaphore before returning
+                if self._execution_semaphore:
+                    self._execution_semaphore.release()
+                return
         
         async def execute():
             self._running_executions += 1

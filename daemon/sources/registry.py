@@ -36,17 +36,19 @@ class SourceRegistry:
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
     
-    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None):
+    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None, session_repo=None):
         """Initialize the source registry.
         
         Args:
             source_repo: SQLModelSourceRepository for database operations.
             manager: SessionManager reference for handling messages.
             job_queue_service: Optional JobQueueService for scheduler queue routing.
+            session_repo: Optional SessionRepository for scheduler session mode.
         """
         self._source_repo = source_repo
         self._manager = manager
         self._job_queue_service = job_queue_service
+        self._session_repo = session_repo
         self._adapters: dict[str, MessageSourceAdapter] = {}
         self._supervisor_tasks: dict[str, asyncio.Task] = {}
         self._running: dict[str, bool] = {}  # Track running state for each adapter
@@ -325,7 +327,7 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
             
-            # Pass JobQueueService and SourceRepository for queue routing and session mode (Tasks 5.4 & 6)
+            # Pass JobQueueService, SourceRepository, and SessionRepository for queue routing and session mode (Tasks 5.4 & 6)
             adapter = SchedulerAdapter(
                 config,
                 on_message,
@@ -333,6 +335,7 @@ class SourceRegistry:
                 on_complete_callback=on_complete_callback,
                 job_queue_service=self._job_queue_service,
                 source_repo=self._source_repo,
+                session_repo=self._session_repo,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
