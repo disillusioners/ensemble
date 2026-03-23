@@ -64,6 +64,7 @@ from .models import (
     # Schedule models
     ScheduleInfo,
     ScheduleListResponse,
+    ScheduleUpdate,
     ScheduleExecutionInfo,
     ScheduleExecutionListResponse,
     ScheduleTriggerResponse,
@@ -1279,6 +1280,70 @@ async def list_schedules():
                 updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else None,
             ))
     return ScheduleListResponse(schedules=schedules)
+
+
+# PUT /schedules/{schedule_id} - Update a schedule
+@api_router.put("/schedules/{schedule_id}", response_model=ScheduleInfo)
+async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
+    """Update a schedule configuration."""
+    # Check source exists and is a scheduler
+    existing = manager._source_repository.get_source_config(schedule_id)
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.SOURCE_NOT_FOUND,
+                message=f"Schedule not found: {schedule_id}"
+            ).model_dump()
+        )
+    
+    if existing.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {existing.source_type})"
+            ).model_dump()
+        )
+    
+    # Merge updates
+    updated_name = schedule_update.name if schedule_update.name is not None else existing.name
+    updated_config = schedule_update.config if schedule_update.config is not None else existing.config
+    
+    # Handle partial config update (merge with existing config)
+    if schedule_update.config is not None and existing.config:
+        # Merge partial config with existing config
+        merged_config = {**existing.config, **schedule_update.config}
+        updated_config = merged_config
+    
+    # Handle status update
+    updated_status = None
+    if schedule_update.status is not None:
+        updated_status = schedule_update.status.value if isinstance(schedule_update.status, SourceStatus) else schedule_update.status
+    
+    # Update source config using repository
+    updated = manager._source_repository.update_source_config(
+        source_id=schedule_id,
+        source_type=existing.source_type,
+        name=updated_name,
+        config=updated_config,
+        credentials=existing.credentials,
+        enabled=existing.enabled,
+    )
+    
+    # Handle status update if provided
+    if updated_status:
+        manager._source_repository.update_source_status(schedule_id, updated_status)
+        updated = manager._source_repository.get_source_config(schedule_id)
+    
+    return ScheduleInfo(
+        id=updated.source_id,
+        name=updated.name,
+        config=updated.config,
+        status=SourceStatus(updated.status),
+        created_at=datetime.fromisoformat(updated.created_at).replace(tzinfo=timezone.utc) if isinstance(updated.created_at, str) else updated.created_at,
+        updated_at=datetime.fromisoformat(updated.updated_at).replace(tzinfo=timezone.utc) if updated.updated_at and isinstance(updated.updated_at, str) else None,
+    )
 
 
 # POST /schedules/{schedule_id}/trigger - Manually trigger a schedule

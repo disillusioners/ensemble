@@ -518,6 +518,24 @@ class ScheduleInfo(BaseModel):
     )
 
 
+class ScheduleUpdate(BaseModel):
+    """Request for updating a schedule."""
+
+    name: str | None = Field(default=None, description="Display name for the schedule", min_length=1, max_length=128)
+    config: dict[str, Any] | None = Field(default=None, description="Schedule configuration (partial updates)")
+    status: SourceStatus | None = Field(default=None, description="Schedule status (running, stopped, paused)")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "Updated Schedule Name",
+                "config": {"interval_seconds": 600},
+                "status": "running"
+            }
+        }
+    )
+
+
 class ScheduleListResponse(BaseModel):
     """Response for listing schedules (matches frontend ScheduleListResponse)."""
 
