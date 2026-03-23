@@ -1332,6 +1332,15 @@ async def list_schedules():
     schedules = []
     for src in all_sources:
         if src.source_type == "scheduler":
+            # Calculate next_run_at from adapter if available
+            next_run_at = None
+            adapter = manager.source_registry.get(src.source_id)
+            if adapter and hasattr(adapter, '_get_next_trigger_time'):
+                try:
+                    next_run_at = adapter._get_next_trigger_time()
+                except Exception:
+                    pass
+            
             schedules.append(ScheduleInfo(
                 id=src.source_id,
                 name=src.name,
@@ -1339,6 +1348,7 @@ async def list_schedules():
                 status=SourceStatus(src.status),
                 created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
                 updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else None,
+                next_run_at=next_run_at,
             ))
     return ScheduleListResponse(schedules=schedules)
 
