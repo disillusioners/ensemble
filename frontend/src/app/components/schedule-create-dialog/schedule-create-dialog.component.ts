@@ -51,6 +51,7 @@ export interface ScheduleCreateDialogData {
   message?: string;
   project?: string;
   timezone?: string;
+  session_mode?: 'new_session' | 'reuse_session';
 }
 
 export interface ScheduleCreateDialogResult {
@@ -60,6 +61,7 @@ export interface ScheduleCreateDialogResult {
   project?: string;
   timezone: string;
   schedule_type: 'cron' | 'interval' | 'one-time';
+  session_mode: 'new_session' | 'reuse_session';
   schedule?: string;
   interval_seconds?: number;
   run_at?: string;
@@ -103,6 +105,7 @@ export class ScheduleCreateDialogComponent implements OnInit {
   protected readonly form: FormGroup = this.fb.group({
     name: ['', [Validators.required, Validators.minLength(2)]],
     type: ['cron', Validators.required],
+    session_mode: ['new_session'],
     agent: ['', Validators.required],
     message: ['', [Validators.required, Validators.minLength(5)]],
     project: [''],
@@ -128,7 +131,8 @@ export class ScheduleCreateDialogComponent implements OnInit {
         agent: this.data.agent || '',
         message: this.data.message || '',
         project: this.data.project || '',
-        timezone: this.data.timezone || 'UTC'
+        timezone: this.data.timezone || 'UTC',
+        session_mode: this.data.session_mode || 'new_session'
       });
     }
   }
@@ -161,6 +165,7 @@ export class ScheduleCreateDialogComponent implements OnInit {
       const scheduleCtrl = this.form.get('schedule');
       const intervalCtrl = this.form.get('interval_seconds');
       const runAtCtrl = this.form.get('run_at');
+      const sessionModeCtrl = this.form.get('session_mode');
       
       if (type === 'cron') {
         scheduleCtrl?.setValidators([Validators.required]);
@@ -180,6 +185,8 @@ export class ScheduleCreateDialogComponent implements OnInit {
         intervalCtrl?.clearValidators();
         intervalCtrl?.setValue(60);
         runAtCtrl?.setValidators([Validators.required]);
+        // One-time schedules always create a new session
+        sessionModeCtrl?.setValue('new_session');
       }
       
       scheduleCtrl?.updateValueAndValidity();
@@ -190,6 +197,20 @@ export class ScheduleCreateDialogComponent implements OnInit {
 
   protected get selectedType(): string {
     return this.form.get('type')?.value || 'cron';
+  }
+
+  protected get isSessionModeEnabled(): boolean {
+    const type = this.form.get('type')?.value;
+    // Enable session mode selector only when a schedule type is selected
+    return !!type;
+  }
+
+  protected get isReuseSessionDisabled(): boolean {
+    return this.selectedType === 'one-time';
+  }
+
+  protected get showOneTimeSessionHint(): boolean {
+    return this.selectedType === 'one-time';
   }
 
   protected handleClose(): void {
@@ -236,7 +257,8 @@ export class ScheduleCreateDialogComponent implements OnInit {
         message: this.form.value.message,
         project: this.form.value.project || undefined,
         timezone: this.form.value.timezone || 'UTC',
-        schedule_type: this.form.value.type
+        schedule_type: this.form.value.type,
+        session_mode: this.form.value.session_mode
       };
 
       if (this.form.value.type === 'cron') {
@@ -268,7 +290,8 @@ export class ScheduleCreateDialogComponent implements OnInit {
     
     const config: any = {
       agent: this.form.value.agent,
-      message: this.form.value.message
+      message: this.form.value.message,
+      session_mode: this.form.value.session_mode
     };
 
     if (type === 'cron') {

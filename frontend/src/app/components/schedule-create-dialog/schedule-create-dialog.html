@@ -55,6 +55,45 @@
         </select>
       </div>
 
+      <!-- Session Mode -->
+      <div class="form-group">
+        <label class="form-label">Session Mode</label>
+        <div class="radio-group" [class.disabled]="!isSessionModeEnabled">
+          <label class="radio-option" [class.disabled]="!isSessionModeEnabled">
+            <input
+              type="radio"
+              formControlName="session_mode"
+              value="new_session"
+              [disabled]="!isSessionModeEnabled"
+            />
+            <span class="radio-content">
+              <span class="radio-label">New Session</span>
+              <span class="radio-description">Start a fresh conversation session</span>
+            </span>
+          </label>
+          <label class="radio-option" [class.disabled]="!isSessionModeEnabled || isReuseSessionDisabled">
+            <input
+              type="radio"
+              formControlName="session_mode"
+              value="reuse_session"
+              [disabled]="!isSessionModeEnabled || isReuseSessionDisabled"
+            />
+            <span class="radio-content">
+              <span class="radio-label">Reuse Session</span>
+              <span class="radio-description">Continue from previous run</span>
+            </span>
+          </label>
+        </div>
+        @if (showOneTimeSessionHint) {
+          <p class="form-hint hint-warning">
+            <svg class="hint-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            One-time schedules always create a new session
+          </p>
+        }
+      </div>
+
       <!-- Cron Expression (shown when type='cron') -->
       @if (selectedType === 'cron') {
         <div class="form-group">
