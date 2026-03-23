@@ -862,6 +862,13 @@ async def create_source(source_create: SourceCreate):
         source_id=source_create.source_id,
     )
     
+    # Auto-start enabled sources (start adapter immediately for running daemon)
+    if source.enabled:
+        try:
+            await manager.source_registry.start_adapter(source.source_id)
+        except Exception as e:
+            logger.warning(f"Failed to auto-start source {source.source_id}: {e}")
+    
     return SourceInfo(
         source_id=source.source_id,
         source_type=SourceType(source.source_type),
@@ -1460,11 +1467,7 @@ async def trigger_schedule(schedule_id: str):
 # POST /schedules/{schedule_id}/start - Start a scheduler
 @api_router.post("/schedules/{schedule_id}/start", response_model=SourceActionResponse)
 async def start_schedule(schedule_id: str):
-    """Start a scheduler source.
-    
-    Note: Scheduler sources manage their own lifecycle automatically.
-    This endpoint will reject all requests with SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED.
-    """
+    """Start a scheduler source."""
     # Check source exists
     source = manager._source_repository.get_source_config(schedule_id)
     if not source:
@@ -1476,18 +1479,39 @@ async def start_schedule(schedule_id: str):
             ).model_dump()
         )
     
-    # Reject lifecycle operations for scheduler sources
-    await _reject_scheduler_lifecycle(schedule_id)
+    # Verify it's a scheduler source
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Start the scheduler adapter
+    try:
+        await manager.source_registry.start_adapter(schedule_id)
+        return SourceActionResponse(
+            source_id=schedule_id,
+            success=True,
+            message=f"Scheduler {schedule_id} started successfully"
+        )
+    except Exception as e:
+        logger.error(f"Failed to start scheduler {schedule_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to start scheduler: {str(e)}"
+            ).model_dump()
+        )
 
 
 # POST /schedules/{schedule_id}/stop - Stop a scheduler
 @api_router.post("/schedules/{schedule_id}/stop", response_model=SourceActionResponse)
 async def stop_schedule(schedule_id: str):
-    """Stop a scheduler source.
-    
-    Note: Scheduler sources manage their own lifecycle automatically.
-    This endpoint will reject all requests with SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED.
-    """
+    """Stop a scheduler source."""
     # Check source exists
     source = manager._source_repository.get_source_config(schedule_id)
     if not source:
@@ -1499,8 +1523,33 @@ async def stop_schedule(schedule_id: str):
             ).model_dump()
         )
     
-    # Reject lifecycle operations for scheduler sources
-    await _reject_scheduler_lifecycle(schedule_id)
+    # Verify it's a scheduler source
+    if source.source_type != "scheduler":
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
+            ).model_dump()
+        )
+    
+    # Stop the scheduler adapter
+    try:
+        await manager.source_registry.stop_adapter(schedule_id)
+        return SourceActionResponse(
+            source_id=schedule_id,
+            success=True,
+            message=f"Scheduler {schedule_id} stopped successfully"
+        )
+    except Exception as e:
+        logger.error(f"Failed to stop scheduler {schedule_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=ErrorResponse(
+                code=ErrorCodes.INTERNAL_ERROR,
+                message=f"Failed to stop scheduler: {str(e)}"
+            ).model_dump()
+        )
 
 
 # GET /schedules/{schedule_id}/executions - Get execution history
