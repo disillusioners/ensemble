@@ -320,7 +320,7 @@ class SourceRegistry:
                 """
                 try:
                     self._source_repo.update_source_status(source_id, "stopped")
-                    self._source_repo.update_source_enabled(source_id, False)
+                    self._source_repo.update_source_config(source_id, enabled=False)
                     logger.info(f"Disabled one-time scheduler after completion: {source_id}")
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
