@@ -135,6 +135,11 @@ class SourceRegistry:
                 logger.debug(f"Skipping disabled source: {config.source_id}")
                 continue
             
+            # Skip sources that were stopped (status = stopped)
+            if config.status == SourceStatus.STOPPED.value:
+                logger.debug(f"Skipping stopped source: {config.source_id}")
+                continue
+            
             source_id = config.source_id
             
             # Check if adapter is already registered
