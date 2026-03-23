@@ -50,7 +50,30 @@ ng serve
 
 ## Test Results
 
-### Latest Test Run: 2026-03-23 (Job Queue Frontend - Browser Automation)
+### Latest Test Run: 2026-03-23 (View Session Fix Validation)
+- **Test Type**: Browser Automation (Playwright) - Fix Verification
+- **Status**: ✅ ALL TESTS PASSED (4/4 scenarios)
+- **Report**: `.agents/tester/RESULTS/2026-03-23-view-session-fix-validation.md`
+- **Screenshots**: `test-results/view-session-fix/` (5 screenshots)
+- **Execution Time**: ~5 minutes
+- **Commit Verified**: 8105626
+- **Fix Verified**: ✅ View Session button now navigates correctly and shows error message instead of silent redirect
+- **Session ID**: ses_2e8a24f75ffexAeqetxvCqJKEW
+
+### Previous Test Run: 2026-03-23 (Bug Fix Validation - Browser Automation)
+- **Test Type**: Browser Automation (Playwright) - Bug Fix Validation
+- **Status**: ⚠️ PARTIAL PASS (2/3 fixes verified, 1 bug still present)
+- **Report**: `.agents/tester/RESULTS/2026-03-23-bugfix-validation-browser-automation.md`
+- **Screenshots**: `test-results/bugfix-validation/` (18 screenshots)
+- **Execution Time**: ~40 minutes
+- **Fixes Verified**:
+  - ✅ Fix #1: Connection error debouncing and retry logic - WORKING
+  - ❌ Fix #2: View Session button navigation - STILL BROKEN (navigates to `/` instead of `/sessions/:sessionId`)
+  - ✅ Fix #3: Agent dropdown accessibility - FIXED (ARIA attributes added)
+- **Quick Fixes Applied**: 1 (commit a6e67f7 - agent dropdown ARIA attributes)
+- **Session ID**: ses_2e8da5c80ffeKgIMijHdxI6la3
+
+### Previous Test Run: 2026-03-23 (Job Queue Frontend - Browser Automation)
 - **Test Type**: Browser Automation (Playwright)
 - **Status**: ⚠️ PARTIAL PASS (9/9 features work, 3 bugs found)
 - **Report**: `.agents/tester/RESULTS/2026-03-23-job-queue-frontend-browser-automation.md`

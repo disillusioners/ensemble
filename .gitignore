@@ -54,3 +54,4 @@ playground/
 config.local.yaml
 .env.prod
 agents-ensemble.db
+test-results/*
