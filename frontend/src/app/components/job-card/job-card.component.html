@@ -11,7 +11,7 @@
         class="status-chip"
         [style.backgroundColor]="statusColor() + '20'"
         [style.color]="statusColor()">
-        <mat-icon class="status-icon">{{ statusIcon() }}</mat-icon>
+        <mat-icon class="status-icon" [class.spinning]="isProcessing()">{{ statusIcon() }}</mat-icon>
         {{ statusLabel() }}
       </span>
       @if (showPausedBadge()) {

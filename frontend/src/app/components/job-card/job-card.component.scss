@@ -203,7 +203,7 @@
 }
 
 // Status-specific icon animations
-.status-chip mat-icon[innerHTML='sync'] {
+.status-icon.spinning {
   animation: spin 1.5s linear infinite;
 }
 

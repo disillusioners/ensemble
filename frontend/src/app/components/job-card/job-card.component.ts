@@ -64,6 +64,9 @@ export class JobCardComponent {
     return status.charAt(0).toUpperCase() + status.slice(1);
   });
 
+  // Used to apply spinning animation to processing status icon
+  isProcessing = computed(() => this.job().status === 'processing');
+
   messagePreview = computed(() => {
     const msg = this.job().message;
     return msg.length > 100 ? msg.substring(0, 100) + '...' : msg;

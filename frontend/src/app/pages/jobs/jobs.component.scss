@@ -229,6 +229,12 @@
         .mat-mdc-slide-toggle-content {
           font-size: 12px;
         }
+
+        .mat-mdc-slide-toggle:hover {
+          .mat-mdc-slide-toggle-content {
+            color: var(--text-color, #e0e0e0);
+          }
+        }
       }
     }
   }
