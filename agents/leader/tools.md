@@ -20,14 +20,24 @@ Create a new agent session to handle a subtask.
 **Parameters:**
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `agent_dir` | string | Yes | - | Path to agent (e.g., `agents/coder`) |
-| `session_id` | string | No | None | Optional custom session ID |
+| `agent_id` | string | Conditional | None | **Preferred.** Agent ID (e.g., `coder`, `leader`) |
+| `agent_dir` | string | Conditional | None | **DEPRECATED.** Path to agent (e.g., `agents/coder`). Use `agent_id` instead. |
+| `project_id` | string | No | None | Optional project ID for context injection |
+
+**Note:** Either `agent_id` or `agent_dir` is required. `agent_id` is preferred.
 
 **Returns:** The session_id of the newly created session
 
-**Example:**
+**Examples:**
 ```
+# Preferred: using agent_id
+spawn_session(agent_id="coder")
+
+# Deprecated: using agent_dir (for backward compatibility)
 spawn_session(agent_dir="agents/coder")
+
+# With project context
+spawn_session(agent_id="coder", project_id="my-project")
 ```
 
 ---

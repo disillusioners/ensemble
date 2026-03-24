@@ -3,8 +3,10 @@
 import asyncio
 import logging
 from pathlib import Path
-from langchain_core.tools import tool
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
+
+from langchain_core.tools import tool, BaseTool
+from pydantic import BaseModel, Field, model_validator
 
 from .bash import bash
 from .filesystem import list_directory, read_file, glob_files, write_file, grep_files, edit_file
@@ -16,6 +18,32 @@ from .help import create_help_tool
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
+
+
+class SpawnSessionInput(BaseModel):
+    """Input model for spawn_session tool."""
+    
+    agent_id: Annotated[str | None, Field(
+        default=None,
+        description="Agent ID (e.g., 'coder', 'leader'). Preferred over agent_dir."
+    )] = None
+    
+    agent_dir: Annotated[str | None, Field(
+        default=None,
+        description="DEPRECATED: Path to agent directory (e.g., 'agents/coder'). Use agent_id instead."
+    )] = None
+    
+    project_id: Annotated[str | None, Field(
+        default=None,
+        description="Optional project ID for context injection. Pass None if no project context is needed."
+    )] = None
+    
+    @model_validator(mode='after')
+    def validate_params(self):
+        """Require at least one of agent_id or agent_dir."""
+        if not self.agent_id and not self.agent_dir:
+            raise ValueError('Either agent_id or agent_dir is required')
+        return self
 
 
 def create_session_tools(manager: "SessionManager", current_session_id: str, agent_dir: str = ""):
@@ -44,8 +72,8 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         except asyncio.CancelledError:
             logger.debug(f"Queue processing cancelled for session {session_id[:8]}")
     
-    @tool
-    def spawn_session(agent_dir: str, project_id: str | None = None) -> str:
+    @tool(args_schema=SpawnSessionInput)
+    def spawn_session(input: SpawnSessionInput) -> str:
         """Spawn a new agent session and return its session_id.
         
         IMPORTANT: After spawning, you MUST use send_message(session_id, message) 
@@ -53,21 +81,21 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         until you send it a message.
         
         Args:
-            agent_dir: Path to the agent directory (e.g., "agents/coder")
-            project_id: Optional project ID for context injection. Pass None if no 
-                project context is needed. If provided, the child session will use 
-                this project context instead of extracting it from message text.
-                This ensures child sessions don't rely on text extraction - 
-                the parent must explicitly provide context.
+            input: SpawnSessionInput containing agent_id (preferred) or agent_dir (deprecated),
+                and optional project_id for context injection.
         
         Returns:
             The session_id of the newly spawned session. Use this with send_message().
         """
+        # Prefer agent_id, fallback to agent_dir
+        agent_id_to_use = input.agent_id or input.agent_dir
+        
         new_session_id = manager.spawn_session(
-            agent_dir=agent_dir,
+            agent_id=input.agent_id,
+            agent_dir=input.agent_dir,
             session_id=None,
             parent_id=current_session_id,
-            project_id=project_id,
+            project_id=input.project_id,
         )
         return (
             f"Successfully spawned session: {new_session_id}\n"
