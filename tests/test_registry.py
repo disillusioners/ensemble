@@ -248,6 +248,31 @@ class TestResolveToId:
         abs_path = str(temp_agents_dir / "coder")
         assert registry.resolve_to_id(abs_path) == "coder"
 
+    def test_resolve_to_id_empty_string(self) -> None:
+        """Empty string should return None."""
+        registry = AgentRegistry(Path("/tmp/test_agents"))
+        registry.discover()
+        assert registry.resolve_to_id("") is None
+
+    def test_path_traversal_blocked(self) -> None:
+        """Path traversal attempts should return None."""
+        registry = AgentRegistry(Path("/tmp/test_agents"))
+        registry.discover()
+        # Try to escape agents directory
+        assert registry.resolve_to_id("../../../etc/passwd") is None
+        assert registry.resolve_to_id("../../daemon/config.py") is None
+        assert registry.resolve_to_id("../_trash/evil") is None
+
+    def test_resolve_to_id_with_absolute_path_outside_agents(self, tmp_path: Path) -> None:
+        """Absolute path outside agents dir should return None."""
+        registry = AgentRegistry(tmp_path / "agents")
+        registry.discover()
+        # Create a file outside agents dir
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "meta.json").write_text('{"name": "Evil"}')
+        assert registry.resolve_to_id(str(outside_dir)) is None
+
 
 class TestAgentMetadata:
     """Tests for AgentMetadata model."""

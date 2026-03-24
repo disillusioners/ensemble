@@ -148,6 +148,9 @@ class AgentRegistry:
         Returns:
             Canonical agent_id if found, None otherwise
         """
+        if not agent_dir_or_id:
+            return None
+
         # Already just an ID - check if it exists
         if agent_id := self.resolve_pure_id(agent_dir_or_id):
             return agent_id
@@ -208,10 +211,13 @@ class AgentRegistry:
         if Path(path_str).is_absolute():
             try:
                 abs_path = Path(path_str).resolve()
-                if abs_path.parent.name == "agents":
-                    agent_id = abs_path.name
-                    if agent_id in self._agents:
-                        return agent_id
+                # CRITICAL: Verify path is within agents directory
+                try:
+                    abs_path.relative_to(self._agents_dir)
+                except ValueError:
+                    return None  # Path traversal attempt - path outside agents dir
+                if abs_path.parent == self._agents_dir and abs_path.name in self._agents:
+                    return abs_path.name
             except (OSError, ValueError):
                 pass
 
@@ -249,8 +255,7 @@ def get_registry() -> AgentRegistry:
     """
     global _registry
     if _registry is None:
-        from daemon.config import BASE_DIR
-
-        _registry = AgentRegistry(BASE_DIR / "agents")
+        base_dir = Path(__file__).parent.parent
+        _registry = AgentRegistry(base_dir / "agents")
         _registry.discover()
     return _registry
