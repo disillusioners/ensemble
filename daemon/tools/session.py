@@ -87,9 +87,6 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         Returns:
             The session_id of the newly spawned session. Use this with send_message().
         """
-        # Prefer agent_id, fallback to agent_dir
-        agent_id_to_use = input.agent_id or input.agent_dir
-        
         new_session_id = manager.spawn_session(
             agent_id=input.agent_id,
             agent_dir=input.agent_dir,
