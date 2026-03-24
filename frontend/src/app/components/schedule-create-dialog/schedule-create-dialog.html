@@ -19,8 +19,8 @@
       </button>
     </div>
 
-    <!-- Form -->
-    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
+    <!-- Scrollable Form Body -->
+    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-body">
       <!-- Name -->
       <div class="form-group">
         <label class="form-label">
@@ -240,9 +240,10 @@
           }
         </div>
       }
+    </form>
 
-      <!-- Actions -->
-      <div class="form-actions">
+    <!-- Actions (always visible at bottom) -->
+    <div class="form-actions">
         <button
           type="button"
           (click)="handleClose()"
@@ -266,7 +267,8 @@
           Validate
         </button>
         <button
-          type="submit"
+          type="button"
+          (click)="handleSubmit()"
           [disabled]="isSubmitDisabled()"
           class="submit-btn"
         >
@@ -279,6 +281,5 @@
           {{ data.editMode ? 'Update' : 'Create' }}
         </button>
       </div>
-    </form>
   </div>
 </div>
