@@ -77,62 +77,47 @@ from .services.job_queue_service import JobQueueService
 from .services.job_lock_manager import JobLockManager
 from .services.job_processor import JobProcessor
 from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
+from .registry import get_registry
 
 
-def validate_agent_dir(agent_dir: str) -> Path:
-    """Validate agent_dir is within allowed base directory.
+def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
+    """Validate agent_dir using AgentRegistry and return agent_id with path.
     
     Args:
-        agent_dir: Relative path to agent directory (e.g., "./agents/my-agent")
+        agent_dir: Agent ID or relative/absolute path to agent directory.
+            Examples: "coder", "./agents/coder", "agents/coder"
         
     Returns:
-        Resolved absolute Path if valid.
+        Tuple of (agent_id, resolved_absolute_path).
         
     Raises:
-        HTTPException: If path is invalid or outside allowed directory.
+        HTTPException: If agent is invalid or not found.
     """
-    base_dir = Path(__file__).parent.parent  # project root
-    agents_base = (base_dir / "agents").resolve()
+    registry = get_registry()
     
-    # Handle relative paths like "./agents/my-agent"
-    if agent_dir.startswith("./"):
-        agent_path = (base_dir / agent_dir).resolve()
-    else:
-        agent_path = (agents_base / agent_dir).resolve()
-    
-    # Check path is within agents directory
-    try:
-        agent_path.relative_to(agents_base)
-    except ValueError:
+    # Resolve to canonical agent_id
+    agent_id = registry.resolve_to_id(agent_dir)
+    if agent_id is None:
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid agent_dir: must be within agents directory"
+                message=f"Invalid agent_dir: '{agent_dir}' is not a valid agent ID or path"
             ).model_dump()
         )
-
-    # Check for symlink attack
-    if agent_path.is_symlink():
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message="Symlinks not allowed in agent paths"
-            ).model_dump()
-        )
-
+    
     # Check agent exists
-    if not agent_path.exists():
+    metadata = registry.get(agent_id)
+    if metadata is None:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=f"Agent directory not found: {agent_dir}"
+                message=f"Agent not found: {agent_id}"
             ).model_dump()
         )
     
-    return agent_path
+    return agent_id, metadata.path
 
 
 async def _reject_scheduler_lifecycle(source_id: str) -> None:

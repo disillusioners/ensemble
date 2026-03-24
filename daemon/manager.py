@@ -34,6 +34,7 @@ from .repositories import (
     create_source_repository,
     create_message_queue_repository,
 )
+from .registry import get_registry
 
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 from .repositories.session.repository import get_agent_name
@@ -450,27 +451,50 @@ class SessionManager:
 
     def spawn_session(
         self, 
-        agent_dir: str, 
+        agent_dir: str | None = None,
         session_id: str | None = None, 
         parent_id: str | None = None,
         project_id: str | None = None,
+        agent_id: str | None = None,
     ) -> str:
         """Create a new agent session.
 
         Args:
-            agent_dir: Path to the agent directory.
+            agent_dir: Path to the agent directory (legacy format). Provide either
+                agent_dir or agent_id, but not both. agent_id takes precedence.
             session_id: Optional session ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent session ID for hierarchical sessions.
-        project_id: Optional project ID for project context. Use `None` to explicitly
-            indicate no project context is needed. If provided, stored in session
-            metadata so child sessions don't rely on text extraction.
+            project_id: Optional project ID for project context. Use `None` to explicitly
+                indicate no project context is needed. If provided, stored in session
+                metadata so child sessions don't rely on text extraction.
+            agent_id: Agent ID (e.g., "coder"). Preferred over agent_dir when provided.
 
         Returns:
             The session_id of the newly created session.
 
         Raises:
-            ValueError: If max_sessions or max_children_per_session limit is exceeded.
+            ValueError: If max_sessions or max_children_per_session limit is exceeded,
+                or if neither agent_dir nor agent_id is provided.
         """
+        # Resolve agent - prefer agent_id over agent_dir
+        registry = get_registry()
+        resolved_agent_dir: str
+        resolved_agent_id: str
+        
+        if agent_id is not None:
+            # Use agent_id directly
+            resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
+            metadata = registry.get(resolved_agent_id)
+            if metadata is None:
+                raise ValueError(f"Agent not found: {resolved_agent_id}")
+            resolved_agent_dir = str(metadata.path)
+        elif agent_dir is not None:
+            # Use agent_dir - resolve to agent_id for storage
+            resolved_agent_dir = agent_dir
+            resolved_agent_id = registry.resolve_to_id(agent_dir) or agent_dir
+        else:
+            raise ValueError("Either agent_dir or agent_id must be provided")
+        
         # Validate session_id format or auto-generate
         if session_id is None or not _UUID_PATTERN.match(session_id):
             if session_id is not None:
@@ -498,12 +522,12 @@ class SessionManager:
                         f"{self.config.limits.max_children_per_session}"
                     )
 
-        # Load and cache prompt
-        agent_path = Path(agent_dir)
+        # Load and cache prompt using resolved path
+        agent_path = Path(resolved_agent_dir)
         system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, agent_dir)
+        tools = create_session_tools(self, session_id, resolved_agent_dir)
 
         # Build LLM config
         llm_config = {
@@ -543,13 +567,13 @@ class SessionManager:
         
         self._session_repository.create(
             session_id=session_id,
-            agent_dir=agent_dir,
+            agent_dir=resolved_agent_dir,
             parent_id=parent_id,
             metadata=session_metadata if session_metadata else None,
         )
 
         # Store in sessions dict
-        self.sessions[session_id] = (graph, agent_dir)
+        self.sessions[session_id] = (graph, resolved_agent_dir)
 
         return session_id
 
