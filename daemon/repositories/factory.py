@@ -102,7 +102,7 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
     return engine
 
 
-def _add_agent_id_column(conn, table_name: str, logger: logging.Logger) -> None:
+def _add_agent_id_column(conn, table_name: str, logger) -> None:
     """Add agent_id column to a table if it doesn't exist and populate from agent_dir.
     
     Args:
@@ -122,23 +122,26 @@ def _add_agent_id_column(conn, table_name: str, logger: logging.Logger) -> None:
     if 'agent_id' in table_sql:
         return  # Column already exists
     
-    # Add column
+    # Add column as nullable first (for backward compat with old rows)
     conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN agent_id TEXT"))
     conn.commit()
     logger.info(f"Migration: Added agent_id column to {table_name} table")
     
-    # Populate agent_id from agent_dir
-    conn.execute(text(f"""
-        UPDATE {table_name}
-        SET agent_id = CASE 
-            WHEN agent_dir LIKE '%/%' THEN substr(agent_dir, length(agent_dir) - instr(REVERSE(agent_dir), '/') + 2)
-            WHEN agent_dir LIKE '%\\%' THEN substr(agent_dir, length(agent_dir) - instr(REVERSE(agent_dir), '\\') + 2)
-            ELSE agent_dir
-        END
-        WHERE agent_id IS NULL AND agent_dir IS NOT NULL
-    """))
+    # Populate agent_id from agent_dir using Python (more reliable than complex SQL)
+    # Fetch rows that need updating
+    result = conn.execute(text(f"SELECT session_id, agent_dir FROM {table_name} WHERE agent_id IS NULL AND agent_dir IS NOT NULL AND agent_dir != ''"))
+    rows = result.fetchall()
+    
+    for row in rows:
+        session_id, agent_dir = row
+        # Extract last path component (e.g., 'coder' from './agents/coder')
+        agent_id = agent_dir.rstrip('/').rsplit('/', 1)[-1] if '/' in agent_dir else agent_dir
+        agent_id = agent_id.rsplit('\\', 1)[-1] if '\\' in agent_id else agent_id
+        conn.execute(text(f"UPDATE {table_name} SET agent_id = :agent_id WHERE session_id = :session_id"), 
+                    {"agent_id": agent_id, "session_id": session_id})
+    
     conn.commit()
-    logger.info(f"Migration: Populated agent_id from agent_dir in {table_name} table")
+    logger.info(f"Migration: Populated agent_id from agent_dir in {table_name} table ({len(rows)} rows)")
 
 
 def run_migrations(engine: Engine) -> None:
