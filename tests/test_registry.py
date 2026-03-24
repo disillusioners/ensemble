@@ -120,6 +120,22 @@ class TestDiscoverAgents:
         assert registry.exists("valid_agent")
         assert not registry.exists("no_meta")
 
+    def test_symlink_directories_skipped(self, temp_agents_dir: Path) -> None:
+        """Symlink directories should be skipped for security."""
+        # Create real agent
+        create_agent_meta(temp_agents_dir, "real_agent")
+
+        # Create symlink to agent
+        symlink_agent = temp_agents_dir / "symlink_agent"
+        symlink_agent.symlink_to(temp_agents_dir / "real_agent")
+
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        # Should only find real agent, not symlink
+        assert registry.exists("real_agent")
+        assert not registry.exists("symlink_agent")
+
     def test_missing_meta_json_logs_warning(self, temp_agents_dir: Path, caplog) -> None:
         """Test that missing meta.json logs a warning."""
         (temp_agents_dir / "no_meta").mkdir()

@@ -80,6 +80,11 @@ class AgentRegistry:
             if not agent_path.is_dir():
                 continue
 
+            # Skip symlinks for security
+            if agent_path.is_symlink():
+                logger.warning(f"Skipping symlink directory: {agent_path}")
+                continue
+
             # Skip hidden directories (starting with .)
             if agent_path.name.startswith("."):
                 continue
@@ -211,6 +216,9 @@ class AgentRegistry:
         if Path(path_str).is_absolute():
             try:
                 abs_path = Path(path_str).resolve()
+                # Reject symlinks for security
+                if abs_path.is_symlink():
+                    return None
                 # CRITICAL: Verify path is within agents directory
                 try:
                     abs_path.relative_to(self._agents_dir)
