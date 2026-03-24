@@ -17,6 +17,7 @@ import type {
   ScheduleExecution,
   ScheduleConfiguration,
   ScheduleType,
+  SessionMode,
 } from '../../models/scheduler.model';
 
 @Component({
@@ -52,6 +53,7 @@ export class ScheduleDetailDrawerComponent {
   // Local editing state
   editingName = signal<string>('');
   editingConfig = signal<ScheduleConfiguration | null>(null);
+  editingSessionMode = signal<SessionMode>('new_session');
 
   // Execution history state
   executions = signal<ScheduleExecution[]>([]);
@@ -108,7 +110,8 @@ export class ScheduleDetailDrawerComponent {
       config.agent !== schedule.config.agent ||
       config.message !== schedule.config.message ||
       config.timezone !== schedule.config.timezone ||
-      config.project !== schedule.config.project
+      config.project !== schedule.config.project ||
+      this.editingSessionMode() !== (schedule.config.session_mode || 'new_session')
     );
   });
 
@@ -134,6 +137,7 @@ export class ScheduleDetailDrawerComponent {
       if (schedule) {
         this.editingName.set(schedule.name);
         this.editingConfig.set({ ...schedule.config });
+        this.editingSessionMode.set(schedule.config.session_mode || 'new_session');
         this.executions.set([]);
         this.executionsOffset.set(0);
         this.hasMoreExecutions.set(true);
@@ -188,6 +192,7 @@ export class ScheduleDetailDrawerComponent {
     if (schedule) {
       this.editingName.set(schedule.name);
       this.editingConfig.set({ ...schedule.config });
+      this.editingSessionMode.set(schedule.config.session_mode || 'new_session');
     }
     this.isEditing.set(false);
   }
@@ -198,10 +203,16 @@ export class ScheduleDetailDrawerComponent {
     if (!schedule || !config) return;
 
     this.actionLoading.set(true);
+
+    // Update config with session_mode
+    const updatedConfig = {
+      ...config,
+      session_mode: this.editingSessionMode(),
+    };
     
     this.schedulerService.updateSchedule(schedule.id, {
       name: this.editingName(),
-      config,
+      config: updatedConfig,
     }).subscribe({
       next: (updated) => {
         this.saved.emit(updated);
@@ -369,6 +380,37 @@ export class ScheduleDetailDrawerComponent {
         return { ...c, project };
       });
     }
+  }
+
+  onSessionModeChange(sessionMode: SessionMode): void {
+    this.editingSessionMode.set(sessionMode);
+  }
+
+  // Session mode helper getters
+  get isSessionModeEnabled(): boolean {
+    const config = this.editingConfig();
+    // Enable session mode selector only when a schedule type is selected
+    return !!config?.type;
+  }
+
+  get isReuseSessionDisabled(): boolean {
+    const config = this.editingConfig();
+    return config?.type === 'one-time';
+  }
+
+  get showOneTimeSessionHint(): boolean {
+    const config = this.editingConfig();
+    return config?.type === 'one-time';
+  }
+
+  getSessionModeLabel(mode: SessionMode | undefined): string {
+    return mode === 'reuse_session' ? 'Reuse Session' : 'New Session';
+  }
+
+  getSessionModeDescription(mode: SessionMode | undefined): string {
+    return mode === 'reuse_session' 
+      ? 'Continue from previous run' 
+      : 'Start a fresh conversation session';
   }
 
   formatDate(dateStr?: string | null): string {

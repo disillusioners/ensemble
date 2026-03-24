@@ -9,6 +9,9 @@ export type ScheduleType = 'cron' | 'interval' | 'one-time';
 // Schedule execution status type
 export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'failed';
 
+// Session mode type
+export type SessionMode = 'new_session' | 'reuse_session';
+
 // Schedule configuration - what the schedule will run
 export interface ScheduleConfiguration {
   type: ScheduleType;            // cron | interval | one-time
@@ -19,6 +22,7 @@ export interface ScheduleConfiguration {
   message: string;                // The message to send to the agent
   timezone?: string;               // Default 'UTC'
   project?: string;               // Optional project context
+  session_mode?: SessionMode;     // new_session | reuse_session (default: new_session)
   metadata?: Record<string, any>; // Optional metadata
 }
 
