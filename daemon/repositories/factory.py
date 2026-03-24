@@ -102,6 +102,45 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
     return engine
 
 
+def _add_agent_id_column(conn, table_name: str, logger: logging.Logger) -> None:
+    """Add agent_id column to a table if it doesn't exist and populate from agent_dir.
+    
+    Args:
+        conn: Database connection.
+        table_name: Name of the table to migrate.
+        logger: Logger instance for recording migration progress.
+    """
+    from sqlalchemy import text
+    
+    # Check if column exists
+    result = conn.execute(text(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
+    row = result.fetchone()
+    if not row or not row[0]:
+        return
+    
+    table_sql = row[0]
+    if 'agent_id' in table_sql:
+        return  # Column already exists
+    
+    # Add column
+    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN agent_id TEXT"))
+    conn.commit()
+    logger.info(f"Migration: Added agent_id column to {table_name} table")
+    
+    # Populate agent_id from agent_dir
+    conn.execute(text(f"""
+        UPDATE {table_name}
+        SET agent_id = CASE 
+            WHEN agent_dir LIKE '%/%' THEN substr(agent_dir, length(agent_dir) - instr(REVERSE(agent_dir), '/') + 2)
+            WHEN agent_dir LIKE '%\\%' THEN substr(agent_dir, length(agent_dir) - instr(REVERSE(agent_dir), '\\') + 2)
+            ELSE agent_dir
+        END
+        WHERE agent_id IS NULL AND agent_dir IS NOT NULL
+    """))
+    conn.commit()
+    logger.info(f"Migration: Populated agent_id from agent_dir in {table_name} table")
+
+
 def run_migrations(engine: Engine) -> None:
     """Run database migrations to add missing columns to existing tables.
     
@@ -119,7 +158,7 @@ def run_migrations(engine: Engine) -> None:
     
     # Get the connection to check existing columns
     with engine.connect() as conn:
-        # Check if projects table exists and has job_queue_paused column
+        # Migration: Add job_queue_paused to projects
         try:
             result = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'"))
             row = result.fetchone()
@@ -131,6 +170,24 @@ def run_migrations(engine: Engine) -> None:
                     logger.info("Migration: Added job_queue_paused column to projects table")
         except Exception as e:
             logger.warning(f"Migration check failed (table may not exist yet): {e}")
+        
+        # Migration: Add agent_id to sessions
+        try:
+            _add_agent_id_column(conn, "sessions", logger)
+        except Exception as e:
+            logger.warning(f"Migration failed for sessions table: {e}")
+        
+        # Migration: Add agent_id to session_mappings
+        try:
+            _add_agent_id_column(conn, "session_mappings", logger)
+        except Exception as e:
+            logger.warning(f"Migration failed for session_mappings table: {e}")
+        
+        # Migration: Add agent_id to jobqueue
+        try:
+            _add_agent_id_column(conn, "jobqueue", logger)
+        except Exception as e:
+            logger.warning(f"Migration failed for jobqueue table: {e}")
 
 
 def create_project_repository(
