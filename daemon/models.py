@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SessionStatus(str, Enum):
@@ -63,13 +63,20 @@ class ErrorResponse(BaseModel):
 class SessionCreate(BaseModel):
     """Request for spawning a new session."""
 
-    agent_dir: str = Field(..., description="Directory containing the agent implementation")
+    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
+    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Path to agent directory for backward compatibility.")
     session_id: str | None = Field(default=None, description="Optional session ID (auto-generated if omitted)")
+
+    @model_validator(mode='after')
+    def validate_agent(self):
+        if not self.agent_id and not self.agent_dir:
+            raise ValueError('Either agent_id or agent_dir is required')
+        return self
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "agent_dir": "/path/to/agent",
+                "agent_id": "coder",
                 "session_id": "session-123"
             }
         }
@@ -80,7 +87,8 @@ class SessionInfo(BaseModel):
     """Response for session information."""
 
     session_id: str = Field(..., description="Unique session identifier")
-    agent_dir: str = Field(..., description="Directory containing the agent implementation")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_dir: str = Field(..., description="Path to the agent directory")
     status: SessionStatus = Field(..., description="Current session status")
     title: str | None = Field(default=None, description="Auto-generated session title from first message")
     parent_id: str | None = Field(default=None, description="Parent session ID if this is a child session")
@@ -92,7 +100,8 @@ class SessionInfo(BaseModel):
         json_schema_extra={
             "example": {
                 "session_id": "session-123",
-                "agent_dir": "/path/to/agent",
+                "agent_id": "coder",
+                "agent_dir": "./agents/coder",
                 "status": "running",
                 "title": "Help with Python debugging",
                 "parent_id": None,
@@ -597,14 +606,21 @@ class SessionMappingCreate(BaseModel):
     """Request for creating a session mapping."""
 
     external_user_id: str = Field(..., description="External user ID (e.g., Telegram chat_id)", min_length=1, max_length=256)
-    agent_dir: str = Field(..., description="Agent directory to use for this user")
+    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
+    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Agent directory for backward compatibility.")
     metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
+
+    @model_validator(mode='after')
+    def validate_agent(self):
+        if not self.agent_id and not self.agent_dir:
+            raise ValueError('Either agent_id or agent_dir is required')
+        return self
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "external_user_id": "123456789",
-                "agent_dir": "./agents/coder",
+                "agent_id": "coder",
                 "metadata": {"username": "john_doe"}
             }
         }
@@ -618,7 +634,8 @@ class SessionMappingInfo(BaseModel):
     source_id: str = Field(..., description="Source this mapping belongs to")
     external_user_id: str = Field(..., description="External user ID")
     agent_session_id: str = Field(..., description="Agent session handling this user")
-    agent_dir: str = Field(..., description="Agent directory used")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_dir: str = Field(..., description="Path to the agent directory")
     metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
     last_message_at: datetime | None = Field(default=None, description="Last message timestamp")
     created_at: datetime = Field(..., description="Mapping creation timestamp")
@@ -630,6 +647,7 @@ class SessionMappingInfo(BaseModel):
                 "source_id": "telegram-main",
                 "external_user_id": "123456789",
                 "agent_session_id": "session-abc",
+                "agent_id": "coder",
                 "agent_dir": "./agents/coder",
                 "metadata": {"username": "john_doe"},
                 "last_message_at": "2024-01-01T00:01:00Z",

@@ -73,6 +73,7 @@ class SessionMapping(SQLModel, table=True):
     source_id: str = Field(foreign_key="source_configs.source_id", index=True)
     external_user_id: str = Field(index=True)
     agent_session_id: str = Field(index=True)
+    agent_id: str
     agent_dir: str
     
     mapping_metadata: dict[str, Any] = Field(
@@ -90,6 +91,7 @@ class SessionMapping(SQLModel, table=True):
             "source_id": self.source_id,
             "external_user_id": self.external_user_id,
             "agent_session_id": self.agent_session_id,
+            "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "metadata": dict(self.mapping_metadata),
             "last_message_at": self.last_message_at,

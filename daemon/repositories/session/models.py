@@ -42,6 +42,7 @@ class Session(SQLModel, table=True):
     __tablename__ = "sessions"
 
     session_id: str = Field(primary_key=True)
+    agent_id: str = Field(index=True)
     agent_dir: str = Field(index=True)
     agent_name: Optional[str] = Field(default=None, index=True)
     parent_id: Optional[str] = Field(default=None, index=True)
@@ -79,6 +80,7 @@ class Session(SQLModel, table=True):
         """Convert to dictionary for serialization."""
         return {
             "session_id": self.session_id,
+            "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "agent_name": self.agent_name,
             "parent_id": self.parent_id,

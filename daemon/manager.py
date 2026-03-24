@@ -567,6 +567,7 @@ class SessionManager:
         
         self._session_repository.create(
             session_id=session_id,
+            agent_id=resolved_agent_id,
             agent_dir=resolved_agent_dir,
             parent_id=parent_id,
             metadata=session_metadata if session_metadata else None,

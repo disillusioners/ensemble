@@ -27,6 +27,7 @@ async def mock_manager():
     manager.list_sessions = Mock(return_value=([
         {
             "session_id": "session-1",
+            "agent_id": "coder",
             "agent_dir": "/path/to/agent1",
             "status": "running",
             "parent_id": None,
@@ -37,6 +38,7 @@ async def mock_manager():
     ], 1))
     manager.get_session_info = Mock(return_value={
         "session_id": "test-session-id",
+        "agent_id": "coder",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -78,6 +80,7 @@ async def mock_manager():
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
             agent_session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
             metadata TEXT,
             last_message_at TIMESTAMP,
@@ -147,8 +150,10 @@ async def test_create_session_success(client, mock_manager):
     assert response.status_code == 201
     data = response.json()
     assert data["session_id"] == "test-session-id"
+    assert data["agent_id"] == "coder"
     assert data["agent_dir"] == "/path/to/agent"
     mock_manager.spawn_session.assert_called_once_with(
+        agent_id=None,
         agent_dir="/path/to/agent",
         session_id="custom-session-id"
     )

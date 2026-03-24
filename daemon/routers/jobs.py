@@ -70,6 +70,7 @@ def _job_to_response(
         job_id=job.job_id,
         status=job.status,
         priority=job.priority,
+        agent_id=job.agent_id,
         agent_dir=job.agent_dir,
         project_id=job.project_id,
         session_id=job.session_id,
@@ -109,22 +110,25 @@ async def create_job(
         202 with status=pending if job was queued
         422 if validation errors
     """
+    # Validate and resolve agent input
     try:
-        # Validate agent_dir exists (similar to existing API pattern)
         from daemon.api import validate_agent_dir
-        validate_agent_dir(request.agent_dir)
+        # Prefer agent_id over agent_dir
+        agent_input = request.agent_id or request.agent_dir
+        resolved_agent_id, agent_path = validate_agent_dir(agent_input)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail={"error": "Invalid agent_dir", "message": str(e)}
+            detail={"error": "Invalid agent", "message": str(e)}
         )
     
     # Enqueue the job
     try:
         job = await service.enqueue(
-            agent_dir=request.agent_dir,
+            agent_id=resolved_agent_id,
+            agent_dir=str(agent_path),
             message=request.message,
             source=request.source,
             project_id=request.project_id,
@@ -153,6 +157,7 @@ async def create_job(
             job_id=job.job_id,
             status=job.status,
             priority=job.priority,
+            agent_id=job.agent_id,
             agent_dir=job.agent_dir,
             project_id=job.project_id,
             session_id=job.session_id,
@@ -173,6 +178,7 @@ async def create_job(
             job_id=job.job_id,
             status=job.status,
             priority=job.priority,
+            agent_id=job.agent_id,
             agent_dir=job.agent_dir,
             project_id=job.project_id,
             created_at=job.created_at,

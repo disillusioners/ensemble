@@ -51,6 +51,7 @@ class JobItem(SQLModel, table=True):
     )
 
     # Job content
+    agent_id: str
     agent_dir: str
     message: str
     source: str = Field(default="api")  # "api", "telegram", "scheduler", "webhook"
@@ -85,6 +86,7 @@ class JobItem(SQLModel, table=True):
         """Convert to dictionary for serialization."""
         return {
             "job_id": self.job_id,
+            "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "message": self.message,
             "source": self.source,

@@ -222,6 +222,7 @@ class SQLModelSourceRepository:
         source_id: str,
         external_user_id: str,
         agent_session_id: str,
+        agent_id: str,
         agent_dir: str,
         metadata: Optional[dict[str, Any]] = None,
         mapping_id: Optional[str] = None,
@@ -242,6 +243,7 @@ class SQLModelSourceRepository:
             if existing:
                 # Update existing mapping
                 existing.agent_session_id = agent_session_id
+                existing.agent_id = agent_id
                 existing.agent_dir = agent_dir
                 existing.mapping_metadata = metadata or {}
                 existing.last_message_at = now
@@ -259,6 +261,7 @@ class SQLModelSourceRepository:
                 source_id=source_id,
                 external_user_id=external_user_id,
                 agent_session_id=agent_session_id,
+                agent_id=agent_id,
                 agent_dir=agent_dir,
                 mapping_metadata=metadata or {},
                 last_message_at=now,

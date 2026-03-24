@@ -450,7 +450,9 @@ async def delete_agent(agent_id: str):
 async def create_session(session_create: SessionCreate):
     """Spawn a new session."""
     try:
+        # Prefer agent_id over agent_dir
         session_id = manager.spawn_session(
+            agent_id=session_create.agent_id,
             agent_dir=session_create.agent_dir,
             session_id=session_create.session_id,
         )
@@ -477,6 +479,7 @@ async def create_session(session_create: SessionCreate):
     session_meta = manager.get_session_info(session_id)
     return SessionInfo(
         session_id=session_meta["session_id"],
+        agent_id=session_meta["agent_id"],
         agent_dir=session_meta["agent_dir"],
         status=SessionStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
@@ -507,6 +510,7 @@ async def list_sessions(
     for sess in sessions_data:
         sessions.append(SessionInfo(
             session_id=sess["session_id"],
+            agent_id=sess["agent_id"],
             agent_dir=sess["agent_dir"],
             status=SessionStatus(sess["status"]),
             parent_id=sess.get("parent_id"),
@@ -544,6 +548,7 @@ async def get_session(session_id: str):
 
     return SessionInfo(
         session_id=session_meta["session_id"],
+        agent_id=session_meta["agent_id"],
         agent_dir=session_meta["agent_dir"],
         status=SessionStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
@@ -1202,6 +1207,7 @@ async def list_mappings(source_id: str):
             source_id=m.source_id,
             external_user_id=m.external_user_id,
             agent_session_id=m.agent_session_id,
+            agent_id=m.agent_id,
             agent_dir=m.agent_dir,
             metadata=m.mapping_metadata,
             last_message_at=datetime.fromisoformat(m.last_message_at).replace(tzinfo=timezone.utc) if m.last_message_at and isinstance(m.last_message_at, str) else m.last_message_at,
@@ -1216,8 +1222,11 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     """Create a session mapping for an external user."""
     import uuid
     
-    # Validate agent_dir is within allowed directory
-    validate_agent_dir(mapping_create.agent_dir)
+    # Prefer agent_id over agent_dir
+    agent_input = mapping_create.agent_id or mapping_create.agent_dir
+    
+    # Validate agent input
+    resolved_agent_id, agent_path = validate_agent_dir(agent_input)
     
     # Check source exists
     source = manager._source_repository.get_source_config(source_id)
@@ -1248,8 +1257,8 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     
     # Spawn the agent session
     try:
-        manager.spawn_session(
-            agent_dir=mapping_create.agent_dir,
+        session_id = manager.spawn_session(
+            agent_id=resolved_agent_id,
             session_id=session_id,
         )
     except Exception as e:
@@ -1267,7 +1276,8 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
             source_id=source_id,
             external_user_id=mapping_create.external_user_id,
             agent_session_id=session_id,
-            agent_dir=mapping_create.agent_dir,
+            agent_id=resolved_agent_id,
+            agent_dir=str(agent_path),
             metadata=mapping_create.metadata,
             mapping_id=mapping_id,
         )
@@ -1292,6 +1302,7 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
         source_id=saved.source_id,
         external_user_id=saved.external_user_id,
         agent_session_id=saved.agent_session_id,
+        agent_id=saved.agent_id,
         agent_dir=saved.agent_dir,
         metadata=saved.mapping_metadata,
         last_message_at=datetime.fromisoformat(saved.last_message_at).replace(tzinfo=timezone.utc) if saved.last_message_at and isinstance(saved.last_message_at, str) else saved.last_message_at,

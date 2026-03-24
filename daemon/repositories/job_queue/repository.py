@@ -29,6 +29,7 @@ class JobRepository:
 
     def create(
         self,
+        agent_id: str,
         agent_dir: str,
         message: str,
         source: str = "api",
@@ -39,6 +40,7 @@ class JobRepository:
         """Create a new job queue item.
         
         Args:
+            agent_id: Agent ID (e.g., 'coder').
             agent_dir: Path to the agent directory.
             message: Job message/content.
             source: Source of the job ("api", "telegram", "scheduler", "webhook").
@@ -51,6 +53,7 @@ class JobRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             job = JobItem(
+                agent_id=agent_id,
                 agent_dir=agent_dir,
                 message=message,
                 source=source,

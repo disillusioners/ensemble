@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ==================== Job Queue Schemas ====================
@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field, field_validator
 class JobCreateRequest(BaseModel):
     """Request body for creating a new job."""
     
-    agent_dir: str = Field(..., description="Path to the agent directory")
+    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
+    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Path to agent directory for backward compatibility.")
     message: str = Field(..., description="Job message/content")
     project_id: Optional[str] = Field(default=None, description="Optional project ID for job serialization")
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
@@ -26,10 +27,16 @@ class JobCreateRequest(BaseModel):
             raise ValueError("Priority must be between 1 and 10")
         return v
     
+    @model_validator(mode='after')
+    def validate_agent(self):
+        if not self.agent_id and not self.agent_dir:
+            raise ValueError('Either agent_id or agent_dir is required')
+        return self
+    
     model_config = {
         "json_schema_extra": {
             "example": {
-                "agent_dir": "/agents/coder",
+                "agent_id": "coder",
                 "message": "Fix the login bug in auth.py",
                 "project_id": "optional-project-uuid",
                 "priority": 7,
@@ -46,6 +53,7 @@ class JobResponse(BaseModel):
     job_id: str = Field(..., description="Unique job identifier")
     status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled)")
     priority: int = Field(..., description="Job priority (1-10)")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
     project_id: Optional[str] = Field(default=None, description="Project ID if job is serialized")
     session_id: Optional[str] = Field(default=None, description="Session ID if job is processing/processed")
@@ -63,6 +71,7 @@ class JobResponse(BaseModel):
                 "job_id": "job-uuid",
                 "status": "completed",
                 "priority": 7,
+                "agent_id": "coder",
                 "agent_dir": "/agents/coder",
                 "project_id": "project-uuid",
                 "session_id": "session-uuid",

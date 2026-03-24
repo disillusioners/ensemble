@@ -11,6 +11,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from .base import IncomingMessage
+from ..registry import get_registry
 
 if TYPE_CHECKING:
     from .manager import SessionManager
@@ -122,6 +123,7 @@ class SessionMapper:
                 "source_id": mapping.source_id,
                 "external_user_id": mapping.external_user_id,
                 "agent_session_id": mapping.agent_session_id,
+                "agent_id": mapping.agent_id,
                 "agent_dir": mapping.agent_dir,
                 "metadata": mapping.mapping_metadata,
                 "last_message_at": mapping.last_message_at,
@@ -216,8 +218,17 @@ class SessionMapper:
         )
         
         try:
+            # Resolve agent_dir to agent_id
+            registry = get_registry()
+            agent_id = registry.resolve_to_id(agent_dir)
+            if agent_id is None:
+                agent_id = agent_dir  # Fallback to using agent_dir as agent_id
+            
             # Spawn new session via SessionManager
-            agent_session_id = self.manager.spawn_session(agent_dir)
+            agent_session_id = self.manager.spawn_session(
+                agent_id=agent_id,
+                agent_dir=agent_dir,
+            )
             
             # Create mapping
             mapping_id = str(uuid.uuid4())
@@ -230,6 +241,7 @@ class SessionMapper:
                 source_id=source_id,
                 external_user_id=external_user_id,
                 agent_session_id=agent_session_id,
+                agent_id=agent_id,
                 agent_dir=agent_dir,
                 metadata=metadata,
                 mapping_id=mapping_id,

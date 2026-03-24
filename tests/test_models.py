@@ -73,6 +73,7 @@ class TestSessionInfo:
         """Test SessionInfo with parent_id."""
         data = {
             "session_id": "child-session",
+            "agent_id": "coder",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": "parent-session",
@@ -87,6 +88,7 @@ class TestSessionInfo:
         """Test SessionInfo with children."""
         data = {
             "session_id": "parent-session",
+            "agent_id": "coder",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": None,
@@ -283,14 +285,27 @@ class TestErrorCodes:
     def test_error_codes_values(self):
         """Test ErrorCodes has correct number of values."""
         values = [e.value for e in ErrorCodes]
-        assert len(values) == 7
-        assert "INVALID_REQUEST" in values
-        assert "SESSION_NOT_FOUND" in values
-        assert "SESSION_TERMINATED" in values
-        assert "RATE_LIMITED" in values
-        assert "MAX_SESSIONS_EXCEEDED" in values
-        assert "LLM_ERROR" in values
-        assert "INTERNAL_ERROR" in values
+        # Should have all expected error codes
+        expected_codes = [
+            "INVALID_REQUEST",
+            "SESSION_NOT_FOUND",
+            "SESSION_TERMINATED",
+            "RATE_LIMITED",
+            "MAX_SESSIONS_EXCEEDED",
+            "LLM_ERROR",
+            "INTERNAL_ERROR",
+            "SOURCE_NOT_FOUND",
+            "SOURCE_ALREADY_EXISTS",
+            "SOURCE_TYPE_NOT_SUPPORTED",
+            "SCHEDULER_ENABLE_NOT_ALLOWED",
+            "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",
+            "MAPPING_NOT_FOUND",
+            "MAPPING_ALREADY_EXISTS",
+            "SERVICE_UNAVAILABLE",
+        ]
+        assert len(values) == len(expected_codes)
+        for code in expected_codes:
+            assert code in values
 
 
 class TestSessionListResponse:
@@ -301,19 +316,27 @@ class TestSessionListResponse:
         sessions = [
             SessionInfo(
                 session_id="session-1",
+                agent_id="coder",
                 agent_dir="/path/to/agent1",
                 status=SessionStatus.running,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
             SessionInfo(
                 session_id="session-2",
+                agent_id="coder",
                 agent_dir="/path/to/agent2",
                 status=SessionStatus.idle,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
         
-        response = SessionListResponse(sessions=sessions)
+        response = SessionListResponse(
+            sessions=sessions,
+            total=2,
+            limit=100,
+            offset=0,
+            has_more=False,
+        )
         
         assert len(response.sessions) == 2
         assert response.sessions[0].session_id == "session-1"
@@ -321,7 +344,13 @@ class TestSessionListResponse:
 
     def test_session_list_response_empty(self):
         """Test SessionListResponse with empty list."""
-        response = SessionListResponse(sessions=[])
+        response = SessionListResponse(
+            sessions=[],
+            total=0,
+            limit=100,
+            offset=0,
+            has_more=False,
+        )
         
         assert len(response.sessions) == 0
 
@@ -330,17 +359,25 @@ class TestSessionListResponse:
         sessions = [
             SessionInfo(
                 session_id="session-1",
+                agent_id="coder",
                 agent_dir="/path/to/agent",
                 status=SessionStatus.running,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
         
-        response = SessionListResponse(sessions=sessions)
+        response = SessionListResponse(
+            sessions=sessions,
+            total=1,
+            limit=100,
+            offset=0,
+            has_more=False,
+        )
         data = response.model_dump()
         
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["session_id"] == "session-1"
+        assert data["sessions"][0]["agent_id"] == "coder"
 
 
 class TestModelValidation:

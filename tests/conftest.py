@@ -119,6 +119,7 @@ def sample_session_info_data():
     """Sample SessionInfo data for testing."""
     return {
         "session_id": "test-session-123",
+        "agent_id": "coder",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,

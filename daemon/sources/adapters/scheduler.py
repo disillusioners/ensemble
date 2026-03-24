@@ -17,6 +17,7 @@ from ..base import (
     SourceStatus,
 )
 from daemon.models import SchedulerSessionMode, SessionStatus
+from daemon.registry import get_registry
 
 if TYPE_CHECKING:
     from daemon.repositories.session.repository import SQLModelSessionRepository
@@ -715,7 +716,14 @@ Original scheduled task:
                             # Construct agent_dir from agent name (will be resolved later)
                             agent_dir = self._agent
                         
+                        # Resolve agent_dir to agent_id
+                        registry = get_registry()
+                        agent_id = registry.resolve_to_id(agent_dir)
+                        if agent_id is None:
+                            agent_id = agent_dir  # Fallback to using agent_dir as agent_id
+                        
                         job_item = await self._job_queue_service.enqueue(
+                            agent_id=agent_id,
                             agent_dir=agent_dir,
                             message=formatted_message,
                             source="scheduler",

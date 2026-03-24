@@ -65,6 +65,7 @@ class SQLModelSessionRepository:
     def create(
         self,
         session_id: str,
+        agent_id: str,
         agent_dir: str,
         parent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -74,6 +75,7 @@ class SQLModelSessionRepository:
         
         Args:
             session_id: Unique session identifier.
+            agent_id: Agent ID (e.g., 'coder').
             agent_dir: Path to the agent directory.
             parent_id: Optional parent session ID for hierarchical sessions.
             metadata: Optional metadata dictionary.
@@ -88,6 +90,7 @@ class SQLModelSessionRepository:
             
             session = Session(
                 session_id=session_id,
+                agent_id=agent_id,
                 agent_dir=agent_dir,
                 agent_name=agent_name,
                 parent_id=parent_id,

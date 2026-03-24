@@ -43,6 +43,7 @@ class JobQueueService:
     
     async def enqueue(
         self,
+        agent_id: str,
         agent_dir: str,
         message: str,
         source: str = "api",
@@ -57,6 +58,7 @@ class JobQueueService:
         If project_id provided and lock held: create PENDING job with queue position.
         
         Args:
+            agent_id: Agent ID (e.g., 'coder').
             agent_dir: Path to the agent directory.
             message: Job message/content.
             source: Source of the job ("api", "telegram", "scheduler", "webhook").
@@ -69,6 +71,7 @@ class JobQueueService:
         """
         # Create job once (status defaults to PENDING in repository)
         job = self._repository.create(
+            agent_id=agent_id,
             agent_dir=agent_dir,
             message=message,
             source=source,
@@ -187,6 +190,7 @@ class JobQueueService:
         # Create a new job and use enqueue logic to determine if it should
         # start immediately or be queued
         new_job = await self.enqueue(
+            agent_id=job.agent_id,
             agent_dir=job.agent_dir,
             message=job.message,
             source=job.source,
