@@ -91,14 +91,18 @@
     <span class="action-divider"></span>
 
     <!-- Trigger Manual Execution -->
-    <button 
-      mat-icon-button 
-      matTooltip="Trigger now"
-      class="action-btn trigger-btn"
-      [disabled]="schedule().status === 'running'"
-      (click)="onTrigger(); $event.stopPropagation()">
-      <mat-icon>bolt</mat-icon>
-    </button>
+    <span
+      [matTooltip]="schedule().status !== 'running' ? 'To use the trigger feature you need to start the schedule first.' : ''"
+      [matTooltipDisabled]="schedule().status === 'running'"
+      matTooltipPosition="above">
+      <button
+        mat-icon-button
+        class="action-btn trigger-btn"
+        [disabled]="schedule().status !== 'running'"
+        (click)="onTrigger(); $event.stopPropagation()">
+        <mat-icon>bolt</mat-icon>
+      </button>
+    </span>
 
     <!-- Edit -->
     <button 

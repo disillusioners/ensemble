@@ -399,12 +399,17 @@
             Stop
           </button>
         }
-        <button mat-stroked-button
-                (click)="onTrigger()"
-                [disabled]="actionLoading()">
-          <mat-icon>flash_on</mat-icon>
-          Trigger Now
-        </button>
+        <span
+          [matTooltip]="schedule()?.status !== 'running' ? 'To use the trigger feature you need to start the schedule first.' : ''"
+          [matTooltipDisabled]="schedule()?.status === 'running'"
+          matTooltipPosition="above">
+          <button mat-stroked-button
+                  (click)="onTrigger()"
+                  [disabled]="actionLoading() || schedule()?.status !== 'running'">
+            <mat-icon>flash_on</mat-icon>
+            Trigger Now
+          </button>
+        </span>
         @if (!showDeleteConfirm()) {
           <button mat-stroked-button
                   color="warn"
