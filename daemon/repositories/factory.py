@@ -122,6 +122,15 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
     if 'agent_id' in table_sql:
         return  # Column already exists
     
+    # Determine PK column per table
+    pk_column = "session_id"
+    if table_name == "session_mappings":
+        pk_column = "mapping_id"
+    elif table_name in ("job_queue_items", "jobqueue"):
+        pk_column = "job_id"
+    elif table_name == "task_queue_items":
+        pk_column = "task_id"
+    
     # Add column as nullable first (for backward compat with old rows)
     conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN agent_id TEXT"))
     conn.commit()
@@ -129,16 +138,16 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
     
     # Populate agent_id from agent_dir using Python (more reliable than complex SQL)
     # Fetch rows that need updating
-    result = conn.execute(text(f"SELECT session_id, agent_dir FROM {table_name} WHERE agent_id IS NULL AND agent_dir IS NOT NULL AND agent_dir != ''"))
+    result = conn.execute(text(f"SELECT {pk_column}, agent_dir FROM {table_name} WHERE agent_id IS NULL AND agent_dir IS NOT NULL AND agent_dir != ''"))
     rows = result.fetchall()
     
     for row in rows:
-        session_id, agent_dir = row
+        pk_value, agent_dir = row
         # Extract last path component (e.g., 'coder' from './agents/coder')
         agent_id = agent_dir.rstrip('/').rsplit('/', 1)[-1] if '/' in agent_dir else agent_dir
         agent_id = agent_id.rsplit('\\', 1)[-1] if '\\' in agent_id else agent_id
-        conn.execute(text(f"UPDATE {table_name} SET agent_id = :agent_id WHERE session_id = :session_id"), 
-                    {"agent_id": agent_id, "session_id": session_id})
+        conn.execute(text(f"UPDATE {table_name} SET agent_id = :agent_id WHERE {pk_column} = :pk_value"), 
+                    {"agent_id": agent_id, "pk_value": pk_value})
     
     conn.commit()
     logger.info(f"Migration: Populated agent_id from agent_dir in {table_name} table ({len(rows)} rows)")
