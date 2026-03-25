@@ -662,7 +662,7 @@ class SourceRegistry:
             session_id = await mapper.get_or_create_session(
                 source_id=source_id,
                 external_user_id=msg.external_user_id,
-                agent_dir=agent_dir,
+                agent_id=agent_dir,
                 force_new=force_new,
             )
             

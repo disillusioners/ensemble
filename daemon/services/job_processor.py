@@ -116,7 +116,7 @@ class JobProcessor:
             # Spawn session for this job
             try:
                 session_id = self._session_manager.spawn_session(
-                    agent_dir=job.agent_dir,
+                    agent_id=job.agent_id,
                     session_id=started_job.session_id,
                 )
             except Exception as e:

@@ -232,7 +232,6 @@ class SessionMapper:
             # Spawn new session via SessionManager
             agent_session_id = self.manager.spawn_session(
                 agent_id=effective_agent_id,
-                agent_dir=effective_agent_dir,
             )
             
             # Create mapping
