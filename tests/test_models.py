@@ -22,14 +22,14 @@ class TestSessionCreate:
         """Test SessionCreate with only required fields."""
         session = SessionCreate(**sample_session_create_data)
         
-        assert session.agent_dir == "/path/to/agent"
+        assert session.agent_id == "coder"
         assert session.session_id is None
 
     def test_session_create_optional(self, sample_session_create_with_session_id):
         """Test SessionCreate with optional session_id."""
         session = SessionCreate(**sample_session_create_with_session_id)
         
-        assert session.agent_dir == "/path/to/agent"
+        assert session.agent_id == "coder"
         assert session.session_id == "custom-session-123"
 
     def test_session_create_serialization(self, sample_session_create_data):
@@ -37,7 +37,7 @@ class TestSessionCreate:
         session = SessionCreate(**sample_session_create_data)
         data = session.model_dump()
         
-        assert data["agent_dir"] == "/path/to/agent"
+        assert data["agent_id"] == "coder"
         assert data["session_id"] is None
 
     def test_session_create_validation_missing_agent_dir(self):
@@ -386,18 +386,18 @@ class TestModelValidation:
     def test_model_validate(self):
         """Test model_validate for parsing validated data."""
         data = {
-            "agent_dir": "/path/to/agent",
+            "agent_id": "coder",
             "session_id": "test-session",
         }
         
         session = SessionCreate.model_validate(data)
-        assert session.agent_dir == "/path/to/agent"
+        assert session.agent_id == "coder"
         assert session.session_id == "test-session"
 
     def test_model_dump_json(self):
         """Test model_dump_json for JSON serialization."""
-        session = SessionCreate(agent_dir="/path/to/agent")
+        session = SessionCreate(agent_id="coder")
         json_str = session.model_dump_json()
         
-        assert "agent_dir" in json_str
-        assert "/path/to/agent" in json_str
+        assert "agent_id" in json_str
+        assert "coder" in json_str

@@ -174,7 +174,7 @@ def sample_health_response_data():
 def sample_session_create_data():
     """Sample SessionCreate data for testing."""
     return {
-        "agent_dir": "/path/to/agent",
+        "agent_id": "coder",
     }
 
 
@@ -182,7 +182,7 @@ def sample_session_create_data():
 def sample_session_create_with_session_id():
     """Sample SessionCreate data with custom session_id."""
     return {
-        "agent_dir": "/path/to/agent",
+        "agent_id": "coder",
         "session_id": "custom-session-123",
     }
 
