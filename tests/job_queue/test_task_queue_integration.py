@@ -49,41 +49,41 @@ def integration_service(integration_repository, integration_lock_manager):
 
 
 class TestIntegrationBasicWorkflow:
-    """Tests for basic task queue workflow."""
+    """Tests for basic job queue workflow."""
 
     @pytest.mark.asyncio
     async def test_enqueue_process_complete_workflow(
         self, integration_service
     ):
         """Test the complete enqueue -> process -> complete workflow."""
-        # Step 1: Enqueue task
-        task = await integration_service.enqueue(
+        # Step 1: Enqueue job
+        job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Process this task",
+            message="Process this job",
             source="test",
             project_id="project-1",
             priority=5
         )
         
-        assert task is not None
-        assert task.status == TaskStatus.PROCESSING.value
-        assert task.session_id is not None
+        assert job is not None
+        assert job.status == JobStatus.PROCESSING.value
+        assert job.session_id is not None
         
-        # Step 2: Verify task is in database
-        retrieved = await integration_service.get_task(task.task_id)
+        # Step 2: Verify job is in database
+        retrieved = await integration_service.get_job(job.job_id)
         assert retrieved is not None
-        assert retrieved.status == TaskStatus.PROCESSING.value
+        assert retrieved.status == JobStatus.PROCESSING.value
         
-        # Step 3: Complete the task
-        completed = await integration_service.complete_task(task.task_id)
+        # Step 3: Complete the job
+        completed = await integration_service.complete_job(job.job_id)
         
         assert completed is not None
-        assert completed.status == TaskStatus.COMPLETED.value
+        assert completed.status == JobStatus.COMPLETED.value
         assert completed.completed_at is not None
         
         # Step 4: Verify final state
-        final = await integration_service.get_task(task.task_id)
-        assert final.status == TaskStatus.COMPLETED.value
+        final = await integration_service.get_job(job.job_id)
+        assert final.status == JobStatus.COMPLETED.value
         
         # Step 5: Verify lock is released
         assert await integration_service._lock_manager.is_locked("project-1") is False
@@ -92,209 +92,209 @@ class TestIntegrationBasicWorkflow:
     async def test_enqueue_without_project_skips_queue(
         self, integration_service
     ):
-        """Test that tasks without project_id skip the queue entirely."""
-        task = await integration_service.enqueue(
+        """Test that jobs without project_id skip the queue entirely."""
+        job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="No project task",
+            message="No project job",
             source="test",
             project_id=None,
             priority=5
         )
         
         # Should be processing immediately
-        assert task.status == TaskStatus.PROCESSING.value
-        assert task.session_id is not None
+        assert job.status == JobStatus.PROCESSING.value
+        assert job.session_id is not None
         
-        # Complete the task
-        completed = await integration_service.complete_task(task.task_id)
-        assert completed.status == TaskStatus.COMPLETED.value
+        # Complete the job
+        completed = await integration_service.complete_job(job.job_id)
+        assert completed.status == JobStatus.COMPLETED.value
 
 
 class TestIntegrationSameProjectSerialization:
-    """Tests for tasks with the same project (serialization)."""
+    """Tests for jobs with the same project (serialization)."""
 
     @pytest.mark.asyncio
-    async def test_multiple_tasks_same_project_serialized(
+    async def test_multiple_jobs_same_project_serialized(
         self, integration_service
     ):
-        """Test that multiple tasks for the same project are serialized."""
-        # Enqueue multiple tasks for the same project
-        task1 = await integration_service.enqueue(
+        """Test that multiple jobs for the same project are serialized."""
+        # Enqueue multiple jobs for the same project
+        job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 1",
+            message="Job 1",
             project_id="project-1",
             priority=5
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 2",
+            message="Job 2",
             project_id="project-1",
             priority=5
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 3",
+            message="Job 3",
             project_id="project-1",
             priority=5
         )
         
-        # Only first task should be processing
-        assert task1.status == TaskStatus.PROCESSING.value
-        assert task2.status == TaskStatus.PENDING.value
-        assert task3.status == TaskStatus.PENDING.value
+        # Only first job should be processing
+        assert job1.status == JobStatus.PROCESSING.value
+        assert job2.status == JobStatus.PENDING.value
+        assert job3.status == JobStatus.PENDING.value
         
         # Lock should be held
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
-        # Complete task 1
-        await integration_service.complete_task(task1.task_id)
+        # Complete job 1
+        await integration_service.complete_job(job1.job_id)
         
-        # Trigger next task (lock is released, so task2 should start)
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job (lock is released, so job2 should start)
+        await integration_service.trigger_next_job("project-1")
         
-        # Task 2 should now be processing
-        task2_updated = await integration_service.get_task(task2.task_id)
-        assert task2_updated.status == TaskStatus.PROCESSING.value
+        # Job 2 should now be processing
+        job2_updated = await integration_service.get_job(job2.job_id)
+        assert job2_updated.status == JobStatus.PROCESSING.value
         
-        # Complete task 2
-        await integration_service.complete_task(task2.task_id)
+        # Complete job 2
+        await integration_service.complete_job(job2.job_id)
         
-        # Trigger next task
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job
+        await integration_service.trigger_next_job("project-1")
         
-        # Task 3 should now be processing
-        task3_updated = await integration_service.get_task(task3.task_id)
-        assert task3_updated.status == TaskStatus.PROCESSING.value
+        # Job 3 should now be processing
+        job3_updated = await integration_service.get_job(job3.job_id)
+        assert job3_updated.status == JobStatus.PROCESSING.value
         
-        # Complete task 3
-        await integration_service.complete_task(task3.task_id)
+        # Complete job 3
+        await integration_service.complete_job(job3.job_id)
         
-        # All tasks completed
+        # All jobs completed
         assert await integration_service._lock_manager.is_locked("project-1") is False
         
         # Verify all are completed
-        all_tasks = await integration_service.list_tasks()
-        assert all(t.status == TaskStatus.COMPLETED.value for t in all_tasks)
+        all_jobs = await integration_service.list_jobs()
+        assert all(j.status == JobStatus.COMPLETED.value for j in all_jobs)
 
     @pytest.mark.asyncio
     async def test_priority_ordering_same_project(
         self, integration_service
     ):
-        """Test that tasks are processed by priority for same project."""
+        """Test that jobs are processed by priority for same project."""
         # Enqueue in reverse priority order
-        task_low = await integration_service.enqueue(
+        job_low = await integration_service.enqueue(
             agent_dir="/test/agent",
             message="Low priority",
             project_id="project-1",
             priority=1
         )
         
-        task_high = await integration_service.enqueue(
+        job_high = await integration_service.enqueue(
             agent_dir="/test/agent",
             message="High priority",
             project_id="project-1",
             priority=10
         )
         
-        task_medium = await integration_service.enqueue(
+        job_medium = await integration_service.enqueue(
             agent_dir="/test/agent",
             message="Medium priority",
             project_id="project-1",
             priority=5
         )
         
-        # First task (low priority) is processing
-        assert task_low.status == TaskStatus.PROCESSING.value
+        # First job (low priority) is processing
+        assert job_low.status == JobStatus.PROCESSING.value
         
-        # Complete low priority task
-        await integration_service.complete_task(task_low.task_id)
+        # Complete low priority job
+        await integration_service.complete_job(job_low.job_id)
         
-        # Trigger next task
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job
+        await integration_service.trigger_next_job("project-1")
         
         # High priority should be next
-        task_high_updated = await integration_service.get_task(task_high.task_id)
-        assert task_high_updated.status == TaskStatus.PROCESSING.value
+        job_high_updated = await integration_service.get_job(job_high.job_id)
+        assert job_high_updated.status == JobStatus.PROCESSING.value
         
-        # Complete high priority task
-        await integration_service.complete_task(task_high.task_id)
+        # Complete high priority job
+        await integration_service.complete_job(job_high.job_id)
         
-        # Trigger next task
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job
+        await integration_service.trigger_next_job("project-1")
         
         # Medium priority should be last
-        task_medium_updated = await integration_service.get_task(task_medium.task_id)
-        assert task_medium_updated.status == TaskStatus.PROCESSING.value
+        job_medium_updated = await integration_service.get_job(job_medium.job_id)
+        assert job_medium_updated.status == JobStatus.PROCESSING.value
 
     @pytest.mark.asyncio
-    async def test_cancel_queued_task_unblocks_next(
+    async def test_cancel_queued_job_unblocks_next(
         self, integration_service
     ):
-        """Test that cancelling a queued task allows next task to proceed."""
-        task1 = await integration_service.enqueue(
+        """Test that cancelling a queued job allows next job to proceed."""
+        job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 1",
+            message="Job 1",
             project_id="project-1"
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 2",
+            message="Job 2",
             project_id="project-1"
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 3",
+            message="Job 3",
             project_id="project-1"
         )
         
-        # Cancel task 2
-        await integration_service.cancel_task(task2.task_id)
+        # Cancel job 2
+        await integration_service.cancel_job(job2.job_id)
         
-        # Complete task 1
-        await integration_service.complete_task(task1.task_id)
+        # Complete job 1
+        await integration_service.complete_job(job1.job_id)
         
-        # Trigger next task (task 2 was cancelled, so task 3 should start)
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job (job 2 was cancelled, so job 3 should start)
+        await integration_service.trigger_next_job("project-1")
         
-        # Task 3 should be processing (task 2 was cancelled)
-        task3_updated = await integration_service.get_task(task3.task_id)
-        assert task3_updated.status == TaskStatus.PROCESSING.value
+        # Job 3 should be processing (job 2 was cancelled)
+        job3_updated = await integration_service.get_job(job3.job_id)
+        assert job3_updated.status == JobStatus.PROCESSING.value
 
 
 class TestIntegrationDifferentProjectsParallel:
-    """Tests for tasks with different projects (parallel execution)."""
+    """Tests for jobs with different projects (parallel execution)."""
 
     @pytest.mark.asyncio
     async def test_different_projects_run_parallel(
         self, integration_service
     ):
-        """Test that tasks for different projects run in parallel."""
-        task1 = await integration_service.enqueue(
+        """Test that jobs for different projects run in parallel."""
+        job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task for project 1",
+            message="Job for project 1",
             project_id="project-1"
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task for project 2",
+            message="Job for project 2",
             project_id="project-2"
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task for project 3",
+            message="Job for project 3",
             project_id="project-3"
         )
         
         # All should be processing
-        assert task1.status == TaskStatus.PROCESSING.value
-        assert task2.status == TaskStatus.PROCESSING.value
-        assert task3.status == TaskStatus.PROCESSING.value
+        assert job1.status == JobStatus.PROCESSING.value
+        assert job2.status == JobStatus.PROCESSING.value
+        assert job3.status == JobStatus.PROCESSING.value
         
         # All locks should be held
         assert await integration_service._lock_manager.is_locked("project-1") is True
@@ -302,9 +302,9 @@ class TestIntegrationDifferentProjectsParallel:
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
         # Complete all
-        await integration_service.complete_task(task1.task_id)
-        await integration_service.complete_task(task2.task_id)
-        await integration_service.complete_task(task3.task_id)
+        await integration_service.complete_job(job1.job_id)
+        await integration_service.complete_job(job2.job_id)
+        await integration_service.complete_job(job3.job_id)
         
         # All locks released
         assert await integration_service._lock_manager.is_locked("project-1") is False
@@ -315,50 +315,50 @@ class TestIntegrationDifferentProjectsParallel:
     async def test_mixed_projects_serialization_and_parallelism(
         self, integration_service
     ):
-        """Test mixing serialized and parallel tasks."""
-        # Project 1 gets multiple tasks (serialized)
-        task1_p1 = await integration_service.enqueue(
+        """Test mixing serialized and parallel jobs."""
+        # Project 1 gets multiple jobs (serialized)
+        job1_p1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="P1 Task 1",
+            message="P1 Job 1",
             project_id="project-1"
         )
         
-        task2_p1 = await integration_service.enqueue(
+        job2_p1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="P1 Task 2",
+            message="P1 Job 2",
             project_id="project-1"
         )
         
-        # Project 2 gets one task (parallel)
-        task_p2 = await integration_service.enqueue(
+        # Project 2 gets one job (parallel)
+        job_p2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="P2 Task",
+            message="P2 Job",
             project_id="project-2"
         )
         
-        # Both projects should have processing tasks
-        assert task1_p1.status == TaskStatus.PROCESSING.value
-        assert task_p2.status == TaskStatus.PROCESSING.value
+        # Both projects should have processing jobs
+        assert job1_p1.status == JobStatus.PROCESSING.value
+        assert job_p2.status == JobStatus.PROCESSING.value
         
         # Project 1 should have one pending
-        assert task2_p1.status == TaskStatus.PENDING.value
+        assert job2_p1.status == JobStatus.PENDING.value
         
-        # Complete project 2 task
-        await integration_service.complete_task(task_p2.task_id)
+        # Complete project 2 job
+        await integration_service.complete_job(job_p2.job_id)
         
-        # Project 1 task 2 is still pending (not unblocked, it's same project)
-        task2_p1_updated = await integration_service.get_task(task2_p1.task_id)
-        assert task2_p1_updated.status == TaskStatus.PENDING.value
+        # Project 1 job 2 is still pending (not unblocked, it's same project)
+        job2_p1_updated = await integration_service.get_job(job2_p1.job_id)
+        assert job2_p1_updated.status == JobStatus.PENDING.value
         
-        # Complete project 1 task 1
-        await integration_service.complete_task(task1_p1.task_id)
+        # Complete project 1 job 1
+        await integration_service.complete_job(job1_p1.job_id)
         
-        # Trigger next task for project 1
-        await integration_service.trigger_next_task("project-1")
+        # Trigger next job for project 1
+        await integration_service.trigger_next_job("project-1")
         
-        # Now project 1 task 2 should start
-        task2_p1_updated = await integration_service.get_task(task2_p1.task_id)
-        assert task2_p1_updated.status == TaskStatus.PROCESSING.value
+        # Now project 1 job 2 should start
+        job2_p1_updated = await integration_service.get_job(job2_p1.job_id)
+        assert job2_p1_updated.status == JobStatus.PROCESSING.value
 
 
 class TestIntegrationCrashRecovery:
@@ -369,14 +369,14 @@ class TestIntegrationCrashRecovery:
         self, integration_service, integration_lock_manager
     ):
         """Test recovery when lock manager state is lost (simulated crash)."""
-        # Enqueue and start a task
-        task = await integration_service.enqueue(
+        # Enqueue and start a job
+        job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task before crash",
+            message="Job before crash",
             project_id="project-1"
         )
         
-        assert task.status == TaskStatus.PROCESSING.value
+        assert job.status == JobStatus.PROCESSING.value
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
         # Simulate crash: clear lock manager
@@ -385,174 +385,174 @@ class TestIntegrationCrashRecovery:
         # Lock should be released (simulating crash recovery)
         assert await integration_service._lock_manager.is_locked("project-1") is False
         
-        # The task is still in PROCESSING state in database
+        # The job is still in PROCESSING state in database
         # but the lock is gone - this is crash recovery state
         
-        # New task should be able to acquire lock
-        new_task = await integration_service.enqueue(
+        # New job should be able to acquire lock
+        new_job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task after crash",
+            message="Job after crash",
             project_id="project-1"
         )
         
         # Should acquire lock and start processing
-        assert new_task.status == TaskStatus.PROCESSING.value
+        assert new_job.status == JobStatus.PROCESSING.value
         
-        # The old task is now orphaned - depends on application logic to handle
+        # The old job is now orphaned - depends on application logic to handle
 
     @pytest.mark.asyncio
-    async def test_recovery_completed_task_cleanup(
+    async def test_recovery_completed_job_cleanup(
         self, integration_service
     ):
-        """Test cleanup of completed tasks after recovery."""
-        # Create and complete some tasks
+        """Test cleanup of completed jobs after recovery."""
+        # Create and complete some jobs
         for i in range(5):
-            task = await integration_service.enqueue(
+            job = await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Task {i}",
+                message=f"Job {i}",
                 project_id="project-1"
             )
-            await integration_service.complete_task(task.task_id)
+            await integration_service.complete_job(job.job_id)
         
         # Verify all are completed
-        tasks = await integration_service.list_tasks()
-        assert all(t.status == TaskStatus.COMPLETED.value for t in tasks)
+        jobs = await integration_service.list_jobs()
+        assert all(j.status == JobStatus.COMPLETED.value for j in jobs)
         
-        # Cleanup completed tasks
+        # Cleanup completed jobs
         deleted = integration_service._repository.delete_completed()
         
         assert deleted == 5
         
-        # Verify all tasks are gone
-        remaining = await integration_service.list_tasks()
+        # Verify all jobs are gone
+        remaining = await integration_service.list_jobs()
         assert len(remaining) == 0
 
     @pytest.mark.asyncio
-    async def test_recovery_orphaned_processing_tasks(
+    async def test_recovery_orphaned_processing_jobs(
         self, integration_service
     ):
-        """Test handling of tasks stuck in PROCESSING state."""
-        # Start a task but don't complete it
-        task = await integration_service.enqueue(
+        """Test handling of jobs stuck in PROCESSING state."""
+        # Start a job but don't complete it
+        job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Orphaned task",
+            message="Orphaned job",
             project_id="project-1"
         )
         
-        # Simulate crash: clear lock but leave task in PROCESSING
-        await integration_service._lock_manager.release_by_session(task.session_id)
+        # Simulate crash: clear lock but leave job in PROCESSING
+        await integration_service._lock_manager.release_by_session(job.session_id)
         
-        # Task is still in PROCESSING state
-        assert task.status == TaskStatus.PROCESSING.value
+        # Job is still in PROCESSING state
+        assert job.status == JobStatus.PROCESSING.value
         
         # We should be able to cancel it
-        cancelled = await integration_service.cancel_task(task.task_id)
+        cancelled = await integration_service.cancel_job(job.job_id)
         assert cancelled is True
         
         # Or we could manually reset it
         updated = integration_service._repository.update(
-            task.task_id,
-            status=TaskStatus.PENDING.value,
+            job.job_id,
+            status=JobStatus.PENDING.value,
             session_id=None  # Clear session
         )
         assert updated is not None
-        assert updated.status == TaskStatus.PENDING.value
+        assert updated.status == JobStatus.PENDING.value
         
-        # Now a new task can be enqueued
-        new_task = await integration_service.enqueue(
+        # Now a new job can be enqueued
+        new_job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="New task",
+            message="New job",
             project_id="project-1"
         )
         
-        assert new_task.status == TaskStatus.PROCESSING.value
+        assert new_job.status == JobStatus.PROCESSING.value
 
     @pytest.mark.asyncio
-    async def test_recovery_with_multiple_queued_tasks(
+    async def test_recovery_with_multiple_queued_jobs(
         self, integration_service
     ):
-        """Test recovery when multiple tasks are queued."""
+        """Test recovery when multiple jobs are queued."""
         # Create a queue
-        task1 = await integration_service.enqueue(
+        job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 1",
+            message="Job 1",
             project_id="project-1"
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 2",
+            message="Job 2",
             project_id="project-1"
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 3",
+            message="Job 3",
             project_id="project-1"
         )
         
-        # Simulate crash during task1 processing
-        await integration_service._lock_manager.release_by_session(task1.session_id)
+        # Simulate crash during job1 processing
+        await integration_service._lock_manager.release_by_session(job1.session_id)
         
-        # Cancel the orphaned task1
-        await integration_service.cancel_task(task1.task_id)
+        # Cancel the orphaned job1
+        await integration_service.cancel_job(job1.job_id)
         
         # Complete the recovery
-        await integration_service.complete_task(task1.task_id)
+        await integration_service.complete_job(job1.job_id)
         
-        # Trigger next task
-        next_task = await integration_service.trigger_next_task("project-1")
+        # Trigger next job
+        next_job = await integration_service.trigger_next_job("project-1")
         
-        # Should be task2
-        assert next_task is not None
-        assert next_task.task_id == task2.task_id
-        assert next_task.status == TaskStatus.PROCESSING.value
+        # Should be job2
+        assert next_job is not None
+        assert next_job.job_id == job2.job_id
+        assert next_job.status == JobStatus.PROCESSING.value
         
-        # Complete task2 and trigger task3
-        await integration_service.complete_task(task2.task_id)
+        # Complete job2 and trigger job3
+        await integration_service.complete_job(job2.job_id)
         
-        next_task = await integration_service.trigger_next_task("project-1")
-        assert next_task.task_id == task3.task_id
+        next_job = await integration_service.trigger_next_job("project-1")
+        assert next_job.job_id == job3.job_id
 
 
 class TestIntegrationConcurrentOperations:
-    """Tests for concurrent task operations."""
+    """Tests for concurrent job operations."""
 
     @pytest.mark.asyncio
     async def test_concurrent_enqueue_same_project(
         self, integration_service
     ):
         """Test concurrent enqueue operations for same project."""
-        async def enqueue_task(i: int):
+        async def enqueue_job(i: int):
             return await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Concurrent task {i}",
+                message=f"Concurrent job {i}",
                 project_id="project-1"
             )
         
-        # Enqueue multiple tasks concurrently
+        # Enqueue multiple jobs concurrently
         results = await asyncio.gather(*[
-            enqueue_task(i) for i in range(5)
+            enqueue_job(i) for i in range(5)
         ])
         
         # Only one should be processing
         processing_count = sum(
-            1 for t in results if t.status == TaskStatus.PROCESSING.value
+            1 for j in results if j.status == JobStatus.PROCESSING.value
         )
         pending_count = sum(
-            1 for t in results if t.status == TaskStatus.PENDING.value
+            1 for j in results if j.status == JobStatus.PENDING.value
         )
         
         assert processing_count == 1
         assert pending_count == 4
         
         # Complete all in order
-        for task in results:
-            await integration_service.complete_task(task.task_id)
+        for job in results:
+            await integration_service.complete_job(job.job_id)
             # After each completion, next pending becomes processing
             # Check remaining pending
-            remaining_pending = await integration_service.list_tasks(
-                status=TaskStatus.PENDING,
+            remaining_pending = await integration_service.list_jobs(
+                status=JobStatus.PENDING,
                 project_id="project-1"
             )
             # Can verify ordering
@@ -562,21 +562,21 @@ class TestIntegrationConcurrentOperations:
         self, integration_service
     ):
         """Test concurrent enqueue operations for different projects."""
-        async def enqueue_task(i: int):
+        async def enqueue_job(i: int):
             return await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Task for project {i}",
+                message=f"Job for project {i}",
                 project_id=f"project-{i}"
             )
         
-        # Enqueue tasks for different projects concurrently
+        # Enqueue jobs for different projects concurrently
         results = await asyncio.gather(*[
-            enqueue_task(i) for i in range(5)
+            enqueue_job(i) for i in range(5)
         ])
         
         # All should be processing (different projects)
         assert all(
-            t.status == TaskStatus.PROCESSING.value for t in results
+            j.status == JobStatus.PROCESSING.value for j in results
         )
 
     @pytest.mark.asyncio
@@ -584,28 +584,28 @@ class TestIntegrationConcurrentOperations:
         self, integration_service
     ):
         """Test concurrent complete operations."""
-        # Create multiple tasks for different projects
-        tasks = []
+        # Create multiple jobs for different projects
+        jobs = []
         for i in range(5):
-            task = await integration_service.enqueue(
+            job = await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Task {i}",
+                message=f"Job {i}",
                 project_id=f"project-{i}"
             )
-            tasks.append(task)
+            jobs.append(job)
         
         # Complete all concurrently
-        async def complete_task(task):
-            return await integration_service.complete_task(task.task_id)
+        async def complete_job(job):
+            return await integration_service.complete_job(job.job_id)
         
         results = await asyncio.gather(*[
-            complete_task(t) for t in tasks
+            complete_job(j) for j in jobs
         ])
         
         # All should complete successfully
         assert all(r is not None for r in results)
         assert all(
-            r.status == TaskStatus.COMPLETED.value for r in results if r
+            r.status == JobStatus.COMPLETED.value for r in results if r
         )
 
 
@@ -617,22 +617,22 @@ class TestIntegrationSessionManagement:
         self, integration_service
     ):
         """Test that releasing by session releases all locks for that session."""
-        # Create tasks for different projects (each gets own session)
-        task1 = await integration_service.enqueue(
+        # Create jobs for different projects (each gets own session)
+        job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 1",
+            message="Job 1",
             project_id="project-1"
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 2",
+            message="Job 2",
             project_id="project-2"
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task 3",
+            message="Job 3",
             project_id="project-3"
         )
         
@@ -641,8 +641,8 @@ class TestIntegrationSessionManagement:
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
-        # Release all locks for task1's session (only project-1)
-        released = await integration_service.release_lock_by_session(task1.session_id)
+        # Release all locks for job1's session (only project-1)
+        released = await integration_service.release_lock_by_session(job1.session_id)
         assert "project-1" in released
         
         # Only project-1 lock should be released
@@ -650,12 +650,12 @@ class TestIntegrationSessionManagement:
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
-        # Release task2's session
-        released = await integration_service.release_lock_by_session(task2.session_id)
+        # Release job2's session
+        released = await integration_service.release_lock_by_session(job2.session_id)
         assert "project-2" in released
         
-        # Release task3's session
-        released = await integration_service.release_lock_by_session(task3.session_id)
+        # Release job3's session
+        released = await integration_service.release_lock_by_session(job3.session_id)
         assert "project-3" in released
         
         # All locks should be released
@@ -668,16 +668,16 @@ class TestIntegrationSessionManagement:
         self, integration_service
     ):
         """Test that session cleanup releases project lock."""
-        task = await integration_service.enqueue(
+        job = await integration_service.enqueue(
             agent_dir="/test/agent",
-            message="Task",
+            message="Job",
             project_id="project-1"
         )
         
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
         # Cleanup by session
-        released = await integration_service.release_lock_by_session(task.session_id)
+        released = await integration_service.release_lock_by_session(job.session_id)
         
         assert "project-1" in released
         assert await integration_service._lock_manager.is_locked("project-1") is False
@@ -690,62 +690,62 @@ class TestIntegrationPriorityQueue:
     async def test_priority_queue_ordering(
         self, integration_service
     ):
-        """Test that tasks are processed in priority order."""
-        # Enqueue tasks with different priorities
+        """Test that jobs are processed in priority order."""
+        # Enqueue jobs with different priorities
         priorities = [5, 1, 10, 3, 8]
-        tasks = []
+        jobs = []
         
         for i, priority in enumerate(priorities):
-            task = await integration_service.enqueue(
+            job = await integration_service.enqueue(
                 agent_dir="/test/agent",
                 message=f"Priority {priority}",
                 project_id="project-1",
                 priority=priority
             )
-            tasks.append((priority, task))
+            jobs.append((priority, job))
         
-        # First task (priority 5) should be processing
-        assert tasks[0][1].status == TaskStatus.PROCESSING.value
+        # First job (priority 5) should be processing
+        assert jobs[0][1].status == JobStatus.PROCESSING.value
         
-        # Get the pending tasks - should be ordered by priority (desc)
+        # Get the pending jobs - should be ordered by priority (desc)
         pending = integration_service._repository.list_pending_by_project("project-1")
-        pending_priorities = [t.priority for t in pending]
+        pending_priorities = [j.priority for j in pending]
         
-        # Pending tasks should be sorted by priority descending
+        # Pending jobs should be sorted by priority descending
         assert pending_priorities == sorted(pending_priorities, reverse=True)
         
-        # Complete all tasks
-        for priority, task in tasks:
-            await integration_service.complete_task(task.task_id)
-            await integration_service.trigger_next_task("project-1")
+        # Complete all jobs
+        for priority, job in jobs:
+            await integration_service.complete_job(job.job_id)
+            await integration_service.trigger_next_job("project-1")
         
-        # Verify all tasks are completed
-        all_tasks = await integration_service.list_tasks()
-        assert all(t.status == TaskStatus.COMPLETED.value for t in all_tasks)
+        # Verify all jobs are completed
+        all_jobs = await integration_service.list_jobs()
+        assert all(j.status == JobStatus.COMPLETED.value for j in all_jobs)
 
     @pytest.mark.asyncio
     async def test_same_priority_fifo_ordering(
         self, integration_service
     ):
-        """Test FIFO ordering for same priority tasks."""
-        tasks = []
+        """Test FIFO ordering for same priority jobs."""
+        jobs = []
         for i in range(3):
-            task = await integration_service.enqueue(
+            job = await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Task {i}",
+                message=f"Job {i}",
                 project_id="project-1",
                 priority=5
             )
-            tasks.append(task)
+            jobs.append(job)
             # Small delay to ensure different created_at
             await asyncio.sleep(0.01)
         
-        # Complete first task
-        await integration_service.complete_task(tasks[0].task_id)
+        # Complete first job
+        await integration_service.complete_job(jobs[0].job_id)
         
-        # Next should be task[1]
-        next_task = await integration_service.trigger_next_task("project-1")
-        assert next_task.task_id == tasks[1].task_id
+        # Next should be jobs[1]
+        next_job = await integration_service.trigger_next_job("project-1")
+        assert next_job.job_id == jobs[1].job_id
 
 
 class TestIntegrationEndToEnd:
@@ -758,8 +758,8 @@ class TestIntegrationEndToEnd:
         """Test a complete realistic end-to-end scenario."""
         # Simulate a real workload
         
-        # 1. Submit initial tasks for different projects
-        task1 = await integration_service.enqueue(
+        # 1. Submit initial jobs for different projects
+        job1 = await integration_service.enqueue(
             agent_dir="/agents/code",
             message="Build authentication module",
             source="api",
@@ -767,7 +767,7 @@ class TestIntegrationEndToEnd:
             priority=8
         )
         
-        task2 = await integration_service.enqueue(
+        job2 = await integration_service.enqueue(
             agent_dir="/agents/docs",
             message="Update API documentation",
             source="api",
@@ -775,7 +775,7 @@ class TestIntegrationEndToEnd:
             priority=5
         )
         
-        task3 = await integration_service.enqueue(
+        job3 = await integration_service.enqueue(
             agent_dir="/agents/frontend",
             message="Fix login form styling",
             source="webhook",
@@ -784,27 +784,27 @@ class TestIntegrationEndToEnd:
         )
         
         # 2. Verify initial states
-        assert task1.status == TaskStatus.PROCESSING.value
-        assert task2.status == TaskStatus.PENDING.value
-        assert task3.status == TaskStatus.PROCESSING.value
+        assert job1.status == JobStatus.PROCESSING.value
+        assert job2.status == JobStatus.PENDING.value
+        assert job3.status == JobStatus.PROCESSING.value
         
-        # 3. Complete task3 (frontend-web, independent)
-        await integration_service.complete_task(task3.task_id)
+        # 3. Complete job3 (frontend-web, independent)
+        await integration_service.complete_job(job3.job_id)
         
-        # 4. Complete task1 (backend-api first task)
-        await integration_service.complete_task(task1.task_id)
+        # 4. Complete job1 (backend-api first job)
+        await integration_service.complete_job(job1.job_id)
         
         # 5. Trigger next for backend-api
-        next_backend = await integration_service.trigger_next_task("backend-api")
-        assert next_backend.task_id == task2.task_id
-        assert next_backend.status == TaskStatus.PROCESSING.value
+        next_backend = await integration_service.trigger_next_job("backend-api")
+        assert next_backend.job_id == job2.job_id
+        assert next_backend.status == JobStatus.PROCESSING.value
         
-        # 6. Complete remaining tasks
-        await integration_service.complete_task(task2.task_id)
+        # 6. Complete remaining jobs
+        await integration_service.complete_job(job2.job_id)
         
         # 7. Verify all completed
-        all_tasks = await integration_service.list_tasks()
-        assert all(t.status == TaskStatus.COMPLETED.value for t in all_tasks)
+        all_jobs = await integration_service.list_jobs()
+        assert all(j.status == JobStatus.COMPLETED.value for j in all_jobs)
         
         # 8. Verify no locks held
         assert await integration_service._lock_manager.is_locked("backend-api") is False
@@ -812,46 +812,46 @@ class TestIntegrationEndToEnd:
 
     @pytest.mark.asyncio
     async def test_high_load_scenario(self, integration_service):
-        """Test with high load of tasks."""
-        # Create many tasks across multiple projects
+        """Test with high load of jobs."""
+        # Create many jobs across multiple projects
         num_projects = 3
-        tasks_per_project = 10
+        jobs_per_project = 10
         
-        all_tasks = []
+        all_jobs = []
         for project_id in range(num_projects):
-            project_tasks = []
-            for i in range(tasks_per_project):
-                task = await integration_service.enqueue(
+            project_jobs = []
+            for i in range(jobs_per_project):
+                job = await integration_service.enqueue(
                     agent_dir="/test/agent",
-                    message=f"Task {i} for project {project_id}",
+                    message=f"Job {i} for project {project_id}",
                     project_id=f"project-{project_id}",
                     priority=(i % 10) + 1
                 )
-                project_tasks.append(task)
-            all_tasks.append(project_tasks)
+                project_jobs.append(job)
+            all_jobs.append(project_jobs)
         
         # Verify initial state: 1 processing, rest pending per project
-        for project_tasks in all_tasks:
-            assert project_tasks[0].status == TaskStatus.PROCESSING.value
-            for task in project_tasks[1:]:
-                assert task.status == TaskStatus.PENDING.value
+        for project_jobs in all_jobs:
+            assert project_jobs[0].status == JobStatus.PROCESSING.value
+            for job in project_jobs[1:]:
+                assert job.status == JobStatus.PENDING.value
         
-        # Complete all tasks per project
+        # Complete all jobs per project
         for project_id in range(num_projects):
-            project_tasks = all_tasks[project_id]
-            for task in project_tasks:
-                # Complete current task
-                completed = await integration_service.complete_task(task.task_id)
-                # Trigger next task
-                await integration_service.trigger_next_task(f"project-{project_id}")
+            project_jobs = all_jobs[project_id]
+            for job in project_jobs:
+                # Complete current job
+                completed = await integration_service.complete_job(job.job_id)
+                # Trigger next job
+                await integration_service.trigger_next_job(f"project-{project_id}")
         
-        # Verify all tasks are completed
-        final_tasks = await integration_service.list_tasks()
-        assert len(final_tasks) == num_projects * tasks_per_project
+        # Verify all jobs are completed
+        final_jobs = await integration_service.list_jobs()
+        assert len(final_jobs) == num_projects * jobs_per_project
         
-        # Count completed tasks
-        completed_count = sum(1 for t in final_tasks if t.status == TaskStatus.COMPLETED.value)
-        assert completed_count == num_projects * tasks_per_project
+        # Count completed jobs
+        completed_count = sum(1 for j in final_jobs if j.status == JobStatus.COMPLETED.value)
+        assert completed_count == num_projects * jobs_per_project
         
         # No locks should be held
         assert len(await integration_service._lock_manager.get_all_locks()) == 0
@@ -860,34 +860,34 @@ class TestIntegrationEndToEnd:
     async def test_cancellation_recovery_scenario(self, integration_service):
         """Test cancellation and recovery scenario."""
         # Create a queue
-        tasks = []
+        jobs = []
         for i in range(5):
-            task = await integration_service.enqueue(
+            job = await integration_service.enqueue(
                 agent_dir="/test/agent",
-                message=f"Task {i}",
+                message=f"Job {i}",
                 project_id="project-1"
             )
-            tasks.append(task)
+            jobs.append(job)
         
-        # Cancel middle tasks
-        await integration_service.cancel_task(tasks[1].task_id)
-        await integration_service.cancel_task(tasks[3].task_id)
+        # Cancel middle jobs
+        await integration_service.cancel_job(jobs[1].job_id)
+        await integration_service.cancel_job(jobs[3].job_id)
         
         # Complete remaining in order
-        await integration_service.complete_task(tasks[0].task_id)
-        await integration_service.trigger_next_task("project-1")  # task 2
+        await integration_service.complete_job(jobs[0].job_id)
+        await integration_service.trigger_next_job("project-1")  # job 2
         
-        await integration_service.complete_task(tasks[2].task_id)
-        await integration_service.trigger_next_task("project-1")  # task 4
+        await integration_service.complete_job(jobs[2].job_id)
+        await integration_service.trigger_next_job("project-1")  # job 4
         
-        await integration_service.complete_task(tasks[4].task_id)
+        await integration_service.complete_job(jobs[4].job_id)
         
         # Verify final states
-        final_tasks = await integration_service.list_tasks()
-        assert len(final_tasks) == 5
+        final_jobs = await integration_service.list_jobs()
+        assert len(final_jobs) == 5
         
-        cancelled = [t for t in final_tasks if t.status == TaskStatus.CANCELLED.value]
-        completed = [t for t in final_tasks if t.status == TaskStatus.COMPLETED.value]
+        cancelled = [j for j in final_jobs if j.status == JobStatus.CANCELLED.value]
+        completed = [j for j in final_jobs if j.status == JobStatus.COMPLETED.value]
         
         assert len(cancelled) == 2
         assert len(completed) == 3

@@ -5,6 +5,7 @@ job serialization with waiter notification.
 """
 
 import asyncio
+from datetime import datetime
 import pytest
 
 from daemon.services.job_lock_manager import JobLockManager, LockInfo
@@ -19,7 +20,7 @@ class TestLockManagerBasicOperations:
         """Test successful lock acquisition."""
         result = await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         assert result is True
@@ -31,14 +32,14 @@ class TestLockManagerBasicOperations:
         # First acquisition succeeds
         await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         
         # Second acquisition for same project fails
         result = await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-2",
+            job_id="job-2",
             session_id="session-2"
         )
         assert result is False
@@ -48,31 +49,31 @@ class TestLockManagerBasicOperations:
         """Test successful lock release."""
         await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         
-        result = await lock_manager.release("project-1", "task-1")
+        result = await lock_manager.release("project-1", "job-1")
         assert result is True
         assert await lock_manager.is_locked("project-1") is False
 
     @pytest.mark.asyncio
     async def test_release_lock_not_held(self, lock_manager):
         """Test releasing lock that's not held returns False."""
-        result = await lock_manager.release("project-1", "task-1")
+        result = await lock_manager.release("project-1", "job-1")
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_release_lock_wrong_task(self, lock_manager):
-        """Test releasing lock held by different task returns False."""
+    async def test_release_lock_wrong_job(self, lock_manager):
+        """Test releasing lock held by different job returns False."""
         await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         
-        # Try to release with different task_id
-        result = await lock_manager.release("project-1", "task-2")
+        # Try to release with different job_id
+        result = await lock_manager.release("project-1", "job-2")
         assert result is False
         assert await lock_manager.is_locked("project-1") is True
 
@@ -81,32 +82,32 @@ class TestLockManagerBasicOperations:
         """Test double release returns False second time."""
         await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         
         # First release succeeds
-        result1 = await lock_manager.release("project-1", "task-1")
+        result1 = await lock_manager.release("project-1", "job-1")
         assert result1 is True
         
         # Second release fails (lock no longer held)
-        result2 = await lock_manager.release("project-1", "task-1")
+        result2 = await lock_manager.release("project-1", "job-1")
         assert result2 is False
 
     @pytest.mark.asyncio
     async def test_multiple_projects_independent(self, lock_manager):
         """Test locks for different projects are independent."""
         # Acquire locks for multiple projects
-        await lock_manager.acquire("project-1", "task-1", "session-1")
-        await lock_manager.acquire("project-2", "task-2", "session-2")
-        await lock_manager.acquire("project-3", "task-3", "session-3")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
+        await lock_manager.acquire("project-2", "job-2", "session-2")
+        await lock_manager.acquire("project-3", "job-3", "session-3")
         
         assert await lock_manager.is_locked("project-1") is True
         assert await lock_manager.is_locked("project-2") is True
         assert await lock_manager.is_locked("project-3") is True
         
         # Release one doesn't affect others
-        await lock_manager.release("project-2", "task-2")
+        await lock_manager.release("project-2", "job-2")
         assert await lock_manager.is_locked("project-1") is True
         assert await lock_manager.is_locked("project-2") is False
         assert await lock_manager.is_locked("project-3") is True
@@ -120,13 +121,13 @@ class TestLockManagerGetLockInfo:
         """Test getting lock info when lock exists."""
         await lock_manager.acquire(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         
         info = await lock_manager.get_lock_info("project-1")
         assert info is not None
-        assert info.task_id == "task-1"
+        assert info.job_id == "job-1"
         assert info.project_id == "project-1"
         assert info.session_id == "session-1"
         assert info.locked_at is not None
@@ -140,8 +141,8 @@ class TestLockManagerGetLockInfo:
     @pytest.mark.asyncio
     async def test_get_all_locks(self, lock_manager):
         """Test getting all current locks."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
-        await lock_manager.acquire("project-2", "task-2", "session-2")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
+        await lock_manager.acquire("project-2", "job-2", "session-2")
         
         all_locks = await lock_manager.get_all_locks()
         assert len(all_locks) == 2
@@ -163,12 +164,12 @@ class TestLockManagerConcurrentAccess:
         """Test concurrent attempts to acquire same project lock."""
         acquired_count = 0
         
-        async def try_acquire(task_id: str):
+        async def try_acquire(job_id: str):
             nonlocal acquired_count
             result = await lock_manager.acquire(
                 project_id="project-1",
-                task_id=task_id,
-                session_id=f"session-{task_id}"
+                job_id=job_id,
+                session_id=f"session-{job_id}"
             )
             if result:
                 acquired_count += 1
@@ -176,9 +177,9 @@ class TestLockManagerConcurrentAccess:
         
         # Run multiple concurrent acquisitions
         results = await asyncio.gather(
-            try_acquire("task-1"),
-            try_acquire("task-2"),
-            try_acquire("task-3"),
+            try_acquire("job-1"),
+            try_acquire("job-2"),
+            try_acquire("job-3"),
         )
         
         # Only one should succeed
@@ -190,9 +191,9 @@ class TestLockManagerConcurrentAccess:
     async def test_concurrent_acquire_different_projects(self, lock_manager):
         """Test concurrent acquisitions for different projects all succeed."""
         results = await asyncio.gather(
-            lock_manager.acquire("project-1", "task-1", "session-1"),
-            lock_manager.acquire("project-2", "task-2", "session-2"),
-            lock_manager.acquire("project-3", "task-3", "session-3"),
+            lock_manager.acquire("project-1", "job-1", "session-1"),
+            lock_manager.acquire("project-2", "job-2", "session-2"),
+            lock_manager.acquire("project-3", "job-3", "session-3"),
         )
         
         assert all(results)
@@ -202,19 +203,19 @@ class TestLockManagerConcurrentAccess:
     async def test_concurrent_acquire_and_release(self, lock_manager):
         """Test concurrent acquire and release operations."""
         # Acquire initial lock
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
-        async def release_task():
+        async def release_job():
             await asyncio.sleep(0.01)  # Small delay
-            return await lock_manager.release("project-1", "task-1")
+            return await lock_manager.release("project-1", "job-1")
         
         async def acquire_after():
             await asyncio.sleep(0.02)  # Larger delay
-            return await lock_manager.acquire("project-1", "task-2", "session-2")
+            return await lock_manager.acquire("project-1", "job-2", "session-2")
         
         # Start both operations concurrently
         release_result, acquire_result = await asyncio.gather(
-            release_task(),
+            release_job(),
             acquire_after()
         )
         
@@ -231,7 +232,7 @@ class TestLockManagerWaitForLock:
         """Test wait_for_lock when lock is immediately available."""
         result = await lock_manager.wait_for_lock(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         assert result is True
@@ -240,19 +241,19 @@ class TestLockManagerWaitForLock:
     @pytest.mark.asyncio
     async def test_wait_for_lock_waits_for_release(self, lock_manager):
         """Test wait_for_lock waits and acquires when lock released."""
-        # First task holds lock
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        # First job holds lock
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         async def wait_for_and_acquire():
             return await lock_manager.wait_for_lock(
                 project_id="project-1",
-                task_id="task-2",
+                job_id="job-2",
                 session_id="session-2"
             )
         
         async def release_after_delay():
             await asyncio.sleep(0.05)
-            await lock_manager.release("project-1", "task-1")
+            await lock_manager.release("project-1", "job-1")
         
         # Waiter should get the lock after release
         wait_result, _ = await asyncio.gather(
@@ -263,81 +264,81 @@ class TestLockManagerWaitForLock:
         assert wait_result is True
         assert await lock_manager.is_locked("project-1") is True
         
-        # Verify the lock was acquired by task-2
+        # Verify the lock was acquired by job-2
         lock_info = await lock_manager.get_lock_info("project-1")
-        assert lock_info.task_id == "task-2"
+        assert lock_info.job_id == "job-2"
 
     @pytest.mark.asyncio
     async def test_wait_for_lock_with_timeout(self, lock_manager):
         """Test wait_for_lock respects timeout."""
         # Hold lock indefinitely
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         # Wait with very short timeout
         result = await lock_manager.wait_for_lock(
             project_id="project-1",
-            task_id="task-2",
+            job_id="job-2",
             session_id="session-2",
             timeout=0.05
         )
         
         assert result is False
-        # Lock should still be held by task-1
+        # Lock should still be held by job-1
         assert await lock_manager.is_locked("project-1") is True
         lock_info = await lock_manager.get_lock_info("project-1")
-        assert lock_info.task_id == "task-1"
+        assert lock_info.job_id == "job-1"
 
     @pytest.mark.asyncio
     async def test_wait_for_lock_fifo_order(self, lock_manager):
         """Test waiters are notified in FIFO order."""
         # Hold lock
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
-        acquired_tasks = []
+        acquired_jobs = []
         
-        async def wait_and_acquire(task_id: str):
+        async def wait_and_acquire(job_id: str):
             result = await lock_manager.wait_for_lock(
                 project_id="project-1",
-                task_id=task_id,
-                session_id=f"session-{task_id}"
+                job_id=job_id,
+                session_id=f"session-{job_id}"
             )
             if result:
-                acquired_tasks.append(task_id)
+                acquired_jobs.append(job_id)
         
         # Add multiple waiters
         await asyncio.gather(
-            wait_and_acquire("task-2"),
-            wait_and_acquire("task-3"),
-            wait_and_acquire("task-4"),
+            wait_and_acquire("job-2"),
+            wait_and_acquire("job-3"),
+            wait_and_acquire("job-4"),
         )
         
         # Release the lock
-        await lock_manager.release("project-1", "task-1")
+        await lock_manager.release("project-1", "job-1")
         
         # Wait for all waiters to complete
         await asyncio.sleep(0.1)
         
         # First waiter should get the lock
-        assert len(acquired_tasks) == 1
-        assert acquired_tasks[0] == "task-2"
+        assert len(acquired_jobs) == 1
+        assert acquired_jobs[0] == "job-2"
 
     @pytest.mark.asyncio
     async def test_wait_for_lock_max_waiters(self):
         """Test max_waiters limit is enforced."""
-        manager = TaskLockManager(max_waiters=2)
+        manager = JobLockManager(max_waiters=2)
         
         # Hold lock
-        await manager.acquire("project-1", "task-1", "session-1")
+        await manager.acquire("project-1", "job-1", "session-1")
         
         # First two waiters should succeed
-        result1 = await manager.wait_for_lock("project-1", "task-2", "session-2")
-        result2 = await manager.wait_for_lock("project-1", "task-3", "session-3")
+        result1 = await manager.wait_for_lock("project-1", "job-2", "session-2")
+        result2 = await manager.wait_for_lock("project-1", "job-3", "session-3")
         
         assert result1 is True
         assert result2 is True
         
         # Third waiter should fail (max reached)
-        result3 = await manager.wait_for_lock("project-1", "task-4", "session-4")
+        result3 = await manager.wait_for_lock("project-1", "job-4", "session-4")
         assert result3 is False
 
 
@@ -347,9 +348,9 @@ class TestLockManagerReleaseBySession:
     @pytest.mark.asyncio
     async def test_release_by_session_single_lock(self, lock_manager):
         """Test releasing lock by session ID."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
-        await lock_manager.acquire("project-2", "task-2", "session-1")
-        await lock_manager.acquire("project-3", "task-3", "session-2")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
+        await lock_manager.acquire("project-2", "job-2", "session-1")
+        await lock_manager.acquire("project-3", "job-3", "session-2")
         
         released = await lock_manager.release_by_session("session-1")
         
@@ -361,7 +362,7 @@ class TestLockManagerReleaseBySession:
     @pytest.mark.asyncio
     async def test_release_by_session_no_matching(self, lock_manager):
         """Test release_by_session with no matching session."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         released = await lock_manager.release_by_session("session-nonexistent")
         
@@ -382,7 +383,7 @@ class TestLockManagerSyncMethods:
         """Test synchronous lock acquisition."""
         result = lock_manager.acquire_sync(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         assert result is True
@@ -391,32 +392,32 @@ class TestLockManagerSyncMethods:
 
     def test_acquire_sync_already_held(self, lock_manager):
         """Test synchronous acquisition when already held."""
-        lock_manager.acquire_sync("project-1", "task-1", "session-1")
+        lock_manager.acquire_sync("project-1", "job-1", "session-1")
         
-        result = lock_manager.acquire_sync("project-1", "task-2", "session-2")
+        result = lock_manager.acquire_sync("project-1", "job-2", "session-2")
         assert result is False
 
     def test_release_sync_success(self, lock_manager):
         """Test synchronous lock release."""
-        lock_manager.acquire_sync("project-1", "task-1", "session-1")
+        lock_manager.acquire_sync("project-1", "job-1", "session-1")
         
-        result = lock_manager.release_sync("project-1", "task-1")
+        result = lock_manager.release_sync("project-1", "job-1")
         assert result is True
         assert lock_manager._locks.get("project-1") is None
 
-    def test_release_sync_wrong_task(self, lock_manager):
-        """Test sync release with wrong task_id."""
-        lock_manager.acquire_sync("project-1", "task-1", "session-1")
+    def test_release_sync_wrong_job(self, lock_manager):
+        """Test sync release with wrong job_id."""
+        lock_manager.acquire_sync("project-1", "job-1", "session-1")
         
-        result = lock_manager.release_sync("project-1", "task-2")
+        result = lock_manager.release_sync("project-1", "job-2")
         assert result is False
         assert lock_manager._locks.get("project-1") is not None
 
     def test_release_by_session_sync(self, lock_manager):
         """Test synchronous release_by_session."""
-        lock_manager.acquire_sync("project-1", "task-1", "session-1")
-        lock_manager.acquire_sync("project-2", "task-2", "session-1")
-        lock_manager.acquire_sync("project-3", "task-3", "session-2")
+        lock_manager.acquire_sync("project-1", "job-1", "session-1")
+        lock_manager.acquire_sync("project-2", "job-2", "session-1")
+        lock_manager.acquire_sync("project-3", "job-3", "session-2")
         
         released = lock_manager.release_by_session_sync("session-1")
         
@@ -434,7 +435,7 @@ class TestLockManagerContextManager:
         """Test context manager acquires and releases lock."""
         async with lock_manager.lock_context(
             project_id="project-1",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         ) as acquired:
             assert acquired is True
@@ -447,11 +448,11 @@ class TestLockManagerContextManager:
     async def test_lock_context_with_timeout(self, lock_manager):
         """Test context manager with timeout."""
         # Hold lock
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         async with lock_manager.lock_context(
             project_id="project-1",
-            task_id="task-2",
+            job_id="job-2",
             session_id="session-2",
             timeout=0.05
         ) as acquired:
@@ -466,7 +467,7 @@ class TestLockManagerContextManager:
         with pytest.raises(ValueError):
             async with lock_manager.lock_context(
                 project_id="project-1",
-                task_id="task-1",
+                job_id="job-1",
                 session_id="session-1"
             ):
                 assert await lock_manager.is_locked("project-1") is True
@@ -482,8 +483,8 @@ class TestLockManagerClear:
     @pytest.mark.asyncio
     async def test_clear_removes_all_locks(self, lock_manager):
         """Test clear removes all locks and waiters."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
-        await lock_manager.acquire("project-2", "task-2", "session-2")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
+        await lock_manager.acquire("project-2", "job-2", "session-2")
         
         lock_manager.clear()
         
@@ -494,11 +495,11 @@ class TestLockManagerClear:
     @pytest.mark.asyncio
     async def test_clear_removes_waiters(self, lock_manager):
         """Test clear also removes waiters."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         # Add waiters
-        await lock_manager.wait_for_lock("project-1", "task-2", "session-2")
-        await lock_manager.wait_for_lock("project-1", "task-3", "session-3")
+        await lock_manager.wait_for_lock("project-1", "job-2", "session-2")
+        await lock_manager.wait_for_lock("project-1", "job-3", "session-3")
         
         assert await lock_manager.get_waiter_count("project-1") == 2
         
@@ -513,12 +514,12 @@ class TestLockInfo:
     def test_lock_info_creation(self):
         """Test LockInfo creation with default timestamp."""
         info = LockInfo(
-            task_id="task-1",
+            job_id="job-1",
             project_id="project-1",
             session_id="session-1"
         )
         
-        assert info.task_id == "task-1"
+        assert info.job_id == "job-1"
         assert info.project_id == "project-1"
         assert info.session_id == "session-1"
         assert info.locked_at is not None
@@ -527,7 +528,7 @@ class TestLockInfo:
         """Test LockInfo creation with custom timestamp."""
         custom_time = datetime(2024, 1, 1, 12, 0, 0)
         info = LockInfo(
-            task_id="task-1",
+            job_id="job-1",
             project_id="project-1",
             session_id="session-1",
             locked_at=custom_time
@@ -535,18 +536,18 @@ class TestLockInfo:
         
         assert info.locked_at == custom_time
 
-    def test_lock_info_to_lock_info(self):
-        """Test conversion to TaskLockInfo."""
+    def test_lock_info_to_job_lock_info(self):
+        """Test conversion to JobLockInfo."""
         info = LockInfo(
-            task_id="task-1",
+            job_id="job-1",
             project_id="project-1",
             session_id="session-1"
         )
         
         lock_info = info.to_lock_info()
         
-        assert isinstance(lock_info, TaskLockInfo)
-        assert lock_info.task_id == "task-1"
+        assert isinstance(lock_info, JobLockInfo)
+        assert lock_info.job_id == "job-1"
         assert lock_info.project_id == "project-1"
         assert lock_info.session_id == "session-1"
         assert lock_info.locked_at == info.locked_at
@@ -560,14 +561,14 @@ class TestLockManagerEdgeCases:
         """Test lock operations with empty project ID."""
         result = await lock_manager.acquire(
             project_id="",
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         assert result is True
         
         assert await lock_manager.is_locked("") is True
         
-        release_result = await lock_manager.release("", "task-1")
+        release_result = await lock_manager.release("", "job-1")
         assert release_result is True
 
     @pytest.mark.asyncio
@@ -577,7 +578,7 @@ class TestLockManagerEdgeCases:
         
         result = await lock_manager.acquire(
             project_id=special_project,
-            task_id="task-1",
+            job_id="job-1",
             session_id="session-1"
         )
         assert result is True
@@ -589,7 +590,7 @@ class TestLockManagerEdgeCases:
     @pytest.mark.asyncio
     async def test_waiter_count(self, lock_manager):
         """Test waiter count tracking."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         assert await lock_manager.get_waiter_count("project-1") == 0
         
@@ -597,7 +598,7 @@ class TestLockManagerEdgeCases:
         # Actually wait_for_lock adds to waiters when lock is held
         async def add_waiter():
             return await lock_manager.wait_for_lock(
-                "project-1", f"task-waiter", f"session-waiter"
+                "project-1", f"job-waiter", f"session-waiter"
             )
         
         # Note: wait_for_lock will return False but still add waiter for FIFO
@@ -619,28 +620,28 @@ class TestLockManagerEdgeCases:
     @pytest.mark.asyncio
     async def test_release_triggers_next_waiter(self, lock_manager):
         """Test that releasing lock notifies next waiter."""
-        await lock_manager.acquire("project-1", "task-1", "session-1")
+        await lock_manager.acquire("project-1", "job-1", "session-1")
         
         # Add waiter that will acquire when lock is released
         acquired_by_waiter = False
         
-        async def waiter_task():
+        async def waiter_job():
             nonlocal acquired_by_waiter
             result = await lock_manager.wait_for_lock(
-                "project-1", "task-2", "session-2", timeout=1.0
+                "project-1", "job-2", "session-2", timeout=1.0
             )
             if result:
                 acquired_by_waiter = True
             return result
         
         # Start waiter
-        waiter = asyncio.create_task(waiter_task())
+        waiter = asyncio.create_task(waiter_job())
         
         # Wait for waiter to be registered
         await asyncio.sleep(0.05)
         
         # Release original lock
-        await lock_manager.release("project-1", "task-1")
+        await lock_manager.release("project-1", "job-1")
         
         # Wait for waiter to complete
         try:

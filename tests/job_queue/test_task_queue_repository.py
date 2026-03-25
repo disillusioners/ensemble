@@ -11,96 +11,96 @@ from daemon.repositories.job_queue.models import JobStatus, JobItem
 
 
 class TestRepositoryCreate:
-    """Tests for task creation."""
+    """Tests for job creation."""
 
-    def test_create_task_basic(self, repository, sample_task_data):
-        """Test creating a basic task."""
-        task = repository.create(**sample_task_data)
+    def test_create_job_basic(self, repository, sample_job_data):
+        """Test creating a basic job."""
+        job = repository.create(**sample_job_data)
         
-        assert task.job_id is not None
-        assert task.agent_dir == sample_task_data["agent_dir"]
-        assert task.message == sample_task_data["message"]
-        assert task.source == sample_task_data["source"]
-        assert task.project_id == sample_task_data["project_id"]
-        assert task.priority == sample_task_data["priority"]
-        assert task.status == JobStatus.PENDING.value
-        assert task.job_metadata == sample_task_data["job_metadata"]
+        assert job.job_id is not None
+        assert job.agent_dir == sample_job_data["agent_dir"]
+        assert job.message == sample_job_data["message"]
+        assert job.source == sample_job_data["source"]
+        assert job.project_id == sample_job_data["project_id"]
+        assert job.priority == sample_job_data["priority"]
+        assert job.status == JobStatus.PENDING.value
+        assert job.job_metadata == sample_job_data["job_metadata"]
 
-    def test_create_task_without_project(self, repository, sample_task_data_no_project):
-        """Test creating a task without project_id."""
-        task = repository.create(**sample_task_data_no_project)
+    def test_create_job_without_project(self, repository, sample_job_data_no_project):
+        """Test creating a job without project_id."""
+        job = repository.create(**sample_job_data_no_project)
         
-        assert task.task_id is not None
-        assert task.project_id is None
-        assert task.status == JobStatus.PENDING.value
+        assert job.job_id is not None
+        assert job.project_id is None
+        assert job.status == JobStatus.PENDING.value
 
-    def test_create_task_default_values(self, repository):
-        """Test creating task with minimal parameters."""
-        task = repository.create(
+    def test_create_job_default_values(self, repository):
+        """Test creating job with minimal parameters."""
+        job = repository.create(
             agent_dir="/test/agent",
             message="Test message"
         )
         
-        assert task.task_id is not None
-        assert task.source == "api"  # Default value
-        assert task.priority == 5  # Default value
-        assert task.status == JobStatus.PENDING.value
-        assert task.task_metadata == {}  # Default empty dict
+        assert job.job_id is not None
+        assert job.source == "api"  # Default value
+        assert job.priority == 5  # Default value
+        assert job.status == JobStatus.PENDING.value
+        assert job.job_metadata == {}  # Default empty dict
 
-    def test_create_task_generates_timestamps(self, repository, sample_task_data):
+    def test_create_job_generates_timestamps(self, repository, sample_job_data):
         """Test that create generates created_at timestamp."""
-        task = repository.create(**sample_task_data)
+        job = repository.create(**sample_job_data)
         
-        assert task.created_at is not None
-        assert task.started_at is None
-        assert task.completed_at is None
+        assert job.created_at is not None
+        assert job.started_at is None
+        assert job.completed_at is None
 
-    def test_create_task_uuid_format(self, repository, sample_task_data):
-        """Test that task_id is a valid UUID."""
-        task = repository.create(**sample_task_data)
+    def test_create_job_uuid_format(self, repository, sample_job_data):
+        """Test that job_id is a valid UUID."""
+        job = repository.create(**sample_job_data)
         
         # Should be a valid UUID format (36 chars with hyphens)
-        assert len(task.task_id) == 36
-        assert task.task_id.count("-") == 4
+        assert len(job.job_id) == 36
+        assert job.job_id.count("-") == 4
 
-    def test_create_multiple_tasks_unique_ids(self, repository, sample_task_data):
-        """Test that multiple created tasks have unique IDs."""
-        task1 = repository.create(**sample_task_data)
-        task2 = repository.create(**sample_task_data)
-        task3 = repository.create(**sample_task_data)
+    def test_create_multiple_jobs_unique_ids(self, repository, sample_job_data):
+        """Test that multiple created jobs have unique IDs."""
+        job1 = repository.create(**sample_job_data)
+        job2 = repository.create(**sample_job_data)
+        job3 = repository.create(**sample_job_data)
         
-        assert task1.task_id != task2.task_id
-        assert task2.task_id != task3.task_id
-        assert task1.task_id != task3.task_id
+        assert job1.job_id != job2.job_id
+        assert job2.job_id != job3.job_id
+        assert job1.job_id != job3.job_id
 
 
 class TestRepositoryRead:
-    """Tests for task retrieval."""
+    """Tests for job retrieval."""
 
-    def test_get_existing_task(self, repository, sample_task_data):
-        """Test getting an existing task by ID."""
-        created = repository.create(**sample_task_data)
+    def test_get_existing_job(self, repository, sample_job_data):
+        """Test getting an existing job by ID."""
+        created = repository.create(**sample_job_data)
         
-        retrieved = repository.get(created.task_id)
+        retrieved = repository.get(created.job_id)
         
         assert retrieved is not None
-        assert retrieved.task_id == created.task_id
+        assert retrieved.job_id == created.job_id
         assert retrieved.message == created.message
 
-    def test_get_nonexistent_task(self, repository):
-        """Test getting a non-existent task returns None."""
+    def test_get_nonexistent_job(self, repository):
+        """Test getting a non-existent job returns None."""
         result = repository.get("nonexistent-id")
         assert result is None
 
-    def test_get_by_session_existing(self, repository, sample_task_data):
-        """Test getting task by session ID."""
-        created = repository.create(**sample_task_data)
-        started = repository.start_task(created.task_id, "test-session")
+    def test_get_by_session_existing(self, repository, sample_job_data):
+        """Test getting job by session ID."""
+        created = repository.create(**sample_job_data)
+        started = repository.start_job(created.job_id, "test-session")
         
         retrieved = repository.get_by_session("test-session")
         
         assert retrieved is not None
-        assert retrieved.task_id == created.task_id
+        assert retrieved.job_id == created.job_id
 
     def test_get_by_session_nonexistent(self, repository):
         """Test getting by non-existent session returns None."""
@@ -109,54 +109,54 @@ class TestRepositoryRead:
 
 
 class TestRepositoryList:
-    """Tests for task listing."""
+    """Tests for job listing."""
 
-    def test_list_all_tasks(self, repository, sample_task_data):
-        """Test listing all tasks."""
-        repository.create(**sample_task_data)
-        repository.create(**sample_task_data)
-        repository.create(**sample_task_data)
+    def test_list_all_jobs(self, repository, sample_job_data):
+        """Test listing all jobs."""
+        repository.create(**sample_job_data)
+        repository.create(**sample_job_data)
+        repository.create(**sample_job_data)
         
-        tasks, total = repository.list()
+        jobs, total = repository.list()
         
-        assert len(tasks) == 3
+        assert len(jobs) == 3
         assert total == 3
 
-    def test_list_by_status(self, repository, sample_task_data):
-        """Test listing tasks filtered by status."""
-        task1 = repository.create(**sample_task_data)
-        task2 = repository.create(**sample_task_data)
+    def test_list_by_status(self, repository, sample_job_data):
+        """Test listing jobs filtered by status."""
+        job1 = repository.create(**sample_job_data)
+        job2 = repository.create(**sample_job_data)
         
-        # Start task1
-        repository.start_task(task1.task_id, "session-1")
+        # Start job1
+        repository.start_job(job1.job_id, "session-1")
         
-        pending_tasks, total = repository.list(status=JobStatus.PENDING.value)
-        processing_tasks, _ = repository.list(status=JobStatus.PROCESSING.value)
+        pending_jobs, total = repository.list(status=JobStatus.PENDING.value)
+        processing_jobs, _ = repository.list(status=JobStatus.PROCESSING.value)
         
-        assert len(pending_tasks) == 1
-        assert pending_tasks[0].task_id == task2.task_id
-        assert len(processing_tasks) == 1
-        assert processing_tasks[0].task_id == task1.task_id
+        assert len(pending_jobs) == 1
+        assert pending_jobs[0].job_id == job2.job_id
+        assert len(processing_jobs) == 1
+        assert processing_jobs[0].job_id == job1.job_id
 
-    def test_list_by_project(self, repository, sample_task_data):
-        """Test listing tasks filtered by project."""
-        task1 = repository.create(**sample_task_data)
-        task2 = repository.create(
+    def test_list_by_project(self, repository, sample_job_data):
+        """Test listing jobs filtered by project."""
+        job1 = repository.create(**sample_job_data)
+        job2 = repository.create(
             **{
-                **sample_task_data,
+                **sample_job_data,
                 "project_id": "other-project"
             }
         )
         
-        tasks, total = repository.list(project_id="test-project")
+        jobs, total = repository.list(project_id="test-project")
         
-        assert len(tasks) == 1
-        assert tasks[0].task_id == task1.task_id
+        assert len(jobs) == 1
+        assert jobs[0].job_id == job1.job_id
 
-    def test_list_with_pagination(self, repository, sample_task_data):
+    def test_list_with_pagination(self, repository, sample_job_data):
         """Test listing with limit and offset."""
         for i in range(5):
-            repository.create(**sample_task_data)
+            repository.create(**sample_job_data)
         
         # Get first page
         page1, total = repository.list(limit=2, offset=0)
@@ -172,29 +172,29 @@ class TestRepositoryList:
         assert len(page3) == 1
 
     def test_list_empty_queue(self, repository):
-        """Test listing when no tasks exist."""
-        tasks, total = repository.list()
+        """Test listing when no jobs exist."""
+        jobs, total = repository.list()
         
-        assert tasks == []
+        assert jobs == []
         assert total == 0
 
-    def test_list_pending_by_project(self, repository, sample_task_data):
-        """Test listing pending tasks for a specific project."""
-        # Create multiple tasks for same project
-        task1 = repository.create(**sample_task_data)  # priority=5
-        task2 = repository.create(**sample_task_data)  # priority=5
+    def test_list_pending_by_project(self, repository, sample_job_data):
+        """Test listing pending jobs for a specific project."""
+        # Create multiple jobs for same project
+        job1 = repository.create(**sample_job_data)  # priority=5
+        job2 = repository.create(**sample_job_data)  # priority=5
         
-        # Create task for different project
-        repository.create(**{**sample_task_data, "project_id": "other"})
+        # Create job for different project
+        repository.create(**{**sample_job_data, "project_id": "other"})
         
         pending = repository.list_pending_by_project("test-project")
         
         assert len(pending) == 2
-        assert all(t.status == JobStatus.PENDING.value for t in pending)
+        assert all(j.status == JobStatus.PENDING.value for j in pending)
 
     def test_list_pending_ordered_by_priority(self, repository):
-        """Test that pending tasks are ordered by priority descending."""
-        # Create tasks with different priorities
+        """Test that pending jobs are ordered by priority descending."""
+        # Create jobs with different priorities
         repository.create(
             agent_dir="/test", message="low",
             project_id="test", priority=1
@@ -215,47 +215,47 @@ class TestRepositoryList:
         assert pending[1].message == "medium"  # priority=5
         assert pending[2].message == "low"  # priority=1
 
-    def test_list_all_pending(self, repository, sample_task_data):
-        """Test listing all pending tasks regardless of project."""
-        # Create tasks for different projects
-        task1 = repository.create(**sample_task_data)
-        task2 = repository.create(
+    def test_list_all_pending(self, repository, sample_job_data):
+        """Test listing all pending jobs regardless of project."""
+        # Create jobs for different projects
+        job1 = repository.create(**sample_job_data)
+        job2 = repository.create(
             **{
-                **sample_task_data,
+                **sample_job_data,
                 "project_id": "other-project",
                 "priority": 10  # Higher priority
             }
         )
         
-        # Start task1
-        repository.start_task(task1.task_id, "session-1")
+        # Start job1
+        repository.start_job(job1.job_id, "session-1")
         
         pending = repository.list_all_pending()
         
-        # Should only return task2 (task1 is now processing)
+        # Should only return job2 (job1 is now processing)
         assert len(pending) == 1
-        assert pending[0].task_id == task2.task_id
+        assert pending[0].job_id == job2.job_id
 
 
 class TestRepositoryUpdate:
-    """Tests for task updates."""
+    """Tests for job updates."""
 
-    def test_update_single_field(self, repository, sample_task_data):
+    def test_update_single_field(self, repository, sample_job_data):
         """Test updating a single field."""
-        task = repository.create(**sample_task_data)
+        job = repository.create(**sample_job_data)
         
-        updated = repository.update(task.task_id, priority=8)
+        updated = repository.update(job.job_id, priority=8)
         
         assert updated is not None
         assert updated.priority == 8
-        assert updated.message == sample_task_data["message"]  # Unchanged
+        assert updated.message == sample_job_data["message"]  # Unchanged
 
-    def test_update_multiple_fields(self, repository, sample_task_data):
+    def test_update_multiple_fields(self, repository, sample_job_data):
         """Test updating multiple fields."""
-        task = repository.create(**sample_task_data)
+        job = repository.create(**sample_job_data)
         
         updated = repository.update(
-            task.task_id,
+            job.job_id,
             priority=3,
             message="Updated message"
         )
@@ -263,90 +263,90 @@ class TestRepositoryUpdate:
         assert updated.priority == 3
         assert updated.message == "Updated message"
 
-    def test_update_nonexistent_task(self, repository):
-        """Test updating non-existent task returns None."""
+    def test_update_nonexistent_job(self, repository):
+        """Test updating non-existent job returns None."""
         result = repository.update("nonexistent-id", priority=10)
         assert result is None
 
-    def test_update_invalid_status(self, repository, sample_task_data):
+    def test_update_invalid_status(self, repository, sample_job_data):
         """Test updating with invalid status raises ValueError."""
-        task = repository.create(**sample_task_data)
+        job = repository.create(**sample_job_data)
         
         with pytest.raises(ValueError) as exc_info:
-            repository.update(task.task_id, status="invalid-status")
+            repository.update(job.job_id, status="invalid-status")
         
         assert "Invalid status" in str(exc_info.value)
 
 
-class TestRepositoryTaskLifecycle:
-    """Tests for task lifecycle transitions."""
+class TestRepositoryJobLifecycle:
+    """Tests for job lifecycle transitions."""
 
-    def test_start_pending_task(self, repository, sample_task_data):
-        """Test starting a pending task."""
-        task = repository.create(**sample_task_data)
+    def test_start_pending_job(self, repository, sample_job_data):
+        """Test starting a pending job."""
+        job = repository.create(**sample_job_data)
         
-        started = repository.start_task(task.task_id, "session-1")
+        started = repository.start_job(job.job_id, "session-1")
         
         assert started is not None
         assert started.status == JobStatus.PROCESSING.value
         assert started.session_id == "session-1"
         assert started.started_at is not None
 
-    def test_start_already_started_task_raises(self, repository, sample_task_data):
-        """Test starting an already started task raises ValueError."""
-        task = repository.create(**sample_task_data)
-        repository.start_task(task.task_id, "session-1")
+    def test_start_already_started_job_raises(self, repository, sample_job_data):
+        """Test starting an already started job raises ValueError."""
+        job = repository.create(**sample_job_data)
+        repository.start_job(job.job_id, "session-1")
         
         with pytest.raises(ValueError) as exc_info:
-            repository.start_task(task.task_id, "session-2")
+            repository.start_job(job.job_id, "session-2")
         
-        assert "Cannot start task" in str(exc_info.value)
+        assert "Cannot start job" in str(exc_info.value)
         assert "processing" in str(exc_info.value)
 
-    def test_start_completed_task_raises(self, repository, sample_task_data):
-        """Test starting a completed task raises ValueError."""
-        task = repository.create(**sample_task_data)
-        started = repository.start_task(task.task_id, "session-1")
-        repository.complete_task(started.task_id)
+    def test_start_completed_job_raises(self, repository, sample_job_data):
+        """Test starting a completed job raises ValueError."""
+        job = repository.create(**sample_job_data)
+        started = repository.start_job(job.job_id, "session-1")
+        repository.complete_job(started.job_id)
         
         with pytest.raises(ValueError) as exc_info:
-            repository.start_task(task.task_id, "session-2")
+            repository.start_job(job.job_id, "session-2")
         
-        assert "Cannot start task" in str(exc_info.value)
+        assert "Cannot start job" in str(exc_info.value)
         assert "completed" in str(exc_info.value)
 
-    def test_complete_processing_task(self, repository, sample_task_data):
-        """Test completing a processing task."""
-        task = repository.create(**sample_task_data)
-        started = repository.start_task(task.task_id, "session-1")
+    def test_complete_processing_job(self, repository, sample_job_data):
+        """Test completing a processing job."""
+        job = repository.create(**sample_job_data)
+        started = repository.start_job(job.job_id, "session-1")
         
-        completed = repository.complete_task(
-            started.task_id,
-            result_summary="Task completed successfully"
+        completed = repository.complete_job(
+            started.job_id,
+            result_summary="Job completed successfully"
         )
         
         assert completed is not None
         assert completed.status == JobStatus.COMPLETED.value
         assert completed.completed_at is not None
-        assert completed.result_summary == "Task completed successfully"
+        assert completed.result_summary == "Job completed successfully"
 
-    def test_complete_pending_task_raises(self, repository, sample_task_data):
-        """Test completing a pending task raises ValueError."""
-        task = repository.create(**sample_task_data)
+    def test_complete_pending_job_raises(self, repository, sample_job_data):
+        """Test completing a pending job raises ValueError."""
+        job = repository.create(**sample_job_data)
         
         with pytest.raises(ValueError) as exc_info:
-            repository.complete_task(task.task_id)
+            repository.complete_job(job.job_id)
         
-        assert "Cannot complete task" in str(exc_info.value)
+        assert "Cannot complete job" in str(exc_info.value)
         assert "pending" in str(exc_info.value)
 
-    def test_fail_processing_task(self, repository, sample_task_data):
-        """Test failing a processing task."""
-        task = repository.create(**sample_task_data)
-        started = repository.start_task(task.task_id, "session-1")
+    def test_fail_processing_job(self, repository, sample_job_data):
+        """Test failing a processing job."""
+        job = repository.create(**sample_job_data)
+        started = repository.start_job(job.job_id, "session-1")
         
-        failed = repository.fail_task(
-            started.task_id,
+        failed = repository.fail_job(
+            started.job_id,
             error_message="Something went wrong"
         )
         
@@ -355,98 +355,98 @@ class TestRepositoryTaskLifecycle:
         assert failed.completed_at is not None
         assert failed.error_message == "Something went wrong"
 
-    def test_fail_pending_task_raises(self, repository, sample_task_data):
-        """Test failing a pending task raises ValueError."""
-        task = repository.create(**sample_task_data)
+    def test_fail_pending_job_raises(self, repository, sample_job_data):
+        """Test failing a pending job raises ValueError."""
+        job = repository.create(**sample_job_data)
         
         with pytest.raises(ValueError) as exc_info:
-            repository.fail_task(task.task_id, "Error")
+            repository.fail_job(job.job_id, "Error")
         
-        assert "Cannot fail task" in str(exc_info.value)
+        assert "Cannot fail job" in str(exc_info.value)
         assert "pending" in str(exc_info.value)
 
-    def test_cancel_pending_task(self, repository, sample_task_data):
-        """Test cancelling a pending task."""
-        task = repository.create(**sample_task_data)
+    def test_cancel_pending_job(self, repository, sample_job_data):
+        """Test cancelling a pending job."""
+        job = repository.create(**sample_job_data)
         
-        cancelled = repository.cancel_task(task.task_id)
+        cancelled = repository.cancel_job(job.job_id)
         
         assert cancelled is not None
         assert cancelled.status == JobStatus.CANCELLED.value
         assert cancelled.cancelled_at is not None
 
-    def test_cancel_processing_task_raises(self, repository, sample_task_data):
-        """Test cancelling a processing task raises ValueError."""
-        task = repository.create(**sample_task_data)
-        repository.start_task(task.task_id, "session-1")
+    def test_cancel_processing_job_raises(self, repository, sample_job_data):
+        """Test cancelling a processing job raises ValueError."""
+        job = repository.create(**sample_job_data)
+        repository.start_job(job.job_id, "session-1")
         
         with pytest.raises(ValueError) as exc_info:
-            repository.cancel_task(task.task_id)
+            repository.cancel_job(job.job_id)
         
-        assert "Cannot cancel task" in str(exc_info.value)
+        assert "Cannot cancel job" in str(exc_info.value)
         assert "processing" in str(exc_info.value)
 
 
 class TestRepositoryDelete:
-    """Tests for task deletion."""
+    """Tests for job deletion."""
 
-    def test_delete_existing_task(self, repository, sample_task_data):
-        """Test deleting an existing task."""
-        task = repository.create(**sample_task_data)
+    def test_delete_existing_job(self, repository, sample_job_data):
+        """Test deleting an existing job."""
+        job = repository.create(**sample_job_data)
         
-        result = repository.delete(task.task_id)
+        result = repository.delete(job.job_id)
         
         assert result["deleted"] is True
-        assert result["task_id"] == task.task_id
+        assert result["job_id"] == job.job_id
         
-        # Verify task is gone
-        assert repository.get(task.task_id) is None
+        # Verify job is gone
+        assert repository.get(job.job_id) is None
 
-    def test_delete_nonexistent_task(self, repository):
-        """Test deleting non-existent task returns error."""
+    def test_delete_nonexistent_job(self, repository):
+        """Test deleting non-existent job returns error."""
         result = repository.delete("nonexistent-id")
         
         assert result["deleted"] is False
         assert "error" in result
 
-    def test_delete_completed_tasks(self, repository, sample_task_data):
-        """Test deleting all completed tasks."""
-        # Create and complete some tasks
-        task1 = repository.create(**sample_task_data)
-        task2 = repository.create(**sample_task_data)
-        task3 = repository.create(**sample_task_data)
+    def test_delete_completed_jobs(self, repository, sample_job_data):
+        """Test deleting all completed jobs."""
+        # Create and complete some jobs
+        job1 = repository.create(**sample_job_data)
+        job2 = repository.create(**sample_job_data)
+        job3 = repository.create(**sample_job_data)
         
-        repository.start_task(task1.task_id, "s1")
-        repository.start_task(task2.task_id, "s2")
-        repository.complete_task(task1.task_id)
-        repository.complete_task(task2.task_id)
-        # task3 remains pending
+        repository.start_job(job1.job_id, "s1")
+        repository.start_job(job2.job_id, "s2")
+        repository.complete_job(job1.job_id)
+        repository.complete_job(job2.job_id)
+        # job3 remains pending
         
         deleted_count = repository.delete_completed()
         
         assert deleted_count == 2
-        assert repository.get(task1.task_id) is None
-        assert repository.get(task2.task_id) is None
-        assert repository.get(task3.task_id) is not None
+        assert repository.get(job1.job_id) is None
+        assert repository.get(job2.job_id) is None
+        assert repository.get(job3.job_id) is not None
 
-    def test_delete_by_project(self, repository, sample_task_data):
-        """Test deleting all tasks for a project."""
-        # Create tasks for multiple projects
-        task1 = repository.create(**sample_task_data)  # test-project
-        task2 = repository.create(**sample_task_data)  # test-project
-        task3 = repository.create(
-            **{**sample_task_data, "project_id": "other"}
+    def test_delete_by_project(self, repository, sample_job_data):
+        """Test deleting all jobs for a project."""
+        # Create jobs for multiple projects
+        job1 = repository.create(**sample_job_data)  # test-project
+        job2 = repository.create(**sample_job_data)  # test-project
+        job3 = repository.create(
+            **{**sample_job_data, "project_id": "other"}
         )
         
         deleted_count = repository.delete_by_project("test-project")
         
         assert deleted_count == 2
-        assert repository.get(task1.task_id) is None
-        assert repository.get(task2.task_id) is None
-        assert repository.get(task3.task_id) is not None
+        assert repository.get(job1.job_id) is None
+        assert repository.get(job2.job_id) is None
+        assert repository.get(job3.job_id) is not None
 
     def test_delete_completed_when_none(self, repository):
-        """Test delete_completed when no completed tasks exist."""
+        """Test delete_completed when no completed jobs exist."""
         count = repository.delete_completed()
         assert count == 0
 
@@ -454,126 +454,126 @@ class TestRepositoryDelete:
 class TestRepositoryEdgeCases:
     """Tests for edge cases and error conditions."""
 
-    def test_create_task_with_extreme_priority(self, repository, sample_task_data):
-        """Test creating tasks with boundary priority values."""
-        low_task = repository.create(**{**sample_task_data, "priority": 1})
-        high_task = repository.create(**{**sample_task_data, "priority": 10})
+    def test_create_job_with_extreme_priority(self, repository, sample_job_data):
+        """Test creating jobs with boundary priority values."""
+        low_job = repository.create(**{**sample_job_data, "priority": 1})
+        high_job = repository.create(**{**sample_job_data, "priority": 10})
         
-        assert low_task.priority == 1
-        assert high_task.priority == 10
+        assert low_job.priority == 1
+        assert high_job.priority == 10
 
-    def test_create_task_with_metadata(self, repository):
-        """Test creating task with complex metadata."""
+    def test_create_job_with_metadata(self, repository):
+        """Test creating job with complex metadata."""
         metadata = {
             "user_id": "user-123",
             "tags": ["urgent", "backend"],
             "config": {"timeout": 30, "retries": 3}
         }
         
-        task = repository.create(
+        job = repository.create(
             agent_dir="/test",
             message="Test",
-            task_metadata=metadata
+            job_metadata=metadata
         )
         
-        assert task.task_metadata == metadata
+        assert job.job_metadata == metadata
 
-    def test_start_task_with_empty_session(self, repository, sample_task_data):
-        """Test starting task with empty session ID."""
-        task = repository.create(**sample_task_data)
+    def test_start_job_with_empty_session(self, repository, sample_job_data):
+        """Test starting job with empty session ID."""
+        job = repository.create(**sample_job_data)
         
         # Empty string should be allowed
-        started = repository.start_task(task.task_id, "")
+        started = repository.start_job(job.job_id, "")
         assert started is not None
         assert started.session_id == ""
 
-    def test_update_task_metadata(self, repository, sample_task_data):
-        """Test updating task metadata."""
-        task = repository.create(**sample_task_data)
+    def test_update_job_metadata(self, repository, sample_job_data):
+        """Test updating job metadata."""
+        job = repository.create(**sample_job_data)
         
         updated = repository.update(
-            task.task_id,
-            task_metadata={"new_key": "new_value"}
+            job.job_id,
+            job_metadata={"new_key": "new_value"}
         )
         
-        assert updated.task_metadata == {"new_key": "new_value"}
+        assert updated.job_metadata == {"new_key": "new_value"}
 
-    def test_list_with_filters_combined(self, repository, sample_task_data):
+    def test_list_with_filters_combined(self, repository, sample_job_data):
         """Test listing with multiple filters combined."""
-        # Create task in different states
-        task1 = repository.create(**sample_task_data)
-        repository.create(**{**sample_task_data, "project_id": "other"})
+        # Create job in different states
+        job1 = repository.create(**sample_job_data)
+        repository.create(**{**sample_job_data, "project_id": "other"})
         
-        repository.start_task(task1.task_id, "session-1")
+        repository.start_job(job1.job_id, "session-1")
         
         # Filter by both status and project
-        tasks, total = repository.list(
+        jobs, total = repository.list(
             status=JobStatus.PENDING.value,
             project_id="test-project"
         )
         
-        assert total == 0  # No pending tasks for test-project
+        assert total == 0  # No pending jobs for test-project
 
-    def test_get_task_idempotent(self, repository, sample_task_data):
-        """Test that getting same task multiple times works."""
-        task = repository.create(**sample_task_data)
+    def test_get_job_idempotent(self, repository, sample_job_data):
+        """Test that getting same job multiple times works."""
+        job = repository.create(**sample_job_data)
         
-        result1 = repository.get(task.task_id)
-        result2 = repository.get(task.task_id)
-        result3 = repository.get(task.task_id)
+        result1 = repository.get(job.job_id)
+        result2 = repository.get(job.job_id)
+        result3 = repository.get(job.job_id)
         
-        assert result1.task_id == result2.task_id == result3.task_id
+        assert result1.job_id == result2.job_id == result3.job_id
 
-    def test_start_nonexistent_task(self, repository):
-        """Test starting non-existent task returns None."""
-        result = repository.start_task("nonexistent-id", "session")
+    def test_start_nonexistent_job(self, repository):
+        """Test starting non-existent job returns None."""
+        result = repository.start_job("nonexistent-id", "session")
         assert result is None
 
-    def test_complete_nonexistent_task(self, repository):
-        """Test completing non-existent task returns None."""
-        result = repository.complete_task("nonexistent-id")
+    def test_complete_nonexistent_job(self, repository):
+        """Test completing non-existent job returns None."""
+        result = repository.complete_job("nonexistent-id")
         assert result is None
 
-    def test_fail_nonexistent_task(self, repository):
-        """Test failing non-existent task returns None."""
-        result = repository.fail_task("nonexistent-id", "error")
+    def test_fail_nonexistent_job(self, repository):
+        """Test failing non-existent job returns None."""
+        result = repository.fail_job("nonexistent-id", "error")
         assert result is None
 
-    def test_cancel_nonexistent_task(self, repository):
-        """Test cancelling non-existent task returns None."""
-        result = repository.cancel_task("nonexistent-id")
+    def test_cancel_nonexistent_job(self, repository):
+        """Test cancelling non-existent job returns None."""
+        result = repository.cancel_job("nonexistent-id")
         assert result is None
 
 
 class TestRepositoryConcurrency:
     """Tests for concurrent access patterns."""
 
-    def test_rapid_create_operations(self, repository, sample_task_data):
-        """Test creating many tasks rapidly."""
-        tasks = []
+    def test_rapid_create_operations(self, repository, sample_job_data):
+        """Test creating many jobs rapidly."""
+        jobs = []
         for i in range(100):
-            tasks.append(repository.create(**sample_task_data))
+            jobs.append(repository.create(**sample_job_data))
         
-        assert len(tasks) == 100
-        assert len(set(t.task_id for t in tasks)) == 100  # All unique
+        assert len(jobs) == 100
+        assert len(set(j.job_id for j in jobs)) == 100  # All unique
 
-    def test_task_status_consistency(self, repository, sample_task_data):
-        """Test that task status transitions are consistent."""
-        task = repository.create(**sample_task_data)
+    def test_job_status_consistency(self, repository, sample_job_data):
+        """Test that job status transitions are consistent."""
+        job = repository.create(**sample_job_data)
         
         # Verify initial state
-        assert task.status == JobStatus.PENDING.value
+        assert job.status == JobStatus.PENDING.value
         
-        # Start task
-        started = repository.start_task(task.task_id, "session-1")
+        # Start job
+        started = repository.start_job(job.job_id, "session-1")
         assert started.status == JobStatus.PROCESSING.value
         
-        # Complete task
-        completed = repository.complete_task(task.task_id, "Done")
+        # Complete job
+        completed = repository.complete_job(job.job_id, "Done")
         assert completed.status == JobStatus.COMPLETED.value
         
         # Verify final state persists
-        final = repository.get(task.task_id)
+        final = repository.get(job.job_id)
         assert final.status == JobStatus.COMPLETED.value
         assert final.completed_at is not None
 
@@ -600,14 +600,14 @@ class TestJobStatusValidation:
 class TestJobItem:
     """Tests for JobItem model."""
 
-    def test_to_dict(self, repository, sample_task_data):
+    def test_to_dict(self, repository, sample_job_data):
         """Test JobItem.to_dict() method."""
-        task = repository.create(**sample_task_data)
+        job = repository.create(**sample_job_data)
         
-        task_dict = task.to_dict()
+        job_dict = job.to_dict()
         
-        assert isinstance(task_dict, dict)
-        assert task_dict["task_id"] == task.task_id
-        assert task_dict["message"] == task.message
-        assert task_dict["status"] == task.status
-        assert task_dict["metadata"] == task.task_metadata
+        assert isinstance(job_dict, dict)
+        assert job_dict["job_id"] == job.job_id
+        assert job_dict["message"] == job.message
+        assert job_dict["status"] == job.status
+        assert job_dict["metadata"] == job.job_metadata

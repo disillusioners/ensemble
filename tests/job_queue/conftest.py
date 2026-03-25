@@ -46,12 +46,12 @@ def job_queue_service(repository, lock_manager):
 
 
 @pytest.fixture
-def sample_task_data():
-    """Sample task creation data for repository tests."""
+def sample_job_data():
+    """Sample job creation data for repository tests."""
     return {
         "agent_id": "test-agent",
         "agent_dir": "./agents/test-agent",
-        "message": "Test task message",
+        "message": "Test job message",
         "source": "api",
         "project_id": "test-project",
         "priority": 5,
@@ -60,12 +60,12 @@ def sample_task_data():
 
 
 @pytest.fixture
-def sample_task_data_service():
-    """Sample task creation data for service tests."""
+def sample_job_data_service():
+    """Sample job creation data for service tests."""
     return {
         "agent_id": "test-agent",
         "agent_dir": "./agents/test-agent",
-        "message": "Test task message",
+        "message": "Test job message",
         "source": "api",
         "project_id": "test-project",
         "priority": 5,
@@ -74,12 +74,12 @@ def sample_task_data_service():
 
 
 @pytest.fixture
-def sample_task_data_no_project():
-    """Sample task creation data without project_id for repository."""
+def sample_job_data_no_project():
+    """Sample job creation data without project_id for repository."""
     return {
         "agent_id": "test-agent",
         "agent_dir": "./agents/test-agent",
-        "message": "Test task without project",
+        "message": "Test job without project",
         "source": "api",
         "project_id": None,
         "priority": 5,
@@ -88,11 +88,11 @@ def sample_task_data_no_project():
 
 
 @pytest.fixture
-def sample_task_data_no_project_service():
-    """Sample task creation data without project_id for service."""
+def sample_job_data_no_project_service():
+    """Sample job creation data without project_id for service."""
     return {
         "agent_id": "test-agent",
-        "message": "Test task without project",
+        "message": "Test job without project",
         "source": "api",
         "project_id": None,
         "priority": 5,
@@ -101,18 +101,18 @@ def sample_task_data_no_project_service():
 
 
 @pytest.fixture
-def sample_task_data_service_no_project(sample_task_data_no_project_service):
-    """Alias for sample_task_data_no_project_service (for backward compatibility)."""
-    return sample_task_data_no_project_service
+def sample_job_data_service_no_project(sample_job_data_no_project_service):
+    """Alias for sample_job_data_no_project_service (for backward compatibility)."""
+    return sample_job_data_no_project_service
 
 
 @pytest.fixture
-def high_priority_task_data():
-    """High priority task data for repository ordering tests."""
+def high_priority_job_data():
+    """High priority job data for repository ordering tests."""
     return {
         "agent_id": "test-agent",
         "agent_dir": "./agents/test-agent",
-        "message": "High priority task",
+        "message": "High priority job",
         "source": "api",
         "project_id": "test-project",
         "priority": 10,  # Highest priority
@@ -121,11 +121,11 @@ def high_priority_task_data():
 
 
 @pytest.fixture
-def high_priority_task_data_service():
-    """High priority task data for service ordering tests."""
+def high_priority_job_data_service():
+    """High priority job data for service ordering tests."""
     return {
         "agent_id": "test-agent",
-        "message": "High priority task",
+        "message": "High priority job",
         "source": "api",
         "project_id": "test-project",
         "priority": 10,  # Highest priority
@@ -134,12 +134,12 @@ def high_priority_task_data_service():
 
 
 @pytest.fixture
-def low_priority_task_data():
-    """Low priority task data for repository ordering tests."""
+def low_priority_job_data():
+    """Low priority job data for repository ordering tests."""
     return {
         "agent_id": "test-agent",
         "agent_dir": "./agents/test-agent",
-        "message": "Low priority task",
+        "message": "Low priority job",
         "source": "api",
         "project_id": "test-project",
         "priority": 1,  # Lowest priority
@@ -148,11 +148,11 @@ def low_priority_task_data():
 
 
 @pytest.fixture
-def low_priority_task_data_service():
-    """Low priority task data for service ordering tests."""
+def low_priority_job_data_service():
+    """Low priority job data for service ordering tests."""
     return {
         "agent_id": "test-agent",
-        "message": "Low priority task",
+        "message": "Low priority job",
         "source": "api",
         "project_id": "test-project",
         "priority": 1,  # Lowest priority
