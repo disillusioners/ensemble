@@ -37,6 +37,7 @@ class TestRepositoryCreate:
     def test_create_job_default_values(self, repository):
         """Test creating job with minimal parameters."""
         job = repository.create(
+            agent_id="test-agent",
             agent_dir="/test/agent",
             message="Test message"
         )
@@ -196,15 +197,15 @@ class TestRepositoryList:
         """Test that pending jobs are ordered by priority descending."""
         # Create jobs with different priorities
         repository.create(
-            agent_dir="/test", message="low",
+            agent_id="test-agent", agent_dir="/test", message="low",
             project_id="test", priority=1
         )
         repository.create(
-            agent_dir="/test", message="high",
+            agent_id="test-agent", agent_dir="/test", message="high",
             project_id="test", priority=10
         )
         repository.create(
-            agent_dir="/test", message="medium",
+            agent_id="test-agent", agent_dir="/test", message="medium",
             project_id="test", priority=5
         )
         
@@ -471,6 +472,7 @@ class TestRepositoryEdgeCases:
         }
         
         job = repository.create(
+            agent_id="test-agent",
             agent_dir="/test",
             message="Test",
             job_metadata=metadata
