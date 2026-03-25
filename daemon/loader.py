@@ -171,52 +171,53 @@ def estimate_tokens(text: str) -> int:
 
 
 class PromptCache:
-    """In-memory cache for compiled prompts."""
+    """In-memory cache for compiled prompts.
+    
+    Uses agent_id as cache key for logical identification rather than filesystem path.
+    """
     
     def __init__(self) -> None:
         self._cache: dict[str, tuple[str, int, dict[str, float]]] = {}
     
-    def get(self, agent_dir: Path) -> tuple[str, int] | None:
-        """Get cached prompt for agent directory.
+    def get(self, agent_id: str) -> tuple[str, int] | None:
+        """Get cached prompt for agent.
         
         Args:
-            agent_dir: Path to the agent directory.
+            agent_id: The agent identifier (e.g., "coder").
             
         Returns:
             Tuple of (compiled_prompt, token_count) or None if not cached.
         """
-        key = str(agent_dir)
-        if key not in self._cache:
+        if agent_id not in self._cache:
             return None
         
-        return (self._cache[key][0], self._cache[key][1])
+        return (self._cache[agent_id][0], self._cache[agent_id][1])
     
-    def set(self, agent_dir: Path, prompt: str, tokens: int, mtimes: dict[str, float]) -> None:
+    def set(self, agent_id: str, prompt: str, tokens: int, mtimes: dict[str, float]) -> None:
         """Store prompt in cache.
         
         Args:
-            agent_dir: Path to the agent directory.
+            agent_id: The agent identifier (e.g., "coder").
             prompt: Compiled system prompt.
             tokens: Token count.
             mtimes: Dict of filename to modification time.
         """
-        key = str(agent_dir)
-        self._cache[key] = (prompt, tokens, mtimes)
+        self._cache[agent_id] = (prompt, tokens, mtimes)
     
-    def invalidate(self, agent_dir: Path) -> None:
+    def invalidate(self, agent_id: str) -> None:
         """Remove agent from cache.
         
         Args:
-            agent_dir: Path to the agent directory.
+            agent_id: The agent identifier (e.g., "coder").
         """
-        key = str(agent_dir)
-        self._cache.pop(key, None)
+        self._cache.pop(agent_id, None)
 
 
-def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int]:
+def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) -> tuple[str, int]:
     """Load and cache agent prompts including multiple skills.
     
     Args:
+        agent_id: The agent identifier (e.g., "coder").
         agent_dir: Path to the agent directory.
         cache: PromptCache instance.
         
@@ -248,11 +249,10 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
                     current_mtimes[relative_path] = skill_file.stat().st_mtime
     
     # Check cache
-    cached = cache.get(agent_dir)
+    cached = cache.get(agent_id)
     if cached is not None:
         # Get stored mtimes from cache
-        key = str(agent_dir)
-        stored_mtimes = cache._cache[key][2] if key in cache._cache else {}
+        stored_mtimes = cache._cache[agent_id][2] if agent_id in cache._cache else {}
         
         # Compare mtimes
         if stored_mtimes == current_mtimes:
@@ -266,6 +266,6 @@ def load_and_cache_prompt(agent_dir: Path, cache: PromptCache) -> tuple[str, int
     tokens = estimate_tokens(system_prompt)
     
     # Update cache
-    cache.set(agent_dir, system_prompt, tokens, current_mtimes)
+    cache.set(agent_id, system_prompt, tokens, current_mtimes)
     
     return (system_prompt, tokens)

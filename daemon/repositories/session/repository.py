@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -126,8 +127,32 @@ class SQLModelSessionRepository:
             session = db_session.get(Session, session_id)
             return self._enrich_session(db_session, session)
 
+    def get_by_agent_id(self, agent_id: str) -> list[Session]:
+        """Get all sessions for a given agent ID.
+        
+        Args:
+            agent_id: The agent identifier (e.g., 'coder', 'leader').
+            
+        Returns:
+            List of Session objects for the specified agent.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(Session).where(Session.agent_id == agent_id)
+            sessions = list(db_session.exec(stmt))
+            return self._enrich_sessions(db_session, sessions)
+
     def get_by_agent_dir(self, agent_dir: str) -> list[Session]:
-        """Get all sessions for a given agent directory."""
+        """Get all sessions for a given agent directory.
+        
+        .. deprecated::
+            Use :meth:`get_by_agent_id` instead. agent_id is the canonical
+            identifier; agent_dir is derived and may change.
+        """
+        warnings.warn(
+            "get_by_agent_dir() is deprecated, use get_by_agent_id() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Session).where(Session.agent_dir == agent_dir)
             sessions = list(db_session.exec(stmt))

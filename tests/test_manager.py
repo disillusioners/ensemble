@@ -231,7 +231,8 @@ class TestSpawnSession:
             mock_build.assert_called_once()
             assert session_id in manager.sessions
             assert manager.sessions[session_id][0] == mock_graph
-            assert manager.sessions[session_id][1] == "/path/to/agent"
+            # The second element is the resolved agent directory path (not a static string)
+            assert manager.sessions[session_id][1].endswith("agents/coder")
 
 
 class TestSendMessage:

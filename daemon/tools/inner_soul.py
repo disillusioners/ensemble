@@ -198,6 +198,7 @@ def create_inner_soul_tool(
             results = []
             for t in targets:
                 result = _execute_update(
+                    agent_id=agent_id,
                     agent_path=agent_path,
                     request=actual_request,
                     target=t,
@@ -307,6 +308,7 @@ def _classify_request(request: str) -> dict:
 
 
 def _execute_update(
+    agent_id: str,
     agent_path: Path,
     request: str,
     target: str,
@@ -320,13 +322,13 @@ def _execute_update(
     if target == "memories":
         return _update_memories(agent_path, request, classification)
     elif target == "memory":
-        return _update_memory_md(agent_path, request, rules, manager)
+        return _update_memory_md(agent_id, agent_path, request, rules, manager)
     elif target == "soul":
-        return _update_soul(agent_path, request, rules, manager)
+        return _update_soul(agent_id, agent_path, request, rules, manager)
     elif target == "user":
-        return _update_user(agent_path, request, manager)
+        return _update_user(agent_id, agent_path, request, manager)
     elif target == "workflow":
-        return _update_workflow(agent_path, request, rules, manager)
+        return _update_workflow(agent_id, agent_path, request, rules, manager)
     else:
         return {"success": False, "target": target, "error": f"Unknown target: {target}"}
 
@@ -372,7 +374,7 @@ def _update_memories(agent_path: Path, request: str, classification: dict) -> di
     }
 
 
-def _update_memory_md(agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
+def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
     """Add to core memory.md."""
     memory_file = agent_path / "memory.md"
     
@@ -400,7 +402,7 @@ def _update_memory_md(agent_path: Path, request: str, rules: dict, manager: "Ses
     new_content = '\n'.join(lines)
     
     memory_file.write_text(new_content)
-    manager.prompt_cache.invalidate(agent_path)
+    manager.prompt_cache.invalidate(agent_id)
     
     new_word_count = len(new_content.split())
     return {
@@ -411,7 +413,7 @@ def _update_memory_md(agent_path: Path, request: str, rules: dict, manager: "Ses
     }
 
 
-def _update_soul(agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
+def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
     """Apply soul.md change directly - identity updates are applied immediately."""
     soul_file = agent_path / "soul.md"
     history_dir = agent_path / "history"
@@ -470,7 +472,7 @@ def _update_soul(agent_path: Path, request: str, rules: dict, manager: Optional[
     
     # Invalidate cache if manager provided
     if manager:
-        manager.prompt_cache.invalidate(agent_path)
+        manager.prompt_cache.invalidate(agent_id)
     
     # Log to history for audit trail
     timestamp = now.strftime("%Y%m%d_%H%M%S")
@@ -502,7 +504,7 @@ def _update_soul(agent_path: Path, request: str, rules: dict, manager: Optional[
     }
 
 
-def _update_user(agent_path: Path, request: str, manager: "SessionManager") -> dict:
+def _update_user(agent_id: str, agent_path: Path, request: str, manager: "SessionManager") -> dict:
     """Add user information to user.md."""
     user_file = agent_path / "user.md"
     
@@ -515,7 +517,7 @@ def _update_user(agent_path: Path, request: str, manager: "SessionManager") -> d
     # Append
     new_content = f"{current}\n- {request}"
     user_file.write_text(new_content)
-    manager.prompt_cache.invalidate(agent_path)
+    manager.prompt_cache.invalidate(agent_id)
     
     return {
         "success": True,
@@ -524,7 +526,7 @@ def _update_user(agent_path: Path, request: str, manager: "SessionManager") -> d
     }
 
 
-def _update_workflow(agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
+def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
     
@@ -535,7 +537,7 @@ def _update_workflow(agent_path: Path, request: str, rules: dict, manager: "Sess
     
     new_workflow = f"{current}\n- {request}"
     workflow_file.write_text(new_workflow)
-    manager.prompt_cache.invalidate(agent_path)
+    manager.prompt_cache.invalidate(agent_id)
     
     return {
         "success": True,

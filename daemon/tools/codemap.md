@@ -48,7 +48,7 @@ Agent Request → LangGraph Agent Node → Tool Function → Result String → A
 ### Cache Invalidation
 When agents modify their files (via `inner_soul` or `agent_modify`):
 ```
-File Write → manager.prompt_cache.invalidate(agent_path) → Next prompt rebuilds context
+File Write → manager.prompt_cache.invalidate(agent_id) → Next prompt rebuilds context
 ```
 
 ## Integration Points

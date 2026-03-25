@@ -511,7 +511,7 @@ class SessionManager:
 
         # Load and cache prompt using resolved path
         agent_path = Path(resolved_agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
+        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
         tools = create_session_tools(self, session_id, resolved_agent_id)
@@ -1907,7 +1907,7 @@ Title:"""
         """
         # Load and cache prompt
         agent_path = Path(meta.agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
+        system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
         tools = create_session_tools(self, session_id, meta.agent_id)

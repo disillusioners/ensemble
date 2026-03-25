@@ -135,40 +135,37 @@ class TestEstimateTokens:
 class TestPromptCache:
     """Tests for PromptCache class."""
 
-    def test_prompt_cache_get_miss(self, tmp_path):
+    def test_prompt_cache_get_miss(self):
         """Test cache miss returns None."""
         cache = PromptCache()
-        agent_dir = tmp_path / "test_agent"
-        agent_dir.mkdir()
+        agent_id = "test_agent"
 
-        result = cache.get(agent_dir)
+        result = cache.get(agent_id)
 
         assert result is None
 
-    def test_prompt_cache_set_get(self, tmp_path):
+    def test_prompt_cache_set_get(self):
         """Test cache set and get."""
         cache = PromptCache()
-        agent_dir = tmp_path / "test_agent"
-        agent_dir.mkdir()
+        agent_id = "test_agent"
 
-        cache.set(agent_dir, "test prompt", 100, {"skill.md": 1.0})
+        cache.set(agent_id, "test prompt", 100, {"skill.md": 1.0})
 
-        result = cache.get(agent_dir)
+        result = cache.get(agent_id)
 
         assert result is not None
         assert result[0] == "test prompt"
         assert result[1] == 100
 
-    def test_prompt_cache_invalidate(self, tmp_path):
+    def test_prompt_cache_invalidate(self):
         """Test cache invalidation."""
         cache = PromptCache()
-        agent_dir = tmp_path / "test_agent"
-        agent_dir.mkdir()
+        agent_id = "test_agent"
 
-        cache.set(agent_dir, "test prompt", 100, {"skill.md": 1.0})
-        cache.invalidate(agent_dir)
+        cache.set(agent_id, "test prompt", 100, {"skill.md": 1.0})
+        cache.invalidate(agent_id)
 
-        result = cache.get(agent_dir)
+        result = cache.get(agent_id)
         assert result is None
 
 
@@ -184,7 +181,7 @@ class TestLoadAndCachePrompt:
 
         cache = PromptCache()
 
-        prompt, tokens = load_and_cache_prompt(agent_dir, cache)
+        prompt, tokens = load_and_cache_prompt("test_agent", agent_dir, cache)
 
         assert "## Skills" in prompt
         assert "## Rules" in prompt
@@ -199,10 +196,10 @@ class TestLoadAndCachePrompt:
         cache = PromptCache()
 
         # First call - should load from disk
-        prompt1, tokens1 = load_and_cache_prompt(agent_dir, cache)
+        prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
 
         # Second call - should return cached version
-        prompt2, tokens2 = load_and_cache_prompt(agent_dir, cache)
+        prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
 
         assert prompt1 == prompt2
         assert tokens1 == tokens2
@@ -217,14 +214,14 @@ class TestLoadAndCachePrompt:
         cache = PromptCache()
 
         # First call - should load from disk
-        prompt1, tokens1 = load_and_cache_prompt(agent_dir, cache)
+        prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
 
         # Wait a bit and modify the file to change mtime
         time.sleep(0.1)
         skill_file.write_text("# Skills\nUpdated skills")
 
         # Third call - should reload because mtime changed
-        prompt3, tokens3 = load_and_cache_prompt(agent_dir, cache)
+        prompt3, tokens3 = load_and_cache_prompt("test_agent", agent_dir, cache)
 
         assert "Updated skills" in prompt3
         assert tokens3 > 0
@@ -382,7 +379,7 @@ class TestLoadAndCachePromptWithSkills:
         (coding_dir / "skill.md").write_text("# Coding\nWrite code")
         
         cache = PromptCache()
-        prompt, tokens = load_and_cache_prompt(agent_dir, cache)
+        prompt, tokens = load_and_cache_prompt("test_agent", agent_dir, cache)
         
         assert "## Rules" in prompt
         assert "## Skill: Coding" in prompt
@@ -406,7 +403,7 @@ class TestLoadAndCachePromptWithSkills:
         cache = PromptCache()
         
         # First load
-        prompt1, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt1, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "Write code" in prompt1
         
         # Modify skill
@@ -414,7 +411,7 @@ class TestLoadAndCachePromptWithSkills:
         skill_file.write_text("# Coding\nWrite better code")
         
         # Should reload
-        prompt2, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt2, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "Write better code" in prompt2
 
 
@@ -487,13 +484,13 @@ class TestToolsLoading:
         
         cache = PromptCache()
         
-        prompt1, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt1, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "bash" in prompt1
         
         time.sleep(0.1)
         tools_file.write_text("# Tools\n- bash\n- read_file")
         
-        prompt2, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt2, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "read_file" in prompt2
 
 
@@ -566,11 +563,11 @@ class TestSoulLoading:
         
         cache = PromptCache()
         
-        prompt1, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt1, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "helpful" in prompt1
         
         time.sleep(0.1)
         soul_file.write_text("# Who I Am\nI am a craftsman of code.")
         
-        prompt2, _ = load_and_cache_prompt(agent_dir, cache)
+        prompt2, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "craftsman" in prompt2

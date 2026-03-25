@@ -362,7 +362,7 @@ Returns:
             file_path.write_text(content)
             
             # Invalidate prompt cache so changes take effect immediately
-            manager.prompt_cache.invalidate(agent_dir)
+            manager.prompt_cache.invalidate(agent_name)
             
             return {
                 "success": True,

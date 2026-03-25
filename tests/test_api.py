@@ -142,8 +142,8 @@ async def test_create_session_success(client, mock_manager):
     response = await client.post(
         "/sessions",
         json={
-            "agent_dir": "/path/to/agent",
-            "session_id": "custom-session-id"
+            "agent_id": "coder",
+            "session_id": "550e8400-e29b-41d4-a716-446655440000"
         }
     )
     
@@ -151,11 +151,9 @@ async def test_create_session_success(client, mock_manager):
     data = response.json()
     assert data["session_id"] == "test-session-id"
     assert data["agent_id"] == "coder"
-    assert data["agent_dir"] == "/path/to/agent"
     mock_manager.spawn_session.assert_called_once_with(
-        agent_id=None,
-        agent_dir="/path/to/agent",
-        session_id="custom-session-id"
+        agent_id="coder",
+        session_id="550e8400-e29b-41d4-a716-446655440000"
     )
 
 
@@ -170,7 +168,7 @@ async def test_create_session_max_limit(client, mock_manager):
     response = await client.post(
         "/sessions",
         json={
-            "agent_dir": "/path/to/agent"
+            "agent_id": "coder"
         }
     )
     
