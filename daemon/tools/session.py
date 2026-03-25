@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 from langchain_core.tools import tool, BaseTool
@@ -46,17 +45,24 @@ class SpawnSessionInput(BaseModel):
         return self
 
 
-def create_session_tools(manager: "SessionManager", current_session_id: str, agent_dir: str = ""):
+def create_session_tools(manager: "SessionManager", current_session_id: str, agent_id: str = "", agent_dir: str | None = None):
     """Create tools with injected manager reference.
     
     Args:
         manager: The SessionManager instance to use for operations
         current_session_id: The ID of the current session (used as parent for spawned sessions)
-        agent_dir: The path to the agent directory for self-modification tools
+        agent_id: The agent identifier (e.g., "coder"). Primary parameter.
+        agent_dir: DEPRECATED - Path to agent directory (e.g., 'agents/coder'). Use agent_id instead.
     
     Returns:
         List of tool functions
     """
+    # Backward compatibility: convert agent_dir to agent_id if needed
+    if agent_dir and not agent_id:
+        from ..registry import get_registry
+        registry = get_registry()
+        agent_id = registry.resolve_path_to_id(agent_dir) or agent_dir
+    
     logger = logging.getLogger(__name__)
     
     def _handle_process_result(task: asyncio.Task, session_id: str) -> None:
@@ -173,10 +179,10 @@ Returns:
 """
     
     # Create inner_soul tool for self-modification
-    inner_soul = create_inner_soul_tool(manager, agent_dir, current_session_id)
+    inner_soul = create_inner_soul_tool(manager, agent_id, current_session_id)
     
     # Create project management tools (with session context for creator tracking)
-    project_tools = create_project_tools(manager.project_store, current_session_id, agent_dir)
+    project_tools = create_project_tools(manager.project_store, current_session_id, agent_id)
     
     # Base tools (available in all sessions)
     tools = [
@@ -202,7 +208,7 @@ Returns:
     tools.extend(project_tools)
     
     # Add mother tools if this is the _mother agent
-    if agent_dir and Path(agent_dir).name == "_mother":
+    if agent_id == "_mother":
         mother_tools = create_mother_tools(manager, current_session_id)
         tools.extend(mother_tools)
     

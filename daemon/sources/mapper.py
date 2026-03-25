@@ -8,6 +8,7 @@ validating input, and preventing duplicate message processing.
 import logging
 import re
 import uuid
+import warnings
 from typing import TYPE_CHECKING
 
 from .base import IncomingMessage
@@ -170,7 +171,8 @@ class SessionMapper:
         self,
         source_id: str,
         external_user_id: str,
-        agent_dir: str,
+        agent_id: str,
+        agent_dir: str | None = None,
         force_new: bool = False,
     ) -> str:
         """Get existing session or create a new one.
@@ -182,7 +184,10 @@ class SessionMapper:
         Args:
             source_id: The source identifier.
             external_user_id: The external user ID.
-            agent_dir: The agent directory path for new sessions.
+            agent_id: The agent identifier (primary parameter).
+            agent_dir: Deprecated. Agent directory path - kept for backward 
+                compatibility only. If provided, will be used to resolve 
+                agent_id via AgentRegistry.
             force_new: If True, delete any existing mapping and create a fresh session.
             
         Returns:
@@ -191,6 +196,31 @@ class SessionMapper:
         Raises:
             Exception: If session creation fails.
         """
+        # Handle deprecated agent_dir parameter
+        effective_agent_id = agent_id
+        effective_agent_dir = agent_id  # Use agent_id as fallback for agent_dir
+        
+        if agent_dir is not None:
+            warnings.warn(
+                "agent_dir parameter is deprecated, use agent_id instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            # If agent_id looks like a directory path, resolve it
+            registry = get_registry()
+            resolved_id = registry.resolve_to_id(agent_dir)
+            if resolved_id:
+                effective_agent_id = resolved_id
+            else:
+                effective_agent_id = agent_dir  # Fallback: use agent_dir as id
+            effective_agent_dir = agent_dir
+        else:
+            # Resolve agent_id to canonical form
+            registry = get_registry()
+            resolved_id = registry.resolve_to_id(agent_id)
+            if resolved_id:
+                effective_agent_id = resolved_id
+        
         # Check for existing mapping
         mapping = self.get_mapping(source_id, external_user_id)
         
@@ -214,20 +244,14 @@ class SessionMapper:
         # No mapping exists - create new session
         logger.info(
             f"Creating new session: source_id={source_id}, "
-            f"external_user_id={external_user_id}, agent_dir={agent_dir}"
+            f"external_user_id={external_user_id}, agent_id={effective_agent_id}"
         )
         
         try:
-            # Resolve agent_dir to agent_id
-            registry = get_registry()
-            agent_id = registry.resolve_to_id(agent_dir)
-            if agent_id is None:
-                agent_id = agent_dir  # Fallback to using agent_dir as agent_id
-            
             # Spawn new session via SessionManager
             agent_session_id = self.manager.spawn_session(
-                agent_id=agent_id,
-                agent_dir=agent_dir,
+                agent_id=effective_agent_id,
+                agent_dir=effective_agent_dir,
             )
             
             # Create mapping
@@ -241,8 +265,8 @@ class SessionMapper:
                 source_id=source_id,
                 external_user_id=external_user_id,
                 agent_session_id=agent_session_id,
-                agent_id=agent_id,
-                agent_dir=agent_dir,
+                agent_id=effective_agent_id,
+                agent_dir=effective_agent_dir,
                 metadata=metadata,
                 mapping_id=mapping_id,
             )
@@ -264,13 +288,17 @@ class SessionMapper:
     async def handle_incoming_message(
         self,
         msg: IncomingMessage,
-        default_agent_dir: str
+        default_agent_id: str,
+        default_agent_dir: str | None = None,
     ) -> tuple[str, str]:
         """Process an incoming message: validate, check duplicate, get/create session.
         
         Args:
             msg: The incoming message to handle.
-            default_agent_dir: Default agent directory for new sessions.
+            default_agent_id: Default agent identifier for new sessions.
+            default_agent_dir: Deprecated. Default agent directory - kept for 
+                backward compatibility only. If provided, will be used to resolve
+                agent_id via AgentRegistry.
             
         Returns:
             Tuple of (agent_session_id, source_id).
@@ -302,17 +330,31 @@ class SessionMapper:
                     f"Duplicate message: {external_message_id}"
                 )
         
-        # Determine agent directory (use metadata if specified, otherwise default)
-        agent_dir = msg.metadata.get("agent_dir") if msg.metadata else None
-        if not agent_dir:
-            agent_dir = default_agent_dir
+        # Determine agent identifier (use metadata if specified, otherwise default)
+        agent_id = msg.metadata.get("agent_id") if msg.metadata else None
+        
+        # Handle deprecated default_agent_dir parameter
+        if default_agent_dir is not None:
+            warnings.warn(
+                "default_agent_dir parameter is deprecated, use default_agent_id instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            # If agent_id not set from metadata, use default_agent_dir
+            if agent_id is None:
+                registry = get_registry()
+                resolved_id = registry.resolve_to_id(default_agent_dir)
+                agent_id = resolved_id if resolved_id else default_agent_dir
+        
+        if agent_id is None:
+            agent_id = default_agent_id
         
         # Get or create session
         try:
             agent_session_id = await self.get_or_create_session(
                 source_id=msg.source_id,
                 external_user_id=validated_user_id,
-                agent_dir=agent_dir
+                agent_id=agent_id
             )
         except Exception as e:
             logger.error(f"Failed to get/create session: {e}")

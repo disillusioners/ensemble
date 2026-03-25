@@ -80,12 +80,13 @@ from .repositories import create_job_repository, create_engine_from_config, Data
 from .registry import get_registry
 
 
-def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
-    """Validate agent_dir using AgentRegistry and return agent_id with path.
+def validate_agent_id(agent_id: str) -> tuple[str, Path]:
+    """Validate agent_id exists and return agent_id with path.
+    
+    This is the preferred function for validating agent references.
     
     Args:
-        agent_dir: Agent ID or relative/absolute path to agent directory.
-            Examples: "coder", "./agents/coder", "agents/coder"
+        agent_id: The agent identifier to validate.
         
     Returns:
         Tuple of (agent_id, resolved_absolute_path).
@@ -94,17 +95,6 @@ def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
         HTTPException: If agent is invalid or not found.
     """
     registry = get_registry()
-    
-    # Resolve to canonical agent_id
-    agent_id = registry.resolve_to_id(agent_dir)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid agent_dir: '{agent_dir}' is not a valid agent ID or path"
-            ).model_dump()
-        )
     
     # Check agent exists
     metadata = registry.get(agent_id)
@@ -118,6 +108,46 @@ def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
         )
     
     return agent_id, metadata.path
+
+
+def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
+    """Validate agent directory path and return agent_id with path.
+    
+    DEPRECATED: Use validate_agent_id() with agent_id instead.
+    This function is kept for backward compatibility.
+    
+    Args:
+        agent_dir: Agent ID or relative/absolute path to agent directory.
+            Examples: "coder", "./agents/coder", "agents/coder"
+        
+    Returns:
+        Tuple of (agent_id, resolved_absolute_path).
+        
+    Raises:
+        HTTPException: If agent is invalid or not found.
+    """
+    import warnings
+    warnings.warn(
+        "validate_agent_dir() is deprecated, use validate_agent_id() instead",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
+    registry = get_registry()
+    
+    # Resolve to canonical agent_id
+    agent_id = registry.resolve_to_id(agent_dir)
+    if agent_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Invalid agent_dir: '{agent_dir}' is not a valid agent ID or path"
+            ).model_dump()
+        )
+    
+    # Delegate to validate_agent_id for consistent validation
+    return validate_agent_id(agent_id)
 
 
 async def _reject_scheduler_lifecycle(source_id: str) -> None:
