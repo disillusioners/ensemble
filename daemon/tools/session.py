@@ -22,15 +22,9 @@ if TYPE_CHECKING:
 class SpawnSessionInput(BaseModel):
     """Input model for spawn_session tool."""
     
-    agent_id: Annotated[str | None, Field(
-        default=None,
-        description="Agent ID (e.g., 'coder', 'leader'). Preferred over agent_dir."
-    )] = None
-    
-    agent_dir: Annotated[str | None, Field(
-        default=None,
-        description="DEPRECATED: Path to agent directory (e.g., 'agents/coder'). Use agent_id instead."
-    )] = None
+    agent_id: Annotated[str, Field(
+        description="Agent ID (e.g., 'coder', 'leader')"
+    )]
     
     project_id: Annotated[str | None, Field(
         default=None,
@@ -39,35 +33,23 @@ class SpawnSessionInput(BaseModel):
     
     @model_validator(mode='after')
     def validate_params(self):
-        """Require at least one of agent_id or agent_dir."""
-        if not self.agent_id and not self.agent_dir:
-            raise ValueError('Either agent_id or agent_dir is required')
+        """Require agent_id."""
+        if not self.agent_id:
+            raise ValueError('agent_id is required')
         return self
 
 
-def create_session_tools(manager: "SessionManager", current_session_id: str, agent_id: str = "", agent_dir: str | None = None):
+def create_session_tools(manager: "SessionManager", current_session_id: str, agent_id: str = ""):
     """Create tools with injected manager reference.
     
     Args:
         manager: The SessionManager instance to use for operations
         current_session_id: The ID of the current session (used as parent for spawned sessions)
-        agent_id: The agent identifier (e.g., "coder"). Primary parameter.
-        agent_dir: DEPRECATED - Path to agent directory (e.g., 'agents/coder'). Use agent_id instead.
+        agent_id: The agent identifier (e.g., "coder").
     
     Returns:
         List of tool functions
     """
-    # Backward compatibility: convert agent_dir to agent_id if needed
-    if agent_dir and not agent_id:
-        import warnings
-        warnings.warn(
-            "Parameter 'agent_dir' is deprecated, use 'agent_id' instead",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        from ..registry import get_registry
-        registry = get_registry()
-        agent_id = registry.resolve_path_to_id(agent_dir) or agent_dir
     
     logger = logging.getLogger(__name__)
     
@@ -93,15 +75,13 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         until you send it a message.
         
         Args:
-            input: SpawnSessionInput containing agent_id (preferred) or agent_dir (deprecated),
-                and optional project_id for context injection.
+            input: SpawnSessionInput containing agent_id and optional project_id for context injection.
         
         Returns:
             The session_id of the newly spawned session. Use this with send_message().
         """
         new_session_id = manager.spawn_session(
             agent_id=input.agent_id,
-            agent_dir=input.agent_dir,
             session_id=None,
             parent_id=current_session_id,
             project_id=input.project_id,

@@ -110,46 +110,6 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     return agent_id, metadata.path
 
 
-def validate_agent_dir(agent_dir: str) -> tuple[str, Path]:
-    """Validate agent directory path and return agent_id with path.
-    
-    DEPRECATED: Use validate_agent_id() with agent_id instead.
-    This function is kept for backward compatibility.
-    
-    Args:
-        agent_dir: Agent ID or relative/absolute path to agent directory.
-            Examples: "coder", "./agents/coder", "agents/coder"
-        
-    Returns:
-        Tuple of (agent_id, resolved_absolute_path).
-        
-    Raises:
-        HTTPException: If agent is invalid or not found.
-    """
-    import warnings
-    warnings.warn(
-        "validate_agent_dir() is deprecated, use validate_agent_id() instead",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    
-    registry = get_registry()
-    
-    # Resolve to canonical agent_id
-    agent_id = registry.resolve_to_id(agent_dir)
-    if agent_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid agent_dir: '{agent_dir}' is not a valid agent ID or path"
-            ).model_dump()
-        )
-    
-    # Delegate to validate_agent_id for consistent validation
-    return validate_agent_id(agent_id)
-
-
 async def _reject_scheduler_lifecycle(source_id: str) -> None:
     """Raise error if source is a scheduler type.
     
@@ -483,7 +443,6 @@ async def create_session(session_create: SessionCreate):
         # Prefer agent_id over agent_dir
         session_id = manager.spawn_session(
             agent_id=session_create.agent_id,
-            agent_dir=session_create.agent_dir,
             session_id=session_create.session_id,
         )
     except ValueError as e:
@@ -1252,11 +1211,8 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     """Create a session mapping for an external user."""
     import uuid
     
-    # Prefer agent_id over agent_dir
-    agent_input = mapping_create.agent_id or mapping_create.agent_dir
-    
-    # Validate agent input
-    resolved_agent_id, agent_path = validate_agent_dir(agent_input)
+    # Validate agent_id
+    resolved_agent_id, agent_path = validate_agent_id(mapping_create.agent_id)
     
     # Check source exists
     source = manager._source_repository.get_source_config(source_id)

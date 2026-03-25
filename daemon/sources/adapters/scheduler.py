@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import uuid
-import warnings
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional, Callable, Awaitable
 from zoneinfo import ZoneInfo
@@ -712,44 +711,20 @@ Original scheduled task:
                     
                     try:
                         # Get agent_id as primary identifier
-                        # agent_dir is accepted for backward compatibility but is deprecated
-                        agent_id: Optional[str] = metadata.get("agent_id")
-                        agent_dir: Optional[str] = metadata.get("agent_dir")
+                        agent_id = self._agent
                         
-                        if not agent_id and self._agent:
-                            # Use configured agent as primary identifier
-                            agent_id = self._agent
-                        
-                        # Resolve agent_dir to agent_id if only agent_dir is provided (backward compat)
-                        if not agent_id and agent_dir:
-                            warnings.warn(
-                                "agent_dir is deprecated as a metadata key. Use agent_id instead.",
-                                DeprecationWarning,
-                                stacklevel=2
-                            )
-                            registry = get_registry()
-                            agent_id = registry.resolve_to_id(agent_dir)
-                            if agent_id is None:
-                                agent_id = agent_dir  # Fallback: use agent_dir as agent_id
-                        
-                        # Fallback: construct agent_id from agent name
                         if not agent_id:
-                            agent_id = self._agent
+                            agent_id = metadata.get("agent")
                         
-                        # Resolve agent_id to canonical form (handles both dir and id inputs)
-                        assert agent_id is not None, "agent_id should be set by this point"
+                        # Resolve agent_id to canonical form
+                        assert agent_id is not None and agent_id != "", "agent_id must be set"
                         registry = get_registry()
                         resolved_agent_id = registry.resolve_to_id(agent_id)
                         if resolved_agent_id:
                             agent_id = resolved_agent_id
                         
-                        assert agent_id is not None and agent_id != "", "agent_id must be set"
-                        final_agent_id = agent_id
-                        final_agent_dir = agent_dir or agent_id
-                        
                         job_item = await self._job_queue_service.enqueue(
-                            agent_id=final_agent_id,
-                            agent_dir=final_agent_dir,
+                            agent_id=agent_id,
                             message=formatted_message,
                             source="scheduler",
                             project_id=self._project_id,

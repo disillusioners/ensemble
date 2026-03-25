@@ -104,7 +104,7 @@ async def test_leader_spawns_coder_and_receives_report(
     leader_agent_dir = str(project_root / "agents" / "leader")
     logger.info(f"[TEST] Creating Leader session with agent: {leader_agent_dir}")
     
-    leader_session_id = manager.spawn_session(agent_dir=leader_agent_dir)
+    leader_session_id = manager.spawn_session(agent_id="leader")
     logger.info(f"[TEST] ✅ Leader session created: {leader_session_id[:8]}...")
     
     # Track all events
@@ -322,12 +322,12 @@ async def test_completion_report_message_format(
     
     # Create Leader (parent)
     leader_agent_dir = str(project_root / "agents" / "leader")
-    leader_session_id = manager.spawn_session(agent_dir=leader_agent_dir)
+    leader_session_id = manager.spawn_session(agent_id="leader")
     
     # Create Coder as child of Leader
     coder_agent_dir = str(project_root / "agents" / "coder")
     coder_session_id = manager.spawn_session(
-        agent_dir=coder_agent_dir,
+        agent_id="coder",
         parent_id=leader_session_id
     )
     

@@ -38,6 +38,7 @@ from .registry import get_registry
 
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 from .repositories.session.repository import get_agent_name
+from .repositories.session.models import Session
 from .tools import create_session_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
@@ -451,49 +452,35 @@ class SessionManager:
 
     def spawn_session(
         self, 
-        agent_dir: str | None = None,
+        agent_id: str,
         session_id: str | None = None, 
         parent_id: str | None = None,
         project_id: str | None = None,
-        agent_id: str | None = None,
     ) -> str:
         """Create a new agent session.
 
         Args:
-            agent_dir: Path to the agent directory (legacy format). Provide either
-                agent_dir or agent_id, but not both. agent_id takes precedence.
+            agent_id: Agent ID (e.g., "coder").
             session_id: Optional session ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent session ID for hierarchical sessions.
             project_id: Optional project ID for project context. Use `None` to explicitly
                 indicate no project context is needed. If provided, stored in session
                 metadata so child sessions don't rely on text extraction.
-            agent_id: Agent ID (e.g., "coder"). Preferred over agent_dir when provided.
 
         Returns:
             The session_id of the newly created session.
 
         Raises:
             ValueError: If max_sessions or max_children_per_session limit is exceeded,
-                or if neither agent_dir nor agent_id is provided.
+                or if agent_id is not found.
         """
-        # Resolve agent - prefer agent_id over agent_dir
+        # Resolve agent
         registry = get_registry()
-        resolved_agent_dir: str
-        resolved_agent_id: str
-        
-        if agent_id is not None:
-            # Use agent_id directly
-            resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
-            metadata = registry.get(resolved_agent_id)
-            if metadata is None:
-                raise ValueError(f"Agent not found: {resolved_agent_id}")
-            resolved_agent_dir = str(metadata.path)
-        elif agent_dir is not None:
-            # Use agent_dir - resolve to agent_id for storage
-            resolved_agent_dir = agent_dir
-            resolved_agent_id = registry.resolve_to_id(agent_dir) or agent_dir
-        else:
-            raise ValueError("Either agent_dir or agent_id must be provided")
+        resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
+        metadata = registry.get(resolved_agent_id)
+        if metadata is None:
+            raise ValueError(f"Agent not found: {resolved_agent_id}")
+        resolved_agent_dir = str(metadata.path)
         
         # Validate session_id format or auto-generate
         if session_id is None or not _UUID_PATTERN.match(session_id):
@@ -527,7 +514,7 @@ class SessionManager:
         system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, resolved_agent_dir)
+        tools = create_session_tools(self, session_id, resolved_agent_id)
 
         # Build LLM config
         llm_config = {
@@ -1903,9 +1890,9 @@ Title:"""
             raise KeyError(f"Session not found: {session_id}")
 
         # Session exists in DB but not in memory - restore it
-        return self._restore_session(session_id, meta.agent_dir)
+        return self._restore_session(session_id, meta)
 
-    def _restore_session(self, session_id: str, agent_dir: str) -> CompiledStateGraph:
+    def _restore_session(self, session_id: str, meta: "Session") -> CompiledStateGraph:
         """Restore a session from database into memory.
 
         Rebuilds the graph with the same session_id. The checkpointer will
@@ -1913,17 +1900,17 @@ Title:"""
 
         Args:
             session_id: The ID of the session to restore.
-            agent_dir: Path to the agent directory.
+            meta: Session metadata from database.
 
         Returns:
             The restored CompiledStateGraph instance.
         """
         # Load and cache prompt
-        agent_path = Path(agent_dir)
+        agent_path = Path(meta.agent_dir)
         system_prompt, token_count = load_and_cache_prompt(agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, agent_dir)
+        tools = create_session_tools(self, session_id, meta.agent_id)
 
         # Build LLM config
         llm_config = {
@@ -1949,7 +1936,7 @@ Title:"""
         )
 
         # Store in sessions dict
-        self.sessions[session_id] = (graph, agent_dir)
+        self.sessions[session_id] = (graph, meta.agent_dir)
 
         return graph
 

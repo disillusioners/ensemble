@@ -306,30 +306,17 @@ Returns:
 }
 
 
-def create_project_tools(store: SQLModelProjectRepository, current_session_id: str = "", agent_id: str = "", agent_dir: str | None = None):
+def create_project_tools(store: SQLModelProjectRepository, current_session_id: str = "", agent_id: str = ""):
     """Create project management tools with injected repository.
     
     Args:
         store: SQLModelProjectRepository instance for database operations.
         current_session_id: The current session ID (used for creator tracking).
         agent_id: The current agent ID (primary parameter).
-        agent_dir: DEPRECATED - Path to agent directory. Use agent_id instead.
     
     Returns:
         List of tool functions for project management.
     """
-    # Backward compatibility: convert agent_dir to agent_id if needed
-    if agent_dir and not agent_id:
-        import warnings
-        warnings.warn(
-            "Parameter 'agent_dir' is deprecated, use 'agent_id' instead",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        from ..registry import get_registry
-        registry = get_registry()
-        agent_id = registry.resolve_path_to_id(agent_dir) or agent_dir
-    
     @tool
     def project_create(
         name: str,

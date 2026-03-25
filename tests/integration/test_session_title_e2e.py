@@ -95,7 +95,7 @@ async def test_session_title_generation_e2e(
     coder_agent_dir = str(project_root / "agents" / "coder")
     logger.info(f"[TEST] Creating session with agent: {coder_agent_dir}")
     
-    session_id = manager.spawn_session(agent_dir=coder_agent_dir)
+    session_id = manager.spawn_session(agent_id="coder")
     logger.info(f"[TEST] Session created: {session_id}")
     
     # Verify initial state - no title
@@ -255,7 +255,7 @@ async def test_session_title_not_regenerated(
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
     
-    session_id = manager.spawn_session(agent_dir=coder_agent_dir)
+    session_id = manager.spawn_session(agent_id="coder")
     
     # Pre-set a title before sending any messages
     update_session_title(manager.conn, session_id, "Pre-set Title")

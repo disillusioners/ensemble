@@ -134,7 +134,7 @@ async def test_agent_bootstrap_with_session_manager(integration_config, agent_sy
     )
     
     # Spawn a session with the coder agent
-    session_id = manager.spawn_session(agent_dir=coder_agent_dir)
+    session_id = manager.spawn_session(agent_id="coder")
     
     assert session_id, "Should return a session ID"
     assert session_id in manager.sessions, "Session should be registered"

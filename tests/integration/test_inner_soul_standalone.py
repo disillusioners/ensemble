@@ -108,7 +108,7 @@ async def test_inner_soul_remember():
     
     # Spawn session
     print(f"Spawning session with agent: {agent_dir}")
-    session_id = manager.spawn_session(agent_dir=agent_dir)
+    session_id = manager.spawn_session(agent_id="test_agent")
     print(f"Session ID: {session_id}")
     
     # Send message asking agent to remember
@@ -168,7 +168,7 @@ async def test_inner_soul_workflow_change():
     workflow_before = workflow_file.read_text()
     
     manager = SessionManager(config=config)
-    session_id = manager.spawn_session(agent_dir=agent_dir)
+    session_id = manager.spawn_session(agent_id="test_agent")
     
     message = """Use the inner_soul tool to add a workflow step.
 

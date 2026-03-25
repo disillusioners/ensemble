@@ -152,7 +152,7 @@ class TestSpawnSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent")
+            session_id = manager.spawn_session(agent_id="coder")
             
             # Should have generated a UUID
             assert session_id is not None
@@ -167,7 +167,7 @@ class TestSpawnSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="custom-session-id")
+            session_id = manager.spawn_session(agent_id="coder", session_id="custom-session-id")
             
             assert session_id == "custom-session-id"
 
@@ -186,12 +186,12 @@ class TestSpawnSession:
                  patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
                  patch('daemon.manager.create_session_tools', return_value=[]):
                 
-                manager.spawn_session(agent_dir="/path/to/agent", session_id="session-1")
-                manager.spawn_session(agent_dir="/path/to/agent", session_id="session-2")
+                manager.spawn_session(agent_id="coder", session_id="session-1")
+                manager.spawn_session(agent_id="coder", session_id="session-2")
                 
                 # Third session should raise ValueError
                 with pytest.raises(ValueError, match="Max sessions limit reached"):
-                    manager.spawn_session(agent_dir="/path/to/agent", session_id="session-3")
+                    manager.spawn_session(agent_id="coder", session_id="session-3")
 
     def test_spawn_session_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that max_children_per_session limit is enforced."""
@@ -214,7 +214,7 @@ class TestSpawnSession:
                 
                 # Third child should raise ValueError
                 with pytest.raises(ValueError, match="Max children per session limit reached"):
-                    manager.spawn_session(agent_dir="/path/to/agent", parent_id="parent-session")
+                    manager.spawn_session(agent_id="coder", parent_id="parent-session")
 
     def test_spawn_session_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that graph is created and stored."""
@@ -225,7 +225,7 @@ class TestSpawnSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             # Verify graph was built and stored
             mock_build.assert_called_once()
@@ -247,7 +247,7 @@ class TestSendMessage:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             # Send a message
             response = await manager.send_message(session_id, "Hello!")
@@ -281,7 +281,7 @@ class TestTerminateSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = manager.terminate_session(session_id)
             
@@ -313,7 +313,7 @@ class TestGetSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             graph = manager.get_session(session_id)
             
@@ -388,7 +388,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
@@ -419,7 +419,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
@@ -449,7 +449,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
@@ -479,7 +479,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
@@ -508,7 +508,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             
@@ -536,7 +536,7 @@ class TestThinkTagParsing:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_dir="/path/to/agent", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
             
             result = await manager.send_message(session_id, "Hello!")
             

@@ -12,8 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class JobCreateRequest(BaseModel):
     """Request body for creating a new job."""
     
-    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
-    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Path to agent directory for backward compatibility.")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     message: str = Field(..., description="Job message/content")
     project_id: Optional[str] = Field(default=None, description="Optional project ID for job serialization")
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
@@ -26,12 +25,6 @@ class JobCreateRequest(BaseModel):
         if not 1 <= v <= 10:
             raise ValueError("Priority must be between 1 and 10")
         return v
-    
-    @model_validator(mode='after')
-    def validate_agent(self):
-        if not self.agent_id and not self.agent_dir:
-            raise ValueError('Either agent_id or agent_dir is required')
-        return self
     
     model_config = {
         "json_schema_extra": {

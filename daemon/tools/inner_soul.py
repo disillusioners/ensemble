@@ -139,30 +139,22 @@ def create_inner_soul_tool(
     manager: "SessionManager",
     agent_id: str,
     session_id: str,
-    agent_dir: str | None = None
 ):
     """Create inner_soul tool bound to a specific agent.
     
     Args:
         manager: SessionManager for cache invalidation
-        agent_id: The agent identifier (e.g., "coder"). Preferred parameter.
+        agent_id: The agent identifier (e.g., "coder")
         session_id: Current session ID for logging
-        agent_dir: DEPRECATED - Path to agent directory. Use agent_id instead.
     
     Returns:
         The inner_soul tool function
     """
-    # Backward compatibility: convert agent_dir to agent_id if needed
-    if agent_dir and not agent_id:
-        from ..registry import get_registry
-        registry = get_registry()
-        agent_id = registry.resolve_path_to_id(agent_dir) or agent_dir
-    
     # Resolve agent_id to path for internal use
     from ..registry import get_registry
     registry = get_registry()
     agent_meta = registry.get(agent_id)
-    agent_path = agent_meta.path if agent_meta else Path(agent_dir or agent_id)
+    agent_path = agent_meta.path if agent_meta else Path(agent_id)
     
     @tool
     def inner_soul(

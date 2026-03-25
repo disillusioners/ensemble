@@ -112,10 +112,8 @@ async def create_job(
     """
     # Validate and resolve agent input
     try:
-        from daemon.api import validate_agent_dir
-        # Prefer agent_id over agent_dir
-        agent_input = request.agent_id or request.agent_dir
-        resolved_agent_id, agent_path = validate_agent_dir(agent_input)
+        from daemon.api import validate_agent_id
+        resolved_agent_id, agent_path = validate_agent_id(request.agent_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -128,7 +126,6 @@ async def create_job(
     try:
         job = await service.enqueue(
             agent_id=resolved_agent_id,
-            agent_dir=str(agent_path),
             message=request.message,
             source=request.source,
             project_id=request.project_id,

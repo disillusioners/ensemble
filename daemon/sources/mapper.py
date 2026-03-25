@@ -8,7 +8,6 @@ validating input, and preventing duplicate message processing.
 import logging
 import re
 import uuid
-import warnings
 from typing import TYPE_CHECKING
 
 from .base import IncomingMessage
@@ -172,7 +171,6 @@ class SessionMapper:
         source_id: str,
         external_user_id: str,
         agent_id: str,
-        agent_dir: str | None = None,
         force_new: bool = False,
     ) -> str:
         """Get existing session or create a new one.
@@ -184,10 +182,7 @@ class SessionMapper:
         Args:
             source_id: The source identifier.
             external_user_id: The external user ID.
-            agent_id: The agent identifier (primary parameter).
-            agent_dir: Deprecated. Agent directory path - kept for backward 
-                compatibility only. If provided, will be used to resolve 
-                agent_id via AgentRegistry.
+            agent_id: The agent identifier.
             force_new: If True, delete any existing mapping and create a fresh session.
             
         Returns:
@@ -196,30 +191,16 @@ class SessionMapper:
         Raises:
             Exception: If session creation fails.
         """
-        # Handle deprecated agent_dir parameter
-        effective_agent_id = agent_id
-        effective_agent_dir = agent_id  # Use agent_id as fallback for agent_dir
+        # Resolve agent_id to canonical form
+        registry = get_registry()
+        resolved_id = registry.resolve_to_id(agent_id)
+        effective_agent_id = resolved_id if resolved_id else agent_id
         
-        if agent_dir is not None:
-            warnings.warn(
-                "agent_dir parameter is deprecated, use agent_id instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            # If agent_id looks like a directory path, resolve it
-            registry = get_registry()
-            resolved_id = registry.resolve_to_id(agent_dir)
-            if resolved_id:
-                effective_agent_id = resolved_id
-            else:
-                effective_agent_id = agent_dir  # Fallback: use agent_dir as id
-            effective_agent_dir = agent_dir
-        else:
-            # Resolve agent_id to canonical form
-            registry = get_registry()
-            resolved_id = registry.resolve_to_id(agent_id)
-            if resolved_id:
-                effective_agent_id = resolved_id
+        # Get agent_dir from registry
+        agent_meta = registry.get(effective_agent_id)
+        if agent_meta is None:
+            raise ValueError(f"Agent not found: {effective_agent_id}")
+        effective_agent_dir = str(agent_meta.path)
         
         # Check for existing mapping
         mapping = self.get_mapping(source_id, external_user_id)
@@ -289,16 +270,12 @@ class SessionMapper:
         self,
         msg: IncomingMessage,
         default_agent_id: str,
-        default_agent_dir: str | None = None,
     ) -> tuple[str, str]:
         """Process an incoming message: validate, check duplicate, get/create session.
         
         Args:
             msg: The incoming message to handle.
             default_agent_id: Default agent identifier for new sessions.
-            default_agent_dir: Deprecated. Default agent directory - kept for 
-                backward compatibility only. If provided, will be used to resolve
-                agent_id via AgentRegistry.
             
         Returns:
             Tuple of (agent_session_id, source_id).
@@ -332,19 +309,6 @@ class SessionMapper:
         
         # Determine agent identifier (use metadata if specified, otherwise default)
         agent_id = msg.metadata.get("agent_id") if msg.metadata else None
-        
-        # Handle deprecated default_agent_dir parameter
-        if default_agent_dir is not None:
-            warnings.warn(
-                "default_agent_dir parameter is deprecated, use default_agent_id instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            # If agent_id not set from metadata, use default_agent_dir
-            if agent_id is None:
-                registry = get_registry()
-                resolved_id = registry.resolve_to_id(default_agent_dir)
-                agent_id = resolved_id if resolved_id else default_agent_dir
         
         if agent_id is None:
             agent_id = default_agent_id

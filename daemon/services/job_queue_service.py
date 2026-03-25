@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from daemon.repositories.job_queue import JobRepository, JobItem, JobStatus
 from daemon.services.job_lock_manager import JobLockManager
+from daemon.registry import get_registry
 
 
 class JobQueueService:
@@ -44,7 +45,6 @@ class JobQueueService:
     async def enqueue(
         self,
         agent_id: str,
-        agent_dir: str,
         message: str,
         source: str = "api",
         project_id: Optional[str] = None,
@@ -59,7 +59,6 @@ class JobQueueService:
         
         Args:
             agent_id: Agent ID (e.g., 'coder').
-            agent_dir: Path to the agent directory.
             message: Job message/content.
             source: Source of the job ("api", "telegram", "scheduler", "webhook").
             project_id: Optional project ID for job serialization.
@@ -69,6 +68,13 @@ class JobQueueService:
         Returns:
             JobItem with status and (if immediate) session_id.
         """
+        # Derive agent_dir from agent_id using registry
+        registry = get_registry()
+        agent_meta = registry.get(agent_id)
+        if agent_meta is None:
+            raise ValueError(f"Agent not found: {agent_id}")
+        agent_dir = str(agent_meta.path)
+        
         # Create job once (status defaults to PENDING in repository)
         job = self._repository.create(
             agent_id=agent_id,
@@ -191,7 +197,6 @@ class JobQueueService:
         # start immediately or be queued
         new_job = await self.enqueue(
             agent_id=job.agent_id,
-            agent_dir=job.agent_dir,
             message=job.message,
             source=job.source,
             project_id=job.project_id,

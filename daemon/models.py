@@ -54,7 +54,7 @@ class ErrorResponse(BaseModel):
             "example": {
                 "code": "INVALID_REQUEST",
                 "message": "The request body is invalid",
-                "details": {"field": "agent_dir", "reason": "required field"}
+                "details": {"field": "agent_id", "reason": "required field"}
             }
         }
     )
@@ -63,14 +63,13 @@ class ErrorResponse(BaseModel):
 class SessionCreate(BaseModel):
     """Request for spawning a new session."""
 
-    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
-    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Path to agent directory for backward compatibility.")
-    session_id: str | None = Field(default=None, description="Optional session ID (auto-generated if omitted)")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    session_id: str | None = Field(default=None, description="Optional session ID")
 
     @model_validator(mode='after')
     def validate_agent(self):
-        if not self.agent_id and not self.agent_dir:
-            raise ValueError('Either agent_id or agent_dir is required')
+        if not self.agent_id:
+            raise ValueError('agent_id is required')
         return self
 
     model_config = ConfigDict(
@@ -88,7 +87,7 @@ class SessionInfo(BaseModel):
 
     session_id: str = Field(..., description="Unique session identifier")
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
-    agent_dir: str = Field(..., description="Path to the agent directory")
+    agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
     status: SessionStatus = Field(..., description="Current session status")
     title: str | None = Field(default=None, description="Auto-generated session title from first message")
     parent_id: str | None = Field(default=None, description="Parent session ID if this is a child session")
@@ -606,16 +605,9 @@ class SessionMappingCreate(BaseModel):
     """Request for creating a session mapping."""
 
     external_user_id: str = Field(..., description="External user ID (e.g., Telegram chat_id)", min_length=1, max_length=256)
-    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder'). Preferred over agent_dir.")
-    agent_dir: str | None = Field(default=None, description="[DEPRECATED] Use agent_id instead. Agent directory for backward compatibility.")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
-
-    @model_validator(mode='after')
-    def validate_agent(self):
-        if not self.agent_id and not self.agent_dir:
-            raise ValueError('Either agent_id or agent_dir is required')
-        return self
-
+    
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
