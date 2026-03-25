@@ -169,8 +169,8 @@
             class="form-select"
           >
             <option value="" disabled>Select an agent</option>
-            @for (agent of agents(); track agent.agent_dir) {
-              <option [value]="agent.agent_dir">
+            @for (agent of agents(); track agent.agent_id) {
+              <option [value]="agent.agent_id">
                 {{ getAgentDisplayName(agent) }}
               </option>
             }

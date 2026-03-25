@@ -61,7 +61,7 @@
 <!-- Recursive template for session nodes -->
 <ng-template #sessionNode let-node let-depth="depth">
   @let session = node.session;
-  @let agent = getAgentInfo(session.agent_dir);
+  @let agent = getAgentInfo(session.agent_id);
   @let isActive = session.session_id === currentSessionId();
   @let hasChildren = node.children.length > 0;
   @let expanded = isExpanded(session.session_id);

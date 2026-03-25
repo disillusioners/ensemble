@@ -400,8 +400,8 @@ export class SchedulesComponent implements OnInit, OnDestroy {
     this.selectedSchedule.set(null);
   }
 
-  protected getAgentDisplayName(agentDir: string): string {
-    const agent = this.agents().find(a => a.agent_dir === agentDir);
-    return agent ? `${agent.icon} ${agent.name}` : agentDir;
+  protected getAgentDisplayName(agentId: string): string {
+    const agent = this.agents().find(a => a.agent_id === agentId);
+    return agent ? `${agent.icon} ${agent.name}` : agentId;
   }
 }

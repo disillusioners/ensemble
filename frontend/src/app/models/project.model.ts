@@ -21,7 +21,7 @@ export interface Project {
     [key: string]: string[] | undefined;
   };
   creator_session_id: string | null;
-  creator_agent_dir: string | null;
+  creator_agent_id: string | null;
   created_at: string;
   updated_at: string | null;
   job_queue_paused: boolean;

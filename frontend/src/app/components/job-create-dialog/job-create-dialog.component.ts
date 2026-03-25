@@ -15,7 +15,7 @@ import type { Agent } from '../../models';
 export interface JobCreateDialogData {
   editMode?: boolean;
   jobId?: string;
-  agentDir?: string;
+  agentId?: string;
   message?: string;
   projectId?: string;
   priority?: number;
@@ -23,7 +23,7 @@ export interface JobCreateDialogData {
 }
 
 export interface JobCreateDialogResult {
-  agent_dir: string;
+  agent_id: string;
   message: string;
   project_id?: string;
   priority: number;
@@ -60,7 +60,7 @@ export class JobCreateDialogComponent implements OnInit {
   protected readonly agentsLoading = signal(true);
 
   protected readonly form: FormGroup = this.fb.group({
-    agent_dir: ['', Validators.required],
+    agent_id: ['', Validators.required],
     message: ['', [Validators.required, Validators.minLength(10)]],
     project_id: [''],
     priority: [5, [Validators.required, Validators.min(1), Validators.max(10)]],
@@ -78,9 +78,9 @@ export class JobCreateDialogComponent implements OnInit {
     this.loadAgents();
     
     // Pre-fill form if editing
-    if (this.data?.editMode && this.data.agentDir) {
+    if (this.data?.editMode && this.data.agentId) {
       this.form.patchValue({
-        agent_dir: this.data.agentDir || '',
+        agent_id: this.data.agentId || '',
         message: this.data.message || '',
         project_id: this.data.projectId || '',
         priority: this.data.priority || 5,
@@ -122,7 +122,7 @@ export class JobCreateDialogComponent implements OnInit {
 
     try {
       const result: JobCreateDialogResult = {
-        agent_dir: this.form.value.agent_dir,
+        agent_id: this.form.value.agent_id,
         message: this.form.value.message,
         project_id: this.form.value.project_id || undefined,
         priority: this.form.value.priority,

@@ -30,20 +30,20 @@
           <div class="loading-placeholder">Loading agents...</div>
         } @else {
           <select
-            formControlName="agent_dir"
+            formControlName="agent_id"
             class="form-select"
             aria-labelledby="agent-label"
             aria-required="true"
           >
             <option value="" disabled>Select an agent</option>
-            @for (agent of agents(); track agent.agent_dir) {
-              <option [value]="agent.agent_dir">
+            @for (agent of agents(); track agent.agent_id) {
+              <option [value]="agent.agent_id">
                 {{ getAgentDisplayName(agent) }}
               </option>
             }
           </select>
         }
-        @if (form.get('agent_dir')?.touched && form.get('agent_dir')?.errors?.['required']) {
+        @if (form.get('agent_id')?.touched && form.get('agent_id')?.errors?.['required']) {
           <p class="form-error">Agent is required</p>
         }
       </div>

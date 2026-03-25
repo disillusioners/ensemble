@@ -120,8 +120,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     if (currentFilters.source) {
       filtered = filtered.filter(job => job.source === currentFilters.source);
     }
-    if (currentFilters.agent_dir) {
-      filtered = filtered.filter(job => job.agent_dir === currentFilters.agent_dir);
+    if (currentFilters.agent_id) {
+      filtered = filtered.filter(job => job.agent_id === currentFilters.agent_id);
     }
 
     return filtered;
@@ -296,10 +296,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.loadJobs();
   }
 
-  protected onAgentFilterChange(agentDir: string): void {
+  protected onAgentFilterChange(agentId: string): void {
     this.filters.update(filters => ({
       ...filters,
-      agent_dir: agentDir === 'all' ? undefined : agentDir
+      agent_id: agentId === 'all' ? undefined : agentId
     }));
     this.loadJobs();
   }
@@ -325,7 +325,7 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   private createJob(data: JobCreateDialogResult): void {
     this.jobService.createJob({
-      agent_dir: data.agent_dir,
+      agent_id: data.agent_id,
       message: data.message,
       project_id: data.project_id,
       priority: data.priority,
@@ -432,14 +432,14 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.router.navigate(['/sessions', sessionId]);
   }
 
-  protected getAgentDisplayName(agentDir: string): string {
-    const agent = this.agents().find(a => a.agent_dir === agentDir);
-    return agent ? `${agent.icon} ${agent.name}` : agentDir;
+  protected getAgentDisplayName(agentId: string): string {
+    const agent = this.agents().find(a => a.agent_id === agentId);
+    return agent ? `${agent.icon} ${agent.name}` : agentId;
   }
 
   protected hasActiveFilters(): boolean {
     const filters = this.filters();
-    return !!(filters.status || filters.source || filters.agent_dir);
+    return !!(filters.status || filters.source || filters.agent_id);
   }
 
   protected onToggleProjectPause(project: Project): void {

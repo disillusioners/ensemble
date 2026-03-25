@@ -50,9 +50,9 @@ export class ApiService {
   }
 
   // Sessions
-  createSession(agentDir: string, sessionId?: string): Observable<SessionInfo> {
+  createSession(agentId: string, sessionId?: string): Observable<SessionInfo> {
     return this.http.post<SessionInfo>(`${this.API_BASE}/sessions`, { 
-      agent_dir: agentDir, 
+      agent_id: agentId, 
       session_id: sessionId 
     });
   }

@@ -3,7 +3,7 @@ export type SessionStatus = 'idle' | 'running' | 'waiting' | 'error' | 'terminat
 
 export interface SessionInfo {
   session_id: string;
-  agent_dir: string;
+  agent_id: string;
   status: SessionStatus;
   parent_id: string | null;
   children: string[];
@@ -69,7 +69,7 @@ export interface Agent {
   icon: string;
   color: string;
   version?: string;
-  agent_dir: string;
+  agent_id: string;
   system?: boolean;
 }
 
@@ -166,7 +166,7 @@ export interface SessionMapping {
   source_id: string;
   external_user_id: string;
   agent_session_id: string;
-  agent_dir: string;
+  agent_id: string;
   metadata?: Record<string, unknown>;
   last_message_at?: string;
   created_at: string;
@@ -174,7 +174,7 @@ export interface SessionMapping {
 
 export interface SessionMappingCreate {
   external_user_id: string;
-  agent_dir: string;
+  agent_id: string;
   metadata?: Record<string, unknown>;
 }
 

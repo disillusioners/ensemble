@@ -21,14 +21,14 @@ export class JobService {
   readonly error = signal<string | null>(null);
 
   /**
-   * GET /api/jobs?status=...&source=...&agent_dir=...
+   * GET /api/jobs?status=...&source=...&agent_id=...
    */
   listJobs(filters?: JobFilters): Observable<Job[]> {
     let params = new HttpParams();
     if (filters) {
       if (filters.status) params = params.set('status', filters.status);
       if (filters.source) params = params.set('source', filters.source);
-      if (filters.agent_dir) params = params.set('agent_dir', filters.agent_dir);
+      if (filters.agent_id) params = params.set('agent_id', filters.agent_id);
       if (filters.project_id) params = params.set('project_id', filters.project_id);
     }
 

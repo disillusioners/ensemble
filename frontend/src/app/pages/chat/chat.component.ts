@@ -61,7 +61,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly sessionAgent = computed(() => {
     const session = this.currentSession();
     if (!session) return null;
-    return this.agents().find(a => session.agent_dir.includes(a.id)) || null;
+    return this.agents().find(a => session.agent_id.includes(a.id)) || null;
   });
 
   constructor() {

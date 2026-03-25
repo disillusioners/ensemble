@@ -17,7 +17,7 @@ export type SessionStatus = 'idle' | 'running' | 'waiting' | 'error' | 'terminat
 ```typescript
 export interface SessionInfo {
   session_id: string;
-  agent_dir: string;
+  agent_id: string;
   status: SessionStatus;
   parent_id: string | null;
   children: string[];
@@ -99,7 +99,7 @@ export interface Agent {
   icon: string;
   color: string;
   version?: string;
-  agent_dir: string;
+  agent_id: string;
 }
 ```
 - Purpose: Represents a configurable AI agent with visual properties (icon, color) and metadata

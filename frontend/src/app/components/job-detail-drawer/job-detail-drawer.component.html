@@ -32,10 +32,10 @@
   <section class="detail-section">
     <h3 class="section-title">Overview</h3>
     <div class="detail-grid">
-      @if (job().agent_dir) {
+      @if (job().agent_id) {
         <div class="detail-item">
-          <span class="label">Agent Directory</span>
-          <span class="value">{{ job().agent_dir }}</span>
+          <span class="label">Agent ID</span>
+          <span class="value">{{ job().agent_id }}</span>
         </div>
       }
       @if (job().priority) {

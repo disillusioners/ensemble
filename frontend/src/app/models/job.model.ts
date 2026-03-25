@@ -6,7 +6,7 @@ export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
 export interface Job {
   job_id: string;
-  agent_dir: string;
+  agent_id: string;
   message: string;
   source: JobSource;
   project_id: string | null;
@@ -24,7 +24,7 @@ export interface Job {
 }
 
 export interface JobCreate {
-  agent_dir: string;
+  agent_id: string;
   message: string;
   project_id?: string;
   priority?: number;
@@ -35,7 +35,7 @@ export interface JobCreate {
 export interface JobFilters {
   status?: JobStatus;
   source?: JobSource;
-  agent_dir?: string;
+  agent_id?: string;
   project_id?: string;
 }
 
