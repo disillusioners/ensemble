@@ -86,7 +86,7 @@ class SessionInfo(BaseModel):
     """Response for session information."""
 
     session_id: str = Field(..., description="Unique session identifier")
-    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
     status: SessionStatus = Field(..., description="Current session status")
     title: str | None = Field(default=None, description="Auto-generated session title from first message")
