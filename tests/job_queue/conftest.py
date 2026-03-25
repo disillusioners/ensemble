@@ -50,11 +50,12 @@ def sample_task_data():
     """Sample task creation data for repository tests."""
     return {
         "agent_id": "test-agent",
+        "agent_dir": "./agents/test-agent",
         "message": "Test task message",
         "source": "api",
         "project_id": "test-project",
         "priority": 5,
-        "task_metadata": {"test": True},
+        "job_metadata": {"test": True},
     }
 
 
@@ -63,6 +64,7 @@ def sample_task_data_service():
     """Sample task creation data for service tests."""
     return {
         "agent_id": "test-agent",
+        "agent_dir": "./agents/test-agent",
         "message": "Test task message",
         "source": "api",
         "project_id": "test-project",
@@ -76,11 +78,12 @@ def sample_task_data_no_project():
     """Sample task creation data without project_id for repository."""
     return {
         "agent_id": "test-agent",
+        "agent_dir": "./agents/test-agent",
         "message": "Test task without project",
         "source": "api",
         "project_id": None,
         "priority": 5,
-        "task_metadata": None,
+        "job_metadata": None,
     }
 
 
@@ -108,11 +111,12 @@ def high_priority_task_data():
     """High priority task data for repository ordering tests."""
     return {
         "agent_id": "test-agent",
+        "agent_dir": "./agents/test-agent",
         "message": "High priority task",
         "source": "api",
         "project_id": "test-project",
         "priority": 10,  # Highest priority
-        "task_metadata": None,
+        "job_metadata": None,
     }
 
 
@@ -134,11 +138,12 @@ def low_priority_task_data():
     """Low priority task data for repository ordering tests."""
     return {
         "agent_id": "test-agent",
+        "agent_dir": "./agents/test-agent",
         "message": "Low priority task",
         "source": "api",
         "project_id": "test-project",
         "priority": 1,  # Lowest priority
-        "task_metadata": None,
+        "job_metadata": None,
     }
 
 

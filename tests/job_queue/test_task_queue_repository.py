@@ -17,14 +17,14 @@ class TestRepositoryCreate:
         """Test creating a basic task."""
         task = repository.create(**sample_task_data)
         
-        assert task.task_id is not None
+        assert task.job_id is not None
         assert task.agent_dir == sample_task_data["agent_dir"]
         assert task.message == sample_task_data["message"]
         assert task.source == sample_task_data["source"]
         assert task.project_id == sample_task_data["project_id"]
         assert task.priority == sample_task_data["priority"]
-        assert task.status == TaskStatus.PENDING.value
-        assert task.task_metadata == sample_task_data["task_metadata"]
+        assert task.status == JobStatus.PENDING.value
+        assert task.job_metadata == sample_task_data["job_metadata"]
 
     def test_create_task_without_project(self, repository, sample_task_data_no_project):
         """Test creating a task without project_id."""
@@ -32,7 +32,7 @@ class TestRepositoryCreate:
         
         assert task.task_id is not None
         assert task.project_id is None
-        assert task.status == TaskStatus.PENDING.value
+        assert task.status == JobStatus.PENDING.value
 
     def test_create_task_default_values(self, repository):
         """Test creating task with minimal parameters."""
@@ -44,7 +44,7 @@ class TestRepositoryCreate:
         assert task.task_id is not None
         assert task.source == "api"  # Default value
         assert task.priority == 5  # Default value
-        assert task.status == TaskStatus.PENDING.value
+        assert task.status == JobStatus.PENDING.value
         assert task.task_metadata == {}  # Default empty dict
 
     def test_create_task_generates_timestamps(self, repository, sample_task_data):
@@ -130,8 +130,8 @@ class TestRepositoryList:
         # Start task1
         repository.start_task(task1.task_id, "session-1")
         
-        pending_tasks, total = repository.list(status=TaskStatus.PENDING.value)
-        processing_tasks, _ = repository.list(status=TaskStatus.PROCESSING.value)
+        pending_tasks, total = repository.list(status=JobStatus.PENDING.value)
+        processing_tasks, _ = repository.list(status=JobStatus.PROCESSING.value)
         
         assert len(pending_tasks) == 1
         assert pending_tasks[0].task_id == task2.task_id
@@ -190,7 +190,7 @@ class TestRepositoryList:
         pending = repository.list_pending_by_project("test-project")
         
         assert len(pending) == 2
-        assert all(t.status == TaskStatus.PENDING.value for t in pending)
+        assert all(t.status == JobStatus.PENDING.value for t in pending)
 
     def test_list_pending_ordered_by_priority(self, repository):
         """Test that pending tasks are ordered by priority descending."""
@@ -288,7 +288,7 @@ class TestRepositoryTaskLifecycle:
         started = repository.start_task(task.task_id, "session-1")
         
         assert started is not None
-        assert started.status == TaskStatus.PROCESSING.value
+        assert started.status == JobStatus.PROCESSING.value
         assert started.session_id == "session-1"
         assert started.started_at is not None
 
@@ -326,7 +326,7 @@ class TestRepositoryTaskLifecycle:
         )
         
         assert completed is not None
-        assert completed.status == TaskStatus.COMPLETED.value
+        assert completed.status == JobStatus.COMPLETED.value
         assert completed.completed_at is not None
         assert completed.result_summary == "Task completed successfully"
 
@@ -351,7 +351,7 @@ class TestRepositoryTaskLifecycle:
         )
         
         assert failed is not None
-        assert failed.status == TaskStatus.FAILED.value
+        assert failed.status == JobStatus.FAILED.value
         assert failed.completed_at is not None
         assert failed.error_message == "Something went wrong"
 
@@ -372,7 +372,7 @@ class TestRepositoryTaskLifecycle:
         cancelled = repository.cancel_task(task.task_id)
         
         assert cancelled is not None
-        assert cancelled.status == TaskStatus.CANCELLED.value
+        assert cancelled.status == JobStatus.CANCELLED.value
         assert cancelled.cancelled_at is not None
 
     def test_cancel_processing_task_raises(self, repository, sample_task_data):
@@ -508,7 +508,7 @@ class TestRepositoryEdgeCases:
         
         # Filter by both status and project
         tasks, total = repository.list(
-            status=TaskStatus.PENDING.value,
+            status=JobStatus.PENDING.value,
             project_id="test-project"
         )
         
@@ -562,39 +562,39 @@ class TestRepositoryConcurrency:
         task = repository.create(**sample_task_data)
         
         # Verify initial state
-        assert task.status == TaskStatus.PENDING.value
+        assert task.status == JobStatus.PENDING.value
         
         # Start task
         started = repository.start_task(task.task_id, "session-1")
-        assert started.status == TaskStatus.PROCESSING.value
+        assert started.status == JobStatus.PROCESSING.value
         
         # Complete task
         completed = repository.complete_task(task.task_id, "Done")
-        assert completed.status == TaskStatus.COMPLETED.value
+        assert completed.status == JobStatus.COMPLETED.value
         
         # Verify final state persists
         final = repository.get(task.task_id)
-        assert final.status == TaskStatus.COMPLETED.value
+        assert final.status == JobStatus.COMPLETED.value
         assert final.completed_at is not None
 
 
-class TestTaskStatusValidation:
-    """Tests for TaskStatus enum validation."""
+class TestJobStatusValidation:
+    """Tests for JobStatus enum validation."""
 
     def test_valid_status_values(self):
         """Test all valid status values."""
-        assert TaskStatus.is_valid("pending")
-        assert TaskStatus.is_valid("processing")
-        assert TaskStatus.is_valid("completed")
-        assert TaskStatus.is_valid("failed")
-        assert TaskStatus.is_valid("cancelled")
+        assert JobStatus.is_valid("pending")
+        assert JobStatus.is_valid("processing")
+        assert JobStatus.is_valid("completed")
+        assert JobStatus.is_valid("failed")
+        assert JobStatus.is_valid("cancelled")
 
     def test_invalid_status_values(self):
         """Test invalid status values return False."""
-        assert TaskStatus.is_valid("invalid") is False
-        assert TaskStatus.is_valid("") is False
-        assert TaskStatus.is_valid("PENDING") is False  # Case sensitive
-        assert TaskStatus.is_valid("Pending") is False  # Case sensitive
+        assert JobStatus.is_valid("invalid") is False
+        assert JobStatus.is_valid("") is False
+        assert JobStatus.is_valid("PENDING") is False  # Case sensitive
+        assert JobStatus.is_valid("Pending") is False  # Case sensitive
 
 
 class TestJobItem:

@@ -186,11 +186,23 @@ def run_migrations(engine: Engine) -> None:
         except Exception as e:
             logger.warning(f"Migration failed for session_mappings table: {e}")
         
-        # Migration: Add agent_id to jobqueue
+        # Migration: Add agent_id to jobqueue (legacy table name)
         try:
             _add_agent_id_column(conn, "jobqueue", logger)
         except Exception as e:
             logger.warning(f"Migration failed for jobqueue table: {e}")
+        
+        # Migration: Add agent_id to job_queue_items (new table name)
+        try:
+            _add_agent_id_column(conn, "job_queue_items", logger)
+        except Exception as e:
+            logger.warning(f"Migration failed for job_queue_items table: {e}")
+        
+        # Migration: Add agent_id to task_queue_items (legacy task queue table)
+        try:
+            _add_agent_id_column(conn, "task_queue_items", logger)
+        except Exception as e:
+            logger.warning(f"Migration failed for task_queue_items table: {e}")
 
 
 def create_project_repository(
