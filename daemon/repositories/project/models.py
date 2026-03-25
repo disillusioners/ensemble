@@ -89,7 +89,7 @@ class Project(SQLModel, table=True):
     )
     
     creator_session_id: Optional[str] = None
-    creator_agent_dir: Optional[str] = None
+    creator_agent_id: Optional[str] = None
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -130,7 +130,7 @@ class Project(SQLModel, table=True):
             "metadata": dict(self.project_metadata),
             "relationships": dict(self.relationships),
             "creator_session_id": self.creator_session_id,
-            "creator_agent_dir": self.creator_agent_dir,
+            "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

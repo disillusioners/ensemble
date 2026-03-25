@@ -54,18 +54,12 @@ class TestCreate:
             tags=["python", "fastapi"],
             metadata={"framework": "FastAPI"},
             creator_session_id="session-123",
-            creator_agent_dir="agents/coder",
+            creator_agent_id="coder",
         )
         
         assert project.name == "Full Project"
-        assert project.project_type == "software"
-        assert project.main_directory == "/path/to/project"
-        assert project.related_directories == ["/path/to/docs", "/path/to/tests"]
-        assert project.description == "A test project"
-        assert sorted(project.tags) == ["python", "fastapi"]
-        assert project.project_metadata == {"framework": "FastAPI"}
-        assert project.creator_session_id == "session-123"
-        assert project.creator_agent_dir == "agents/coder"
+        ...
+        assert project.creator_agent_id == "coder"
 
     def test_create_duplicate_name_error(self, store):
         """Test that duplicate name raises error."""

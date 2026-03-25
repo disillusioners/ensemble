@@ -174,7 +174,7 @@ class ProjectResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Project metadata")
     relationships: dict[str, list[str]] = Field(default_factory=dict, description="Project relationships")
     creator_session_id: Optional[str] = Field(default=None, description="Creator session ID")
-    creator_agent_dir: Optional[str] = Field(default=None, description="Creator agent directory")
+    creator_agent_id: Optional[str] = Field(default=None, description="Creator agent ID")
     created_at: str = Field(..., description="Project creation timestamp")
     updated_at: str = Field(..., description="Project update timestamp")
     
@@ -194,7 +194,7 @@ class ProjectResponse(BaseModel):
                 "metadata": {},
                 "relationships": {},
                 "creator_session_id": "session-uuid",
-                "creator_agent_dir": "./agents/coder",
+                "creator_agent_id": "coder",
                 "created_at": "2025-03-15T10:00:00",
                 "updated_at": "2025-03-15T10:00:00"
             }

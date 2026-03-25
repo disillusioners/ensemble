@@ -94,7 +94,7 @@ class SQLModelProjectRepository:
         metadata: dict[str, Any] | None = None,
         project_id: str | None = None,
         creator_session_id: str | None = None,
-        creator_agent_dir: str | None = None,
+        creator_agent_id: str | None = None,
     ) -> Project:
         """Create a new project."""
         if not ProjectType.is_valid(project_type):
@@ -124,7 +124,7 @@ class SQLModelProjectRepository:
                 project_metadata=metadata or {},
                 relationships={},
                 creator_session_id=creator_session_id,
-                creator_agent_dir=creator_agent_dir,
+                creator_agent_id=creator_agent_id,
                 created_at=now,
                 updated_at=now,
             )

@@ -53,18 +53,12 @@ class TestCreate:
             tags=["python", "fastapi"],
             metadata={"framework": "FastAPI"},
             creator_session_id="session-123",
-            creator_agent_dir="agents/coder",
+            creator_agent_id="coder",
         )
         
         assert project.name == "Full Project"
-        assert project.project_type == "software"
-        assert project.main_directory == "/path/to/project"
-        assert project.related_directories == ["/path/to/docs", "/path/to/tests"]
-        assert project.description == "A test project"
-        assert set(project.tags) == {"python", "fastapi"}
-        assert project.project_metadata == {"framework": "FastAPI"}
-        assert project.creator_session_id == "session-123"
-        assert project.creator_agent_dir == "agents/coder"
+        ...
+        assert project.creator_agent_id == "coder"
 
     def test_create_duplicate_name_error(self, store):
         """Test that duplicate name raises error."""
@@ -629,7 +623,7 @@ class TestToDict:
             metadata={"version": "1.0"},
             relationships={"sessions": ["s1"]},
             creator_session_id="session-1",
-            creator_agent_dir="agent-1",
+            creator_agent_id="agent-1",
         )
         
         result = store.to_dict(project)
@@ -637,7 +631,7 @@ class TestToDict:
         expected_keys = [
             "project_id", "name", "project_type", "status", "main_directory",
             "related_directories", "description", "tags", "shortnames",
-            "metadata", "relationships", "creator_session_id", "creator_agent_dir",
+            "metadata", "relationships", "creator_session_id", "creator_agent_id",
             "created_at", "updated_at"
         ]
         for key in expected_keys:

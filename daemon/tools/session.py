@@ -59,6 +59,12 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
     """
     # Backward compatibility: convert agent_dir to agent_id if needed
     if agent_dir and not agent_id:
+        import warnings
+        warnings.warn(
+            "Parameter 'agent_dir' is deprecated, use 'agent_id' instead",
+            DeprecationWarning,
+            stacklevel=2
+        )
         from ..registry import get_registry
         registry = get_registry()
         agent_id = registry.resolve_path_to_id(agent_dir) or agent_dir

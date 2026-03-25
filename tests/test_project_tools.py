@@ -37,7 +37,7 @@ def tools(store):
     return create_project_tools(
         store, 
         current_session_id="test-session", 
-        agent_dir="agents/test"
+        agent_dir="test"
     )
 
 

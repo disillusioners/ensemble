@@ -54,7 +54,7 @@ def _project_to_response(project) -> ProjectResponse:
         metadata=project.project_metadata,
         relationships=project.relationships,
         creator_session_id=project.creator_session_id,
-        creator_agent_dir=project.creator_agent_dir,
+        creator_agent_id=project.creator_agent_id,
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
