@@ -181,6 +181,19 @@ def run_migrations(engine: Engine) -> None:
         except Exception as e:
             logger.warning(f"Migration check failed (table may not exist yet): {e}")
         
+        # Migration: Add creator_agent_id to projects
+        try:
+            result = conn.execute(text("SELECT sql FROM sqlite_master WHERE type='table' AND name='projects'"))
+            row = result.fetchone()
+            if row:
+                table_sql = row[0] if row[0] else ""
+                if 'creator_agent_id' not in table_sql:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN creator_agent_id TEXT"))
+                    conn.commit()
+                    logger.info("Migration: Added creator_agent_id column to projects table")
+        except Exception as e:
+            logger.warning(f"Migration check failed for creator_agent_id: {e}")
+        
         # Migration: Add agent_id to sessions
         try:
             _add_agent_id_column(conn, "sessions", logger)
@@ -232,7 +245,9 @@ def create_project_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
-        run_migrations(engine)
+    
+    # Always run migrations - they handle existing tables safely
+    run_migrations(engine)
     
     return SQLModelProjectRepository(engine)
 
@@ -263,7 +278,9 @@ def create_session_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
-        run_migrations(engine)
+    
+    # Always run migrations - they handle existing tables safely
+    run_migrations(engine)
     
     return SQLModelSessionRepository(engine)
 
@@ -294,7 +311,9 @@ def create_message_queue_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
-        run_migrations(engine)
+    
+    # Always run migrations - they handle existing tables safely
+    run_migrations(engine)
     
     return SQLModelMessageQueueRepository(engine)
 
@@ -325,7 +344,9 @@ def create_source_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
-        run_migrations(engine)
+    
+    # Always run migrations - they handle existing tables safely
+    run_migrations(engine)
     
     return SQLModelSourceRepository(engine)
 
@@ -356,7 +377,9 @@ def create_job_repository(
     
     if create_tables:
         SQLModel.metadata.create_all(engine)
-        run_migrations(engine)
+    
+    # Always run migrations - they handle existing tables safely
+    run_migrations(engine)
     
     return JobRepository(engine)
 

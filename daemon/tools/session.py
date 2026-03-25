@@ -67,7 +67,7 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
             logger.debug(f"Queue processing cancelled for session {session_id[:8]}")
     
     @tool(args_schema=SpawnSessionInput)
-    def spawn_session(input: SpawnSessionInput) -> str:
+    def spawn_session(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection.")] = None) -> str:
         """Spawn a new agent session and return its session_id.
         
         IMPORTANT: After spawning, you MUST use send_message(session_id, message) 
@@ -75,16 +75,17 @@ def create_session_tools(manager: "SessionManager", current_session_id: str, age
         until you send it a message.
         
         Args:
-            input: SpawnSessionInput containing agent_id and optional project_id for context injection.
+            agent_id: Agent ID to spawn (e.g., 'coder', 'leader').
+            project_id: Optional project ID for context injection.
         
         Returns:
             The session_id of the newly spawned session. Use this with send_message().
         """
         new_session_id = manager.spawn_session(
-            agent_id=input.agent_id,
+            agent_id=agent_id,
             session_id=None,
             parent_id=current_session_id,
-            project_id=input.project_id,
+            project_id=project_id,
         )
         return (
             f"Successfully spawned session: {new_session_id}\n"
