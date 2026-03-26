@@ -10,6 +10,7 @@ A **persistent multi-agent daemon** built with LangGraph. Agents are defined by 
 - **Session hierarchy** - agents can spawn and communicate with other agents
 - **Persistent state** - SQLite checkpoints for crash recovery
 - **Job Queue** - priority-based job scheduling with per-project locking
+- **Database Migrations** - file-based schema versioning with auto-apply
 
 ## Quick Start
 
@@ -135,6 +136,37 @@ python -m pytest tests/ -v
 ./dev.sh
 ```
 
+## Database Migrations
+
+The project uses a file-based database migration system for schema versioning.
+
+### How It Works
+
+- Migration files are SQL files in `daemon/migrations/versions/`
+- Pending migrations auto-apply on server startup
+- Each migration has UP (apply) and DOWN (rollback) sections
+
+### Creating a Migration
+
+```bash
+# 1. Create migration file with timestamp
+touch daemon/migrations/versions/$(date +%Y%m%d_%H%M%S)_add_feature.sql
+
+# 2. Edit the file:
+-- Migration: add feature
+-- Created: 2026-03-26
+
+-- UP
+ALTER TABLE sessions ADD COLUMN feature_flag TEXT;
+
+-- DOWN
+-- SQLite does not support DROP COLUMN
+```
+
+### Documentation
+
+See [`daemon/migrations/README.md`](./daemon/migrations/README.md) for full documentation.
+
 ## Project Structure
 
 ```
@@ -143,6 +175,9 @@ ensemble/
 │   ├── api.py         # FastAPI routes
 │   ├── graph.py       # LangGraph definition
 │   ├── manager.py     # Session lifecycle
+│   ├── migrations/    # Database migration system
+│   │   ├── runner.py  # MigrationRunner class
+│   │   └── versions/  # SQL migration files
 │   ├── tools.py       # LLM-callable tools
 │   ├── loader.py      # Markdown loader
 │   ├── persistence.py # SQLite + checkpoints

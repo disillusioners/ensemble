@@ -79,4 +79,9 @@ echo -e "${GREEN}API Docs: http://localhost:$PORT/docs${NC}"
 echo -e "${GREEN}UI:       http://localhost:$PORT${NC}"
 echo ""
 
-$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT"
+# exec -a ensemble-prod $PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT"
+
+exec -a ensemble-prod $PYTHON -c '
+import uvicorn
+uvicorn.run("daemon.api:app", host="$HOST", port=$PORT)
+'
