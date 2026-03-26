@@ -81,7 +81,13 @@ echo ""
 
 # exec -a ensemble-prod $PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT"
 
-exec -a ensemble-prod $PYTHON -c '
+# exec -a ensemble-prod $PYTHON -c '
+# import uvicorn
+# uvicorn.run("daemon.api:app", host="$HOST", port=$PORT)
+# '
+
+exec -a ensemble-prod $PYTHON -c "
 import uvicorn
-uvicorn.run("daemon.api:app", host="$HOST", port=$PORT)
-'
+import os
+uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']))
+"
