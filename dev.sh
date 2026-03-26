@@ -29,7 +29,10 @@ echo -e "${GREEN}Starting Ensemble Daemon (Development Mode)...${NC}"
 # Load environment variables from .env if it exists
 if [ -f ".env" ]; then
     echo -e "${GREEN}Loading environment from .env...${NC}"
-    export $(cat .env | grep -v '^#' | xargs)
+    # Safe .env loading that handles spaces and special characters
+    set -a
+    source .env
+    set +a
 fi
 
 # Check required environment variables
@@ -45,9 +48,9 @@ export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
 # Create data directory if it doesn't exist
 mkdir -p data
 
-PORT="${PORT:-8079}"
-HOST="${HOST:-0.0.0.0}"
-LOG_LEVEL="${LOG_LEVEL:-info}"
+export PORT="${PORT:-8088}"
+export HOST="${HOST:-0.0.0.0}"
+export LOG_LEVEL="${LOG_LEVEL:-info}"
 
 echo -e "${GREEN}Starting server with auto-reload...${NC}"
 echo -e "${GREEN}API Documentation: http://localhost:$PORT/docs${NC}"
