@@ -154,7 +154,23 @@ class MigrationRunner:
         """
         with Session(self.engine) as session:
             migrations = session.exec(select(SchemaMigration)).all()
-            return {m.version for m in migrations}
+            # Extract version string from each migration
+            versions = []
+            for m in migrations:
+                # SQLAlchemy may return Row objects containing the model
+                if hasattr(m, 'version'):
+                    # It's a SchemaMigration model directly
+                    versions.append(m.version)
+                elif isinstance(m, dict):
+                    versions.append(m['version'])
+                elif hasattr(m, '__getitem__'):
+                    # It's a Row - get the first element which should be the model
+                    item = m[0]
+                    if hasattr(item, 'version'):
+                        versions.append(item.version)
+                    elif isinstance(item, dict):
+                        versions.append(item['version'])
+            return set(versions)
     
     def discover_migrations(self) -> list[MigrationFile]:
         """Discover and parse all migration files, sorted by version.
