@@ -129,10 +129,13 @@ class MigrationRunner:
         self.migrations_dir = migrations_dir or Path(__file__).parent / "versions"
     
     def ensure_migrations_table(self) -> None:
-        """Create the schema_migrations table if it doesn't exist.
+        """Create or update the schema_migrations table.
         
         Uses CREATE TABLE IF NOT EXISTS to avoid race conditions when
         multiple processes try to create the table simultaneously.
+        
+        Also adds missing columns to handle schema evolution - if the
+        SchemaMigration model adds new columns, this ensures they exist.
         """
         with self.engine.connect() as conn:
             conn.execute(text("""
@@ -144,6 +147,37 @@ class MigrationRunner:
                     checksum TEXT
                 )
             """))
+            conn.commit()
+        
+        # Auto-migrate: ensure all SchemaMigration columns exist
+        # This handles cases where the model evolved but the table didn't
+        self._sync_migrations_table_schema()
+    
+    def _sync_migrations_table_schema(self) -> None:
+        """Sync schema_migrations table columns with SchemaMigration model.
+        
+        Compares the actual table schema with the expected columns from
+        the SchemaMigration model and adds any missing columns.
+        """
+        model_columns = {
+            "version": "TEXT",
+            "name": "TEXT",
+            "applied_at": "TEXT",
+            "execution_time_ms": "INTEGER",
+            "checksum": "TEXT",
+        }
+        
+        with self.engine.connect() as conn:
+            # Get existing columns
+            result = conn.execute(text("PRAGMA table_info(schema_migrations)"))
+            existing_columns = {row[1] for row in result.fetchall()}
+            
+            # Add missing columns
+            for col_name, col_type in model_columns.items():
+                if col_name not in existing_columns:
+                    logger.info(f"Auto-migrating schema_migrations: adding column '{col_name}'")
+                    conn.execute(text(f"ALTER TABLE schema_migrations ADD COLUMN {col_name} {col_type}"))
+            
             conn.commit()
     
     def get_applied_versions(self) -> set[str]:

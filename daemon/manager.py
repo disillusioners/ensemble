@@ -274,6 +274,11 @@ class SessionManager:
         
         # Create tables once for all repositories
         from sqlmodel import SQLModel
+        
+        # Import SchemaMigration to register it with SQLModel.metadata
+        # This ensures the schema_migrations table is created
+        from .migrations.models import SchemaMigration
+        
         SQLModel.metadata.create_all(self._engine)
         
         # Run file-based migrations using MigrationRunner
