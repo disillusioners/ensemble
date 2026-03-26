@@ -220,15 +220,14 @@ class MigrationRunner:
                             # This happens when SQLModel.metadata.create_all() already added the column
                             err_str = str(stmt_err).lower()
                             if "duplicate column name" in err_str:
-                                logger.warning(
-                                    f"Migration {migration.version}: column already exists, skipping"
+                                # Column already exists - idempotent operation, continue
+                                logger.info(
+                                    f"Migration {migration.version}: column already exists, skipping (idempotent)"
                                 )
-                                statements_failed = True
-                            # Handle "no such table" - table doesn't exist, skip this statement
-                            # This happens when the table is managed by SQLModel but not created yet
+                            # Handle "no such table" - table doesn't exist, this is a real failure
                             elif "no such table" in err_str:
                                 logger.warning(
-                                    f"Migration {migration.version}: table doesn't exist yet, skipping"
+                                    f"Migration {migration.version}: table doesn't exist, skipping"
                                 )
                                 statements_failed = True
                             else:
