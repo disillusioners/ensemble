@@ -131,27 +131,20 @@ class MigrationRunner:
     def ensure_migrations_table(self) -> None:
         """Create the schema_migrations table if it doesn't exist.
         
-        Note: The table is typically already created by SQLModel.metadata.create_all()
-        in the application startup. This method ensures it exists using raw SQL
-        to avoid conflicts with duplicate SchemaMigration model definitions.
+        Uses CREATE TABLE IF NOT EXISTS to avoid race conditions when
+        multiple processes try to create the table simultaneously.
         """
         with self.engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'")
-            )
-            if not result.fetchone():
-                # Table doesn't exist, create it using raw SQL
-                conn.execute(text("""
-                    CREATE TABLE schema_migrations (
-                        version TEXT PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        applied_at TEXT NOT NULL,
-                        execution_time_ms INTEGER,
-                        checksum TEXT
-                    )
-                """))
-                conn.commit()
-                logger.info("Created schema_migrations table")
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL,
+                    execution_time_ms INTEGER,
+                    checksum TEXT
+                )
+            """))
+            conn.commit()
     
     def get_applied_versions(self) -> set[str]:
         """Get set of applied migration versions.
@@ -204,10 +197,12 @@ class MigrationRunner:
             Execution time in milliseconds.
             
         Raises:
-            MigrationError: If the migration fails for non-duplicate reasons.
+            MigrationError: If the migration fails for non-duplicate reasons,
+                or if any statement is skipped/fails.
         """
         logger.info(f"Starting migration: {migration.version} - {migration.name}")
         start_time = time.perf_counter()
+        statements_failed = False
         
         with self.engine.begin() as conn:
             # Execute the UP SQL
@@ -228,12 +223,14 @@ class MigrationRunner:
                                 logger.warning(
                                     f"Migration {migration.version}: column already exists, skipping"
                                 )
+                                statements_failed = True
                             # Handle "no such table" - table doesn't exist, skip this statement
                             # This happens when the table is managed by SQLModel but not created yet
                             elif "no such table" in err_str:
                                 logger.warning(
                                     f"Migration {migration.version}: table doesn't exist yet, skipping"
                                 )
+                                statements_failed = True
                             else:
                                 raise
             except Exception as e:
@@ -242,18 +239,26 @@ class MigrationRunner:
                     f"Migration {migration.version} failed: {e}"
                 ) from e
             
-            # Record the migration (even if some statements were skipped)
+            # If any statement was skipped, do NOT record the migration as complete
+            # Migration must be atomic - all statements must succeed
+            if statements_failed:
+                raise MigrationError(
+                    f"Migration {migration.version} had skipped statements - "
+                    f"migration is not atomic and was not recorded as complete"
+                )
+            
+            # Record the migration only if all statements succeeded
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
-            record = SchemaMigration(
-                version=migration.version,
-                name=migration.name,
-                applied_at=datetime.now(timezone.utc).isoformat(),
-                execution_time_ms=execution_time_ms,
-                checksum=migration.checksum,
-            )
-            session = Session(bind=conn)
-            session.add(record)
-            session.commit()
+            with Session(bind=conn) as session:
+                record = SchemaMigration(
+                    version=migration.version,
+                    name=migration.name,
+                    applied_at=datetime.now(timezone.utc).isoformat(),
+                    execution_time_ms=execution_time_ms,
+                    checksum=migration.checksum,
+                )
+                session.add(record)
+                session.commit()
         
         logger.info(
             f"Completed migration {migration.version} in {execution_time_ms}ms"

@@ -246,8 +246,9 @@ def create_project_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    # Always run migrations - they handle existing tables safely
-    run_migrations(engine)
+    # NOTE: File-based migrations are now handled by MigrationRunner
+    # via run_pending_migrations() in the API startup.
+    # Legacy Python migrations (run_migrations) are disabled.
     
     return SQLModelProjectRepository(engine)
 
@@ -279,8 +280,9 @@ def create_session_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    # Always run migrations - they handle existing tables safely
-    run_migrations(engine)
+    # NOTE: File-based migrations are now handled by MigrationRunner
+    # via run_pending_migrations() in the API startup.
+    # Legacy Python migrations (run_migrations) are disabled.
     
     return SQLModelSessionRepository(engine)
 
@@ -312,8 +314,9 @@ def create_message_queue_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    # Always run migrations - they handle existing tables safely
-    run_migrations(engine)
+    # NOTE: File-based migrations are now handled by MigrationRunner
+    # via run_pending_migrations() in the API startup.
+    # Legacy Python migrations (run_migrations) are disabled.
     
     return SQLModelMessageQueueRepository(engine)
 
@@ -345,8 +348,9 @@ def create_source_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    # Always run migrations - they handle existing tables safely
-    run_migrations(engine)
+    # NOTE: File-based migrations are now handled by MigrationRunner
+    # via run_pending_migrations() in the API startup.
+    # Legacy Python migrations (run_migrations) are disabled.
     
     return SQLModelSourceRepository(engine)
 
@@ -378,8 +382,9 @@ def create_job_repository(
     if create_tables:
         SQLModel.metadata.create_all(engine)
     
-    # Always run migrations - they handle existing tables safely
-    run_migrations(engine)
+    # NOTE: File-based migrations are now handled by MigrationRunner
+    # via run_pending_migrations() in the API startup.
+    # Legacy Python migrations (run_migrations) are disabled.
     
     return JobRepository(engine)
 
