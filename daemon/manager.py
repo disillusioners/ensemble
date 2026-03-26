@@ -276,9 +276,12 @@ class SessionManager:
         from sqlmodel import SQLModel
         SQLModel.metadata.create_all(self._engine)
         
-        # Run migrations to add any missing columns to existing tables
-        from .repositories.factory import run_migrations
-        run_migrations(self._engine)
+        # Run file-based migrations using MigrationRunner
+        from .migrations.runner import MigrationRunner
+        migration_runner = MigrationRunner(self._engine)
+        applied = migration_runner.run_pending_migrations()
+        if applied:
+            logger.info(f"Applied {len(applied)} migrations: {applied}")
 
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
