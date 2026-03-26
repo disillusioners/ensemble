@@ -21,8 +21,8 @@ make sync                    # Uses uv sync
 make install                 # Full production install
 
 # Development
-./dev.sh                     # Auto-reload server (recommended)
-python -m uvicorn daemon.api:app --reload --port 8000
+./dev.sh                     # Auto-reload server on port 8079 (recommended)
+python -m uvicorn daemon.api:app --reload --port 8079
 
 # Run tests
 pytest tests/ -v             # All tests with verbose output
@@ -52,9 +52,9 @@ npm run build                # Production build
 To find and kill processes:
 ```bash
 # Find PID by port
-lsof -ti:8000 | xargs kill   # Kill process on port 8000
+lsof -ti:8079 | xargs kill   # Kill process on port 8079
 # Or use:
-fuser -k 8000/tcp            # Alternative method
+fuser -k 8079/tcp            # Alternative method
 
 # Kill by PID (get PID first)
 ps aux | grep uvicorn
@@ -68,17 +68,12 @@ kill <PID>
 ### Python Conventions
 
 1. **Type Hints**: Required for all function signatures
-   ```python
    def process_message(message: str, session_id: str) -> dict[str, Any]:
-   ```
 
 2. **Logging**: Use module-level logger
-   ```python
    logger = logging.getLogger(__name__)
-   ```
 
 3. **Docstrings**: Required for public methods and classes
-   ```python
    async def fetch_session(session_id: str) -> Session | None:
        """Fetch a session by ID or return None if not found.
        
@@ -88,28 +83,21 @@ kill <PID>
        Returns:
            Session object or None
        """
-   ```
 
 4. **Async/Await**: Use for all I/O operations
-   ```python
    async with aiosqlite.connect(db_path) as db:
        result = await db.execute("SELECT * FROM sessions")
-   ```
 
 5. **Imports**: Relative imports within daemon package
-   ```python
    from .models import Session
    from ..graph import build_session_graph
-   ```
 
 6. **Error Handling**: Use Pydantic validation + explicit exception handling
-   ```python
    try:
        result = await risky_operation()
    except ValueError as e:
        logger.warning(f"Invalid input: {e}")
        raise HTTPException(status_code=400, detail=str(e))
-   ```
 
 ### Naming Conventions
 
@@ -143,7 +131,7 @@ class SessionResponse(BaseModel):
 
 ### File Organization
 
-```
+```raw
 daemon/
 ├── __main__.py          # Entry point
 ├── api.py               # FastAPI routes (1500+ lines)
@@ -167,7 +155,7 @@ daemon/
 
 Agents are defined in markdown files under `agents/<agent_id>/`:
 
-```
+```raw
 agents/
 ├── <agent_id>/
 │   ├── meta.json          # Agent metadata
@@ -199,7 +187,7 @@ llm:
 
 daemon:
   host: 0.0.0.0
-  port: 8000
+  port: 8079
 
 limits:
   max_concurrent_sessions: 10
@@ -212,7 +200,7 @@ persistence:
 
 ### Environment Variables (.env)
 
-```
+```raw
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...   # Optional
 LOG_LEVEL=INFO
@@ -251,14 +239,8 @@ async def test_session_creation():
    - Print width: 100
    - Single quotes: true
    - Angular HTML files use angular parser
+3. **Database**: Two SQLite databases — one for persistence, one for LangGraph checkpoints. Both use aiosqlite for async access.
 
-3. **Process Kill Command**: The command `pkill -f "uvicorn daemon.api"` is **forbidden**. Use port-based PID finding instead:
-   ```bash
-   lsof -ti:8000 | xargs kill
-   ```
+4. **LangGraph Version**: Uses LangGraph 0.3+ with checkpoint-sqlite for state persistence.
 
-4. **Database**: Two SQLite databases — one for persistence, one for LangGraph checkpoints. Both use aiosqlite for async access.
-
-5. **LangGraph Version**: Uses LangGraph 0.3+ with checkpoint-sqlite for state persistence.
-
-6. **SSE (Server-Sent Events)**: This project uses SSE for real-time streaming. When performing browser automation, do not wait for the network to become idle — it will never happen due to the persistent SSE connection.
+5. **SSE (Server-Sent Events)**: This project uses SSE for real-time streaming. When performing browser automation, do not wait for the network to become idle — it will never happen due to the persistent SSE connection.
