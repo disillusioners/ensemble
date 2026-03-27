@@ -13,6 +13,8 @@ const colorMap: Record<string, string> = {
   'accent-rose': '#f43f5e',
   'accent-blue': '#3b82f6',
   'accent-purple': '#a855f7',
+  'accent-indigo': '#6366f1',
+  'accent-green': '#22c55e',
 };
 
 @Component({
