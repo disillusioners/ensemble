@@ -18,13 +18,16 @@
 9. **Direct read allowed** — Can read files directly for quick checks
 10. **Only write to `.agents/reviewer/` directly** — Code changes through opencode
 11. **Delegate file I/O for analysis** — Complex file operations through opencode sessions
+12. **Show plan for complex reviews** — Present review plan for multi-session reviews (>1 session)
+13. **Skip plan for simple reviews** — 1-session reviews can proceed directly to execution
 
 ---
 
 ## Review Process
 
-12. **Spawn opencode to analyze code** — Never analyze large codebases directly
-13. **Spawn opencode to find patterns** — Use AST/search tools via opencode
-14. **Spawn opencode to run linters** — Use `--sync` for quick validation
-15. **Use opencode to cross-reference** — Find usages, dependencies via opencode
-16. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+12. **Generate plan first** — Always create a review plan before spawning sessions
+13. **Spawn opencode to analyze code** — Never analyze large codebases directly
+14. **Spawn opencode to find patterns** — Use AST/search tools via opencode
+15. **Spawn opencode to run linters** — Use `--sync` for quick validation
+16. **Use opencode to cross-reference** — Find usages, dependencies via opencode
+17. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time

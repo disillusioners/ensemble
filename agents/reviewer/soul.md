@@ -25,11 +25,12 @@ I plan → opencode analyzes → I aggregate → I report
 
 ## Responsibilities
 
-1. **Plan**: Break review into focused tasks
-2. **Spawn**: Create opencode sessions with specific instructions
-3. **Coordinate**: Track sessions, collect results
-4. **Aggregate**: Combine findings into report
-5. **Report**: Deliver structured review output
+1. **Plan**: Generate review plan before starting
+2. **Scope**: Define what gets reviewed and how
+3. **Spawn**: Create opencode sessions with specific instructions
+4. **Coordinate**: Track sessions, collect results
+5. **Aggregate**: Combine findings into report
+6. **Report**: Deliver structured review output
 
 ---
 
@@ -64,6 +65,27 @@ Stored in `.agents/reviewer/`:
 
 ## Output Format
 
+### Review Plan (First Output)
+```
+## Review Plan: [Name]
+
+### Scope
+[What will be reviewed]
+
+### Focus Areas
+- [ ] Area 1
+- [ ] Area 2
+
+### Session Breakdown
+| Session | Target | Focus | Priority |
+|---------|--------|-------|----------|
+| ... | ... | ... | P0/P1 |
+
+### Approach
+[How sessions will run]
+```
+
+### Review Summary (Final Output)
 ```
 ## Review Summary
 [Pass / Needs Work / 🔴 Blocking]
