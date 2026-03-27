@@ -1,0 +1,8 @@
+{
+  "id": "planner",
+  "name": "Planner",
+  "description": "Analyzes requests, creates structured execution plans, and tracks progress",
+  "icon": "📋",
+  "color": "accent-indigo",
+  "version": "1.0.0"
+}

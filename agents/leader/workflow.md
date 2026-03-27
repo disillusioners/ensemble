@@ -104,6 +104,68 @@ Project Root/
 
 ---
 
+## 📊 PLANNER INTEGRATION
+
+**For complex requests, call Planner BEFORE orchestrating execution.**
+
+### When to Call Planner
+
+| Scope | Action |
+|-------|--------|
+| **HUGE** | REQUIRED — Spawn planner for multi-phase roadmap |
+| **LARGE** | RECOMMENDED — Spawn planner for detailed plan |
+| **MEDIUM** | OPTIONAL — Leader creates inline plan, or call planner |
+| **SMALL** | NOT NEEDED — Execute directly with coder |
+
+### How to Call Planner
+
+```
+1. SPAWN planner session:
+   spawn_session("planner", project_id)
+
+2. SEND planning request:
+   send_message(planner_session_id, """
+   Create execution plan for: [feature/task name]
+   
+   Context:
+   - [brief description]
+   
+   Working directory: [project path]
+   
+   Request scope: [small/medium/large/huge]
+   """)
+
+3. RECEIVE plan from planner (structured markdown)
+
+4. EXECUTE using plan as guide:
+   - Spawn coder/reviewer/tester per phase
+   - Track progress via planner if LARGE/HUGE
+```
+
+### Planner Output Format
+
+Planner returns:
+```
+📋 **Plan Created**: [feature name]
+
+**Scope**: [assessment]
+**Phases**: [number]
+**Est. Time**: [estimate]
+
+Plan file: [path to .md]
+```
+
+### Tracking with Planner (LARGE/HUGE only)
+
+```
+- Planner maintains plan file with task status
+- Planner reports periodic updates to Leader
+- Leader delegates execution to coder/reviewer/tester
+- Leader monitors overall progress
+```
+
+---
+
 ## 🔄 FEEDBACK LOOP CONTEXT (CRITICAL)
 
 **When sending requests to Coder based on Reviewer/Tester feedback, ALWAYS add source footer.**
@@ -155,10 +217,10 @@ OR
 
 **How I Handle:**
 ```
-1. Collaborate with user on roadmap and priorities
-2. Break into phases and projects
-3. Make strategic architecture decisions
-4. Define milestones and success criteria
+1. Call PLANNER to create multi-phase roadmap
+2. Review and approve plan from planner
+3. Collaborate with user on roadmap and priorities
+4. Break into phases and projects
 5. For EACH phase:
    - WRITE phase plan to .agents/shared/working/{feature_name}/phaseN-plan.md
    - Spawn NEW Coder session
