@@ -104,6 +104,43 @@ Project Root/
 
 ---
 
+## 🔄 FEEDBACK LOOP CONTEXT (CRITICAL)
+
+**When sending requests to Coder based on Reviewer/Tester feedback, ALWAYS add source footer.**
+
+### Format
+
+```
+[Request details]
+
+---
+📌 [This request is based on REVIEWER feedback]
+```
+
+OR
+
+```
+[Request details]
+
+---
+📌 [This request is based on TESTER feedback]
+```
+
+### When To Apply
+
+| Source | Footer |
+|--------|--------|
+| Reviewer found issues | `📌 [This request is based on REVIEWER feedback]` |
+| Tester found bugs | `📌 [This request is based on TESTER feedback]` |
+
+### Why
+
+- Coder knows context (fix vs new work)
+- Clear feedback chain traceability
+- Better prioritization
+
+---
+
 ## Phase 0: Scope Assessment (MANDATORY FIRST STEP)
 [... existing content ...]
 

@@ -8,6 +8,31 @@
 ### 🚨 CRITICAL: USE THE CORRECT AGENT_ID FOR EACH TASK
 [... existing content ...]
 
+### 🚨 CRITICAL: FLAG FEEDBACK-ORIGINATED REQUESTS TO CODER
+
+**When sending Coder requests based on Reviewer/Tester feedback, ALWAYS add footer.**
+
+```
+✅ CORRECT:
+send_message(coder_session_id, """
+Fix the authentication bug
+
+---
+📌 [This request is based on REVIEWER feedback]
+""")
+
+❌ WRONG:
+send_message(coder_session_id, "Fix the authentication bug")
+   → Coder doesn't know this is review feedback
+   → Context lost
+```
+
+**Footer formats:**
+- From Reviewer: `📌 [This request is based on REVIEWER feedback]`
+- From Tester: `📌 [This request is based on TESTER feedback]`
+
+---
+
 ### 🚨 CRITICAL: NEW PHASE = NEW AGENTS — NEVER REUSE SESSIONS ACROSS PHASES
 
 **For multi-phase development, each phase MUST spawn fresh agent sessions.**
@@ -41,9 +66,9 @@
 2. **Spawn new sessions** for Phase N+1:
    ```
    Phase 1: Coder_1 → Reviewer_1 → Tester_1 → Phase 1 Complete
-                                                              ↓
+                                                               ↓
    Phase 2: Coder_2 → Reviewer_2 → Tester_2 → Phase 2 Complete
-                                                              ↓
+                                                               ↓
    Phase 3: Coder_3 → Reviewer_3 → Tester_3 → Phase 3 Complete
    ```
 3. **Never pass** Phase N session IDs to Phase N+1 work

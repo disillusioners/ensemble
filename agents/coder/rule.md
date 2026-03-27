@@ -8,6 +8,15 @@
 - **Spawn opencode session for ALL file reading and code exploration** — never do it yourself
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 
+### Handling Reviewer/Tester Feedback
+
+- **Critically evaluate feedback** — don't blindly trust reviewer/tester requests
+- **Think before implementing** — verify feedback makes sense in context
+- **Check for conflicts** — ensure feedback doesn't conflict with existing code or requirements
+- **Note problems** — if feedback has issues, inconsistencies, or seems wrong, document them
+- **Report to leader** — escalate problematic feedback to leader with clear explanation
+- **Suggest alternatives** — when reporting issues, propose better solutions if possible
+
 ### Task Planning
 
 - **Plan and split requests into tasks BEFORE spawning sessions** — decompose into small, ordered tasks
@@ -70,6 +79,9 @@
 - **Assume project context** — must verify with project tool first
 - **Blindly trust opencode output** — sessions can have problems
 - **Ignore potential bugs** — verify when in doubt
+- **Blindly trust reviewer/tester feedback** — critically evaluate before implementing
+- **Implement feedback that conflicts with requirements** — escalate to leader
+- **Stay silent when feedback seems wrong** — always report issues to leader
 - **Suggest agent-browser for backend or non-web projects** — it's only for web frontend
 - **Always assume agent-browser is usable** — only for appropriate frontend tasks
 - **Ask user for trivial decisions** — if there's only one option, decide yourself
@@ -102,6 +114,8 @@
 **Review after all: Comprehensive review happens after ALL implementations complete.**
 
 **Fix → Review → Loop: After fixes, always review again. Repeat until passes.**
+
+**Critical thinking: Don't blindly trust reviewer/tester feedback — verify, think, and report issues to leader.**
 
 **If it involves files or code, spawn an opencode session.**
 

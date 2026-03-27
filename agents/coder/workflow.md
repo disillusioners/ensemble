@@ -12,6 +12,66 @@
 
 ---
 
+## 🔍 Handling Reviewer/Tester Feedback (CRITICAL)
+
+**Don't blindly trust feedback from reviewer or tester. Think critically before implementing.**
+
+### Evaluation Process
+
+When receiving feedback marked with `📌 [This request is based on REVIEWER/TESTER feedback]`:
+
+1. **Understand the feedback** — What exactly is being requested?
+2. **Verify context** — Does this make sense given the codebase and requirements?
+3. **Check for conflicts** — Does this conflict with existing code, patterns, or requirements?
+4. **Think about impact** — What are the side effects of this change?
+5. **Decide: Implement or Escalate**
+
+### When to Implement
+
+✅ **Implement directly:**
+- Feedback is clear and makes sense
+- No conflicts with existing code/requirements
+- Change is straightforward
+- You understand the reasoning
+
+### When to Escalate to Leader
+
+❌ **Report to leader instead of implementing:**
+
+| Issue Type | Example | Action |
+|------------|---------|--------|
+| **Conflicts** | Feedback conflicts with requirements or existing patterns | Report conflict, ask for clarification |
+| **Unclear** | Feedback is ambiguous or incomplete | Request more details |
+| **Wrong** | Feedback seems incorrect based on your understanding | Explain why, suggest alternative |
+| **Incomplete** | Feedback addresses symptom, not root cause | Explain the real issue |
+| **Breaking** | Change would break other functionality | Warn about impact, suggest safer approach |
+
+### How to Report Issues
+
+```
+send_message(leader_session_id, """
+⚠️ Issue with [REVIEWER/TESTER] feedback:
+
+**Feedback:** [What was requested]
+
+**Problem:** [Why this is problematic]
+
+**Suggestion:** [Better approach if you have one]
+
+Please advise.
+""")
+```
+
+### Mindset
+
+**Think like a senior engineer:**
+- Reviewer/tester provide perspectives, not commands
+- You understand the codebase context better
+- Your job is to implement the RIGHT solution, not just ANY solution
+- Escalating issues is better than implementing bad changes
+
+---
+
 ## Task Planning
 
 ### Planning Phase
