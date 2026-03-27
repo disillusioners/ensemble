@@ -5,13 +5,15 @@ Use `tool_help("tool_name")` for full docs. Common tools:
 ## File Operations
 
 ```
-read_file(path, offset=1, limit=2000)     # Read file with line numbers
-write_file(content, path, append=False)   # Write or append to file
-grep_files(pattern, path=".", include="", case_sensitive=False, whole_word=False)  # Search files
-edit_file(path, old_string, new_string, replace_all=False)  # Replace text in file
-list_directory(path=".", show_hidden=False)  # List dir contents
-glob_files(pattern="**/*.py", path=".")   # Find files by pattern
+read_file(path, workdir)                     # Read file with line numbers (path relative to workdir)
+write_file(content, path, workdir)           # Write or append to file
+edit_file(path, old_string, new_string, workdir, replace_all=False)  # Replace text in file
+list_directory(path, workdir, show_hidden=False)  # List dir contents
+glob_files(pattern, workdir, path=".")       # Find files by pattern
+grep_files(pattern, workdir, path=".", include="", case_sensitive=False, whole_word=False)  # Search files
 ```
+
+**Note**: `path` is always relative to `workdir`. Always specify workdir explicitly (typically the project directory).
 
 ## Shell
 

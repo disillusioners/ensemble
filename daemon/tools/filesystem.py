@@ -8,12 +8,17 @@ from typing import Optional
 
 @tool
 def list_directory(
-    path: str = ".",
+    path: str,
+    workdir: str | None = None,
     show_hidden: bool = False
 ) -> str:
     """List directory contents. Use tool_help("list_directory") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
-        dir_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        dir_path = (base_path / path).expanduser().resolve()
         
         if not dir_path.exists():
             return f"ERROR: Path does not exist: {path}"
@@ -50,7 +55,8 @@ def list_directory(
 list_directory._full_doc_ = """List contents of a directory.
 
 Args:
-    path: Directory path to list (default: current directory)
+    path: Directory path to list (relative to workdir)
+    workdir: Base directory for relative paths (required)
     show_hidden: Whether to show hidden files (default: False)
 
 Returns:
@@ -63,12 +69,17 @@ Returns:
 @tool
 def read_file(
     path: str,
+    workdir: str | None = None,
     offset: int = 1,
     limit: int = 2000
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
-        file_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        file_path = (base_path / path).expanduser().resolve()
         
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
@@ -104,7 +115,8 @@ def read_file(
 read_file._full_doc_ = """Read contents of a file.
 
 Args:
-    path: File path to read
+    path: File path to read (relative to workdir)
+    workdir: Base directory for relative paths (required)
     offset: Line number to start from (1-indexed, default: 1)
     limit: Maximum number of lines to read (default: 2000)
 
@@ -116,17 +128,22 @@ Returns:
 @tool
 def glob_files(
     pattern: str,
+    workdir: str | None = None,
     path: str = "."
 ) -> str:
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
-        base_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        search_path = (base_path / path).expanduser().resolve()
         
-        if not base_path.exists():
+        if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
         # Find matching files
-        matches = list(base_path.glob(pattern))
+        matches = list(search_path.glob(pattern))
         
         # Filter to only files (not directories)
         files = [m for m in matches if m.is_file()]
@@ -137,11 +154,11 @@ def glob_files(
         # Sort by modification time (newest first)
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         
-        # Format output relative to base path
+        # Format output relative to search_path
         result = []
         for f in files:
             try:
-                rel_path = f.relative_to(base_path)
+                rel_path = f.relative_to(search_path)
                 result.append(str(rel_path))
             except ValueError:
                 result.append(str(f))
@@ -155,7 +172,8 @@ glob_files._full_doc_ = """Find files matching a glob pattern.
 
 Args:
     pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
-    path: Base directory to search from (default: current directory)
+    workdir: Base directory for relative paths (required)
+    path: Directory to search in (relative to workdir, default: ".")
 
 Returns:
     List of matching file paths, sorted by modification time (newest first)
@@ -166,11 +184,16 @@ Returns:
 def write_file(
     content: str,
     path: str,
+    workdir: str | None = None,
     append: bool = False
 ) -> str:
     """Write or append content to a file. Use tool_help("write_file") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
-        file_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        file_path = (base_path / path).expanduser().resolve()
         
         # Create parent directories if they don't exist
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +212,8 @@ write_file._full_doc_ = """Write or append content to a file.
 
 Args:
     content: The text content to write
-    path: File path to write to
+    path: File path to write to (relative to workdir)
+    workdir: Base directory for relative paths (required)
     append: If True, append to existing file; if False, overwrite (default: False)
 
 Returns:
@@ -200,18 +224,23 @@ Returns:
 @tool
 def grep_files(
     pattern: str,
+    workdir: str | None = None,
     path: str = ".",
     include: str = "",
     case_sensitive: bool = False,
     whole_word: bool = False
 ) -> str:
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
         import re
         
-        base_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        search_path = (base_path / path).expanduser().resolve()
         
-        if not base_path.exists():
+        if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
         # Build glob pattern from include filter
@@ -226,7 +255,7 @@ def grep_files(
         
         # Search files
         matches = []
-        for file_path in base_path.glob(glob_pattern):
+        for file_path in search_path.glob(glob_pattern):
             if not file_path.is_file():
                 continue
             
@@ -255,7 +284,8 @@ grep_files._full_doc_ = """Search file contents using regex patterns.
 
 Args:
     pattern: Regex pattern to search for
-    path: Directory to search in (default: current directory)
+    workdir: Base directory for relative paths (required)
+    path: Directory to search in (relative to workdir, default: ".")
     include: Glob pattern to filter files (e.g., "*.py", "*.{js,ts}")
     case_sensitive: Whether search is case-sensitive (default: False)
     whole_word: Match whole words only (default: False)
@@ -270,11 +300,16 @@ def edit_file(
     path: str,
     old_string: str,
     new_string: str,
+    workdir: str | None = None,
     replace_all: bool = False
 ) -> str:
     """Replace text in a file using exact string matching. Use tool_help("edit_file") for details."""
+    if not workdir or not workdir.strip():
+        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
+    
     try:
-        file_path = Path(path).expanduser().resolve()
+        base_path = Path(workdir).expanduser().resolve()
+        file_path = (base_path / path).expanduser().resolve()
         
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
@@ -308,9 +343,10 @@ def edit_file(
 edit_file._full_doc_ = """Replace text in a file using exact string matching.
 
 Args:
-    path: File path to edit
+    path: File path to edit (relative to workdir)
     old_string: The exact string to find and replace (supports multi-line)
     new_string: The replacement string
+    workdir: Base directory for relative paths (required)
     replace_all: If True, replace all occurrences; if False, replace only the first (default: False)
 
 Returns:

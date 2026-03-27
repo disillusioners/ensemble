@@ -70,7 +70,7 @@ _baby_template (spawnable)
 From `tools_common.md`:
 - `bash` - Execute shell commands
 - `time` - Get current date/time
-- `read_file` - Read file contents with line numbers
+- `read_file(path, workdir)` - Read file contents with line numbers (path relative to workdir, workdir required)
 - `list_directory` - List directory contents
 - `glob_files` - Find files by pattern
 - `inner_soul` - Remember/learn/change (self-evolution)
