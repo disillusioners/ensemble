@@ -34,7 +34,7 @@
   </div>
 
   <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-    @for (agent of agents; track agent.id) {
+    @for (agent of filteredAgents(); track agent.id) {
       <button
         (click)="onSelect(agent)"
         [class.agent-card]="true"

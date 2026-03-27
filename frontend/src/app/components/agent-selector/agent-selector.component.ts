@@ -33,9 +33,16 @@ export class AgentSelectorComponent {
     'accent-emerald': '#10b981',
     'accent-rose': '#f43f5e',
     'accent-blue': '#3b82f6',
+    'accent-indigo': '#6366f1',
+    'accent-green': '#22c55e',
+    'accent-purple': '#a855f7',
   };
 
   protected isAddModalOpen = signal(false);
+
+  protected filteredAgents = computed(() =>
+    this.agents.filter(agent => agent.id !== '_mother')
+  );
 
   protected activeColor = computed(() => {
     return this.selectedAgent ? this.getAgentColor(this.selectedAgent) : '#10a7f7';
