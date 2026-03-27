@@ -167,5 +167,54 @@ Constraints: [1-2 critical constraints if any]
 
 ---
 
+### 🚨 CRITICAL: REVIEW PLAN BEFORE EXECUTING (HUGE/LARGE scope)
+
+**Always have Reviewer validate plans before execution.**
+
+```
+❌ WRONG: Planner creates plan → Immediately execute
+   → Plan may have gaps, risks, or issues
+   → Execution waste if plan is flawed
+
+✅ RIGHT: Planner creates plan → Reviewer reviews → Iterate → Approve → Execute
+   → Catches issues early
+   → Reduces rework
+   → Higher quality outcome
+```
+
+#### Plan Review Loop Rules
+
+```
+1. After Planner returns plan:
+   - Spawn Reviewer session
+   - Ask Reviewer to review plan (review type: Plan)
+   - Reviewer will generate review plan, then execute
+
+2. Evaluate review result:
+   - 🔴 Critical: MUST send feedback to Planner, wait for revision
+   - 🟡 Warnings: SHOULD iterate if >3 issues, otherwise decide
+   - 🟢 Approved: PROCEED to execution
+
+3. Loop until plan is acceptable:
+   send_message(planner_session_id, """
+   Revise plan based on review feedback:
+   
+   [Paste review findings]
+   
+   Address these concerns and provide updated plan.
+   """)
+```
+
+#### When Plan Review is Required
+
+| Scope | Plan Review |
+|-------|-------------|
+| HUGE | REQUIRED |
+| LARGE | RECOMMENDED |
+| MEDIUM | OPTIONAL |
+| SMALL | NOT NEEDED |
+
+---
+
 ### 🚨 NO REAL WORK — BRAIN ONLY
 [... existing content ...]

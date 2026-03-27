@@ -166,6 +166,89 @@ Plan file: [path to .md]
 
 ---
 
+## 🔄 PLAN REVIEW LOOP (CRITICAL)
+
+**Before executing any plan, have Reviewer validate it. Loop until approved.**
+
+### The Loop
+
+```
+Planner creates plan → Reviewer reviews plan → Pass feedback to Planner → (repeat until approved) → Execute
+```
+
+### Step-by-Step
+
+```
+1. SPAWN planner session:
+   spawn_session("planner", project_id)
+
+2. REQUEST plan:
+   send_message(planner_session_id, """
+   Create execution plan for: [feature/task name]
+   
+   Context:
+   - [brief description]
+   
+   Working directory: [project path]
+   """)
+
+3. RECEIVE plan from planner
+
+4. SPAWN reviewer session:
+   spawn_session("reviewer", project_id)
+
+5. REQUEST plan review:
+   send_message(reviewer_session_id, """
+   Review plan: [plan file path or inline content]
+   
+   Review type: Plan
+   Focus areas: Completeness, Feasibility, Clarity, Risks
+   
+   Request review plan first, then execute review.
+   """)
+
+6. RECEIVE review from reviewer
+
+7. EVALUATE review result:
+   - If 🔴 Critical issues: Loop back to planner
+   - If 🟡 Warnings only: Decide whether to iterate or proceed
+   - If 🟢 Approved: Proceed to execution
+
+8. IF LOOPING BACK:
+   send_message(planner_session_id, """
+   Revise plan based on review feedback:
+   
+   [Reviewer's findings/issues]
+   
+   Please address these concerns and provide updated plan.
+   """)
+   → Go back to step 6
+
+9. TERMINATE planner and reviewer sessions
+
+10. PROCEED TO EXECUTION
+```
+
+### Plan Review Loop Decision Matrix
+
+| Review Result | Action |
+|---------------|--------|
+| 🔴 Critical issues | MUST iterate: pass feedback to planner |
+| 🟡 Warnings (1-3) | SHOULD iterate: consider context |
+| 🟡 Warnings (4+) | MUST iterate: too many concerns |
+| 🟢 Approved | PROCEED to execution |
+
+### When to Skip Plan Review
+
+| Scope | Plan Review |
+|-------|-------------|
+| **SMALL** | Not needed |
+| **MEDIUM** | Optional (leader judgment) |
+| **LARGE** | Recommended |
+| **HUGE** | Required |
+
+---
+
 ## 🔄 FEEDBACK LOOP CONTEXT (CRITICAL)
 
 **When sending requests to Coder based on Reviewer/Tester feedback, ALWAYS add source footer.**
@@ -218,7 +301,11 @@ OR
 **How I Handle:**
 ```
 1. Call PLANNER to create multi-phase roadmap
-2. Review and approve plan from planner
+2. REVIEW PLAN (mandatory loop):
+   - Spawn Reviewer to review plan
+   - Reviewer creates review plan, executes review
+   - If 🔴 Critical issues: pass to Planner for revision
+   - Loop until 🟢 Approved or 🟡 acceptable
 3. Collaborate with user on roadmap and priorities
 4. Break into phases and projects
 5. For EACH phase:
