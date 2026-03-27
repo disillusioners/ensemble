@@ -6,6 +6,15 @@ from langchain_core.tools import tool
 from typing import Optional
 
 
+def _is_within_workdir(workdir: Path, target: Path) -> bool:
+    """Check if target path is within workdir boundary."""
+    try:
+        target.relative_to(workdir)
+        return True
+    except ValueError:
+        return False
+
+
 @tool
 def list_directory(
     path: str,
@@ -19,6 +28,9 @@ def list_directory(
     try:
         base_path = Path(workdir).expanduser().resolve()
         dir_path = (base_path / path).expanduser().resolve()
+        
+        if not _is_within_workdir(base_path, dir_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
         
         if not dir_path.exists():
             return f"ERROR: Path does not exist: {path}"
@@ -81,6 +93,9 @@ def read_file(
         base_path = Path(workdir).expanduser().resolve()
         file_path = (base_path / path).expanduser().resolve()
         
+        if not _is_within_workdir(base_path, file_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
+        
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
         
@@ -139,6 +154,9 @@ def glob_files(
         base_path = Path(workdir).expanduser().resolve()
         search_path = (base_path / path).expanduser().resolve()
         
+        if not _is_within_workdir(base_path, search_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
+        
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
@@ -195,6 +213,9 @@ def write_file(
         base_path = Path(workdir).expanduser().resolve()
         file_path = (base_path / path).expanduser().resolve()
         
+        if not _is_within_workdir(base_path, file_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
+        
         # Create parent directories if they don't exist
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -239,6 +260,9 @@ def grep_files(
         
         base_path = Path(workdir).expanduser().resolve()
         search_path = (base_path / path).expanduser().resolve()
+        
+        if not _is_within_workdir(base_path, search_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
         
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
@@ -310,6 +334,9 @@ def edit_file(
     try:
         base_path = Path(workdir).expanduser().resolve()
         file_path = (base_path / path).expanduser().resolve()
+        
+        if not _is_within_workdir(base_path, file_path):
+            return f"ERROR: Path escapes workdir boundary: {path}"
         
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
