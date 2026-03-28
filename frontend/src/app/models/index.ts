@@ -31,6 +31,9 @@ export interface Message {
   tool_calls?: ToolCall[];
   error?: string;
   created_at: string;
+  // Session ID for tracking which session this message belongs to
+  // Used for session validation in SSE event routing
+  session_id?: string;
 }
 
 export interface ToolCall {

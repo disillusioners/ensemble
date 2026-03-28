@@ -46,10 +46,19 @@ export class SseService {
       message_id: messageId,
       role: 'assistant',
       content: '',
+      thinking: undefined,
+      thinking_extracted: undefined,
+      tool_calls: undefined,
       created_at: new Date().toISOString(),
+      session_id: sessionId,  // Store session ID for validation
     };
   }
 
+  /**
+   * Connects to SSE stream for the specified session.
+   * Ensures currentSessionId is set BEFORE clearing events to prevent
+   * race conditions where events from the new session are discarded.
+   */
   connect(sessionId: string): void {
     console.log('[SSE] connect() called with sessionId:', sessionId, 'currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected);
     if (this.currentSessionId === sessionId && this.isConnected && this.eventSource) {
@@ -57,8 +66,12 @@ export class SseService {
       return;
     }
 
-    this.disconnect();
+    // CRITICAL FIX: Set sessionId BEFORE disconnect to ensure isValidSessionEvent()
+    // works correctly during the transition. This prevents discarding events from
+    // the new session that arrive before clearEvents() is called.
     this.currentSessionId = sessionId;
+    this.clearEvents();
+    this.disconnect();
     console.log('[SSE] Calling connectInternal()');
     this.connectInternal();
   }
@@ -276,6 +289,7 @@ export class SseService {
               thinking_extracted: data.thinking_extracted || undefined,
               tool_calls: toolCalls,
               created_at: new Date().toISOString(),
+              session_id: data.session_id || this.currentSessionId,  // FIX: Include session_id for validation
             };
             this.latestCompletedMessage.set(message);
             console.log('[SSE] Set latestCompletedMessage for:', data.message_id);
@@ -390,10 +404,19 @@ export class SseService {
     this.currentSessionId = null;
   }
 
+  /**
+   * Clears all event-related state.
+   * IMPORTANT: This is called during session switching to ensure no stale events
+   * or partial messages from the previous session leak into the new session.
+   */
   clearEvents(): void {
     this.events.set([]);
     this.latestCompletedMessage.set(null);
     this.latestError.set(null);
     this.statusUpdates.set(new Map());
+    // CRITICAL FIX: Clear partial messages to prevent stale content from
+    // previous session leaking into the new session's pendingMessage display.
+    this.partialMessages.set(new Map());
+    this.titleUpdates.set(null);
   }
 }

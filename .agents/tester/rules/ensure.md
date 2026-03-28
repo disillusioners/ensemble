@@ -1,1 +1,1 @@
-This file for later use by user, agents don't allowed to edit files in rules directory.
+After test, make sure the dev.sh is runable by running it, fix if needed. When it work fine end the dev.sh script. 

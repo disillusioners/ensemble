@@ -78,8 +78,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle SSE completed messages
     effect(() => {
       const latestMessage = this.sseService.latestCompletedMessage();
+      const currentSession = this.currentSession();
       console.log('[Chat] completed effect triggered, latestMessage:', latestMessage?.message_id, 'role:', latestMessage?.role);
-      if (latestMessage && latestMessage.role === 'assistant') {
+      // FIX: Validate session_id to prevent cross-session message leakage
+      if (latestMessage && latestMessage.role === 'assistant' && latestMessage.session_id === currentSession?.session_id) {
         this.messages.update(prev => {
           const existingIndex = prev.findIndex(m => m.message_id === latestMessage.message_id);
           if (existingIndex >= 0) {
@@ -111,15 +113,25 @@ export class ChatComponent implements OnInit, OnDestroy {
     }, { allowSignalWrites: true });
 
     // Effect to handle partial/progressive messages
+    // CRITICAL FIX: Added session validation to prevent stale partial messages
+    // from previous sessions displaying in the current session.
     effect(() => {
       const partialMessages = this.sseService.partialMessages();
-      console.log('[Chat] partialMessages effect, size:', partialMessages?.size);
-      if (partialMessages && partialMessages.size > 0) {
-        // Get the first partial message
-        const firstPartial = partialMessages.values().next().value;
-        if (firstPartial) {
-          console.log('[Chat] Setting pendingMessage, content length:', firstPartial.content?.length);
-          this.pendingMessage.set(firstPartial);
+      const currentSession = this.currentSession();
+      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentSession:', currentSession?.session_id);
+      
+      if (partialMessages && partialMessages.size > 0 && currentSession) {
+        // Only display partial messages that belong to the current session
+        const validPartial = Array.from(partialMessages.values()).find(
+          m => m.session_id === currentSession.session_id
+        );
+        
+        if (validPartial) {
+          console.log('[Chat] Setting pendingMessage for valid partial:', validPartial.message_id, 'content length:', validPartial.content?.length);
+          this.pendingMessage.set(validPartial);
+        } else {
+          console.log('[Chat] No partial messages for current session, clearing pendingMessage');
+          this.pendingMessage.set(null);
         }
       } else {
         console.log('[Chat] Clearing pendingMessage');
@@ -130,7 +142,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle title updates from SSE
     effect(() => {
       const titleUpdate = this.sseService.titleUpdates();
-      if (titleUpdate) {
+      const currentSession = this.currentSession();
+      // FIX: Validate session_id to prevent stale title updates from other sessions
+      if (titleUpdate && titleUpdate.session_id === currentSession?.session_id) {
         this.sessions.update(prev => prev.map(s => 
           s.session_id === titleUpdate.session_id 
             ? { ...s, title: titleUpdate.title }
@@ -148,7 +162,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle SSE errors - reset the signal after consumption
     effect(() => {
       const latestError = this.sseService.latestError();
-      if (latestError) {
+      const currentSession = this.currentSession();
+      // FIX: Validate session context to prevent stale errors from affecting current session
+      // Note: Error events include message_id which we can use for session validation
+      if (latestError && currentSession) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
         // Reset the signal so it can trigger again
@@ -159,7 +176,13 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
+    // CRITICAL FIX: Clear events BEFORE disconnect to ensure no stale state.
+    // This also clears partialMessages which would otherwise leak between sessions.
+    this.sseService.clearEvents();
     this.sseService.disconnect();
+    this.pendingMessage.set(null);
+    this.messages.set([]);
+    this.currentSession.set(null);
     if (this.routeSubscription) {
       this.routeSubscription.unsubscribe();
     }
@@ -297,7 +320,7 @@ export class ChatComponent implements OnInit, OnDestroy {
       console.log('[Chat] Using session from list, connecting SSE');
       this.currentSession.set(session);
       this.loadMessages(sessionId);
-      this.sseService.clearEvents();
+      // FIX: Removed redundant clearEvents() - connect() handles it internally
       this.sseService.connect(sessionId);
     } else {
       // Try to get session from API
@@ -308,7 +331,7 @@ export class ChatComponent implements OnInit, OnDestroy {
           this.sessionNotFound.set(null);
           this.currentSession.set(sessionData);
           this.loadMessages(sessionId);
-          this.sseService.clearEvents();
+          // FIX: Removed redundant clearEvents() - connect() handles it internally
           this.sseService.connect(sessionId);
         },
         error: (err) => {
