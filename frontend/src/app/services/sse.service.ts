@@ -18,7 +18,7 @@ export class SseService {
   isStreaming = signal(false);
   events = signal<SSEEvent[]>([]);
   latestCompletedMessage = signal<Message | null>(null);
-  latestError = signal<{ message_id: string; error: string } | null>(null);
+  latestError = signal<{ message_id: string; error: string; session_id?: string | null } | null>(null);
   statusUpdates = signal<Map<string, string>>(new Map());
   partialMessages = signal<Map<string, Message>>(new Map());
   titleUpdates = signal<{ session_id: string; title: string } | null>(null);
@@ -56,8 +56,8 @@ export class SseService {
 
   /**
    * Connects to SSE stream for the specified session.
-   * Ensures currentSessionId is set BEFORE clearing events to prevent
-   * race conditions where events from the new session are discarded.
+   * Ensures disconnect() is called BEFORE setting new sessionId to prevent
+   * race conditions where events from the previous session interfere.
    */
   connect(sessionId: string): void {
     console.log('[SSE] connect() called with sessionId:', sessionId, 'currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected);
@@ -66,12 +66,12 @@ export class SseService {
       return;
     }
 
-    // CRITICAL FIX: Set sessionId BEFORE disconnect to ensure isValidSessionEvent()
-    // works correctly during the transition. This prevents discarding events from
-    // the new session that arrive before clearEvents() is called.
+    // CRITICAL FIX: Call disconnect() FIRST to reset currentSessionId to null,
+    // THEN set the new sessionId. This prevents connectInternal() from seeing
+    // a stale/null sessionId and returning early.
+    this.disconnect();
     this.currentSessionId = sessionId;
     this.clearEvents();
-    this.disconnect();
     console.log('[SSE] Calling connectInternal()');
     this.connectInternal();
   }
@@ -328,7 +328,11 @@ export class SseService {
           this.events.update(prev => [...prev, event]);
           
           if (data.message_id && data.error) {
-            this.latestError.set({ message_id: data.message_id, error: String(data.error) });
+            this.latestError.set({ 
+              message_id: data.message_id, 
+              error: String(data.error),
+              session_id: data.session_id || this.currentSessionId 
+            });
             this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'failed'));
           }
         } catch (err) {

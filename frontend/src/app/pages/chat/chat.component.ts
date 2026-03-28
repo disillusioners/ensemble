@@ -37,6 +37,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly sseService = inject(SseService);
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private routeSubscription: Subscription | null = null;
+  private messagesSubscription: Subscription | null = null;
 
   readonly agents = signal<Agent[]>([]);
   readonly sessions = signal<SessionInfo[]>([]);
@@ -163,9 +164,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     effect(() => {
       const latestError = this.sseService.latestError();
       const currentSession = this.currentSession();
-      // FIX: Validate session context to prevent stale errors from affecting current session
-      // Note: Error events include message_id which we can use for session validation
-      if (latestError && currentSession) {
+      // FIX: Validate session_id to prevent stale errors from affecting current session
+      if (latestError && currentSession && latestError.session_id === currentSession?.session_id) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
         // Reset the signal so it can trigger again
@@ -176,6 +176,11 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
+    // FIX: Clean up messages subscription
+    if (this.messagesSubscription) {
+      this.messagesSubscription.unsubscribe();
+      this.messagesSubscription = null;
+    }
     // CRITICAL FIX: Clear events BEFORE disconnect to ensure no stale state.
     // This also clears partialMessages which would otherwise leak between sessions.
     this.sseService.clearEvents();
@@ -276,9 +281,19 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   private loadMessages(sessionId: string): void {
-    this.api.getMessages(sessionId).subscribe({
+    // FIX: Cancel previous subscription to prevent race conditions
+    if (this.messagesSubscription) {
+      this.messagesSubscription.unsubscribe();
+      this.messagesSubscription = null;
+    }
+    
+    this.messagesSubscription = this.api.getMessages(sessionId).subscribe({
       next: (msgs) => {
-        this.messages.set(msgs);
+        // FIX: Only set messages if still on the same session
+        const currentSession = this.currentSession();
+        if (currentSession?.session_id === sessionId) {
+          this.messages.set(msgs);
+        }
       },
       error: (err) => console.error('Failed to load messages:', err)
     });
@@ -319,6 +334,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (session) {
       console.log('[Chat] Using session from list, connecting SSE');
       this.currentSession.set(session);
+      // FIX: Clear stale messages immediately before loading new ones
+      this.messages.set([]);
       this.loadMessages(sessionId);
       // FIX: Removed redundant clearEvents() - connect() handles it internally
       this.sseService.connect(sessionId);
@@ -330,6 +347,8 @@ export class ChatComponent implements OnInit, OnDestroy {
           console.log('[Chat] Got session from API, connecting SSE');
           this.sessionNotFound.set(null);
           this.currentSession.set(sessionData);
+          // FIX: Clear stale messages immediately before loading new ones
+          this.messages.set([]);
           this.loadMessages(sessionId);
           // FIX: Removed redundant clearEvents() - connect() handles it internally
           this.sseService.connect(sessionId);
