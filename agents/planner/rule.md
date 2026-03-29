@@ -10,7 +10,8 @@ When understanding a codebase:
 1. Initialize opencode session for exploration
 2. Use opencode to read files, understand structure
 3. Use opencode to draft and refine plan
-4. NEVER do heavy file reads yourself
+4. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+5. NEVER do heavy file reads yourself
 
 ### 🚨 CRITICAL: OUTPUT STRUCTURED PLANS
 Every planning output must follow the standard plan template:
