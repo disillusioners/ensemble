@@ -55,15 +55,16 @@ logger = logging.getLogger(__name__)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
 
 # Patterns for extracting project keywords from messages
-# Use [\w-]+ to match word characters and hyphens/underscores
+# Use [a-zA-Z][\w-]* to match identifiers starting with a letter (not partial words)
+# Use (?!\w) to ensure identifier is not followed by another word character
 _PROJECT_PATTERNS = [
-    r'([\w-]+)\s+(?:project|prj|proj)',           # "abc project", "abc prj", "abc proj", "yd-timemachine prj"
-    r'([\w-]+)\s+(?:system|sys)',                  # "abc system", "abc sys"
-    r'([\w-]+)\s+(?:app|application)',             # "abc app", "abc application"
-    r'([\w-]+)\s+(?:service|svc)',                 # "abc service", "abc svc"
-    r'([\w-]+)\s+(?:module|mod)',                  # "abc module", "abc mod"
-    r'(?:project|prj|proj)\s+([\w-]+)',            # "project abc", "prj abc"
-    r'(?:the\s+)?([\w-]+)\s+(?:repo|repository)',  # "abc repo", "the abc repository"
+    r'\b([a-zA-Z][\w-]*)(?!\w)\s+(?:project|prj|proj)',           # "abc project", "abc prj"
+    r'\b([a-zA-Z][\w-]*)(?!\w)\s+(?:system|sys)',                  # "abc system", "abc sys"
+    r'\b([a-zA-Z][\w-]*)(?!\w)\s+(?:app|application)',            # "abc app", "abc application"
+    r'\b([a-zA-Z][\w-]*)(?!\w)\s+(?:service|svc)',                 # "abc service", "abc svc"
+    r'\b([a-zA-Z][\w-]*)(?!\w)\s+(?:module|mod)',                 # "abc module", "abc mod"
+    r'(?:project|prj|proj)\s+\b([a-zA-Z][\w-]*)(?!\w)',            # "project abc", "prj abc"
+    r'(?:the\s+)?\b([a-zA-Z][\w-]*)(?!\w)\s+(?:repo|repository)', # "abc repo", "the abc repository"
 ]
 _PROJECT_REGEX = re.compile('|'.join(_PROJECT_PATTERNS), re.IGNORECASE)
 
