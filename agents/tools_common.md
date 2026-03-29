@@ -1,26 +1,31 @@
 # Common Tools
 
+> ⚠️ **CRITICAL: Always specify `workdir` explicitly** for ALL file/shell operations.
+> This is enforced by the system. Omitting it causes errors and requires retry.
+
 Use `tool_help("tool_name")` for full docs. Common tools:
 
 ## File Operations
 
 ```
-read_file(path, workdir)                     # Read file with line numbers (path relative to workdir)
+read_file(path, workdir)                     # Read file with line numbers
 write_file(content, path, workdir)           # Write or append to file
-edit_file(path, old_string, new_string, workdir, replace_all=False)  # Replace text in file
+edit_file(path, old_string, new_string, workdir, replace_all=False)  # Replace text
 list_directory(path, workdir, show_hidden=False)  # List dir contents
 glob_files(pattern, workdir, path=".")       # Find files by pattern
-grep_files(pattern, workdir, path=".", include="", case_sensitive=False, whole_word=False)  # Search files
+grep_files(pattern, workdir, path=".", include="", case_sensitive=False, whole_word=False)  # Search
 ```
 
-**Note**: `path` is always relative to `workdir`. Always specify workdir explicitly (typically the project directory).
+**Rules**: `path` is always relative to `workdir`. Never use absolute paths.
 
 ## Shell
 
 ```
-bash(command, timeout=120, workdir=None)  # Execute shell command
-time(format_type="iso")                   # Get current time
+bash(command, timeout=120, workdir)          # Execute shell command (workdir required)
+time(format_type="iso")                      # Get current time
 ```
+
+**Rules**: Always set `workdir` to the project directory. Never omit it.
 
 ## Session Management
 
