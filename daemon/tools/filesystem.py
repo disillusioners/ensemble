@@ -1,18 +1,48 @@
 """File system tools for reading files and directories."""
 
 import os
+import tempfile
 from pathlib import Path
 from langchain_core.tools import tool
 from typing import Optional
 
-
 def _is_within_workdir(workdir: Path, target: Path) -> bool:
-    """Check if target path is within workdir boundary."""
+    """Check if target path is within workdir boundary or a temp directory.
+    
+    Paths are allowed if they are:
+    1. Within the workdir, OR
+    2. Within the system temp directory or common temp directories
+    """
     try:
         target.relative_to(workdir)
         return True
     except ValueError:
-        return False
+        pass
+    
+    # Allow access to system temp directories
+    # Check multiple common temp locations (handles macOS /tmp -> /private/tmp symlink)
+    temp_dirs = [
+        Path(tempfile.gettempdir()).resolve(),  # System temp (e.g., /var/folders/...)
+        Path("/tmp").resolve(),                  # Common Unix temp
+        Path("/private/tmp").resolve(),          # macOS symlink target
+        Path("/var/tmp").resolve(),              # Unix persistent temp
+    ]
+    
+    # On Windows, also check common Windows temp locations
+    if os.name == 'nt':
+        temp_dirs.extend([
+            Path(os.environ.get("TEMP", "")).resolve(),
+            Path(os.environ.get("TMP", "")).resolve(),
+        ])
+    
+    for temp_dir in temp_dirs:
+        try:
+            target.relative_to(temp_dir)
+            return True
+        except (ValueError, OSError):
+            continue
+    
+    return False
 
 
 @tool
