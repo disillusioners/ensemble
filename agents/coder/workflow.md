@@ -1,5 +1,76 @@
 # Workflow
 
+## 🔥 Implementing a Phase Plan (When Leader Sends a Phase)
+
+**When Leader spawns you with a phase plan, follow this workflow:**
+
+### Step 1: Read the Phase Plan
+
+Leader will send a message like:
+```
+Phase N: [Clear goal]
+
+Plan: .agents/shared/working/{feature_name}/phaseN-plan.md
+Key files: src/auth/, config/db.yaml
+
+Constraints: [1-2 critical constraints if any]
+```
+
+**You MUST read the plan file first:**
+```
+read_file(".agents/shared/working/{feature_name}/phaseN-plan.md")
+```
+
+This gives you:
+- **Objective** — What this phase delivers
+- **Context** — What previous phases completed
+- **Tasks** — Numbered task breakdown
+- **Key Files** — Important files with purpose
+- **Constraints** — Critical constraints
+- **Deliverables** — Expected outputs
+
+### Step 2: Plan & Split Tasks from Phase Plan
+
+Using the phase plan's task breakdown:
+1. **Decompose** each plan task into opencode-sized work items
+2. **Order** by logical sequence (respect dependencies in plan)
+3. **Group into parallel batches** where possible
+4. **Document** the task list with order, dependencies, parallel execution plan
+
+### Step 3: Execute via Opencode (Standard Task Planning Flow)
+
+Follow the standard **Task Planning → Execution → Review → Fix Loop** workflow below.
+
+Key differences from ad-hoc work:
+- You already HAVE a plan — use it, don't re-plan from scratch
+- The phase plan defines scope — stay within it
+- Deliverables from the plan are your success criteria
+- If you discover the plan is missing something, implement what's needed but note it
+
+### Step 4: Report Completion to Leader
+
+When phase is complete (implemented + reviewed + committed):
+```
+send_message(leader_session_id, """
+✅ Phase N Complete: [Phase name]
+
+Delivered:
+- [deliverable 1]
+- [deliverable 2]
+
+Commit: [hash]
+Notes: [any deviations or observations]
+""")
+```
+
+### Phase Plan Workflow Summary
+
+```
+Read phase plan → Extract tasks → Plan opencode sessions → Execute batches → Review → Fix loop → Commit → Report to Leader
+```
+
+---
+
 ## Task Processing
 
 1. **Verify Project Context** — Use `project_get` or `project_search` to confirm correct project
@@ -456,25 +527,26 @@ If there's only ONE question or the answer is obvious, just ask it directly with
 
 ## Execution
 
-**Coder does NOT read files or explore code directly.** 
+**Coder does NOT read code files or explore code directly.** 
 
-ALL file operations and code exploration goes through spawned opencode sessions.
+ALL code file operations and code exploration goes through spawned opencode sessions.
 
 ### Coder Can Do
 
 - Use `project_*` tools to verify context
+- Use `read_file` to read `.agents/shared/` files (phase plans, context, decisions)
 - Spawn opencode sessions via `opencode_skill`
 - Review session results
 - Iterate with follow-up sessions
 
 ### Coder Must Spawn Sessions For
 
-- **Reading files** — Any file inspection
+- **Reading CODE files** — Any project source file inspection
 - **Code exploration** — Understanding existing code
 - **Implementation** — Any code changes
 - **Testing** — Writing or running tests
 - **Review** — Code review tasks
-- **Any task requiring file access**
+- **Any task requiring project file access**
 
 ---
 

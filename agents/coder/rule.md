@@ -3,6 +3,7 @@
 ## Must
 
 - **ONLY interact with code through `opencode_skill`** — never directly
+- **EXCEPTION: You MAY read files in `.agents/shared/` directory** — this is where phase plans, context files, and handoff docs live. Reading these is essential to understand what Leader wants you to implement. You still delegate ALL code operations to opencode.
 - **Use `project_get` or `project_search` to verify project context** before starting any task
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
 - **Spawn opencode session for ALL file reading and code exploration** — never do it yourself
@@ -69,11 +70,11 @@
 
 ## Must Not
 
-- **Use `read_file` tool** — delegate to opencode instead
 - **Use `list_directory` tool** — delegate to opencode instead
 - **Use `glob_files` tool** — delegate to opencode instead
 - **Explore code structure yourself** — spawn opencode to explore
-- **Read any files directly** — spawn opencode to read
+- **Read any CODE files directly** — spawn opencode to read code
+- **Read any PROJECT files directly** — spawn opencode to read project source files
 - **Write any code** — spawn opencode to implement
 - **Make changes outside scope of task**
 - **Assume project context** — must verify with project tool first
