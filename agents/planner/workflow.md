@@ -94,10 +94,64 @@ Use simple, consistent session names:
 
 ## Phase 2: Plan Creation
 
-### Output: Plan Document (markdown file)
+### 🚨 Phase Granularity & Multi-File Output (CRITICAL)
+
+**Every plan for MEDIUM+ scope MUST be split into multiple phase files — one file per phase.**
+
+#### Sizing Rule: Module-Level, Not Component-Level
+
+| Granularity | Example | Verdict |
+|---|---|---|
+| ✅ Module level | `auth module` (login, register, logout, middleware together) | **RIGHT SIZE** |
+| ✅ Feature slice | `user profile CRUD` (model, API, UI together) | **RIGHT SIZE** |
+| ✅ Integration layer | `payment integration` (gateway, webhook, reconciliation) | **RIGHT SIZE** |
+| ❌ Component level | `login form component only` | **TOO SMALL — merge up** |
+| ❌ Single function | `validateJWT function only` | **WAY TOO SMALL — merge up** |
+| ❌ Fragmented module | Splitting auth into: `login only`, `register only`, `logout only` | **TOO FRAGMENTED — keep together** |
+
+#### How to Size a Phase
+
+**A well-sized phase:**
+- Covers ONE logical module or feature area
+- Contains 3-10 tasks
+- Can be completed by 1 coder session (not 0.5 sessions, not 3 sessions)
+- Is self-contained enough to review and test as a unit
+- Groups related components that belong together
+
+**Too small signals (merge with adjacent):**
+- Only 1-2 tasks
+- Single component/function
+- No meaningful review/testing boundary
+- Would take <30 min of coder work
+
+**Too big signals (split further):**
+- 15+ tasks
+- Spans multiple unrelated modules
+- Would take multiple coder sessions
+- No single coherent objective
+
+#### Required File Output Structure
+
+```
+.agents/shared/working/{feature_name}/
+├── plan-overview.md          ← Summary: objectives, phase list, dependencies, risks
+├── phase1-plan.md            ← Phase 1: self-contained plan
+├── phase2-plan.md            ← Phase 2: self-contained plan
+├── phaseN-plan.md            ← Phase N: ...
+├── decisions.md              ← Architecture decisions (if any)
+└── notes.md                  ← Working notes (if any)
+```
+
+**For SMALL scope:** Single `plan.md` file is fine.
+**For MEDIUM scope:** Minimum 1 `plan-overview.md` + individual phase files if 2+ phases.
+**For LARGE/HUGE scope:** Multi-file output is MANDATORY.
+
+### Output: Plan Files (markdown)
+
+#### plan-overview.md Template
 
 ```markdown
-# Plan: [Feature/Task Name]
+# Plan Overview: [Feature/Task Name]
 
 ## Objective
 [1-2 sentence description]
@@ -110,20 +164,13 @@ Use simple, consistent session names:
 - Working Directory: [path]
 - Requested by: Leader
 
-## Task Breakdown
+## Phase Index
 
-### Phase 1: [Name]
-| # | Task | Agent | Est. Time | Risk |
-|---|------|-------|-----------|------|
-| 1 | [task] | coder | Xh | low/med/high |
-| 2 | [task] | reviewer | Xh | low/med/high |
-
-### Phase 2: [Name] (if applicable)
-...
-
-## Dependencies
-- [dependency 1]
-- [dependency 2]
+| Phase | Name | Objective | Dependencies | Est. Time |
+|-------|------|-----------|-------------|-----------|
+| 1 | [name] | [1-line goal] | None | Xh |
+| 2 | [name] | [1-line goal] | Phase 1 | Xh |
+| N | [name] | [1-line goal] | Phase N-1 | Xh |
 
 ## Risks & Mitigations
 | Risk | Impact | Mitigation |
@@ -137,6 +184,61 @@ Use simple, consistent session names:
 ## Tracking
 - Created: [date]
 - Last Updated: [date]
+- Status: [draft/active/complete]
+```
+
+#### phaseN-plan.md Template (per phase)
+
+```markdown
+# Phase N: [Phase Name]
+
+## Objective
+[What this phase delivers — 1-2 sentences]
+
+## Context
+- Previous phase completed: [what Phase N-1 delivered]
+- Key decisions: [relevant architectural decisions]
+
+## Tasks
+| # | Task | Details | Key Files |
+|---|------|---------|-----------|
+| 1 | [task] | [brief detail] | path/to/file |
+| 2 | [task] | [brief detail] | path/to/file |
+
+## Key Files
+- path/to/file1 — [purpose]
+- path/to/file2 — [purpose]
+
+## Constraints
+- [constraint 1]
+- [constraint 2]
+
+## Deliverables
+- [ ] [deliverable 1]
+- [ ] [deliverable 2]
+```
+
+### Single-File Plan Template (SMALL scope only)
+
+```markdown
+# Plan: [Feature/Task Name]
+
+## Objective
+[1-2 sentence description]
+
+## Scope Assessment
+[small with justification]
+
+## Tasks
+| # | Task | Key Files |
+|---|------|-----------|
+| 1 | [task] | path/to/file |
+
+## Success Criteria
+- [ ] [criterion 1]
+
+## Tracking
+- Created: [date]
 - Status: [draft/active/complete]
 ```
 
@@ -200,7 +302,23 @@ Leader sends: planning request + context + working directory
 **Phases**: [number]
 **Est. Time**: [estimate]
 
-Plan file: [path to .md]
+Plan overview: .agents/shared/working/{feature_name}/plan-overview.md
+Phase files:
+  - .agents/shared/working/{feature_name}/phase1-plan.md
+  - .agents/shared/working/{feature_name}/phase2-plan.md
+
+[1-2 sentence summary]
+```
+
+**For SMALL scope (single file):**
+```
+📋 **Plan Created**: [feature name]
+
+**Scope**: small
+**Phases**: 1
+**Est. Time**: [estimate]
+
+Plan file: .agents/shared/working/{feature_name}/plan.md
 
 [1-2 sentence summary]
 ```

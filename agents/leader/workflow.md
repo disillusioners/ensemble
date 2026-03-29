@@ -133,14 +133,37 @@ Project Root/
    Working directory: [project path]
    
    Request scope: [small/medium/large/huge]
+
+   PHASE GRANULARITY — FOLLOW STRICTLY:
+   - Create ONE .md FILE PER PHASE (phase1-plan.md, phase2-plan.md, etc.)
+   - Each phase = 1 coder session's worth of work
+   - Right size: MODULE-LEVEL grouping (e.g., "auth module", "user profile CRUD", "payment integration")
+   - Too small: splitting to component/function level (e.g., "login form only", "validateJWT function")
+   - Too big: grouping unrelated features into one phase
+   - If 5+ phases needed, consider if some can be merged at module level
    """)
 
-3. RECEIVE plan from planner (structured markdown)
+3. RECEIVE plan from planner (structured markdown, multiple phase files)
 
 4. EXECUTE using plan as guide:
    - Spawn coder/reviewer/tester per phase
    - Track progress via planner if LARGE/HUGE
 ```
+
+### Phase Granularity Guidelines (Strict)
+
+**When instructing Planner, enforce this sizing rule:**
+
+| Granularity | Example | Verdict |
+|---|---|---|
+| ✅ Module level | `auth module` (login, register, logout, middleware together) | **RIGHT SIZE** |
+| ✅ Feature slice | `user profile CRUD` (model, API, UI together) | **RIGHT SIZE** |
+| ✅ Integration layer | `payment integration` (gateway, webhook, reconciliation) | **RIGHT SIZE** |
+| ❌ Component level | `login form component only` | **TOO SMALL** |
+| ❌ Single function | `validateJWT function only` | **WAY TOO SMALL** |
+| ❌ Fragmented module | Splitting auth into: `login only`, `register only`, `logout only` | **TOO FRAGMENTED** |
+
+**Rule: Each phase should contain ~3-10 tasks at the module/feature level. If a phase has only 1-2 tasks or covers less than one module, merge it with adjacent phases.**
 
 ### Planner Output Format
 
@@ -152,8 +175,33 @@ Planner returns:
 **Phases**: [number]
 **Est. Time**: [estimate]
 
-Plan file: [path to .md]
+Plan overview: .agents/shared/working/{feature_name}/plan-overview.md
+Phase files:
+  - .agents/shared/working/{feature_name}/phase1-plan.md
+  - .agents/shared/working/{feature_name}/phase2-plan.md
+  - .agents/shared/working/{feature_name}/phaseN-plan.md
+
+[1-2 sentence summary]
 ```
+
+### Multi-File Plan Structure (REQUIRED for LARGE/HUGE)
+
+**Planner MUST output multiple files — one per phase:**
+
+```
+.agents/shared/working/{feature_name}/
+├── plan-overview.md          ← Summary: objectives, phase list, dependencies, risks
+├── phase1-plan.md            ← Phase 1: self-contained plan for 1 coder session
+├── phase2-plan.md            ← Phase 2: self-contained plan for 1 coder session
+├── phaseN-plan.md            ← Phase N: ...
+├── decisions.md              ← Architecture decisions (shared across phases)
+└── notes.md                  ← Working notes
+```
+
+**plan-overview.md contains:** objectives, scope, phase index with dependencies, risks, success criteria.
+**phaseN-plan.md contains:** objective, context from prior phases, task breakdown, key files, constraints.
+
+**Leader uses plan-overview.md for orchestration, hands individual phaseN-plan.md to each coder session.**
 
 ### Tracking with Planner (LARGE/HUGE only)
 
