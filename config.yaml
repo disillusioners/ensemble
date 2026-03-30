@@ -17,7 +17,7 @@ daemon:
 # Session Limits
 limits:
   max_sessions: 100
-  max_children_per_session: 10
+  max_children_per_session: 50
   session_timeout_minutes: 60
   message_rate_limit: 60
   graph_recursion_limit: 200
