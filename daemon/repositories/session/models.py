@@ -22,6 +22,7 @@ class SessionStatus(str, enum.Enum):
     PAUSED = "paused"
     COMPLETED = "completed"
     ERROR = "error"
+    TERMINATED = "terminated"
     
     @classmethod
     def is_valid(cls, status: str) -> bool:
