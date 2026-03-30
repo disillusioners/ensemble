@@ -93,6 +93,8 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **The leader uses judgment to decide when review is needed, not rigid rules.**
 
+**⚠️ TrueAuto Override:** In TrueAuto mode, always use Reviewer and Tester for any scope except Tiny. Skip complexity assessment — always run full review cycle.
+
 ```
 1. Delegate to Coder: "Implement [goal]. [Key constraints]. [Context from plan if available]."
 2. Wait for coder result
