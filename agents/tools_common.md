@@ -3,6 +3,8 @@
 > ⚠️ **CRITICAL: Always specify `workdir` explicitly** for ALL file/shell operations.
 > This is enforced by the system. Omitting it causes errors and requires retry.
 
+> 📌 **Note on Skills**: Skills CLI (e.g., `opencode_skill`) have their own tools set and restrictions. The `workdir` restriction and other tools restrictions from this file do NOT apply to skills. Each skill CLI has its own tool set defined within its skill definition. Do not impose these tools restrictions when using skills.
+
 Use `tool_help("tool_name")` for full docs. Common tools:
 
 ## File Operations
