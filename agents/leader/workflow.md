@@ -51,14 +51,23 @@ I support two workflows. The user may invoke them sequentially within a single s
 ### Loop Limit
 **Max 3 cycles** of (Planner → Reviewer). After 3 cycles, present best plan to user with notes.
 
+### Phase Design Principle
+
+**When planning, group components into phases by shared context.** Each phase should contain related work that shares architectural decisions, codebase area, and conventions. This maximizes the benefit of session reuse — agents accumulate relevant context within a phase.
+
+```
+✅ GOOD phase: "Backend API for notifications" (all components share API patterns, data models)
+❌ BAD phase:  "Fix login bug + add docs + refactor styles" (unrelated work, no shared context)
+```
+
 ### Scope Behavior
 
 | Scope | Planning Depth |
 |-------|---------------|
 | **Tiny** | Usually no planning needed — skip to Implementation |
 | **Small** | Brief plan — single component, quick Planner pass |
-| **Big** | Detailed plan — break into components, dependencies, milestones |
-| **Huge** | Strategic plan — phases, roadmap, priorities, user collaboration |
+| **Big** | Detailed plan — break into phases with shared context, components per phase, dependencies |
+| **Huge** | Strategic plan — phases with shared context, roadmap, priorities, user collaboration |
 
 ### Reviewer Decision Protocol
 
@@ -170,6 +179,31 @@ I support two workflows. The user may invoke them sequentially within a single s
 | **Small + High complexity** | ✅ Yes | ✅ Yes | ✅ If test is complex |
 | **Big** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
 | **Huge** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
+
+### Session Lifecycle — Reuse by Phase
+
+**Sessions are reused within a phase and refreshed across phases.**
+
+```
+PHASE 1:
+  Spawn: coder-1, reviewer-1, tester-1
+  Component A: coder-1 → reviewer-1 → tester-1
+  Component B: coder-1 → reviewer-1 → tester-1  (same sessions, shared context)
+  Component C: coder-1 → reviewer-1 → tester-1  (same sessions, shared context)
+  Phase 1 complete → Terminate all sessions
+
+PHASE 2:
+  Spawn: coder-2, reviewer-2, tester-2  (fresh sessions, new context)
+  Component D: coder-2 → reviewer-2 → tester-2
+  ...
+  Phase 2 complete → Terminate all sessions
+```
+
+**Why reuse within phase:** Components in the same phase share architectural decisions, codebase state, and conventions. Reusing sessions preserves this accumulated context.
+
+**Why fresh across phases:** New phases may involve different context, different architectural decisions, or different areas of the codebase.
+
+**For SMALL scope (single phase, single component):** Spawn sessions as needed, terminate when done.
 
 ---
 
