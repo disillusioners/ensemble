@@ -42,11 +42,14 @@ I support two workflows. The user may invoke them sequentially within a single s
 2. Wait for planner result
 3. Spawn Reviewer: "Review this plan for [goal]. Check completeness, feasibility, risks."
 4. Leader Decision on review:
-   - Critical gaps/issues → Send feedback to Planner, loop back to step 1
+   - Critical gaps/issues → send_message to same Planner with feedback → loop back to step 2
    - Optional improvements → Note but don't block
    - Approved → Plan is ready
-5. Report approved plan to user
+5. Terminate Planner and Reviewer sessions
+6. Report approved plan to user
 ```
+
+**Session reuse:** The same Planner and Reviewer sessions are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
 
 ### Loop Limit
 **Max 3 cycles** of (Planner → Reviewer). After 3 cycles, present best plan to user with notes.
@@ -216,25 +219,38 @@ User: "Plan and implement a notification system"
 
 1. LEADER: Scope = BIG, Workflow = Planning first
 2. PLANNING WORKFLOW:
-   - Leader → Planner: "Create plan for notification system"
-   - Planner → produces plan
-   - Leader → Reviewer: "Review this plan"
-   - Reviewer → approves with minor notes
+   - Spawn planner-1, reviewer-plan-1
+   - Leader → planner-1: "Create plan for notification system"
+   - planner-1 → produces plan
+   - Leader → reviewer-plan-1: "Review this plan"
+   - reviewer-plan-1 → approves with minor notes
    - Leader → User: "Plan approved. Starting implementation."
-3. IMPLEMENTATION WORKFLOW (using approved plan):
-   - Leader → Coder: "Implement notification backend per plan component 1"
-   - Coder → completes
+   - Terminate planner-1, reviewer-plan-1
+
+3. IMPLEMENTATION WORKFLOW — Phase 1: Backend (using approved plan):
+   - Spawn coder-1, reviewer-1, tester-1
+   - Leader → coder-1: "Implement notification backend per plan component 1"
+   - coder-1 → completes
    - Leader assesses: HIGH complexity (data handling, external service)
-   - Leader → Reviewer: "Review notification backend code"
-   - Reviewer → approves
-   - Leader → Tester: "Test notification backend"
-   - Tester → passes with integration tests
+   - Leader → reviewer-1: "Review notification backend code"
+   - reviewer-1 → approves
+   - Leader → tester-1: "Test notification backend"
+   - tester-1 → passes with integration tests
    - Leader assesses: HIGH test complexity (integration tests)
-   - Leader → Reviewer: "Review notification backend tests"
-   - Reviewer → approves
-   - Leader → Coder: "Implement notification frontend per plan component 2"
-   - ... (repeat per component)
-4. Leader → User: "✅ Notification system implemented and tested."
+   - Leader → reviewer-1: "Review notification backend tests" (same reviewer, has context)
+   - reviewer-1 → approves
+   - Leader → coder-1: "Implement notification event queue per plan component 2" (same coder)
+   - coder-1 → completes
+   - ... (reuse coder-1, reviewer-1, tester-1 for remaining components in phase 1)
+   - Phase 1 complete → Terminate coder-1, reviewer-1, tester-1
+
+4. IMPLEMENTATION WORKFLOW — Phase 2: Frontend:
+   - Spawn coder-2, reviewer-2, tester-2 (fresh sessions for new phase)
+   - Leader → coder-2: "Implement notification UI per plan"
+   - ... (reuse coder-2, reviewer-2, tester-2 for all frontend components)
+   - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
+
+5. Leader → User: "✅ Notification system implemented and tested."
 ```
 
 ---

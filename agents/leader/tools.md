@@ -11,14 +11,6 @@
 - Do NOT poll, check, or wait
 - Report appears as a new message: `"{AgentName} has done: {summary}"`
 
-### `spawn_session` — Agent Selection
-| Agent ID | Use For |
-|----------|---------|
-| `planner` | Planning workflow — creating structured plans |
-| `coder` | Implementation workflow — code changes, exploration, investigation |
-| `reviewer` | Reviewing plans or code — quality, security, completeness |
-| `tester` | Testing implementations — functional validation |
-
 ### `terminate_session`
 **ONLY terminate after receiving completion report AND certain no more work needed.**
 
