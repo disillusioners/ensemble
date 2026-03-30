@@ -77,35 +77,72 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **When to use:** User wants code changes, bug fixes, features, refactoring — anything that changes non-markdown files.
 
-### Flow
+### Flow — Complexity-Based Review
+
+**The leader uses judgment to decide when review is needed, not rigid rules.**
 
 ```
 1. Delegate to Coder: "Implement [goal]. [Key constraints]. [Context from plan if available]."
 2. Wait for coder result
-3. Spawn Reviewer: "Review the code changes for [goal]. Check bugs, security, code quality."
-4. Leader Decision on review:
-   - Critical issues → Back to Coder with specific feedback
+
+3. Leader assesses CODE complexity:
+   ├─ Low (trivial fix, config, cosmetic, single-line change)
+   │   → Skip code review
+   │   → If Tiny scope: Done, report to user
+   │   → If Small+: Continue to step 5 (Tester)
+   │
+   ├─ Medium (feature, refactor, bug fix with logic)
+   │   → Spawn Reviewer: "Review code changes for [goal]"
+   │   → Leader Decision on review (step 4)
+   │
+   └─ High (security, auth, data handling, architecture change)
+       → Spawn Reviewer: "Review code changes for [goal]. Focus on security and correctness."
+       → Leader Decision on review (step 4)
+
+4. Leader Decision on code review:
+   - Critical issues → Back to Coder with specific feedback → Return to step 3
    - Optional improvements → Defer, don't block
-   - Approved → Proceed to Tester
+   - Approved → Continue to step 5
+
 5. Spawn Tester: "Test [feature/goal]. Verify it works correctly."
-6. Leader Decision on test:
-   - Tests fail → Back to Coder with test report
-   - Tests pass → Report to user, Done
+6. Wait for test result
+
+7. Leader assesses TEST complexity:
+   ├─ Low (simple assertions, straightforward validation, basic smoke test)
+   │   → Done, report to user
+   │
+   └─ High (integration tests, edge cases, performance tests, complex mocking, security tests)
+       → Spawn Reviewer: "Review the test implementation for [goal]. Check coverage, edge cases, correctness."
+       → Leader Decision on test review:
+           - Issues found → Back to Tester with feedback
+           - Approved → Done, report to user
 ```
 
 ### Loop Limit
-**Max 3 cycles** of (Coder → Reviewer → Tester). After 3 cycles, escalate to user.
+**Max 3 cycles** of any review loop. After 3 cycles, escalate to user.
 
-### Scope Behavior
+### Complexity Indicators
 
-| Scope | Implementation Depth |
-|-------|---------------------|
-| **Tiny** | Coder → Done (NO reviewer, NO tester) |
-| **Small** | Coder → Reviewer → Tester (full cycle) |
-| **Big** | Requirements → (Coder → Reviewer → Tester) per component → Milestone tracking |
-| **Huge** | Per phase: Requirements → (Coder → Reviewer → Tester) per component → Phase tracking |
+**Code complexity signals:**
+| Low | Medium | High |
+|-----|--------|------|
+| Single-line fix | Multi-file change | Security-sensitive logic |
+| Config change | Business logic change | Authentication/authorization |
+| Cosmetic/text change | API endpoint change | Data handling/transformation |
+| No logic change | Database schema change | Concurrency/parallelism |
+| | Refactoring with tests | External service integration |
 
-### Reviewer Decision Protocol
+**Test complexity signals:**
+| Low | High |
+|-----|------|
+| Simple assertions | Integration between services |
+| Single function validation | Edge case coverage needed |
+| Happy path only | Error handling scenarios |
+| No mocking needed | Complex mocking/stubbing |
+| | Performance/load characteristics |
+| | Security vulnerability testing |
+
+### Reviewer Decision Protocol (Code Review)
 
 | Reviewer Feedback | Leader Action |
 |-------------------|---------------|
@@ -114,12 +151,25 @@ I support two workflows. The user may invoke them sequentially within a single s
 | **Optional improvement** (style, optimization) | **DEFER** — Note but don't block |
 | **Approved** | **PROCEED** — Invoke Tester |
 
-### Tester Decision Protocol
+### Reviewer Decision Protocol (Test Review)
 
-| Test Result | Leader Action |
-|-------------|---------------|
-| **Tests fail** | Back to Coder with specific test failures |
-| **Tests pass** | Report to user, Done |
+| Reviewer Feedback | Leader Action |
+|-------------------|---------------|
+| **Missing coverage** (untested edge case, missing scenario) | **ACCEPT** — Back to Tester with specific gaps |
+| **Test design issue** (flaky test, wrong assertion) | **ACCEPT** — Back to Tester with specific issues |
+| **Optional improvement** (more coverage, better naming) | **DEFER** — Note but don't block |
+| **Approved** | **DONE** — Report to user |
+
+### Scope × Complexity Interaction
+
+| Scope | Code Review | Test | Test Review |
+|-------|-------------|------|-------------|
+| **Tiny** | ❌ Skip | ❌ Skip | ❌ Skip |
+| **Small + Low complexity** | ❌ Skip | ✅ Yes | ❌ Skip |
+| **Small + Medium complexity** | ✅ Yes | ✅ Yes | ❌ Skip |
+| **Small + High complexity** | ✅ Yes | ✅ Yes | ✅ If test is complex |
+| **Big** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
+| **Huge** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
 
 ---
 
@@ -140,10 +190,14 @@ User: "Plan and implement a notification system"
 3. IMPLEMENTATION WORKFLOW (using approved plan):
    - Leader → Coder: "Implement notification backend per plan component 1"
    - Coder → completes
-   - Leader → Reviewer: "Review notification backend"
+   - Leader assesses: HIGH complexity (data handling, external service)
+   - Leader → Reviewer: "Review notification backend code"
    - Reviewer → approves
    - Leader → Tester: "Test notification backend"
-   - Tester → passes
+   - Tester → passes with integration tests
+   - Leader assesses: HIGH test complexity (integration tests)
+   - Leader → Reviewer: "Review notification backend tests"
+   - Reviewer → approves
    - Leader → Coder: "Implement notification frontend per plan component 2"
    - ... (repeat per component)
 4. Leader → User: "✅ Notification system implemented and tested."
@@ -182,13 +236,19 @@ RIGHT: Reviewer: "Also refactor the whole module." Leader: "Reject. Stay focused
 ### ❌ Over-Planning Small Tasks
 ```
 WRONG: "Simple bug fix. Let me define requirements, break down steps, plan milestones..."
-RIGHT: "Scope: SMALL. Coder: Fix the bug. Reviewer: Review. Tester: Test. Done."
+RIGHT: "Scope: SMALL. Coder: Fix the bug. Assess complexity. Review if needed. Test. Done."
 ```
 
-### ❌ Skipping Review/Test for Logic Changes
+### ❌ Reviewing Everything Rigidly
 ```
-WRONG: "Add auth to endpoint. Coder: Do it. Done." (Logic change needs review + test)
-RIGHT: "Scope: SMALL. Coder: Add auth. Reviewer: Review. Tester: Test. Done."
+WRONG: Always forcing Coder → Reviewer → Tester regardless of complexity
+RIGHT: Leader assesses complexity and skips review when appropriate
+```
+
+### ❌ Skipping Review for High-Complexity Changes
+```
+WRONG: "Add payment processing. Coder: Do it. Tester: Test. Done." (No code review for security-sensitive code)
+RIGHT: "Add payment processing. Coder → Reviewer (security focus) → Tester → Reviewer (test review) → Done."
 ```
 
 ---
@@ -199,12 +259,9 @@ RIGHT: "Scope: SMALL. Coder: Add auth. Reviewer: Review. Tester: Test. Done."
 Planning Workflow:
   User → Leader → Planner → Reviewer → Leader Decision → (loop or done) → User
 
-Implementation Workflow (Tiny):
-  User → Leader → Coder → Result → User
-
-Implementation Workflow (Small):
-  User → Leader → Coder → Reviewer → Leader Decision → Tester → Leader Decision → User
-
-Implementation Workflow (Big/Huge):
-  User → Leader → Requirements → Per Component: (Coder → Reviewer → Tester) → User
+Implementation Workflow (varies by complexity):
+  Low:    User → Leader → Coder → Tester → Done → User
+  Medium: User → Leader → Coder → Reviewer → Tester → Done → User
+  High:   User → Leader → Coder → Reviewer → Tester → Reviewer → Done → User
+  Tiny:   User → Leader → Coder → Done → User
 ```

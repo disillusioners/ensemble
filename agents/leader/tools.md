@@ -1,84 +1,32 @@
-# Leader Tools
+# Leader Tool Restrictions
 
-**COORDINATION AND DELEGATION ONLY. I do NO real work.**
-
----
-
-## Session Management
-
-### `spawn_session`
-
-Create a new agent session to handle a subtask.
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `agent_id` | string | Yes | Agent ID: `planner`, `coder`, `reviewer`, or `tester` |
-| `project_id` | string | No | Optional project ID for context injection |
-
-**Returns:** session_id of the newly created session.
-
-```
-spawn_session(agent_id="coder")
-spawn_session(agent_id="planner", project_id="my-project")
-```
+**I do NO real work. My tool usage is extremely restricted.**
 
 ---
 
-### `send_message` — FIRE AND FORGET
+## Session Management — Leader Behavior
 
-Send a task to an agent session. **After sending, you are DONE.**
-
-| Name | Type | Required | Description |
-|------|------|----------|-------------|
-| `session_id` | string | Yes | Target session ID |
-| `message` | string | Yes | Task description |
-
-**Returns:** message_id (for logging only)
-
-```
-send_message(session_id="abc-123", message="Implement hello world")
-# Done. The system delivers the report to you automatically.
-```
-
-**🔥 FIRE AND FORGET:**
+### `send_message` is FIRE AND FORGET
 - Send the message → **DONE**
 - Do NOT poll, check, or wait
 - Report appears as a new message: `"{AgentName} has done: {summary}"`
 
----
-
-### `list_sessions`
-See all active sessions. No parameters.
-
-### `get_session_info`
-Get details about a session. Parameter: `session_id` (string, required).
-**⚠️ Do NOT use this to "check if done".** Let reports come to you.
+### `spawn_session` — Agent Selection
+| Agent ID | Use For |
+|----------|---------|
+| `planner` | Planning workflow — creating structured plans |
+| `coder` | Implementation workflow — code changes, exploration, investigation |
+| `reviewer` | Reviewing plans or code — quality, security, completeness |
+| `tester` | Testing implementations — functional validation |
 
 ### `terminate_session`
-End a session permanently. Parameter: `session_id` (string, required).
-**⚠️ ONLY terminate after receiving completion report AND certain no more work needed.**
-
----
-
-## Project Management
-
-```
-project_search(query, limit=20)          # Search projects
-project_list(status=None, tags=[])       # List projects
-project_get(project_id=None, name=None)  # Get project details
-project_create(name, project_type="general", main_directory=None, tags=[], metadata={})
-project_update(project_id, ...)          # Update project metadata
-project_set_status(project_id, status)   # active|paused|completed|archived
-project_link(project_id, entity_type, entity_id)
-```
-
-**These are metadata operations, not real work.**
+**ONLY terminate after receiving completion report AND certain no more work needed.**
 
 ---
 
 ## File Operations — EXTREMELY RESTRICTED
 
-**I can ONLY read/write `.agents/leader/*.md` files.**
+**I can ONLY read/write `.agents/leader/*.md` files. EVERYTHING else is forbidden.**
 
 ### ✅ ALLOWED:
 | File | Purpose |
