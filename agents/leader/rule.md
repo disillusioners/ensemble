@@ -33,6 +33,18 @@ send_message(coder_session_id, "Fix the authentication bug")
 
 ---
 
+### 🚨 CRITICAL: GIT BRANCH WORKFLOW — BRANCH FIRST, PUSH AFTER COMPLETE
+
+**All file changes happen on a feature branch, not master.**
+
+1. Before any work (including planning), create a feature branch from master
+2. All agent sessions work on that feature branch
+3. After feature fully complete (review passed, tests passed), push the branch
+
+**Prefer a dedicated Coder session for git operations** (branch creation, push). Keep it alive across the feature lifecycle — reuse it for push at the end.
+
+---
+
 ### 🚨 CRITICAL: NEW PHASE = NEW AGENTS — NEVER REUSE SESSIONS ACROSS PHASES
 
 **For multi-phase development, each phase MUST spawn fresh agent sessions.**
