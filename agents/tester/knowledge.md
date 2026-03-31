@@ -28,8 +28,8 @@ Browser automation tool for web frontend projects.
 - Headless/CLI applications
 
 **Usage in Instructions:**
-```
-"Do browser automation (use agent-browser) to auto fix the website bug."
+```raw
+"Do browser automation (use agent-browser skill) to auto fix the website bug."
 ```
 
 ---
