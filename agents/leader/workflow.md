@@ -31,23 +31,23 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 ## Git Flow
 
-**The leader manages git via a dedicated coder session. This session is reused ONLY for git operations throughout the entire task lifecycle.**
+**The leader manages git via a dedicated giter session. This session is reused ONLY for git operations throughout the entire task lifecycle.**
 
 ### Flow
 
 ```
 1. BEFORE any workflow:
-   - Spawn git-coder session (dedicated, reused for all git operations)
-   - git-coder: "Create feature branch '[branch-name]' from master. If branch exists, switch to it."
+   - Spawn giter session (dedicated, reused for all git operations)
+   - giter: "Create feature branch '[branch-name]' from main. If branch exists, switch to it."
 
 2. DURING workflows:
    - Other agents (coder, reviewer, tester) work normally
    - They may commit as needed (their own logic, not leader's concern)
 
 3. AFTER everything completed:
-   - git-coder: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'. Push to remote."
+   - giter: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'. Push to remote."
    - Wait for result
-   - Terminate git-coder session
+   - Terminate giter session
 ```
 
 ### Branch Naming
@@ -256,8 +256,8 @@ User: "Plan and implement a notification system"
 
 1. LEADER: Scope = BIG, Workflow = Planning first
 2. GIT FLOW — Setup:
-   - Spawn git-coder (dedicated for git operations)
-   - git-coder: "Create branch 'feature/notifications' from master"
+   - Spawn giter (dedicated for git operations)
+   - giter: "Create branch 'feature/notifications' from main"
    - Wait for confirmation
 
 3. PLANNING WORKFLOW:
@@ -287,9 +287,9 @@ User: "Plan and implement a notification system"
    - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
 
 6. GIT FLOW — Finalize:
-   - git-coder: "Check git status. Commit any uncommitted changes. Push feature/notifications to remote."
+   - giter: "Check git status. Commit any uncommitted changes. Push feature/notifications to remote."
    - Wait for confirmation
-   - Terminate git-coder
+   - Terminate giter
 
 7. Leader → User: "✅ Notification system implemented, tested, and pushed to feature/notifications."
 ```
