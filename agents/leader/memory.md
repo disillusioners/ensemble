@@ -12,3 +12,20 @@
 - "Add", "Implement", "Build" feature → likely SMALL
 - "Migrate", "Redesign", "Integrate" across modules → likely BIG
 - "Rebuild", "Create from scratch", "Platform" → likely HUGE
+
+- ## Yedda Store Status Management — Infrastructure Info
+
+### Kubernetes + Telepresence
+- Database runs on k8s, accessible via Telepresence
+- Telepresence must be connected before testing
+
+### Database Connection
+- **Host:** psql-postgresql.postgres.svc.cluster.local:5432
+- **Database:** ydstatus_service
+- **User:** ydstatus_service
+- **Password:** FOkDZ5aVJt9pUnvw
+- **DSN (sqlx):** postgres://ydstatus_service:FOkDZ5aVJt9pUnvw@psql-postgresql.postgres.svc.cluster.local:5432/ydstatus_service?sslmode=disable
+
+### Notes
+- Always include this DSN in tester instructions for ydstatus project
+- Telepresence must be active for live testing
