@@ -29,6 +29,41 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 ---
 
+## Git Flow
+
+**The leader manages git via a dedicated coder session. This session is reused ONLY for git operations throughout the entire task lifecycle.**
+
+### Flow
+
+```
+1. BEFORE any workflow:
+   - Spawn git-coder session (dedicated, reused for all git operations)
+   - git-coder: "Create feature branch '[branch-name]' from master. If branch exists, switch to it."
+
+2. DURING workflows:
+   - Other agents (coder, reviewer, tester) work normally
+   - They may commit as needed (their own logic, not leader's concern)
+
+3. AFTER everything completed:
+   - git-coder: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'. Push to remote."
+   - Wait for result
+   - Terminate git-coder session
+```
+
+### Branch Naming
+- Use descriptive names: `feature/notifications`, `fix/login-bug`, `refactor/auth-module`
+- Derived from the task goal
+
+### When Git Flow Applies
+| Scope | Git Flow |
+|-------|----------|
+| **Tiny** | ❌ Skip — too small for branching |
+| **Small** | ✅ Branch before, push after |
+| **Big** | ✅ Branch before, push after all phases |
+| **Huge** | ✅ Branch before, push after all phases |
+
+---
+
 ## Planning Workflow
 
 **Purpose:** Create a structured plan. Only markdown files change.
@@ -220,7 +255,12 @@ A user may invoke Planning first, then Implementation in the same session:
 User: "Plan and implement a notification system"
 
 1. LEADER: Scope = BIG, Workflow = Planning first
-2. PLANNING WORKFLOW:
+2. GIT FLOW — Setup:
+   - Spawn git-coder (dedicated for git operations)
+   - git-coder: "Create branch 'feature/notifications' from master"
+   - Wait for confirmation
+
+3. PLANNING WORKFLOW:
    - Spawn planner-1, reviewer-plan-1
    - Leader → planner-1: "Create plan for notification system"
    - planner-1 → produces plan
@@ -229,30 +269,29 @@ User: "Plan and implement a notification system"
    - Leader → User: "Plan approved. Starting implementation."
    - Terminate planner-1, reviewer-plan-1
 
-3. IMPLEMENTATION WORKFLOW — Phase 1: Backend (using approved plan):
+4. IMPLEMENTATION — Phase 1: Backend (using approved plan):
    - Spawn coder-1, reviewer-1, tester-1
    - Leader → coder-1: "Implement notification backend per plan component 1"
-   - coder-1 → completes
-   - Leader assesses: HIGH complexity (data handling, external service)
+   - coder-1 → completes (may commit as part of its workflow)
+   - Leader assesses: HIGH complexity
    - Leader → reviewer-1: "Review notification backend code"
    - reviewer-1 → approves
    - Leader → tester-1: "Test notification backend"
-   - tester-1 → passes with integration tests
-   - Leader assesses: HIGH test complexity (integration tests)
-   - Leader → reviewer-1: "Review notification backend tests" (same reviewer, has context)
-   - reviewer-1 → approves
-   - Leader → coder-1: "Implement notification event queue per plan component 2" (same coder)
-   - coder-1 → completes
-   - ... (reuse coder-1, reviewer-1, tester-1 for remaining components in phase 1)
+   - tester-1 → passes
+   - ... (reuse coder-1, reviewer-1, tester-1 for remaining components)
    - Phase 1 complete → Terminate coder-1, reviewer-1, tester-1
 
-4. IMPLEMENTATION WORKFLOW — Phase 2: Frontend:
-   - Spawn coder-2, reviewer-2, tester-2 (fresh sessions for new phase)
-   - Leader → coder-2: "Implement notification UI per plan"
-   - ... (reuse coder-2, reviewer-2, tester-2 for all frontend components)
+5. IMPLEMENTATION — Phase 2: Frontend:
+   - Spawn coder-2, reviewer-2, tester-2 (fresh sessions)
+   - ... (reuse for all frontend components)
    - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
 
-5. Leader → User: "✅ Notification system implemented and tested."
+6. GIT FLOW — Finalize:
+   - git-coder: "Check git status. Commit any uncommitted changes. Push feature/notifications to remote."
+   - Wait for confirmation
+   - Terminate git-coder
+
+7. Leader → User: "✅ Notification system implemented, tested, and pushed to feature/notifications."
 ```
 
 ---
