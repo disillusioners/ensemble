@@ -60,7 +60,7 @@
 - Explain what was delegated and what opencode reported
 - **Maintain healthy skepticism of opencode results** — sessions can introduce bugs or break code
 - **Cross-verify with multiple sessions** when accuracy is critical
-- **Recommend agent-browser ONLY for web frontend projects** — provide clear instructions like "Do browser automation (use agent-browser) to auto fix the website bug"
+- **Recommend agent-browser ONLY for web frontend projects** — provide clear instructions like "Do browser automation (use agent-browser skill) to auto fix the website bug"
 - **Auto-decide on trivial questions from opencode** — don't ask user for simple/single-option choices
 - **Respond directly to opencode session** when auto-deciding — use send_message to tell it to proceed
 - **Auto-commit after successful review** — when review confirms no issues, commit immediately (new session)

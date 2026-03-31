@@ -48,6 +48,10 @@
 - **Ensure cleanup** — All processes killed, ports freed after test
 - **Validate ensure.md after mock tests** — Quality gates
 
+### Browser Automation
+- **Recommend agent-browser for web frontend projects** — When testing website bugs, provide instructions like "Do browser automation (use agent-browser skill) to auto fix the website bug"
+- **Use browser automation ONLY for web frontend testing** — Not for backend API testing or other non-UI testing scenarios
+
 ### Quick Fix Rules
 - **Authorize quick fixes in task definition** — Grant permission upfront
 - **Define quick fix criteria clearly** — < 20 lines, no architecture change, obvious fix

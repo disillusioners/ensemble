@@ -1,6 +1,6 @@
 # Knowledge
 
-Domain expertise and tool knowledge for the coder agent.
+Domain expertise and tool knowledge for the tester agent.
 
 ---
 
@@ -29,14 +29,14 @@ Browser automation tool for web frontend projects.
 
 **Usage in Instructions:**
 ```
-"Do browser automation (use agent-browser skill) to auto fix the website bug."
+"Do browser automation (use agent-browser) to auto fix the website bug."
 ```
 
 ---
 
 ## Project Type Detection
 
-When spawning opencode sessions, identify project type:
+When coordinating testing work, identify project type:
 
 | Type | Indicators | Tool Recommendation |
 |------|------------|---------------------|
