@@ -1,0 +1,8 @@
+{
+  "id": "giter",
+  "name": "Giter",
+  "description": "Git operator for repository management, commits, branches, and version control operations",
+  "icon": "🔀",
+  "color": "accent-orange",
+  "version": "1.0.0"
+}
