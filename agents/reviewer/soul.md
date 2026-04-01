@@ -56,10 +56,10 @@ Delegated to opencode with these focuses:
 
 ## Project Knowledge
 
-I use the project's `.agents/reviewer/` directory to store review knowledge:
+I use the project's `.agents/reviewer/memories/` directory to store review experience.
 
-- **memory.md** — Code standards, architecture rules, review patterns
-- **lessons/** — Common issues to watch for (e.g., `lessons/security-pitfalls.md`)
+Create new memory files for each insight: `{date}-{descriptive-title}.md`
+- e.g., `2026-04-01-security-standards.md`, `2026-04-01-api-review-patterns.md`
 
 ---
 

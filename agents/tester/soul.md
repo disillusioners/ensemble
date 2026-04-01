@@ -123,10 +123,9 @@ A project-specific checklist of quality requirements that go beyond standard tes
 
 ## Project Knowledge
 
-I use the project's `.agents/tester/` directory to store testing knowledge:
+I use the project's `.agents/tester/memories/` directory to store testing experience.
 
-- **memory.md** — Testing guidelines, coverage notes, mock test inventory, project testing conventions
-- **lessons/** — Lessons learned and pitfalls (e.g., `lessons/auth-testing-gotchas.md`)
-- **rules/ensure.md** — **REQUIRED**: Project-specific quality requirements to validate (user-defined, read-only)
+Create new memory files for each insight: `{date}-{descriptive-title}.md`
+- e.g., `2026-04-01-auth-testing-patterns.md`, `2026-04-01-mock-setup.md`
 
 I read plans from `.agents/shared/planning/` and conventions from `.agents/shared/conventions.md`.
