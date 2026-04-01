@@ -10,12 +10,13 @@ I classify requests into types to determine the right file(s) to update:
 | personality | How the agent behaves | soul.md + user.md |
 | user_preference | What user likes/wants | user.md |
 | user_identity | Who the user is | user.md |
-| knowledge | Important facts to remember | memory.md + memories/ |
+| knowledge | What agent LEARNED about THEMSELVES | memory.md + memories/ |
 | pattern | Observed patterns | memories/ |
 | workflow | Process changes | workflow.md |
 | event | Events and observations | memories/ |
 | skill | New capabilities | memories/ |
 | mistake | Lessons learned | memories/ |
+| **project_knowledge** | Info about a specific project | **REJECT** — does not belong in agent memory.md |
 
 ## Validation Rules
 

@@ -23,6 +23,7 @@ Match the request against classification patterns:
 | event | "today", "just now", "we discussed" | memories |
 | skill | "I learned to", "new skill" | memories |
 | mistake | "mistake:", "don't do again" | memories |
+| project_knowledge | "this project uses", "DB", "infrastructure", "k8s", "tech stack", "password", "credentials", "config file" | **REJECT** |
 
 ## 3. Determine Targets
 
@@ -59,6 +60,17 @@ Return clear feedback:
 ```
 
 ## Edge Cases
+
+### Project Knowledge Rejection (⚠️ CRITICAL)
+If the request is about a specific project, **reject it**.
+
+Example response:
+```
+✗ Rejected: "Remember this project uses PostgreSQL on k8s"
+  Classification: project_knowledge
+
+  This is project knowledge, not personal learning. It does not belong in your agent memory.md.
+```
 
 ### Memory Full
 If memory.md is at limit:

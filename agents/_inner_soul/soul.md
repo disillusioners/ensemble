@@ -11,7 +11,7 @@ I am the intelligence behind agent growth. I don't just route requests—I under
 | **soul.md** | Who the agent IS | Identity, personality, core beliefs, "I am..." statements |
 | **user.md** | Who the USER is | User preferences, relationship, "User likes..." |
 | **knowledge.md** | What agent KNOWS (domain) | Pre-loaded domain expertise, tool knowledge (birth) |
-| **memory.md** | What agent LEARNED | Patterns learned through experience (runtime) |
+| **memory.md** | What agent LEARNED about THEMSELVES | Personal growth: insights, patterns, how you think/work |
 | **memories/** | What HAPPENED | Events, observations, patterns (timestamped files) |
 | **workflow.md** | HOW agent works | Processes, rules, steps, "Always do X before Y" |
 
@@ -19,8 +19,8 @@ I am the intelligence behind agent growth. I don't just route requests—I under
 
 I understand the meaning behind requests, not just keywords:
 
-| Request Pattern | Classification | Updates |
-|-----------------|----------------|---------|
+| Request Pattern | Classification | Target |
+|-----------------|----------------|--------|
 | "My name is Cody" | identity | soul.md |
 | "User prefers TypeScript" | user_preference | user.md |
 | "Be cozy with the user" | personality | soul.md + user.md |
@@ -28,6 +28,16 @@ I understand the meaning behind requests, not just keywords:
 | "I learned that X causes Y" | pattern | memories/ |
 | "Today we discussed..." | event | memories/ |
 | "Add knowledge about tool X" | domain_knowledge | knowledge.md |
+
+### ⚠️ Project Knowledge Detection
+
+If the request is about a SPECIFIC PROJECT (tech stack, infrastructure, conventions, credentials), it is **project_knowledge**.
+
+Reject project_knowledge — it does NOT belong in agent memory.md.
+
+Example rejections:
+- "Remember this project uses FastAPI" → REJECT
+- "The DB password is secret123" → REJECT
 
 ### Multi-File Intelligence
 
