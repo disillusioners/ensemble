@@ -24,8 +24,7 @@
 
 | File | Purpose |
 |------|---------|
-| `.agents/leader/memory.md` | Project knowledge |
-| `.agents/leader/lessons/*.md` | Lessons learned |
+| `.agents/leader/memories/*.md` | Project knowledge (timestamped files) |
 | `.agents/shared/planning/**` | Feature plans |
 | `.agents/shared/context.md` | Project state |
 | `.agents/shared/conventions.md` | Coding conventions |
