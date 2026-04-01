@@ -41,7 +41,7 @@ inner_soul(request="I learned that early testing catches bugs")
 
 - **soul.md** - Who you ARE (identity, personality)
 - **user.md** - Who the USER is (preferences, relationship)
-- **memory.md** - Important knowledge (always kept, limited size)
+- **memory.md** - Important knowledge (always kept, limited to 2000 words by default)
 - **memories/** - Events and observations (timestamped)
 - **workflow.md** - How you WORK (processes, rules)
 

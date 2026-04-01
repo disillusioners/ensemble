@@ -31,6 +31,28 @@ def load_project_experience() -> str:
     return ""
 
 
+def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
+    """Load list of recent memory filenames from memories/ directory.
+    
+    Returns filenames only (not content) to minimize token usage.
+    """
+    memories_dir = agent_dir / "memories"
+    if not memories_dir.exists() or not memories_dir.is_dir():
+        return ""
+    
+    memory_files = sorted(
+        [f for f in memories_dir.iterdir() if f.suffix == ".md" and not f.is_symlink()],
+        key=lambda p: p.name,  # Sort by name (timestamp-prefix sorts chronologically)
+        reverse=True           # Most recent first
+    )[:limit]
+    
+    if not memory_files:
+        return ""
+    
+    lines = [f"- {f.name}" for f in memory_files]
+    return "\n".join(lines)
+
+
 def load_agent_skills(agent_dir: Path) -> dict[str, str]:
     """Load all skill.md files from agent's skills/ directory.
     
@@ -85,7 +107,8 @@ def compose_system_prompt(
     prompts: dict[str, str], 
     skills: dict[str, str] | None = None,
     common_tools: str = "",
-    project_experience: str = ""
+    project_experience: str = "",
+    recent_memories: str = ""
 ) -> str:
     """Compose system prompt from prompts dict and optional skills.
     
@@ -166,6 +189,10 @@ def compose_system_prompt(
             content = prompts[key].strip()
             if content:
                 sections.append(f"## {section_titles[key]}\n\n{content}")
+    
+    # Add recent memories section (filenames only, max 5)
+    if recent_memories:
+        sections.append(f"## Recent Memories\n\n{recent_memories}")
     
     # 8. Add project experience section (shared .agents directory usage)
     if project_experience.strip():
@@ -271,6 +298,16 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
                     relative_path = f"skills/{skill_dir.name}/skill.md"
                     current_mtimes[relative_path] = skill_file.stat().st_mtime
     
+    # Track memories/ directory mtimes for cache invalidation
+    memories_dir = agent_dir / "memories"
+    if memories_dir.exists() and memories_dir.is_dir():
+        for memory_file in memories_dir.iterdir():
+            if memory_file.is_file() and memory_file.suffix == ".md":
+                try:
+                    current_mtimes[f"memories/{memory_file.name}"] = memory_file.stat().st_mtime
+                except (PermissionError, OSError):
+                    pass  # Skip broken symlinks and permission issues
+    
     # Check cache
     cached = cache.get(agent_id)
     if cached is not None:
@@ -286,7 +323,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     skills = load_agent_skills(agent_dir)
     common_tools = load_common_tools()
     project_experience = load_project_experience()
-    system_prompt = compose_system_prompt(prompts, skills, common_tools, project_experience)
+    recent_memories = load_recent_memories(agent_dir)
+    system_prompt = compose_system_prompt(prompts, skills, common_tools, project_experience, recent_memories)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache

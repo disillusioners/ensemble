@@ -8,6 +8,7 @@ from .inner_soul import create_inner_soul_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
+from .access_memory import create_access_memory_tool
 
 __all__ = [
     "bash",
@@ -23,4 +24,5 @@ __all__ = [
     "create_mother_tools",
     "create_project_tools",
     "create_help_tool",
+    "create_access_memory_tool",
 ]

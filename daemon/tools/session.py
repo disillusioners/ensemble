@@ -11,6 +11,7 @@ from .bash import bash
 from .filesystem import list_directory, read_file, glob_files, write_file, grep_files, edit_file
 from .time import time
 from .inner_soul import create_inner_soul_tool
+from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
@@ -168,6 +169,9 @@ Returns:
     # Create inner_soul tool for self-modification
     inner_soul = create_inner_soul_tool(manager, agent_id, current_session_id)
     
+    # Create access_memory tool for reading memory files
+    access_memory = create_access_memory_tool(agent_id)
+    
     # Create project management tools (with session context for creator tracking)
     project_tools = create_project_tools(manager.project_store, current_session_id, agent_id)
     
@@ -189,6 +193,8 @@ Returns:
         get_session_info,
         # Self-modification tool
         inner_soul,
+        # Memory access tool
+        access_memory,
     ]
     
     # Add project management tools (available in all sessions)

@@ -11,6 +11,9 @@ from pathlib import Path
 from langchain_core.tools import tool
 from typing import TYPE_CHECKING, Literal, Optional
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from ..manager import SessionManager
@@ -320,7 +323,7 @@ def _execute_update(
     """Execute an update to a specific target."""
     
     if target == "memories":
-        return _update_memories(agent_path, request, classification)
+        return _update_memories(agent_id, agent_path, request, classification, manager)
     elif target == "memory":
         return _update_memory_md(agent_id, agent_path, request, rules, manager)
     elif target == "soul":
@@ -333,7 +336,7 @@ def _execute_update(
         return {"success": False, "target": target, "error": f"Unknown target: {target}"}
 
 
-def _update_memories(agent_path: Path, request: str, classification: dict) -> dict:
+def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: Optional["SessionManager"] = None) -> dict:
     """Create timestamped memory file."""
     memories_dir = agent_path / "memories"
     memories_dir.mkdir(exist_ok=True)
@@ -342,16 +345,15 @@ def _update_memories(agent_path: Path, request: str, classification: dict) -> di
     timestamp = now.strftime("%Y%m%d_%H%M")
     
     # Create safe filename
-    desc = _slugify(request[:50])
-    class_prefix = classification["type"]
-    filename = f"{timestamp}_{class_prefix}_{desc}.md"
+    desc = _slugify(request[:80])  # More chars for better description
+    filename = f"{timestamp}-{desc}.md"
     
     filepath = memories_dir / filename
     
     # Don't overwrite
     counter = 1
     while filepath.exists():
-        filename = f"{timestamp}_{class_prefix}_{desc}_{counter}.md"
+        filename = f"{timestamp}-{desc}-{counter}.md"
         filepath = memories_dir / filename
         counter += 1
     
@@ -366,6 +368,10 @@ def _update_memories(agent_path: Path, request: str, classification: dict) -> di
 """
     filepath.write_text(file_content)
     
+    # Invalidate prompt cache so new memory appears in next prompt
+    if manager:
+        manager.prompt_cache.invalidate(agent_id)
+    
     return {
         "success": True,
         "target": "memories",
@@ -374,7 +380,7 @@ def _update_memories(agent_path: Path, request: str, classification: dict) -> di
     }
 
 
-def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
+def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
     """Add to core memory.md."""
     memory_file = agent_path / "memory.md"
     
@@ -402,7 +408,13 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
     new_content = '\n'.join(lines)
     
     memory_file.write_text(new_content)
-    manager.prompt_cache.invalidate(agent_id)
+    
+    # Invalidate cache separately so cache failure doesn't fail the write
+    if manager:
+        try:
+            manager.prompt_cache.invalidate(agent_id)
+        except Exception as e:
+            logger.warning(f"Cache invalidation failed for {agent_id}: {e}")
     
     new_word_count = len(new_content.split())
     return {
@@ -504,7 +516,7 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
     }
 
 
-def _update_user(agent_id: str, agent_path: Path, request: str, manager: "SessionManager") -> dict:
+def _update_user(agent_id: str, agent_path: Path, request: str, manager: Optional["SessionManager"] = None) -> dict:
     """Add user information to user.md."""
     user_file = agent_path / "user.md"
     
@@ -517,7 +529,8 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Sessio
     # Append
     new_content = f"{current}\n- {request}"
     user_file.write_text(new_content)
-    manager.prompt_cache.invalidate(agent_id)
+    if manager:
+        manager.prompt_cache.invalidate(agent_id)
     
     return {
         "success": True,
@@ -526,7 +539,7 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Sessio
     }
 
 
-def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "SessionManager") -> dict:
+def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
     
@@ -537,7 +550,8 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
     
     new_workflow = f"{current}\n- {request}"
     workflow_file.write_text(new_workflow)
-    manager.prompt_cache.invalidate(agent_id)
+    if manager:
+        manager.prompt_cache.invalidate(agent_id)
     
     return {
         "success": True,
@@ -575,7 +589,7 @@ def _load_growth_rules(agent_path: Path) -> dict:
     growth_file = agent_path / "growth.md"
     if not growth_file.exists():
         return {
-            "max_memory_words": 500,
+            "max_memory_words": 2000,
             "max_soul_chars": 2000,
             "soul_requires_approval": True,
         }
@@ -583,7 +597,7 @@ def _load_growth_rules(agent_path: Path) -> dict:
     content = growth_file.read_text()
     
     rules = {
-        "max_memory_words": 500,
+        "max_memory_words": 2000,
         "max_soul_chars": 2000,
         "max_soul_statements": 20,
         "soul_requires_approval": True,
@@ -600,8 +614,8 @@ def _load_growth_rules(agent_path: Path) -> dict:
 
 
 def _slugify(text: str) -> str:
-    """Convert text to URL-safe slug."""
+    """Convert text to readable hyphenated slug."""
     text = text.lower()
-    text = re.sub(r'[^a-z0-9]+', '_', text)
-    text = text.strip('_')
-    return text[:30] if text else "memory"
+    text = re.sub(r'[^a-z0-9]+', '-', text)  # Hyphens, not underscores
+    text = text.strip('-')
+    return text[:60] if text else "memory"  # Longer: 60 chars
