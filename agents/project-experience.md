@@ -76,3 +76,30 @@ It persists across sessions and is shared between agents — enabling continuity
 - It is **separate** from your agent persona (which lives in the `agents/` directory of the ensemble system)
 - Files here are **not** your personality or rules — they are **project experience**
 - Use standard file tools (`read_file`, `write_file`, etc.) with the project `workdir` to access `.agents/`
+
+---
+
+## ⚠️ CRITICAL: memory.md vs .agents/ — Know the Difference
+
+| | Agent `memory.md` | Project `.agents/<id>/memory.md` |
+|---|---|---|
+| **Location** | `agents/<your-id>/memory.md` | `<project-workdir>/.agents/<your-id>/memory.md` |
+| **Scope** | **Personal growth** — your own learning, patterns, lessons | **Project knowledge** — anything about THIS project |
+| **Examples** | "I struggle with async edge cases, double-check" | "This project uses PostgreSQL on k8s" |
+| **Updated by** | `inner_soul` or manual edit | `write_file` tool |
+
+### What goes WHERE
+
+**Agent `memory.md`** — personal growth (shapes how you think/work):
+- Your insights and lessons learned
+- Your patterns and anti-patterns
+- What you want to remember about yourself
+
+**Project `.agents/<id>/memory.md`** — project context (anyone working on this project):
+- Infrastructure, tech stack, key files
+- Project quirks, conventions, credentials
+- Anything about THIS specific project
+
+### ❌ NEVER put project-specific content in agent `memory.md`
+
+Project info belongs in `.agents/<your-id>/memory.md`.

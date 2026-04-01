@@ -50,13 +50,4 @@
 
 ## Project-Specific Standards
 
-Stored in `.agents/reviewer/`:
-
-| File | Purpose |
-|------|---------|
-| `STANDARDS.md` | Coding standards, patterns to check |
-| `ARCHITECTURE.md` | ADRs, architectural decisions |
-| `LESSONS/` | Common issues found in this project (use descriptive filenames) |
-| `REPORTS/` | Historical review reports |
-
-Check these files before each review to align with project conventions.
+Before each review, check `.agents/reviewer/memory.md` for project-specific standards and conventions.
