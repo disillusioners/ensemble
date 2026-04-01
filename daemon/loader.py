@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
-# Path to common tools file (shared across all agents)
+# Path to shared files (injected into all agents)
 COMMON_TOOLS_FILE = Path(__file__).parent.parent / "agents" / "tools_common.md"
+PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
 
 
 def load_common_tools() -> str:
@@ -16,6 +17,17 @@ def load_common_tools() -> str:
     """
     if COMMON_TOOLS_FILE.exists():
         return COMMON_TOOLS_FILE.read_text(encoding="utf-8")
+    return ""
+
+
+def load_project_experience() -> str:
+    """Load project experience instructions shared by all agents.
+    
+    Returns:
+        Content of project-experience.md or empty string if not found.
+    """
+    if PROJECT_EXPERIENCE_FILE.exists():
+        return PROJECT_EXPERIENCE_FILE.read_text(encoding="utf-8")
     return ""
 
 
@@ -72,7 +84,8 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
 def compose_system_prompt(
     prompts: dict[str, str], 
     skills: dict[str, str] | None = None,
-    common_tools: str = ""
+    common_tools: str = "",
+    project_experience: str = ""
 ) -> str:
     """Compose system prompt from prompts dict and optional skills.
     
@@ -82,6 +95,7 @@ def compose_system_prompt(
         skills: Optional dict with skill name as key, skill.md content as value.
                 Loaded from agent's skills/ directory.
         common_tools: Common tools content from tools_common.md (shared by all agents).
+        project_experience: Project experience content from project-experience.md (shared by all agents).
         
     Returns:
         Composed system prompt with sections in order:
@@ -92,6 +106,7 @@ def compose_system_prompt(
         5. tools_common.md + tools.md (available tools - only if content exists)
         6. workflow.md (methodology)
         7. memory.md (knowledge)
+        8. project-experience.md (how to use .agents directory for project knowledge)
         Separated by "\n\n---\n\n" with headers.
     """
     section_titles = {
@@ -151,6 +166,10 @@ def compose_system_prompt(
             content = prompts[key].strip()
             if content:
                 sections.append(f"## {section_titles[key]}\n\n{content}")
+    
+    # 8. Add project experience section (shared .agents directory usage)
+    if project_experience.strip():
+        sections.append(f"## Project Experience\n\n{project_experience.strip()}")
     
     return "\n\n---\n\n".join(sections)
 
@@ -232,6 +251,10 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     if COMMON_TOOLS_FILE.exists():
         current_mtimes["tools_common.md"] = COMMON_TOOLS_FILE.stat().st_mtime
     
+    # Include project experience file mtime for cache invalidation
+    if PROJECT_EXPERIENCE_FILE.exists():
+        current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
+    
     for filename in prompt_files:
         filepath = agent_dir / filename
         if filepath.exists():
@@ -262,7 +285,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir)
     common_tools = load_common_tools()
-    system_prompt = compose_system_prompt(prompts, skills, common_tools)
+    project_experience = load_project_experience()
+    system_prompt = compose_system_prompt(prompts, skills, common_tools, project_experience)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache

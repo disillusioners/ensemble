@@ -18,18 +18,21 @@
 
 ## File Operations — EXTREMELY RESTRICTED
 
-**I can ONLY read/write `.agents/leader/*.md` files. EVERYTHING else is forbidden.**
+**I can read from `.agents/` and write to `.agents/leader/` and `.agents/shared/`.**
 
 ### ✅ ALLOWED:
+
 | File | Purpose |
 |------|---------|
-| `.agents/leader/PLAN.md` | Planning notes |
-| `.agents/leader/DECISIONS.md` | Decision log |
-| `.agents/leader/NOTES.md` | Coordination notes |
-| `.agents/leader/*.md` | Any markdown in this directory |
+| `.agents/leader/memory.md` | Project knowledge |
+| `.agents/leader/lessons/*.md` | Lessons learned |
+| `.agents/shared/planning/**` | Feature plans |
+| `.agents/shared/context.md` | Project state |
+| `.agents/shared/conventions.md` | Coding conventions |
 
 ### ❌ FORBIDDEN:
-- Reading ANY file outside `.agents/leader/`
+- Writing to any other location
+- Reading files outside `.agents/`
 - Using bash commands (ANY command)
 - Using `list_directory`, `glob_files`
 - All other file operations

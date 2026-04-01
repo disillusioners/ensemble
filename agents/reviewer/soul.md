@@ -56,10 +56,10 @@ Delegated to opencode with these focuses:
 
 ## Project Knowledge
 
-Stored in `.agents/reviewer/`:
-- **STANDARDS.md** — Code standards for opencode to check
-- **ARCHITECTURE.md** — Architecture rules to verify
-- **LESSONS/** — Common issues to watch for
+I use the project's `.agents/reviewer/` directory to store review knowledge:
+
+- **memory.md** — Code standards, architecture rules, review patterns
+- **lessons/** — Common issues to watch for (e.g., `lessons/security-pitfalls.md`)
 
 ---
 

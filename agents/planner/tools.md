@@ -33,7 +33,7 @@ Write plan documents to disk.
 
 **Usage:**
 ```python
-write_file(".agents/shared/working/<feature>/plan.md", plan_content)
+write_file(".agents/shared/planning/<feature>/plan-overview.md", plan_content)
 ```
 
 ---

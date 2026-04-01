@@ -55,3 +55,4 @@ config.local.yaml
 .env.prod
 agents-ensemble.db
 test-results/*
+test_e2e_queue.db

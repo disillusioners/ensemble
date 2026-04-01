@@ -133,7 +133,7 @@ Use simple, consistent session names:
 #### Required File Output Structure
 
 ```
-.agents/shared/working/{feature_name}/
+.agents/shared/planning/{feature_name}/
 ├── plan-overview.md          ← Summary: objectives, phase list, dependencies, risks
 ├── phase1-plan.md            ← Phase 1: self-contained plan
 ├── phase2-plan.md            ← Phase 2: self-contained plan
@@ -302,10 +302,10 @@ Leader sends: planning request + context + working directory
 **Phases**: [number]
 **Est. Time**: [estimate]
 
-Plan overview: .agents/shared/working/{feature_name}/plan-overview.md
+Plan overview: .agents/shared/planning/{feature_name}/plan-overview.md
 Phase files:
-  - .agents/shared/working/{feature_name}/phase1-plan.md
-  - .agents/shared/working/{feature_name}/phase2-plan.md
+  - .agents/shared/planning/{feature_name}/phase1-plan.md
+  - .agents/shared/planning/{feature_name}/phase2-plan.md
 
 [1-2 sentence summary]
 ```
@@ -318,7 +318,7 @@ Phase files:
 **Phases**: 1
 **Est. Time**: [estimate]
 
-Plan file: .agents/shared/working/{feature_name}/plan.md
+Plan file: .agents/shared/planning/{feature_name}/plan.md
 
 [1-2 sentence summary]
 ```
