@@ -227,12 +227,24 @@ def identify_boundary_groups(messages: list[BaseMessage]) -> list[MessageGroup]:
                 if tc_id:
                     tool_call_ids.add(tc_id)
             
+            # W2: If no valid tool_call_ids, treat as single message
+            if not tool_call_ids:
+                groups.append(MessageGroup(
+                    start_idx=i,
+                    end_idx=i,
+                    messages=[msg],
+                    group_type="single"
+                ))
+                i += 1
+                continue
+            
             # Collect following ToolMessages whose tool_call_id matches
             group_messages = [msg]
             group_end = i
             for j in range(i + 1, len(messages)):
                 next_msg = messages[j]
-                if hasattr(next_msg, "tool_call_id") and next_msg.tool_call_id:
+                # W1: Use explicit None check to handle empty string tool_call_id
+                if hasattr(next_msg, "tool_call_id") and getattr(next_msg, 'tool_call_id', None) is not None:
                     if next_msg.tool_call_id in tool_call_ids:
                         group_messages.append(next_msg)
                         group_end = j
@@ -375,6 +387,10 @@ def emergency_truncate(
             if estimate_fn(truncated) <= max_tokens:
                 return truncated
     
+    # C1: After Pass 3, if still over limit, drop oldest messages as last resort
+    while len(truncated) > 1 and estimate_fn(truncated) > max_tokens:
+        truncated.pop(0)
+    
     return truncated
 
 
@@ -421,6 +437,15 @@ def _truncate_batch_to_fit(
         [msg for g in truncated_groups for msg in g.messages]
     ) > max_tokens:
         truncated_groups.pop(0)
+    
+    # W3: If single remaining group still exceeds max_tokens, truncate its messages
+    if len(truncated_groups) == 1 and tokenizer_fn(
+        [msg for g in truncated_groups for msg in g.messages]
+    ) > max_tokens:
+        for msg in truncated_groups[0].messages:
+            content = getattr(msg, "content", "") or ""
+            if len(content) > max_tool_response_chars:
+                msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
     
     return truncated_groups
 
@@ -531,6 +556,11 @@ class ContextCompactor:
                 estimate_fn=estimate_messages_tokens,
             )
             
+            # W6: Assign new IDs to truncated messages to avoid conflict with RemoveMessage
+            for truncated_msg in truncated_msgs:
+                if hasattr(truncated_msg, 'id') and truncated_msg.id:
+                    truncated_msg.id = f"truncated-{uuid.uuid4()}"
+            
             replacement = []
             for group in groups:
                 for msg in group.messages:
@@ -556,10 +586,8 @@ class ContextCompactor:
         try:
             summaries = await self._summarize_chunked(compactable, context)
             
-            if len(summaries) == 1:
-                summary = summaries[0]
-            else:
-                summary = await self._merge_summaries(summaries, context)
+            # C2: _summarize_chunked always returns a single-element list
+            summary = summaries[0]
             
             replacement = self._build_replacement_messages(compactable, preserved, summary)
             compaction_type = "chunked_summarization" if len(summaries) > 1 else "summarization"
