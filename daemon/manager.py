@@ -1838,8 +1838,9 @@ Title:"""
                 return 0
             # Get cached token count from prompt cache using agent_id
             cache_key = meta.agent_id
-            if cache_key in self.prompt_cache.cache:
-                _, token_count = self.prompt_cache.cache[cache_key]
+            cached = self.prompt_cache.get(cache_key)
+            if cached is not None:
+                _, token_count = cached
                 return token_count
             return 0
         except Exception:
@@ -1890,7 +1891,7 @@ Title:"""
             )
             
             # Compact state
-            result = self._compactor.compact_state(context)
+            result = await self._compactor.compact_state(context)
             
             if result is None or result.replacement_messages is None:
                 return
