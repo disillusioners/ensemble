@@ -48,6 +48,7 @@ from .cancellation import (
     OperationCancelledError
 )
 from .request_registry import ActiveRequestRegistry
+from .compaction import ContextCompactor, CompactionContext
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,27 @@ class SessionManager:
         self._checkpointer_db_path = Path(config.persistence.checkpointer_db_path)
         self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
+
+        # Initialize context compactor
+        if self.config.compaction.enabled:
+            self._compactor = ContextCompactor(
+                config=self.config.compaction,
+                llm_config={
+                    "base_url": self.config.llm.base_url,
+                    "api_key": self.config.llm.api_key,
+                    "model": self.config.llm.model,
+                    "temperature": self.config.llm.temperature,
+                    "request_timeout": self.config.llm.request_timeout,
+                },
+            )
+            logger.info(
+                f"Context compaction enabled: threshold={self.config.compaction.threshold}, "
+                f"recent_window={self.config.compaction.recent_message_window}, "
+                f"min_window={self.config.compaction.min_recent_window}"
+            )
+        else:
+            self._compactor = None
+
         # Maps session_id to tuple of (graph, agent_dir)
         self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
 
@@ -595,6 +617,10 @@ class SessionManager:
             "configurable": {"thread_id": session_id},
             "recursion_limit": self.config.limits.graph_recursion_limit,
         }
+        
+        # Compact context before processing (non-blocking)
+        await self._maybe_compact_context(session_id, graph, config)
+        
         result = await graph.ainvoke({"messages": [message]}, config)
 
         # Extract message data from the current turn
@@ -1117,6 +1143,9 @@ class SessionManager:
         event_count = 0
         
         # Build input - on retry with checkpoint, resume from None
+        if not is_retry:
+            await self._maybe_compact_context(session_id, graph, config)
+        
         if is_retry:
             if await self._has_checkpoint(session_id):
                 logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry #{msg.retry_count})")
@@ -1793,6 +1822,116 @@ Title:"""
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""
         return self._queue_repository.get_stats(session_id)
+
+    def _get_system_prompt_tokens(self, session_id: str) -> int:
+        """Get the cached system prompt token count for a session's agent.
+
+        Args:
+            session_id: The session ID.
+
+        Returns:
+            The number of tokens in the system prompt, or 0 if not found.
+        """
+        try:
+            meta = self._session_repository.get(session_id)
+            if not meta:
+                return 0
+            # Get cached token count from prompt cache using agent_id
+            cache_key = meta.agent_id
+            if cache_key in self.prompt_cache.cache:
+                _, token_count = self.prompt_cache.cache[cache_key]
+                return token_count
+            return 0
+        except Exception:
+            return 0
+
+    async def _maybe_compact_context(
+        self,
+        session_id: str,
+        graph: CompiledStateGraph,
+        config: dict[str, Any],
+    ) -> None:
+        """Conditionally compact session context if threshold is exceeded.
+        
+        Compaction is non-blocking - failures are logged but never interrupt processing.
+        
+        Args:
+            session_id: The session ID to potentially compact.
+            graph: The compiled state graph for the session.
+            config: The LangGraph config dict with configurable thread_id.
+        """
+        if self._compactor is None:
+            return
+        
+        try:
+            # Get current state
+            state = await graph.aget_state(config)
+            if not state:
+                return
+            
+            messages = state.values.get('messages', [])
+            system_prompt_tokens = self._get_system_prompt_tokens(session_id)
+            last_compacted_at = state.values.get('compacted_at')
+            
+            # Build compaction context
+            context = CompactionContext(
+                messages=messages,
+                system_prompt_tokens=system_prompt_tokens,
+                model_name=self.config.llm.model,
+                config=self.config.compaction,
+                llm_config={
+                    "base_url": self.config.llm.base_url,
+                    "api_key": self.config.llm.api_key,
+                    "model": self.config.llm.model,
+                    "temperature": self.config.llm.temperature,
+                    "request_timeout": self.config.llm.request_timeout,
+                },
+                last_compacted_at=last_compacted_at,
+            )
+            
+            # Compact state
+            result = self._compactor.compact_state(context)
+            
+            if result is None or result.replacement_messages is None:
+                return
+            
+            messages_before = len(messages)
+            messages_after = len(result.replacement_messages)
+            tokens_before = result.tokens_before
+            tokens_saved = result.tokens_saved
+            
+            # Update graph state with compacted messages
+            await graph.aupdate_state(
+                config,
+                {'messages': result.replacement_messages},
+                as_node='agent'
+            )
+            
+            # Update compaction timestamp if available
+            if result.compacted_at:
+                await graph.aupdate_state(
+                    config,
+                    {'compacted_at': result.compacted_at},
+                    as_node='agent'
+                )
+            
+            # Log compaction result
+            log_parts = [
+                f"[Compaction] session={session_id[:8]}...",
+                f"compaction_type={result.compaction_type.value}",
+                f"messages_before={messages_before}",
+                f"messages_after={messages_after}",
+                f"tokens_before={tokens_before}",
+                f"tokens_after={result.tokens_after}",
+                f"tokens_saved={tokens_saved}",
+            ]
+            if result.summarization_error:
+                log_parts.append(f"WARNING: summarization_error={result.summarization_error}")
+            
+            logger.info(" ".join(log_parts))
+            
+        except Exception as e:
+            logger.warning(f"[Compaction] Failed to compact context for {session_id[:8]}...: {e}")
 
     async def _has_checkpoint(self, session_id: str) -> bool:
         """Check if a checkpoint exists for this session.

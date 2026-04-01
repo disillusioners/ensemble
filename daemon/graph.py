@@ -164,6 +164,17 @@ class ThinkingChatOpenAI(ChatOpenAI):
         )
 
 
+class SessionState(MessagesState):
+    """Extended state schema for agent sessions.
+    
+    Inherits all message handling from MessagesState (add_messages reducer).
+    Adds compaction metadata fields that persist in checkpoints.
+    """
+    # Compaction dedup: ISO timestamp of last successful compaction
+    # Stored/retrieved via graph.aupdate_state() and state.values["compacted_at"]
+    compacted_at: Optional[str] = None
+
+
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end."""
     messages = state["messages"]
@@ -224,7 +235,7 @@ def build_session_graph(
         )
         logger.debug(f"LLM configured with {max_retries} retries")
     
-    graph = StateGraph(MessagesState)
+    graph = StateGraph(SessionState)
     
     # Add nodes
     graph.add_node("agent", create_agent_node(llm_with_tools, system_prompt))
