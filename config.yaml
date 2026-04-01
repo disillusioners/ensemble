@@ -46,3 +46,16 @@ queue:
   llm_max_retries: 3
   llm_retry_delay_seconds: 10.0
   llm_retry_exponential_base: 2.0
+
+# Context Compaction Settings
+# Automatically summarizes old conversation history when context window fills up
+compaction:
+  enabled: true
+  threshold: 0.80              # Trigger at 80% of context window
+  recent_message_window: 10    # Keep last 10 boundary groups intact (not individual messages)
+  min_recent_window: 3         # Never reduce below 3 groups, even under pressure
+  target_ratio: 0.40           # Target 40% of context window after compaction
+  min_messages_before_compaction: 10
+  summarization_chunk_threshold: 0.60  # Chunk summarization if old messages > 60% of context
+  # context_window_override: 0  # 0 = auto-detect from model name
+  # summarization_model: ""     # Empty = use session model

@@ -114,6 +114,22 @@ class AgentsConfig(BaseSettings):
     directory: str = Field(default="./agents")
 
 
+class CompactionConfig(BaseSettings):
+    """Context compaction configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="COMPACTION_")
+
+    enabled: bool = Field(default=True)
+    threshold: float = Field(default=0.80, description="Trigger compaction when tokens exceed this fraction of context window")
+    recent_message_window: int = Field(default=10, description="Number of most recent boundary GROUPS to keep intact during compaction")
+    min_recent_window: int = Field(default=3, description="Hard minimum for recent window during progressive reduction")
+    context_window_override: int = Field(default=0, description="Override context window size. 0 = auto-detect from model name")
+    target_ratio: float = Field(default=0.40, description="Target token usage after compaction as fraction of context window")
+    summarization_model: str = Field(default="", description="Model to use for summarization. Empty = use session model")
+    min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
+    summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -125,6 +141,7 @@ class Config(BaseSettings):
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
+    compaction: CompactionConfig = Field(default_factory=CompactionConfig)
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -182,6 +199,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         config_dict["agents"] = processed_config["agents"]
     if "queue" in processed_config:
         config_dict["queue"] = processed_config["queue"]
+    if "compaction" in processed_config:
+        config_dict["compaction"] = processed_config["compaction"]
 
     # Create and validate config
     return Config(**config_dict)
