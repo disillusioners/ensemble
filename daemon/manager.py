@@ -905,21 +905,6 @@ class SessionManager:
                             f"during processing, skipping ack (success already recorded)"
                         )
                     
-                    # Generate title if this was the first message
-                    if is_first_message:
-                        try:
-                            title = await self._generate_session_title(session_id, msg.content)
-                            if title:
-                                # Broadcast title_updated event for frontend refresh
-                                await self.broadcaster.broadcast(Event(
-                                    type="title_updated",
-                                    session_id=session_id,
-                                    message_id=msg.message_id,
-                                    data={"title": title}
-                                ))
-                        except Exception as e:
-                            logger.warning(f"Failed to generate title for session {session_id}: {e}")
-                    
                     # Determine the source for the completed event
                     # Root source inheritance: child sessions don't broadcast completed events
                     # Only the root session (parentless) broadcasts with the original external source
@@ -959,6 +944,12 @@ class SessionManager:
                                 "source": root_source,  # Use root_source for external routing
                             }
                         ))
+                    
+                    # Fire-and-forget title generation - don't block the completed event
+                    if is_first_message:
+                        asyncio.create_task(
+                            self._generate_and_broadcast_title(session_id, msg.content)
+                        )
                     
                 except OperationCancelledError as e:
                     logger.info(f"Message {msg.message_id[:8]}... was cancelled: {e.reason.value}")
@@ -1789,6 +1780,31 @@ Title:"""
         except Exception as e:
             logger.warning(f"Failed to generate title for session {session_id}: {e}")
             return None
+
+    async def _generate_and_broadcast_title(
+        self, session_id: str, message_content: str
+    ) -> None:
+        """Generate session title asynchronously and broadcast the update.
+        
+        This runs as a fire-and-forget task to avoid delaying the 'completed' event.
+        Errors are logged but not retried - title generation is best-effort.
+        
+        Args:
+            session_id: The session to generate title for
+            message_content: The message content to base the title on
+        """
+        try:
+            title = await self._generate_session_title(session_id, message_content)
+            if title:
+                # Broadcast title_updated event for frontend refresh
+                await self.broadcaster.broadcast(Event(
+                    type="title_updated",
+                    session_id=session_id,
+                    message_id="",  # Title updates don't need message_id
+                    data={"title": title}
+                ))
+        except Exception as e:
+            logger.warning(f"Failed to generate title for session {session_id}: {e}")
 
     def get_queue_stats(self, session_id: str):
         """Get queue statistics for a session."""

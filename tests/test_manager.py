@@ -1,11 +1,15 @@
 """Tests for daemon/manager.py"""
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+import asyncio
+import time
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from datetime import datetime
 
 from daemon.manager import SessionManager, parse_think_tags
 from daemon.config import Config, LLMConfig, LimitsConfig, PersistenceConfig, DaemonConfig, AgentsConfig
+from daemon.events import Event
+from daemon.queue import QueuedMessage
 
 
 class TestParseThinkTags:
@@ -136,7 +140,7 @@ class TestSessionManagerInit:
             manager._session_repository = mock_session_repository
             
             assert manager.config == mock_config
-            assert manager.conn is not None
+            assert manager._engine is not None
             assert manager.sessions == {}
 
 
@@ -167,9 +171,9 @@ class TestSpawnSession:
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_id="coder", session_id="custom-session-id")
+            session_id = manager.spawn_session(agent_id="coder", session_id="550e8400-e29b-41d4-a716-446655440000")
             
-            assert session_id == "custom-session-id"
+            assert session_id == "550e8400-e29b-41d4-a716-446655440000"
 
     def test_spawn_session_max_sessions_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_session_repository):
         """Test that max_sessions limit is enforced."""
@@ -277,18 +281,17 @@ class TestTerminateSession:
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_session_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-             patch('daemon.manager.create_session_tools', return_value=[]), \
-             patch('daemon.manager.update_session_status') as mock_update:
+             patch('daemon.manager.create_session_tools', return_value=[]):
             
             manager = SessionManager(mock_config)
             manager._session_repository = mock_session_repository
-            session_id = manager.spawn_session(agent_id="coder", session_id="test-session")
+            session_id = manager.spawn_session(agent_id="coder", session_id="550e8400-e29b-41d4-a716-446655440001")
             
             result = manager.terminate_session(session_id)
             
             assert result is True
             assert session_id not in manager.sessions
-            mock_update.assert_called_once()
+            mock_session_repository.update_status.assert_called_once_with(session_id, "terminated")
 
     def test_terminate_session_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_session_repository):
         """Test terminating non-existent session."""
@@ -701,3 +704,310 @@ class TestGenerateSessionTitle:
             # Verify title was extracted from list
             assert title is not None
             assert "List Response Title" in title
+
+
+class TestGenerateAndBroadcastTitle:
+    """Tests for _generate_and_broadcast_title helper method."""
+
+    @pytest.mark.asyncio
+    async def test_generate_and_broadcast_title_success(self, mock_config, mock_session_repository):
+        """Test that title is generated and broadcast correctly."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()):
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            
+            # Mock _generate_session_title to return a title
+            manager._generate_session_title = AsyncMock(return_value="Test Title")
+            
+            # Call the method
+            await manager._generate_and_broadcast_title("test-session", "Hello, how are you?")
+            
+            # Verify broadcast was called with correct event
+            manager.broadcaster.broadcast.assert_called_once()
+            call_args = manager.broadcaster.broadcast.call_args
+            event = call_args[0][0]
+            assert isinstance(event, Event)
+            assert event.type == "title_updated"
+            assert event.session_id == "test-session"
+            assert event.message_id == ""
+            assert event.data == {"title": "Test Title"}
+
+    @pytest.mark.asyncio
+    async def test_generate_and_broadcast_title_no_title_returned(self, mock_config, mock_session_repository):
+        """Test that broadcast is NOT called when no title is generated."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()):
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            
+            # Mock _generate_session_title to return None
+            manager._generate_session_title = AsyncMock(return_value=None)
+            
+            # Call the method
+            await manager._generate_and_broadcast_title("test-session", "Hello!")
+            
+            # Verify broadcast was NOT called
+            manager.broadcaster.broadcast.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_and_broadcast_title_error_caught(self, mock_config, mock_session_repository):
+        """Test that errors are caught and logged without crashing."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.logger') as mock_logger:
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            
+            # Mock _generate_session_title to raise an exception
+            manager._generate_session_title = AsyncMock(side_effect=Exception("LLM Error"))
+            
+            # Call the method - should not raise
+            await manager._generate_and_broadcast_title("test-session", "Hello!")
+            
+            # Verify broadcast was NOT called due to error
+            manager.broadcaster.broadcast.assert_not_called()
+            
+            # Verify warning was logged
+            mock_logger.warning.assert_called()
+            assert "Failed to generate title" in str(mock_logger.warning.call_args)
+
+    @pytest.mark.asyncio
+    async def test_generate_and_broadcast_title_broadcasts_correct_event(self, mock_config, mock_session_repository):
+        """Test that the broadcast event has exactly the expected structure."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()):
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            
+            # Mock _generate_session_title to return a specific title
+            manager._generate_session_title = AsyncMock(return_value="Exact Title")
+            
+            # Call the method
+            await manager._generate_and_broadcast_title("session-123", "User message content")
+            
+            # Capture the Event object passed to broadcast
+            manager.broadcaster.broadcast.assert_called_once()
+            event = manager.broadcaster.broadcast.call_args[0][0]
+            
+            # Assert event structure
+            assert event.type == "title_updated"
+            assert event.session_id == "session-123"
+            assert event.message_id == ""
+            assert event.data == {"title": "Exact Title"}
+
+
+class TestTitleGenerationFireAndForget:
+    """Tests for asyncio.create_task behavior in _process_queue."""
+
+    @pytest.mark.asyncio
+    async def test_title_generation_does_not_block_completed_event(self, mock_config, mock_session_repository):
+        """Test that completed event is broadcast BEFORE title generation finishes (fire-and-forget)."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_messages', new_callable=AsyncMock, return_value=[]) as mock_get_messages:
+            
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            manager.circuit_breaker = Mock()
+            manager.circuit_breaker.can_execute = Mock(return_value=True)
+            manager.circuit_breaker.record_success = Mock()
+            manager._request_registry = Mock()
+            manager._request_registry.register = Mock(return_value=Mock(token=None))
+            # Set _checkpointer directly since checkpointer is a property without setter
+            manager._checkpointer = Mock()
+            # Mock watchdog to avoid database errors
+            manager.watchdog = Mock()
+            
+            # Track event order with timestamps
+            event_timestamps = {}
+            
+            # Mock _generate_and_broadcast_title to be slow
+            async def slow_title_gen(*args, **kwargs):
+                await asyncio.sleep(0.5)
+                event_timestamps["title_started"] = time.monotonic()
+            
+            manager._generate_and_broadcast_title = slow_title_gen
+            
+            # Create a mock broadcast that tracks events with timing
+            async def tracking_broadcast(event):
+                if event.type == "completed":
+                    event_timestamps["completed_broadcast"] = time.monotonic()
+                # Call the original AsyncMock's behavior
+                await AsyncMock()(event)
+            
+            manager.broadcaster.broadcast = AsyncMock(side_effect=tracking_broadcast)
+            
+            # Create a mock message result
+            mock_result = Mock()
+            mock_result.content = "Response"
+            mock_result.thinking = None
+            mock_result.thinking_extracted = None
+            mock_result.tool_calls = []
+            manager._process_message_with_tracking = AsyncMock(return_value=mock_result)
+            
+            # Mock dequeue to return one message then None
+            queued_msg = QueuedMessage(
+                message_id="msg-123",
+                session_id="test-session",
+                content="Hello!",
+                source="test",
+                retry_count=0
+            )
+            manager._queue_repository = Mock()
+            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.get_status = Mock(return_value="processing")
+            manager._queue_repository.complete = Mock()
+            manager._queue_repository.is_empty = Mock(return_value=True)
+            
+            # Mock session metadata
+            mock_session = Mock()
+            mock_session.parent_id = None
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
+            
+            # Record start time
+            start_time = time.monotonic()
+            
+            # Run _process_queue - should return quickly due to fire-and-forget
+            await manager._process_queue("test-session")
+            
+            # Verify completed was broadcast
+            assert "completed_broadcast" in event_timestamps, "Completed event should be broadcasted"
+            
+            # Verify title generation has NOT started yet (because it's fire-and-forget)
+            # Since we're not waiting for the background task, title should not have started
+            # within this short time window
+            assert "title_started" not in event_timestamps, "Title generation should not block - it runs in background"
+            
+            # Verify _process_queue returned quickly (< 0.3s while title takes 0.5s)
+            elapsed = time.monotonic() - start_time
+            assert elapsed < 0.3, f"_process_queue took {elapsed:.2f}s, should return quickly"
+
+    @pytest.mark.asyncio
+    async def test_title_generation_not_triggered_for_non_first_message(self, mock_config, mock_session_repository):
+        """Test that title generation is NOT triggered when is_first_message is False."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_messages', new_callable=AsyncMock, return_value=["existing-message"]) as mock_get_messages:
+            
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            manager.circuit_breaker = Mock()
+            manager.circuit_breaker.can_execute = Mock(return_value=True)
+            manager.circuit_breaker.record_success = Mock()
+            manager._request_registry = Mock()
+            manager._request_registry.register = Mock(return_value=Mock(token=None))
+            # Set _checkpointer directly since checkpointer is a property without setter
+            manager._checkpointer = Mock()
+            # Mock watchdog to avoid database errors
+            manager.watchdog = Mock()
+            
+            # Track if title generation was called
+            title_gen_called = False
+            
+            async def track_title_gen(*args, **kwargs):
+                nonlocal title_gen_called
+                title_gen_called = True
+            
+            manager._generate_and_broadcast_title = track_title_gen
+            
+            # Mock _process_message_with_tracking
+            mock_result = Mock()
+            mock_result.content = "Response"
+            mock_result.thinking = None
+            mock_result.thinking_extracted = None
+            mock_result.tool_calls = []
+            manager._process_message_with_tracking = AsyncMock(return_value=mock_result)
+            
+            # Mock dequeue to return one message then None
+            queued_msg = QueuedMessage(
+                message_id="msg-123",
+                session_id="test-session",
+                content="Hello again!",
+                source="test",
+                retry_count=0
+            )
+            manager._queue_repository = Mock()
+            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.get_status = Mock(return_value="processing")
+            manager._queue_repository.complete = Mock()
+            manager._queue_repository.is_empty = Mock(return_value=True)
+            
+            # Mock session metadata
+            mock_session = Mock()
+            mock_session.parent_id = None
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
+            
+            # Run _process_queue
+            await manager._process_queue("test-session")
+            
+            # Verify title generation was NOT called
+            assert not title_gen_called, "Title generation should NOT be called for non-first messages"
+            
+            # Verify NO title_updated event was broadcast
+            title_updated_calls = [c for c in manager.broadcaster.broadcast.call_args_list 
+                                  if c[0][0].type == "title_updated"]
+            assert len(title_updated_calls) == 0, "No title_updated event should be broadcasted"
+
+    @pytest.mark.asyncio
+    async def test_fire_and_forget_isolation(self, mock_config, mock_session_repository):
+        """Test that _process_queue returns quickly even when title generation is slow."""
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.manager.get_session_messages', new_callable=AsyncMock, return_value=[]) as mock_get_messages:
+            
+            manager = SessionManager(mock_config)
+            manager._session_repository = mock_session_repository
+            manager.broadcaster = AsyncMock()
+            manager.circuit_breaker = Mock()
+            manager.circuit_breaker.can_execute = Mock(return_value=True)
+            manager.circuit_breaker.record_success = Mock()
+            manager._request_registry = Mock()
+            manager._request_registry.register = Mock(return_value=Mock(token=None))
+            # Set _checkpointer directly since checkpointer is a property without setter
+            manager._checkpointer = Mock()
+            # Mock watchdog to avoid database errors
+            manager.watchdog = Mock()
+            
+            # Mock _generate_and_broadcast_title to be slow (2 seconds)
+            async def slow_title_gen(*args, **kwargs):
+                await asyncio.sleep(2.0)
+            
+            manager._generate_and_broadcast_title = slow_title_gen
+            
+            # Mock _process_message_with_tracking
+            mock_result = Mock()
+            mock_result.content = "Response"
+            mock_result.thinking = None
+            mock_result.thinking_extracted = None
+            mock_result.tool_calls = []
+            manager._process_message_with_tracking = AsyncMock(return_value=mock_result)
+            
+            # Mock dequeue to return one message then None
+            queued_msg = QueuedMessage(
+                message_id="msg-123",
+                session_id="test-session",
+                content="Hello!",
+                source="test",
+                retry_count=0
+            )
+            manager._queue_repository = Mock()
+            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.get_status = Mock(return_value="processing")
+            manager._queue_repository.complete = Mock()
+            manager._queue_repository.is_empty = Mock(return_value=True)
+            
+            # Mock session metadata
+            mock_session = Mock()
+            mock_session.parent_id = None
+            mock_session.session_metadata = {}
+            mock_session_repository.get.return_value = mock_session
+            
+            # Measure how long _process_queue takes
+            start_time = time.monotonic()
+            await manager._process_queue("test-session")
+            elapsed = time.monotonic() - start_time
+            
+            # _process_queue should return quickly (< 0.5s) even with slow title generation
+            assert elapsed < 0.5, f"_process_queue took {elapsed:.2f}s, should return quickly with fire-and-forget title generation"

@@ -16,3 +16,6 @@ Persistent multi-agent daemon built with LangGraph. Agents defined by markdown f
 
 ## Current Focus
 Testing memory system improvements (inner_soul, access_memory, load_recent_memories, cache invalidation).
+
+## Recent Test Runs
+- **2026-04-02**: Title generation fire-and-forget fix — 7 new unit tests added (all 38 pass). See `RESULTS/2026-04-02-title-generation-fix.md`
