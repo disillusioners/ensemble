@@ -73,7 +73,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "qwen": 32768,
 }
 
-DEFAULT_CONTEXT_LIMIT = 128000
+DEFAULT_CONTEXT_LIMIT = 180000
 
 
 def get_model_context_limit(model_name: str, config: Optional[object] = None) -> int:
