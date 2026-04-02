@@ -2089,11 +2089,11 @@ Title:"""
 
         return graph
 
-    def list_sessions(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+    def list_sessions(self, limit: int = 20, offset: int = 0) -> tuple[list[dict], int]:
         """List sessions with pagination.
 
         Args:
-            limit: Maximum number of sessions to return (default: 100).
+            limit: Maximum number of sessions to return (default: 20).
             offset: Number of sessions to skip (default: 0).
 
         Returns:

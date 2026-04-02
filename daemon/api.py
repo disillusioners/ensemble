@@ -481,13 +481,13 @@ async def create_session(session_create: SessionCreate):
 # 3. GET /sessions - List sessions
 @api_router.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(
-    limit: int = 100,
+    limit: int = 20,
     offset: int = 0
 ):
     """List sessions with pagination.
     
     Args:
-        limit: Maximum number of sessions to return (default: 100, max: 100).
+        limit: Maximum number of sessions to return (default: 20, max: 100).
         offset: Number of sessions to skip (default: 0, min: 0).
     """
     # Input validation

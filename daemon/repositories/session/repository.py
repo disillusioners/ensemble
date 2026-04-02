@@ -180,14 +180,14 @@ class SQLModelSessionRepository:
     def list(
         self,
         status: str | None = None,
-        limit: int = 100,
+        limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[Session], int]:
         """List sessions with optional status filter and pagination.
         
         Args:
             status: Optional status filter.
-            limit: Maximum number of sessions to return.
+            limit: Maximum number of sessions to return (default: 20).
             offset: Number of sessions to skip.
             
         Returns:

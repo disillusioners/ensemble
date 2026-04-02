@@ -143,13 +143,13 @@ Returns:
     
     @tool
     def list_sessions() -> list[dict]:
-        """List all active sessions. Use tool_help("list_sessions") for details."""
-        return manager.list_sessions()
+        """List all active sessions (most recent first). Use tool_help("list_sessions") for details."""
+        return manager.list_sessions(limit=20)
     
-    list_sessions._full_doc_ = """List all active sessions.
+    list_sessions._full_doc_ = """List all active sessions (most recent first).
 
 Returns:
-    List of session info dictionaries
+    List of session info dictionaries (up to 20 most recent)
 """
     
     @tool
