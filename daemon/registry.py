@@ -239,6 +239,25 @@ class AgentRegistry:
         """
         return sorted(self._agents.values(), key=lambda a: a.id)
 
+    def find_skill(self, skill_name: str) -> list[str]:
+        """Find all agents that have a specific skill.
+
+        Skills are stored at agents/<agent_id>/skills/<skill_name>/skill.md.
+        This method scans the filesystem to find agents with the given skill.
+
+        Args:
+            skill_name: The skill name to search for.
+
+        Returns:
+            List of agent_ids that have this skill.
+        """
+        agents_with_skill = []
+        for agent_id, metadata in self._agents.items():
+            skill_path = metadata.path / "skills" / skill_name / "skill.md"
+            if skill_path.exists():
+                agents_with_skill.append(agent_id)
+        return agents_with_skill
+
     def exists(self, agent_id: str) -> bool:
         """Check if agent exists.
 
