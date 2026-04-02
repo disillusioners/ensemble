@@ -68,12 +68,13 @@ class TestLoadConfig:
 
     def test_load_config_default(self, tmp_path, sample_config_yaml):
         """Test loading config from default path (./config.yaml)."""
-        # Create config file in current working directory
-        config_file = Path("./config.yaml")
-        
-        # Write sample config
+        # Create config file in tmp_path and point ENSEMBLE_CONFIG to it
+        config_file = tmp_path / "config.yaml"
         with open(config_file, "w") as f:
             f.write(sample_config_yaml)
+        
+        # Set the environment variable to use our tmp config
+        os.environ["ENSEMBLE_CONFIG"] = str(config_file)
         
         try:
             config = load_config()
@@ -85,9 +86,9 @@ class TestLoadConfig:
             assert config.daemon.port == 8079
             assert config.limits.max_sessions == 100
         finally:
-            # Cleanup
-            if config_file.exists():
-                config_file.unlink()
+            # Cleanup env var
+            if "ENSEMBLE_CONFIG" in os.environ:
+                del os.environ["ENSEMBLE_CONFIG"]
 
     def test_load_config_custom_path(self, tmp_path, sample_config_yaml):
         """Test loading config from custom path via ENSEMBLE_CONFIG env var."""
@@ -156,21 +157,20 @@ class TestLoadConfig:
         
         assert "Config file not found" in str(exc_info.value)
 
-    def test_missing_default_config_file(self):
+    def test_missing_default_config_file(self, tmp_path):
         """Test error when default config file doesn't exist."""
-        # Make sure ENSEMBLE_CONFIG is not set and config.yaml doesn't exist
-        if "ENSEMBLE_CONFIG" in os.environ:
-            del os.environ["ENSEMBLE_CONFIG"]
+        # Point ENSEMBLE_CONFIG to a nonexistent path in tmp_path
+        nonexistent_path = tmp_path / "nonexistent.yaml"
+        os.environ["ENSEMBLE_CONFIG"] = str(nonexistent_path)
         
-        # Ensure ./config.yaml doesn't exist
-        config_file = Path("./config.yaml")
-        if config_file.exists():
-            config_file.unlink()
-        
-        with pytest.raises(FileNotFoundError) as exc_info:
-            load_config()
-        
-        assert "Config file not found" in str(exc_info.value)
+        try:
+            with pytest.raises(FileNotFoundError) as exc_info:
+                load_config()
+            
+            assert "Config file not found" in str(exc_info.value)
+        finally:
+            if "ENSEMBLE_CONFIG" in os.environ:
+                del os.environ["ENSEMBLE_CONFIG"]
 
     def test_empty_config_file(self, tmp_path):
         """Test error when config file is empty."""
