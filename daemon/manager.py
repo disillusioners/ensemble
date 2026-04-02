@@ -1919,7 +1919,7 @@ Title:"""
             # Log compaction result
             log_parts = [
                 f"[Compaction] session={session_id[:8]}...",
-                f"compaction_type={result.compaction_type.value}",
+                f"compaction_type={result.compaction_type}",
                 f"messages_before={messages_before}",
                 f"messages_after={messages_after}",
                 f"tokens_before={tokens_before}",

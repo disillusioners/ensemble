@@ -28,6 +28,28 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.tools import BaseTool
+from pydantic import Field
+
+
+# =============================================================================
+# Test Tools
+# =============================================================================
+
+
+class EchoTool(BaseTool):
+    """Simple echo tool for testing tool calls after compaction."""
+
+    name: str = "echo"
+    description: str = "Echoes the input text back"
+
+    text: str = Field(default="", description="Text to echo back")
+
+    def _run(self, text: str) -> str:
+        return f"echo: {text}"
+
+    async def _arun(self, text: str) -> str:
+        return f"echo: {text}"
 
 
 # =============================================================================
@@ -92,6 +114,7 @@ def _import_daemon_modules():
     """Import daemon modules after langgraph modules are restored."""
     from daemon.compaction import (
         CompactionContext,
+        CompactionResult,
         ContextCompactor,
         identify_boundary_groups,
     )
@@ -101,6 +124,7 @@ def _import_daemon_modules():
     from daemon.persistence import get_checkpointer
     return {
         "CompactionContext": CompactionContext,
+        "CompactionResult": CompactionResult,
         "ContextCompactor": ContextCompactor,
         "identify_boundary_groups": identify_boundary_groups,
         "CompactionConfigModel": CompactionConfigModel,
@@ -230,12 +254,60 @@ def create_mock_llm(response_content: str = "I can help with that."):
 
     The mock supports:
     - .invoke() for direct calls (used by agent node)
-    - .bind_tools() for tool binding
+    - .bind_tools() for tool binding - returns a callable with .invoke
     """
     mock_response = AIMessage(content=response_content, id="mock-ai-response")
+
+    # Create the base mock
     mock_llm_instance = MagicMock()
     mock_llm_instance.invoke = MagicMock(return_value=mock_response)
-    mock_llm_instance.bind_tools = MagicMock(return_value=mock_llm_instance)
+
+    # bind_tools should return a callable that has .invoke that returns the response
+    mock_bound = MagicMock()
+    mock_bound.invoke = MagicMock(return_value=mock_response)
+    mock_llm_instance.bind_tools = MagicMock(return_value=mock_bound)
+    return mock_llm_instance
+
+
+def create_mock_llm_with_tool_calls(response_content: str = "Done."):
+    """Create a mock LLM that returns AIMessage with tool_calls.
+
+    The mock returns an AI message with a tool_call on first invoke,
+    then a plain response on second invoke.
+    """
+    call_count = 0
+
+    def invoke_side_effect(messages):
+        nonlocal call_count
+        call_count += 1
+
+        if call_count == 1:
+            # First call: return message with tool_calls
+            # Use the modern langchain-core tool_call format
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "name": "echo",
+                        "args": {"text": "hello"},
+                    }
+                ],
+                id="mock-ai-toolcall",
+            )
+        else:
+            # Subsequent calls: return plain response
+            return AIMessage(content=response_content, id="mock-ai-response")
+
+    # Create the base mock
+    mock_llm_instance = MagicMock()
+    mock_llm_instance.invoke = MagicMock(side_effect=invoke_side_effect)
+
+    # bind_tools should return a callable that has .invoke that returns the tool_calls response
+    mock_bound = MagicMock()
+    mock_bound.invoke = MagicMock(side_effect=invoke_side_effect)
+    mock_llm_instance.bind_tools = MagicMock(return_value=mock_bound)
     return mock_llm_instance
 
 
@@ -262,13 +334,14 @@ async def test_compaction_and_graph_continuation():
     """Test that compaction works end-to-end with a real graph.
 
     Steps:
-    1. Build a real graph with SessionState and in-memory checkpointer
-    2. Mock ThinkingChatOpenAI for predictable LLM responses
+    1. Build a real graph with SessionState, echo tool, and in-memory checkpointer
+    2. Mock ThinkingChatOpenAI for predictable LLM responses (with tool_calls)
     3. Build 20+ message history and inject into graph via aupdate_state
     4. Trigger compaction via ContextCompactor.compact_state()
     5. Apply result to graph via aupdate_state
     6. Send new message via graph.ainvoke()
-    7. Verify agent responds correctly after compaction
+    7. Verify tool call works: human -> AI with tool_calls -> tool execution -> AI response
+    8. Verify ToolMessage appears in results after compaction
     """
     # Import daemon modules lazily
     daemon = _import_daemon_modules()
@@ -276,10 +349,28 @@ async def test_compaction_and_graph_continuation():
     build_session_graph = daemon["build_session_graph"]
     ContextCompactor = daemon["ContextCompactor"]
     CompactionContext = daemon["CompactionContext"]
+    CompactionResult = daemon["CompactionResult"]
     estimate_messages_tokens = daemon["estimate_messages_tokens"]
 
     checkpointer, conn = await setup_in_memory_checkpointer()
     session_id = "test-compaction-continuation"
+
+    # Create echo tool for testing tool calls
+    echo_tool = EchoTool()
+
+    # Create mock LLM that returns tool_calls on first call, then plain response
+    mock_llm_with_tools = create_mock_llm_with_tool_calls(
+        response_content="After compaction, I can still help you."
+    )
+
+    # Create plain mock for compaction (no tools needed)
+    mock_plain_response = AIMessage(
+        content="Summary of previous conversation: user asked about various topics, "
+        "assistant provided helpful answers on topics 0-7.",
+        id="mock-summary",
+    )
+    mock_summary_llm = MagicMock()
+    mock_summary_llm.invoke = MagicMock(return_value=mock_plain_response)
 
     try:
         # Build 24 messages (12 pairs)
@@ -288,12 +379,10 @@ async def test_compaction_and_graph_continuation():
 
         config = {"configurable": {"thread_id": session_id}}
 
-        mock_llm = create_mock_llm("After compaction, I can still help you.")
-
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
-            # Build graph with real checkpointer
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_summary_llm):
+            # Build graph with real checkpointer AND echo tool
             graph = build_session_graph(
-                tools=[],
+                tools=[echo_tool],  # Include echo tool for tool call testing
                 checkpointer=checkpointer,
                 llm_config={
                     "base_url": "http://localhost:1234/v1",
@@ -353,15 +442,6 @@ async def test_compaction_and_graph_continuation():
             },
         )
 
-        # Mock the summarization LLM call within compact_state
-        mock_summary_response = AIMessage(
-            content="Summary of previous conversation: user asked about various topics, "
-            "assistant provided helpful answers on topics 0-7.",
-            id="mock-summary",
-        )
-        mock_summary_llm = MagicMock()
-        mock_summary_llm.invoke = MagicMock(return_value=mock_summary_response)
-
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_summary_llm):
             context = CompactionContext(
                 messages=messages,
@@ -382,7 +462,7 @@ async def test_compaction_and_graph_continuation():
 
         # Verify compaction occurred
         assert result is not None, "Compaction should have been triggered"
-        assert isinstance(result, type(result))  # CompactionResult
+        assert isinstance(result, CompactionResult)
         assert result.tokens_before > 0
         assert result.compacted_at is not None
         assert result.messages_before == 24
@@ -399,9 +479,24 @@ async def test_compaction_and_graph_continuation():
         ]
         assert len(summary_msgs) > 0, "Should contain a summary SystemMessage"
 
-        # Apply compaction result to graph state
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
-            await graph.aupdate_state(
+        # Rebuild the graph with the tool-calling mock (to ensure bound tools have correct invoke)
+        # The graph needs to be rebuilt because bind_tools needs to return a mock with proper invoke
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_with_tools):
+            graph_with_tools = build_session_graph(
+                tools=[echo_tool],
+                checkpointer=checkpointer,
+                llm_config={
+                    "base_url": "http://localhost:1234/v1",
+                    "api_key": "test-key",
+                    "model": "gpt-4o",
+                    "temperature": 0.7,
+                    "request_timeout": 60,
+                },
+                system_prompt="You are a helpful assistant.",
+            )
+
+            # Apply compaction result to the NEW graph
+            await graph_with_tools.aupdate_state(
                 config,
                 {"messages": result.replacement_messages},
                 as_node="agent",
@@ -409,14 +504,14 @@ async def test_compaction_and_graph_continuation():
 
             # Set compacted_at timestamp in state
             if result.compacted_at:
-                await graph.aupdate_state(
+                await graph_with_tools.aupdate_state(
                     config,
                     {"compacted_at": result.compacted_at},
                     as_node="agent",
                 )
 
             # Verify compacted state
-            state = await graph.aget_state(config)
+            state = await graph_with_tools.aget_state(config)
             compacted_messages = state.values.get("messages", [])
             # Filter out RemoveMessage instances
             actual_messages = [
@@ -427,7 +522,8 @@ async def test_compaction_and_graph_continuation():
             assert state.values.get("compacted_at") == result.compacted_at
 
             # Send a new message through the graph - this invokes the LLM
-            invoke_result = await graph.ainvoke(
+            # The mock LLM returns tool_calls on first call, then a plain response
+            invoke_result = await graph_with_tools.ainvoke(
                 {"messages": [HumanMessage(content="After compaction test", id="post-compact-1")]},
                 config,
             )
@@ -436,11 +532,47 @@ async def test_compaction_and_graph_continuation():
             result_messages = invoke_result.get("messages", [])
             assert len(result_messages) > 0, "Graph should return messages"
 
-            # The last message should be from the AI (mock response)
-            last_msg = result_messages[-1]
-            assert hasattr(last_msg, "type")
-            assert last_msg.type == "ai", f"Last message should be AI, got {last_msg.type}"
-            assert last_msg.content == "After compaction, I can still help you."
+            # Verify tool call pipeline worked:
+            # 1. Find the AI message with tool_calls
+            ai_with_toolcall = None
+            tool_message = None
+            final_ai_response = None
+
+            for msg in result_messages:
+                if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                    ai_with_toolcall = msg
+                elif isinstance(msg, ToolMessage):
+                    tool_message = msg
+                elif isinstance(msg, AIMessage) and not (hasattr(msg, "tool_calls") and msg.tool_calls):
+                    final_ai_response = msg
+
+            # Verify the full pipeline: human -> AI with tool_calls -> tool -> AI response
+            assert ai_with_toolcall is not None, (
+                "Should have an AI message with tool_calls after compaction. "
+                f"Messages: {[type(m).__name__ for m in result_messages]}"
+            )
+            assert ai_with_toolcall.tool_calls is not None
+            assert len(ai_with_toolcall.tool_calls) > 0
+            # Check tool name - could be accessed as 'name' or 'function.name'
+            tc = ai_with_toolcall.tool_calls[0]
+            tool_name = tc.get("name") or tc.get("function", {}).get("name")
+            assert tool_name == "echo", (
+                f"Tool call should be 'echo', got: {tc}"
+            )
+
+            assert tool_message is not None, (
+                "Should have a ToolMessage after the AI tool_call. "
+                f"Messages: {[type(m).__name__ for m in result_messages]}"
+            )
+            assert tool_message.content == "echo: hello", (
+                f"ToolMessage should contain 'echo: hello', got: {tool_message.content}"
+            )
+
+            assert final_ai_response is not None, (
+                "Should have a final AI response after tool execution. "
+                f"Messages: {[type(m).__name__ for m in result_messages]}"
+            )
+            assert final_ai_response.content == "After compaction, I can still help you."
 
     finally:
         await conn.close()
@@ -786,140 +918,3 @@ async def test_dedup_via_session_state():
         await conn.close()
 
 
-# =============================================================================
-# Test 4: Tool Call Integrity After Compaction
-# =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_tool_call_integrity_after_compaction():
-    """Test that tool calls maintain integrity after compaction.
-
-    Builds a conversation with interleaved tool calls, compacts it,
-    and verifies every remaining AIMessage.tool_calls has matching
-    ToolMessages - no orphans.
-
-    Steps:
-    1. Build history with interleaved tool calls (5 turns, 20 messages)
-    2. Compact with a small context window
-    3. Verify every remaining AIMessage with tool_calls has matching ToolMessages
-    """
-    # Import daemon modules lazily
-    daemon = _import_daemon_modules()
-    ContextCompactor = daemon["ContextCompactor"]
-    CompactionContext = daemon["CompactionContext"]
-    identify_boundary_groups = daemon["identify_boundary_groups"]
-    estimate_messages_tokens = daemon["estimate_messages_tokens"]
-
-    checkpointer, conn = await setup_in_memory_checkpointer()
-    session_id = "test-tool-integrity"
-
-    try:
-        # Build conversation with tool calls (5 turns * 4 messages = 20 messages)
-        messages = build_tool_conversation()
-        assert len(messages) == 20
-
-        # Verify initial integrity: all tool calls have matching responses
-        _verify_tool_call_integrity(messages, "Pre-compaction messages")
-
-        compaction_config = make_compaction_config(
-            context_window_override=800,
-            threshold=0.50,
-            recent_message_window=3,  # Keep last 3 groups (tool_sequence groups)
-            min_recent_window=2,
-            min_messages_before_compaction=5,
-        )
-
-        compactor = ContextCompactor(
-            config=compaction_config,
-            llm_config={
-                "base_url": "http://localhost:1234/v1",
-                "api_key": "test-key",
-                "model": "gpt-4o",
-                "temperature": 0.7,
-                "request_timeout": 60,
-            },
-        )
-
-        # Mock summarization LLM
-        mock_summary_response = AIMessage(
-            content="Summary: user made several requests involving bash tool calls. "
-            "The assistant checked files and confirmed everything was in order.",
-            id="mock-summary-tool",
-        )
-        mock_summary_llm = MagicMock()
-        mock_summary_llm.invoke = MagicMock(return_value=mock_summary_response)
-
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_summary_llm):
-            context = CompactionContext(
-                messages=messages,
-                system_prompt_tokens=30,
-                model_name="gpt-4o",
-                config=compaction_config,
-                llm_config={
-                    "base_url": "http://localhost:1234/v1",
-                    "api_key": "test-key",
-                    "model": "gpt-4o",
-                    "temperature": 0.7,
-                    "request_timeout": 60,
-                },
-                last_compacted_at=None,
-            )
-
-            result = await compactor.compact_state(context)
-
-        assert result is not None, "Compaction should trigger for tool conversation"
-
-        # Extract non-RemoveMessage entries from replacement
-        kept_messages = [
-            m for m in result.replacement_messages
-            if not isinstance(m, RemoveMessage)
-        ]
-
-        # The kept messages should maintain tool call integrity
-        _verify_tool_call_integrity(kept_messages, "Post-compaction messages")
-
-        # Additional verification: check that the boundary grouping was correct
-        groups = identify_boundary_groups(messages)
-        tool_sequence_groups = [g for g in groups if g.group_type == "tool_sequence"]
-        assert len(tool_sequence_groups) == 5, (
-            "Should have 5 tool_sequence groups (one per turn)"
-        )
-
-        # Each tool_sequence should have: AI + ToolMessage
-        for i, group in enumerate(tool_sequence_groups):
-            ai_msgs = [m for m in group.messages if isinstance(m, AIMessage)]
-            tool_msgs = [m for m in group.messages if isinstance(m, ToolMessage)]
-            assert len(ai_msgs) == 1, f"Group {i} should have 1 AI message"
-            assert len(tool_msgs) == 1, f"Group {i} should have 1 ToolMessage"
-
-    finally:
-        await conn.close()
-
-
-def _verify_tool_call_integrity(messages, label: str) -> None:
-    """Verify that every AIMessage with tool_calls has matching ToolMessages.
-
-    Args:
-        messages: List of messages to check.
-        label: Label for error messages (e.g., "Pre-compaction").
-
-    Raises:
-        AssertionError if any orphan tool calls are found.
-    """
-    # Build map of tool_call_id -> ToolMessage
-    tool_responses: dict = {}
-    for msg in messages:
-        if isinstance(msg, ToolMessage):
-            tool_responses[msg.tool_call_id] = msg
-
-    # Check every AIMessage with tool_calls
-    for i, msg in enumerate(messages):
-        if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-            for tc in msg.tool_calls:
-                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                assert tc_id in tool_responses, (
-                    f"{label}: AIMessage at index {i} has tool_call '{tc_id}' "
-                    f"with no matching ToolMessage. "
-                    f"Available tool_call_ids: {list(tool_responses.keys())}"
-                )
