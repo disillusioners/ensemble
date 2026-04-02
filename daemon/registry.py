@@ -251,6 +251,8 @@ class AgentRegistry:
         Returns:
             List of agent_ids that have this skill.
         """
+        if '/' in skill_name or '\\' in skill_name or '..' in skill_name:
+            return []
         agents_with_skill = []
         for agent_id, metadata in self._agents.items():
             skill_path = metadata.path / "skills" / skill_name / "skill.md"

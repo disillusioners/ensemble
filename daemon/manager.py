@@ -7,6 +7,7 @@ import sqlite3
 import re
 import time
 import json
+import difflib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any
@@ -491,21 +492,28 @@ class SessionManager:
             # Check if it's a skill (not an agent)
             agents_with_skill = registry.find_skill(resolved_agent_id)
             if agents_with_skill:
-                available_agents = [a.id for a in registry.list_all()]
+                available_agents = [a.id for a in registry.list_all() if not a.system]
+                if not available_agents:
+                    agents_msg = "No agents are currently registered."
+                else:
+                    agents_msg = f"Available agents: {', '.join(available_agents)}."
                 raise ValueError(
                     f"'{resolved_agent_id}' is a skill, not an agent. "
                     f"Skills are used by agents. Available agents with this skill: {agents_with_skill}. "
-                    f"Available agents: {available_agents}"
+                    f"{agents_msg}"
                 )
 
             # Suggest close match for typos
-            import difflib
-            available_agents = [a.id for a in registry.list_all()]
+            available_agents = [a.id for a in registry.list_all() if not a.system]
             suggestion = difflib.get_close_matches(resolved_agent_id, available_agents, cutoff=0.6, n=1)
             suggestion_msg = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+            if not available_agents:
+                agents_msg = "No agents are currently registered."
+            else:
+                agents_msg = f"Available agents: {', '.join(available_agents)}."
             raise ValueError(
                 f"Agent not found: {resolved_agent_id}. "
-                f"Available agents: {available_agents}.{suggestion_msg}"
+                f"{agents_msg}{suggestion_msg}"
             )
         resolved_agent_dir = str(metadata.path)
         
