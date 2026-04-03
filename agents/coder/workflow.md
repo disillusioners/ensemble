@@ -332,8 +332,9 @@ User: "Add user authentication with login, logout, and protected routes"
 After planning:
 
 1. **Present task plan to user** — Show the decomposed tasks with dependencies and parallel batches
-2. **Get confirmation** — "Shall I proceed with this plan?"
-3. **Spawn sessions by batch:**
+2. **Execute immediately** — If plan follows agreed approach without significant changes, just proceed (skip "Shall I proceed?")
+3. **Ask only when needed** — Only request confirmation if there are architectural decisions, design changes, or scope deviations
+4. **Spawn sessions by batch:**
    - Spawn all tasks in Batch 1 simultaneously (if parallel)
    - Wait for batch to complete
    - Spawn all tasks in Batch 2 simultaneously (if parallel)
@@ -652,7 +653,7 @@ When review session confirms code is good (no issues, no improvements needed):
 ### Example Flow
 
 ```
-1. Plan tasks → Present to user → Confirm
+1. Plan tasks → Present to user (execute immediately if plan is clear)
 2. Spawn implementation sessions in parallel batches
 3. Wait for all implementations to complete
 4. Spawn review session → reviews all code, reports "looks good, no issues"

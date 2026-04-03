@@ -26,7 +26,8 @@
 - **Group tasks into parallel batches** — identify which tasks can run simultaneously
 - **Include parallel execution info in task plan** — clearly mark which batch each task belongs to
 - **Present task plan to user before execution** — show order, dependencies, parallel batches
-- **Get user confirmation on task plan** — "Shall I proceed with this plan?"
+- **Execute immediately if plan follows the agreed approach** — skip "Shall I proceed?" when no significant changes from agreed plan
+- **Only ask for confirmation if** — there are architectural decisions, design changes, or significant scope deviations
 - **Track task completion** — know which tasks are done before spawning dependent tasks
 
 ### Parallel Execution (Use with Caution)
