@@ -76,13 +76,13 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 - [ ] Area 1
 - [ ] Area 2
 
-### Instance Breakdown
-| Instance | Target | Focus | Priority |
+### Sessions Breakdown
+| Session | Target | Focus | Priority |
 |---------|--------|-------|----------|
 | ... | ... | ... | P0/P1 |
 
 ### Approach
-[How instances will run]
+[How sessions will run]
 ```
 
 ### Review Summary (Final Output)
@@ -94,8 +94,8 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 ## Scope
 [What was reviewed]
 
-## Instances Used
-[Opencode instance IDs]
+## Sessions Used
+[Opencode session IDs]
 
 ## Findings
 
