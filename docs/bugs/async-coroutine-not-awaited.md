@@ -1,4 +1,4 @@
-# Bug: Async Coroutine Not Awaited in `terminate_session`
+# Bug: Async Coroutine Not Awaited in `terminate_instance`
 
 **Date:** 2026-03-31  
 **Status:** Investigated (pending fix)  
@@ -8,7 +8,7 @@
 
 ## Summary
 
-`terminate_session()` in `daemon/manager.py` calls `release_lock_by_session()` without awaiting it, causing the coroutine to never execute.
+`terminate_instance()` in `daemon/manager.py` calls `release_lock_by_session()` without awaiting it, causing the coroutine to never execute.
 
 ## Root Cause
 
@@ -18,8 +18,8 @@
 
 **Code:**
 ```python
-# Line 1814: terminate_session is NOT async
-def terminate_session(self, session_id: str) -> bool:
+# Line 1814: terminate_instance is NOT async
+def terminate_instance(self, session_id: str) -> bool:
     ...
     # Line 1865: release_lock_by_session IS async but not awaited
     released_projects = self._job_queue_service.release_lock_by_session(session_id)
@@ -46,9 +46,9 @@ daemon.manager - WARNING - Failed to release locks for session 771c13b2...: obje
 
 ## Fix Options
 
-### Option 1: Make `terminate_session` async (Recommended)
+### Option 1: Make `terminate_instance` async (Recommended)
 ```python
-async def terminate_session(self, session_id: str) -> bool:
+async def terminate_instance(self, session_id: str) -> bool:
     ...
     released_projects = await self._job_queue_service.release_lock_by_session(session_id)
 ```
@@ -67,7 +67,7 @@ asyncio.create_task(self._job_queue_service.release_lock_by_session(session_id))
 
 ## Notes
 
-- `terminate_session` is called from sync context in `daemon/tools/session.py:132`
+- `terminate_instance` is called from sync context in `daemon/tools/session.py:132`
 - Option 1 requires updating all call sites to await
 - Option 2 adds complexity but minimizes changes
 - Option 3 is simplest but loses error handling

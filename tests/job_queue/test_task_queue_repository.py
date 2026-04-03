@@ -98,14 +98,14 @@ class TestRepositoryRead:
         created = repository.create(**sample_job_data)
         started = repository.start_job(created.job_id, "test-instance")
         
-        retrieved = repository.get_by_session("test-instance")
+        retrieved = repository.get_by_instance("test-instance")
         
         assert retrieved is not None
         assert retrieved.job_id == created.job_id
 
     def test_get_by_instance_nonexistent(self, repository):
         """Test getting by non-existent instance returns None."""
-        result = repository.get_by_session("nonexistent-instance")
+        result = repository.get_by_instance("nonexistent-instance")
         assert result is None
 
 
