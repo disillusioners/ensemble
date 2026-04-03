@@ -96,6 +96,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     @tool
     async def send_message(instance_id: str, message: str) -> str:
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
+        # Validate instance exists first (with fuzzy matching for typos)
+        try:
+            manager.get_instance(instance_id)
+        except KeyError:
+            # Try to find a near match
+            near_match = manager.find_near_instance(instance_id, max_distance=2)
+            if near_match:
+                raise ValueError(
+                    f"instance not found, are you intent to use following '{near_match}'?"
+                )
+            else:
+                raise ValueError(
+                    f"'{instance_id}' not found, please re-plan, spawn new instance for your task"
+                )
+        
         # Enqueue the message (fast ~1-5ms DB write)
         message_id = manager.queue.enqueue(
             instance_id=instance_id,
@@ -144,9 +159,10 @@ Returns:
     @tool
     def list_instances() -> list[dict]:
         """List all active instances. Use tool_help("list_instances") for details."""
-        return manager.list_instances()
+        instances, _ = manager.list_instances(limit=20)
+        return instances
     
-    list_instances._full_doc_ = """List all active instances.
+    list_instances._full_doc_ = """List the 20 most recent active instances.
 
 Returns:
     List of instance info dictionaries

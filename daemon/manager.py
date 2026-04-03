@@ -1943,6 +1943,59 @@ Title:"""
         # Instance exists in DB but not in memory - restore it
         return self._restore_instance(instance_id, meta)
 
+    def find_near_instance(self, instance_id: str, max_distance: int = 2) -> str | None:
+        """Find a near-matching instance ID from recent instances.
+
+        Searches the last 20 instances for a close match using edit distance.
+        Useful for correcting typos in instance IDs.
+
+        Args:
+            instance_id: The instance ID to match against.
+            max_distance: Maximum allowed character edit distance (default: 2).
+
+        Returns:
+            The matching instance_id if found, None otherwise.
+        """
+        # Get recent 20 instances
+        recent_instances, _ = self._instance_repository.list(limit=20, offset=0)
+        
+        instance_id_lower = instance_id.lower()
+        
+        for instance in recent_instances:
+            candidate = instance.instance_id
+            
+            # Quick length check - if lengths differ by more than max_distance, skip
+            if abs(len(candidate) - len(instance_id)) > max_distance:
+                continue
+            
+            # Calculate Levenshtein distance
+            distance = self._edit_distance(candidate.lower(), instance_id_lower)
+            
+            if distance <= max_distance:
+                return candidate
+        
+        return None
+
+    def _edit_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein edit distance between two strings."""
+        if len(s1) < len(s2):
+            return self._edit_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+
     def _restore_instance(self, instance_id: str, meta: "Instance") -> CompiledStateGraph:
         """Restore an instance from database into memory.
 
