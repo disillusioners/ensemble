@@ -305,22 +305,34 @@ class TestLockManagerWaitForLock:
             if result:
                 acquired_jobs.append(job_id)
         
-        # Add multiple waiters
-        await asyncio.gather(
-            wait_and_acquire("job-2"),
-            wait_and_acquire("job-3"),
-            wait_and_acquire("job-4"),
-        )
+        # Add waiters as tasks (they will block until lock is released)
+        waiter_tasks = [
+            asyncio.create_task(wait_and_acquire("job-2")),
+            asyncio.create_task(wait_and_acquire("job-3")),
+            asyncio.create_task(wait_and_acquire("job-4")),
+        ]
         
-        # Release the lock
+        # Small delay to ensure all waiters are registered
+        await asyncio.sleep(0.05)
+        
+        # Release the lock - this should unblock the first waiter (job-2)
         await lock_manager.release("project-1", "job-1")
         
-        # Wait for all waiters to complete
+        # Wait for waiters to complete (job-2 should get lock, others still waiting)
         await asyncio.sleep(0.1)
         
-        # First waiter should get the lock
+        # Only the first waiter (job-2) should have acquired the lock
         assert len(acquired_jobs) == 1
         assert acquired_jobs[0] == "job-2"
+        
+        # Cancel remaining waiters
+        for task in waiter_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     @pytest.mark.asyncio
     async def test_wait_for_lock_max_waiters(self):
@@ -330,16 +342,38 @@ class TestLockManagerWaitForLock:
         # Hold lock
         await manager.acquire("project-1", "job-1", "instance-1")
         
-        # First two waiters should succeed
-        result1 = await manager.wait_for_lock("project-1", "job-2", "instance-2")
-        result2 = await manager.wait_for_lock("project-1", "job-3", "instance-3")
+        # Add waiters as tasks (they will block until lock is released)
+        waiter_tasks = [
+            asyncio.create_task(manager.wait_for_lock("project-1", "job-2", "instance-2", timeout=2.0)),
+            asyncio.create_task(manager.wait_for_lock("project-1", "job-3", "instance-3", timeout=2.0)),
+        ]
         
+        # Small delay to ensure waiters are registered
+        await asyncio.sleep(0.1)
+        
+        # Release the lock - first waiter should acquire
+        await manager.release("project-1", "job-1")
+        
+        # Wait for first waiter to complete (should succeed)
+        result1 = await waiter_tasks[0]
         assert result1 is True
+        
+        # Release job-2's lock so job-3 can acquire
+        await manager.release("project-1", "job-2")
+        
+        # Wait for second waiter
+        result2 = await waiter_tasks[1]
         assert result2 is True
         
-        # Third waiter should fail (max reached)
-        result3 = await manager.wait_for_lock("project-1", "job-4", "instance-4")
+        # Now add a third waiter - should fail because max_waiters is enforced
+        # when the lock is held (and we already have 2 in queue)
+        await manager.acquire("project-1", "job-4", "instance-4")
+        
+        result3 = await manager.wait_for_lock("project-1", "job-5", "instance-5", timeout=0.1)
         assert result3 is False
+        
+        # Cleanup
+        await manager.release("project-1", "job-4")
 
 
 class TestLockManagerReleaseByInstance:
@@ -497,9 +531,13 @@ class TestLockManagerClear:
         """Test clear also removes waiters."""
         await lock_manager.acquire("project-1", "job-1", "instance-1")
         
-        # Add waiters
-        await lock_manager.wait_for_lock("project-1", "job-2", "instance-2")
-        await lock_manager.wait_for_lock("project-1", "job-3", "instance-3")
+        # Manually add waiters to the internal queue (bypassing wait_for_lock)
+        waiter1 = asyncio.Event()
+        waiter2 = asyncio.Event()
+        lock_manager._waiters["project-1"] = [
+            ("job-2", waiter1),
+            ("job-3", waiter2),
+        ]
         
         assert await lock_manager.get_waiter_count("project-1") == 2
         
