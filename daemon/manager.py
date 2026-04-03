@@ -1881,7 +1881,7 @@ Title:"""
                 self.terminate_instance(child_id)
         
         # 1. Cancel active requests for this instance
-        self._request_registry.cancel_by_session(instance_id)
+        self._request_registry.cancel_by_instance(instance_id)
         
         # 2. Remove from processing set
         self._processing.discard(instance_id)

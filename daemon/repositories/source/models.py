@@ -78,7 +78,7 @@ class InstanceMapping(SQLModel, table=True):
     
     mapping_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSON)
+        sa_column=Column("mapping_metadata", JSON)
     )
     
     last_message_at: Optional[str] = None

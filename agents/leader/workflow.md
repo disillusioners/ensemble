@@ -247,6 +247,58 @@ PHASE 2:
 
 ---
 
+## Phase Scheduling — Parallelism & Pipelining
+
+**The leader MUST assess dependencies between phases and schedule them intelligently. Never default to fully sequential if parallelism is possible.**
+
+### Hard Constraint: Max Concurrent Instances = 3
+
+The system allows at most 3 agent instances running simultaneously. The leader must schedule within this budget at all times.
+
+### Step 1: Build Dependency Graph
+
+After planning, assess each phase pair:
+
+| Relationship | Signal | Schedule |
+|-------------|--------|----------|
+| **Independent** | Different files, different modules, no shared APIs | ✅ **Parallel** — run coders simultaneously |
+| **Loosely coupled** | Phase N+1 uses Phase N's planned interfaces, not its implementation | ✅ **Pipeline** — start N+1 coder while N is in review |
+| **Tightly coupled** | Phase N+1 builds on Phase N's actual code (same files, same models) | ❌ **Sequential** — wait for Phase N review approval first |
+
+### Step 2: Schedule Within Budget
+
+```
+Instance budget = 3. Common allocation patterns:
+
+2 independent phases:
+  Slot 1: coder-1        Slot 1: reviewer-1    Slot 1: tester-1
+  Slot 2: coder-2        Slot 2: reviewer-2    Slot 2: tester-2
+  Slot 3: (free)         Slot 3: (free)        Slot 3: (free)
+
+3 independent phases:
+  Slot 1: coder-1        Slot 1: reviewer-1    Slot 1: tester-1
+  Slot 2: coder-2   →    Slot 2: reviewer-2   → Slot 2: tester-2
+  Slot 3: coder-3        Slot 3: reviewer-3    Slot 3: tester-3
+                         (stagger: start reviews as coders finish)
+
+Pipeline (coupled phases):
+  Slot 1: coder-1        Slot 1: reviewer-1    Slot 1: tester-1
+  Slot 2: (free)         Slot 2: coder-2       Slot 2: reviewer-2
+  Slot 3: (free)         Slot 3: (free)        Slot 3: tester-2
+```
+
+**Rule: Prioritize coders first.** Run as many coders in parallel as budget and independence allow, then stagger review/test as slots free up.
+
+### Step 3: Handle Risks
+
+**When review finds critical issues on a phase that has downstream dependents already running:**
+- Leader assesses blast radius
+- **Contained fix** (unrelated to dependent's work) → Let dependent continue, apply fix as follow-up
+- **Architectural change** (affects dependent's code) → Abort dependent, apply corrections, restart with updated context
+- **When unsure → abort dependent.** Wasted work is cheaper than broken work.
+
+---
+
 ## Sequential Workflow Example
 
 A user may invoke Planning first, then Implementation in the same session:

@@ -11,6 +11,21 @@ You coordinate work across specialized agents. Break complex tasks into subtasks
 - For SMALL scope (single component): spawn as needed, terminate when done
 - **When planning:** Design phases to group related components with shared context — this makes instance reuse more effective
 
+## Phase Scheduling
+
+After planning, the leader must assess phase dependencies and schedule intelligently — not default to sequential.
+
+### Dependency Types
+- **Independent** (different files/modules, no shared APIs) → run coders in parallel
+- **Loosely coupled** (depends on planned interfaces only) → pipeline: start next coder while current phase is in review
+- **Tightly coupled** (depends on actual implementation) → sequential: wait for review approval first
+
+### Instance Budget: max 3 concurrent instances
+Prioritize coders in parallel first. Stagger review/test as slots free up.
+
+### Risk Rule
+If review finds critical issues affecting a running dependent phase → abort the dependent. When unsure → abort.
+
 ## Delegation Clarity
 
 Give agents clear, specific instructions with all necessary context. They only know what you tell them. Include:

@@ -137,14 +137,14 @@ def save_instance_mapping(
     cursor = conn.execute(
         """
         INSERT INTO instance_mappings 
-        (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, metadata, last_message_at)
+        (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, mapping_metadata, last_message_at)
         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(mapping_id) DO UPDATE SET
             source_id = excluded.source_id,
             external_user_id = excluded.external_user_id,
             agent_instance_id = excluded.agent_instance_id,
             agent_dir = excluded.agent_dir,
-            metadata = excluded.metadata,
+            mapping_metadata = excluded.mapping_metadata,
             last_message_at = CURRENT_TIMESTAMP
         """,
         (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, metadata_json),
@@ -165,7 +165,7 @@ def get_instance_mapping(
     cursor = conn.execute(
         """
         SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
-               metadata, last_message_at, created_at
+               mapping_metadata, last_message_at, created_at
         FROM instance_mappings 
         WHERE source_id = ? AND external_user_id = ?
         """,
@@ -186,7 +186,7 @@ def get_instance_mapping_by_instance(
     cursor = conn.execute(
         """
         SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
-               metadata, last_message_at, created_at
+               mapping_metadata, last_message_at, created_at
         FROM instance_mappings 
         WHERE agent_instance_id = ?
         """,
@@ -242,7 +242,7 @@ def list_instance_mappings(
     cursor = conn.execute(
         """
         SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
-               metadata, last_message_at, created_at
+               mapping_metadata, last_message_at, created_at
         FROM instance_mappings 
         WHERE source_id = ?
         ORDER BY last_message_at DESC
@@ -345,8 +345,8 @@ def _row_to_dict(cursor: sqlite3.Cursor, row: sqlite3.Row) -> dict[str, Any]:
     # Parse JSON fields
     if result.get("config") and isinstance(result["config"], str):
         result["config"] = json.loads(result["config"])
-    if result.get("metadata") and isinstance(result["metadata"], str):
-        result["metadata"] = json.loads(result["metadata"])
+    if result.get("mapping_metadata") and isinstance(result["mapping_metadata"], str):
+        result["mapping_metadata"] = json.loads(result["mapping_metadata"])
     if result.get("credentials") and isinstance(result["credentials"], str):
         # Decrypt credentials using CredentialManager
         from .credentials import CredentialManager

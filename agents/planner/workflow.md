@@ -166,11 +166,27 @@ Use simple, consistent instance names:
 
 ## Phase Index
 
-| Phase | Name | Objective | Dependencies | Est. Time |
-|-------|------|-----------|-------------|-----------|
-| 1 | [name] | [1-line goal] | None | Xh |
-| 2 | [name] | [1-line goal] | Phase 1 | Xh |
-| N | [name] | [1-line goal] | Phase N-1 | Xh |
+| Phase | Name | Objective | Dependencies | Coupling | Est. Time |
+|-------|------|-----------|-------------|----------|-----------|
+| 1 | [name] | [1-line goal] | None | — | Xh |
+| 2 | [name] | [1-line goal] | Phase 1 | tight / loose / independent | Xh |
+| N | [name] | [1-line goal] | Phase X | tight / loose / independent | Xh |
+
+### Coupling Assessment
+
+For each pair of consecutive phases, assess their coupling:
+
+| Coupling | Meaning | Leader Scheduling |
+|----------|---------|-------------------|
+| **independent** | Different files/modules, no shared APIs | Can run in parallel |
+| **loose** | Depends on planned interfaces only, not implementation | Can pipeline (overlap review + next coding) |
+| **tight** | Depends on actual code from prior phase (same files, models, APIs) | Must run sequential — wait for review approval |
+
+**How to assess:**
+- Do these phases touch the same files? → tight
+- Does Phase N+1 import/call code that Phase N creates? → tight
+- Do they touch different directories/modules with no import relationship? → independent
+- Does Phase N+1 only need the interface/contract that Phase N defines? → loose
 
 ## Risks & Mitigations
 | Risk | Impact | Mitigation |
@@ -194,6 +210,13 @@ Use simple, consistent instance names:
 
 ## Objective
 [What this phase delivers — 1-2 sentences]
+
+## Coupling
+- **Depends on**: [Phase X | None]
+- **Coupling type**: tight / loose / independent
+- **Shared files with other phases**: [list files, or "none"]
+- **Shared APIs/interfaces**: [list, or "none"]
+- **Why this coupling**: [1 sentence justification]
 
 ## Context
 - Previous phase completed: [what Phase N-1 delivered]
@@ -301,6 +324,13 @@ Leader sends: planning request + context + working directory
 **Scope**: [assessment]
 **Phases**: [number]
 **Est. Time**: [estimate]
+
+**Phase Scheduling**:
+| Phase | Coupling | Can Parallel With |
+|-------|----------|-------------------|
+| 1 | — (root) | [Phase 2 if independent] |
+| 2 | tight/loose/independent with Phase 1 | [Phase 3 if independent] |
+| N | tight/loose/independent with Phase X | [none or Phase Y] |
 
 Plan overview: .agents/shared/planning/{feature_name}/plan-overview.md
 Phase files:
