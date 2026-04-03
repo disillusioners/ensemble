@@ -20,7 +20,7 @@ from daemon.models import SchedulerInstanceMode, InstanceStatus
 from daemon.registry import get_registry
 
 if TYPE_CHECKING:
-    from daemon.repositories.session.repository import SQLModelSessionRepository
+    from daemon.repositories.instance.repository import SQLModelInstanceRepository
     from daemon.services.job_queue_service import JobQueueService
     from daemon.repositories.source.repository import SourceRepository as SourceRepositoryType
 
@@ -49,7 +49,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         on_complete_callback: Optional[Callable[[str, bool], None]] = None,
         job_queue_service: Optional["JobQueueService"] = None,
         source_repo: Optional["SourceRepositoryType"] = None,
-        instance_repo: Optional["SQLModelSessionRepository"] = None,
+        instance_repo: Optional["SQLModelInstanceRepository"] = None,
     ):
         """Initialize the scheduler adapter.
         

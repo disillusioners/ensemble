@@ -37,7 +37,7 @@ from .repositories import (
 )
 from .registry import get_registry
 
-from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
+from .queue import InputMessageQueue, InstanceWatchdog, InstanceCircuitBreaker, QueuedMessage
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance
 from .tools import create_session_tools
@@ -371,13 +371,13 @@ class InstanceManager:
                 except Exception as e:
                     logger.error(f"Error triggering retry processing for {instance_id[:8]}...: {e}")
         
-        self.watchdog = SessionWatchdog(
+        self.watchdog = InstanceWatchdog(
             self._queue_repository,
             request_registry=self._request_registry,
             on_message_failed=_on_watchdog_message_failed,
             on_retry_ready=_on_watchdog_retry_ready,
         )
-        self.circuit_breaker = SessionCircuitBreaker()
+        self.circuit_breaker = InstanceCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
         self._processing_lock = asyncio.Lock()
         
@@ -847,7 +847,7 @@ class InstanceManager:
             
             logger.debug(f"Starting dequeue loop for instance {instance_id[:8]}...")
             while True:
-                msg = self._queue_repository.dequeue_by_session(instance_id)
+                msg = self._queue_repository.dequeue_by_instance(instance_id)
                 if msg is None:
                     logger.debug(f"No more messages for instance {instance_id[:8]}..., exiting loop")
                     break
@@ -1887,7 +1887,7 @@ Title:"""
         self._processing.discard(instance_id)
         
         # 3. Clean up event broadcaster
-        self.broadcaster.cleanup_session(instance_id)
+        self.broadcaster.cleanup_instance(instance_id)
 
         # 4. Remove from instances dict
         if instance_id in self.instances:
@@ -1904,7 +1904,7 @@ Title:"""
         # 6. Release project lock if JobQueueService is connected
         if self._job_queue_service is not None:
             try:
-                released_projects = self._job_queue_service.release_lock_by_session(instance_id)
+                released_projects = self._job_queue_service.release_lock_by_instance(instance_id)
                 if released_projects:
                     logger.info(
                         f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "

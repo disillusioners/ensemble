@@ -582,7 +582,7 @@ class SourceRegistry:
         """Handle incoming message from an adapter.
         
         This is the callback that adapters call when they receive messages.
-        Forwards the message to the SessionManager for processing.
+        Forwards the message to the InstanceManager for processing.
         
         Args:
             source_id: The source_id the message came from.
