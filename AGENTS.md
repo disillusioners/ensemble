@@ -68,29 +68,29 @@ kill <PID>
 ### Python Conventions
 
 1. **Type Hints**: Required for all function signatures
-   def process_message(message: str, session_id: str) -> dict[str, Any]:
+   def process_message(message: str, instance_id: str) -> dict[str, Any]:
 
 2. **Logging**: Use module-level logger
    logger = logging.getLogger(__name__)
 
 3. **Docstrings**: Required for public methods and classes
-   async def fetch_session(session_id: str) -> Session | None:
-       """Fetch a session by ID or return None if not found.
+   async def fetch_instance(instance_id: str) -> Instance | None:
+       """Fetch an instance by ID or return None if not found.
        
        Args:
-           session_id: Unique session identifier
+           instance_id: Unique instance identifier
        
        Returns:
-           Session object or None
+           Instance object or None
        """
 
 4. **Async/Await**: Use for all I/O operations
-   async with aiosqlite.connect(db_path) as db:
-       result = await db.execute("SELECT * FROM sessions")
+    async with aiosqlite.connect(db_path) as db:
+        result = await db.execute("SELECT * FROM instances")
 
 5. **Imports**: Relative imports within daemon package
-   from .models import Session
-   from ..graph import build_session_graph
+   from .models import Instance
+   from ..graph import build_instance_graph
 
 6. **Error Handling**: Use Pydantic validation + explicit exception handling
    try:
@@ -103,9 +103,9 @@ kill <PID>
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Variables | snake_case | `session_id`, `message_count` |
-| Functions | snake_case | `fetch_session()`, `build_graph()` |
-| Classes | PascalCase | `SessionManager`, `ThinkingChatOpenAI` |
+| Variables | snake_case | `instance_id`, `message_count` |
+| Functions | snake_case | `fetch_instance()`, `build_graph()` |
+| Classes | PascalCase | `InstanceManager`, `ThinkingChatOpenAI` |
 | Constants | SCREAMING_SNAKE | `MAX_RETRIES`, `DEFAULT_TIMEOUT` |
 | Private | _prefix | `_internal_state`, `_cache` |
 | Type aliases | PascalCase | `MessageHandler`, `ToolResult` |
@@ -118,15 +118,15 @@ All API request/response models should use Pydantic v2:
 from pydantic import BaseModel, Field
 from typing import Optional
 
-class SessionCreate(BaseModel):
+class InstanceCreate(BaseModel):
     project: str = Field(..., description="Project name")
     agent_id: str = Field(default="leader", description="Agent to use")
     
-class SessionResponse(BaseModel):
+class InstanceResponse(BaseModel):
     id: str
     project: str
     created_at: datetime
-    status: SessionStatus
+    status: InstanceStatus
 ```
 
 ### File Organization
@@ -136,14 +136,14 @@ daemon/
 ├── __main__.py          # Entry point
 ├── api.py               # FastAPI routes (1500+ lines)
 ├── graph.py             # LangGraph definition
-├── manager.py           # Session orchestration
+├── manager.py           # Instance orchestration
 ├── loader.py            # Agent/markdown loader
 ├── models.py            # Pydantic models
 ├── config.py            # Configuration loading
 ├── tools/               # Agent tools
 │   ├── bash.py
 │   ├── filesystem.py
-│   └── session.py
+│   └── instance.py
 └── sources/             # Message source adapters
     ├── telegram.py
     └── scheduler.py
@@ -219,14 +219,14 @@ LOG_LEVEL=INFO
 ```python
 # Example test
 import pytest
-from daemon.manager import SessionManager
+from daemon.manager import InstanceManager
 
 @pytest.mark.asyncio
-async def test_session_creation():
-    manager = SessionManager()
-    session = await manager.create_session(project="test")
-    assert session.id is not None
-    assert session.project == "test"
+async def test_instance_creation():
+    manager = InstanceManager()
+    instance = await manager.create_instance(project="test")
+    assert instance.id is not None
+    assert instance.project == "test"
 ```
 
 ---

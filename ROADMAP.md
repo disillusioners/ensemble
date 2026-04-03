@@ -1,8 +1,8 @@
-# Roadmap: Persistent Multi-Session Agent Daemon
+# Roadmap: Persistent Multi-Instance Agent Daemon
 
 ## Vision
 
-Build a **long-running daemon** that hosts conversational agents as independent sessions.
+Build a **long-running daemon** that hosts conversational agents as independent instances.
 
 - **1 LangGraph node** - minimal runtime, all complexity in markdown
 - **HTTP API** - RESTful control interface
@@ -19,8 +19,8 @@ The daemon is infrastructure. Intelligence lives in `agents/` directories.
 ┌─────────────────────────────────────────────────────────────┐
 │                         DAEMON                              │
 │                                                             │
-│  ┌─────────┐    ┌──────────────┐    ┌─────────────────┐   │
-│  │ HTTP API│───►│Session Manager│───►│ Session Registry│   │
+│  ┌─────────┐    ┌───────────────┐    ┌─────────────────┐   │
+│  │ HTTP API│───►│Instance Manager│───►│ Instance Registry│   │
 │  └─────────┘    └──────┬───────┘    └─────────────────┘   │
 │                        │                                    │
 │                        ▼                                    │
@@ -31,8 +31,8 @@ The daemon is infrastructure. Intelligence lives in `agents/` directories.
 │                       │                                     │
 │         ┌─────────────┼─────────────┐                      │
 │         ▼             ▼             ▼                      │
-│    ┌─────────┐  ┌─────────┐  ┌─────────┐                  │
-│    │Session 1│  │Session 2│  │Session N│                  │
+│    ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│    │Instance 1│  │Instance 2│  │Instance N│                  │
 │    │(leader) │  │ (coder) │  │(reviewer)│                 │
 │    └────┬────┘  └────┬────┘  └────┬────┘                  │
 │         │            │            │                        │
@@ -67,31 +67,31 @@ The daemon is infrastructure. Intelligence lives in `agents/` directories.
 ### Endpoints
 
 ```
-POST   /sessions                    # Spawn new session
-GET    /sessions                    # List all sessions
-GET    /sessions/:id                # Get session info
-DELETE /sessions/:id                # Terminate session
+POST   /instances                    # Spawn new instance
+GET    /instances                    # List all instances
+GET    /instances/:id                # Get instance info
+DELETE /instances/:id                # Terminate instance
 
-POST   /sessions/:id/messages       # Send message to session
-GET    /sessions/:id/messages       # Get message history
-GET    /sessions/:id/events         # SSE stream of events
+POST   /instances/:id/messages       # Send message to instance
+GET    /instances/:id/messages       # Get message history
+GET    /instances/:id/events         # SSE stream of events
 
 GET    /health                      # Daemon health status
 ```
 
 ### Request/Response Examples
 
-**Spawn Session**
+**Spawn Instance**
 ```json
-POST /sessions
+POST /instances
 {
   "agent_dir": "agents/leader",
-  "session_id": "leader_001"  // optional, auto-generated if omitted
+  "instance_id": "leader_001"  // optional, auto-generated if omitted
 }
 
 Response 201:
 {
-  "session_id": "leader_001",
+  "instance_id": "leader_001",
   "agent_dir": "agents/leader",
   "status": "idle",
   "created_at": "2024-01-15T10:30:00Z"
@@ -100,7 +100,7 @@ Response 201:
 
 **Send Message**
 ```json
-POST /sessions/leader_001/messages
+POST /instances/leader_001/messages
 {
   "content": "Review the authentication module"
 }
@@ -116,15 +116,15 @@ Response 200:
 }
 ```
 
-**List Sessions**
+**List Instances**
 ```json
-GET /sessions
+GET /instances
 
 Response 200:
 {
-  "sessions": [
+  "instances": [
     {
-      "session_id": "leader_001",
+      "instance_id": "leader_001",
       "agent_dir": "agents/leader",
       "status": "running",
       "parent_id": null,
@@ -137,7 +137,7 @@ Response 200:
 
 **SSE Events Stream**
 ```
-GET /sessions/leader_001/events
+GET /instances/leader_001/events
 
 event: message
 data: {"type": "user", "content": "Hello"}
@@ -146,7 +146,7 @@ event: message
 data: {"type": "assistant", "content": "Hi there!"}
 
 event: tool_call
-data: {"tool": "spawn_session", "args": {...}}
+data: {"tool": "spawn_instance", "args": {...}}
 
 event: status
 data: {"status": "waiting"}
@@ -157,15 +157,15 @@ data: {"status": "waiting"}
 Response 400/404/429/500:
 {
   "error": {
-    "code": "SESSION_NOT_FOUND",
-    "message": "Session 'leader_001' does not exist",
-    "details": {"session_id": "leader_001"}
+    "code": "INSTANCE_NOT_FOUND",
+    "message": "Instance 'leader_001' does not exist",
+    "details": {"instance_id": "leader_001"}
   }
 }
 ```
 
-Error codes: `INVALID_REQUEST`, `SESSION_NOT_FOUND`, `SESSION_TERMINATED`, 
-`RATE_LIMITED`, `MAX_SESSIONS_EXCEEDED`, `LLM_ERROR`, `INTERNAL_ERROR`
+Error codes: `INVALID_REQUEST`, `INSTANCE_NOT_FOUND`, `INSTANCE_TERMINATED`, 
+`RATE_LIMITED`, `MAX_INSTANCES_EXCEEDED`, `LLM_ERROR`, `INTERNAL_ERROR`
 
 ### API Documentation
 
@@ -176,34 +176,34 @@ OpenAPI/Swagger UI available at:
 
 ---
 
-## Session Tools (LLM-callable)
+## Instance Tools (LLM-callable)
 
-These tools are available to all sessions:
+These tools are available to all instances:
 
 ```python
-# Spawn a new session
-spawn_session(
+# Spawn a new instance
+spawn_instance(
     agent_dir: str,      # e.g., "agents/coder"
-    session_id: str      # optional, auto-generated if omitted
-) -> str                 # returns session_id
+    instance_id: str      # optional, auto-generated if omitted
+) -> str                 # returns instance_id
 
-# Send message to another session
+# Send message to another instance
 send_message(
-    session_id: str,
+    instance_id: str,
     message: str
 ) -> str                 # returns response
 
-# Terminate a session
-terminate_session(
-    session_id: str
+# Terminate an instance
+terminate_instance(
+    instance_id: str
 ) -> bool
 
-# List active sessions
-list_sessions() -> list[dict]
+# List active instances
+list_instances() -> list[dict]
 
-# Get session info
-get_session_info(
-    session_id: str
+# Get instance info
+get_instance_info(
+    instance_id: str
 ) -> dict
 ```
 
@@ -217,9 +217,9 @@ Single SQLite database with LangGraph checkpoints:
 -- LangGraph checkpoint tables (managed by LangGraph)
 -- checkpoints, checkpoint_blobs, checkpoint_writes
 
--- Session metadata (daemon-managed)
-CREATE TABLE sessions (
-    session_id TEXT PRIMARY KEY,
+-- Instance metadata (daemon-managed)
+CREATE TABLE instances (
+    instance_id TEXT PRIMARY KEY,
     agent_dir TEXT NOT NULL,
     parent_id TEXT,
     status TEXT DEFAULT 'idle',  -- idle, running, waiting, error, terminated
@@ -228,7 +228,7 @@ CREATE TABLE sessions (
     metadata JSON
 );
 
-CREATE TABLE session_hierarchy (
+CREATE TABLE instance_hierarchy (
     parent_id TEXT,
     child_id TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -256,14 +256,14 @@ limits:
   max_instances: 100
   max_children_per_instance: 10
   instance_timeout_minutes: 60
-  message_rate_limit: 60  # per minute per session
+  message_rate_limit: 60  # per minute per instance
   
 persistence:
   db_path: "./data/instances.db"
   checkpoint_interval: 1  # every message
   checkpoint_ttl_hours: 168        # 7 days, then eligible for cleanup
   checkpoint_cleanup_interval: 24  # hours between cleanup runs
-  checkpoint_max_count: 1000       # max checkpoints per session
+  checkpoint_max_count: 1000       # max checkpoints per instance
   
 agents:
   directory: "./agents"
@@ -280,8 +280,8 @@ ensemble/
 │   ├── api.py              # FastAPI routes
 │   ├── graph.py            # 1-node LangGraph definition
 │   ├── loader.py           # markdown → system prompt
-│   ├── tools.py            # session tools (spawn, send, etc.)
-│   ├── manager.py          # session lifecycle management
+│   ├── tools.py            # instance tools (spawn, send, etc.)
+│   ├── manager.py          # instance lifecycle management
 │   ├── persistence.py      # SQLite + checkpoint setup
 │   ├── config.py           # configuration loading
 │   └── models.py           # pydantic models

@@ -517,17 +517,17 @@ Session IDs: [list of opencode session IDs used]
   - ✅ [Requirement 4]: PASS
 
 ### Quick Fixes Applied (if any)
-- [Session ID]: Fixed [issue] in [file:line]
+- [Instance ID]: Fixed [issue] in [file:line]
   - Root cause: [why it failed]
   - Fix: [what was changed]
   - Verification: [re-test result]
 
 ### Unit Test Results
-- Opencode Session: [session_id]
-- [Aggregated results from session]
+- Opencode Instance: [instance_id]
+- [Aggregated results from instance]
 
 ### Mock Test Results
-- Opencode Session: [session_id]
+- Opencode Instance: [instance_id]
 - Test Script: [script_name]
 - Timeout: [X seconds]
 - Ports Used: [list ports > 10000]

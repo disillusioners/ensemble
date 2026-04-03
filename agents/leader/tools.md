@@ -11,7 +11,7 @@
 - Do NOT poll, check, or wait
 - Report appears as a new message: `"{AgentName} has done: {summary}"`
 
-### `terminate_session`
+### `terminate_instance`
 **ONLY terminate after receiving completion report AND certain no more work needed.**
 
 ---

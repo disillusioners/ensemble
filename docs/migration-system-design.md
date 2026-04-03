@@ -312,7 +312,7 @@ In `daemon/manager.py`:
 ```python
 from daemon.migrations import MigrationRunner
 
-class SessionManager:
+class InstanceManager:
     def _initialize_database(self) -> None:
         """Initialize database with schema and migrations."""
         # Create tables from SQLModel metadata

@@ -48,13 +48,13 @@ sequenceDiagram
     participant CB as Circuit Breaker
     
     Note over P,C: Normal Flow
-    P->>C: spawn_session with task
+    P->>C: spawn_instance with task
     C->>Q: enqueue message
     C->>C: process successfully
     C->>P: completion_report
     
     Note over P,C: Error Flow - Max Retries
-    P->>C: spawn_session with task
+    P->>C: spawn_instance with task
     C->>Q: enqueue message
     loop retry_count < max_retries
         C->>C: process (fails)
@@ -64,7 +64,7 @@ sequenceDiagram
     C->>P: error_report (max_retries_exceeded)
     
     Note over P,C: Error Flow - Watchdog Timeout
-    P->>C: spawn_session with task
+    P->>C: spawn_instance with task
     C->>Q: enqueue message
     C->>C: process (stuck)
     W->>W: detect stuck message
@@ -72,7 +72,7 @@ sequenceDiagram
     C->>P: error_report (watchdog_timeout)
     
     Note over P,C: Error Flow - Circuit Breaker
-    P->>C: spawn_session with task
+    P->>C: spawn_instance with task
     C->>Q: enqueue message
     loop consecutive failures
         C->>C: process (fails)
@@ -108,7 +108,7 @@ sequenceDiagram
 ```json
 {
     "type": "error_report",
-    "child_session_id": "abc123...",
+    "child_instance_id": "abc123...",
     "error_type": "max_retries_exceeded",
     "error": "Streaming failed: connection timeout...",
     "original_message_id": "msg456...",
@@ -140,7 +140,7 @@ Responsible for sending error notifications to parent sessions.
 ```python
 # After marking message as failed
 await self._send_error_report(
-    session_id=session_id,
+    instance_id=instance_id,
     error=f"Max retries ({msg.retry_count}) exceeded: {e}",
     error_type="max_retries_exceeded",
     message_id=msg.message_id
@@ -151,10 +151,10 @@ await self._send_error_report(
 **Location:** `daemon/manager.py:669-683`
 
 ```python
-if not self.circuit_breaker.can_execute(session_id):
+if not self.circuit_breaker.can_execute(instance_id):
     # ... check for pending messages
     await self._send_error_report(
-        session_id=session_id,
+        instance_id=instance_id,
         error=f"Circuit breaker open - session has {len(pending)} message(s) blocked",
         error_type="circuit_breaker_open",
         message_id=pending[0].message_id
@@ -167,7 +167,7 @@ if not self.circuit_breaker.can_execute(session_id):
 The watchdog runs in a background thread and uses `asyncio.run_coroutine_threadsafe()` to schedule error reports:
 
 ```python
-def _on_watchdog_message_failed(session_id, message_id, error):
+def _on_watchdog_message_failed(instance_id, message_id, error):
     loop = self._loop
     if loop is None or loop.is_closed():
         return
@@ -185,12 +185,12 @@ Before sending an error report, the system checks if one already exists:
 
 ```python
 existing = self._queue_repository.list(
-    session_id=meta_check.parent_id,
+    instance_id=meta_check.parent_id,
     status="ready",
     limit=10
 )
 for existing_msg in existing:
-    if existing_msg.source == f"error_report:{session_id}":
+    if existing_msg.source == f"error_report:{instance_id}":
         return  # Skip duplicate
 ```
 
@@ -213,7 +213,7 @@ if message_metadata.get("type") == "error_report":
     
     if recoverable:
         # Option 1: Retry after delay
-        await retry_with_backoff(child_session_id)
+        await retry_with_backoff(child_instance_id)
     else:
         # Option 2: Escalate to user
         return f"Child agent failed: {error_type}. Please advise."
@@ -236,7 +236,7 @@ The implementation handles cross-thread communication safely:
 flowchart LR
     subgraph MainThread["Main Thread (Async)"]
         EL[Event Loop]
-        SM[SessionManager]
+        IM[InstanceManager]
     end
     
     subgraph WatchdogThread["Watchdog Thread (Sync)"]

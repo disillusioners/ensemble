@@ -19,7 +19,7 @@ Add plugable message sources (Telegram, webhooks, etc.) to the agent backend wit
 ┌─────────────────────────────────────────────────────────────────┐
 │                     SOURCE MANAGER (NEW)                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │SourceRegistry│  │SessionMapper │  │ ResponseDispatcher   │  │
+│  │SourceRegistry│  │InstanceMapper │  │ ResponseDispatcher   │  │
 │  │- register()  │  │- map()       │  │- Listens to events   │  │
 │  │- get()       │  │- create()    │  │- Routes to adapters  │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
@@ -29,7 +29,7 @@ Add plugable message sources (Telegram, webhooks, etc.) to the agent backend wit
 ┌─────────────────────────────────────────────────────────────────┐
 │                  CORE ENGINE (REQUIRES CHANGES)                  │
 │  ┌────────────────┐   ┌────────────────┐   ┌────────────────┐  │
-│  │InputMessageQueue│   │SessionManager  │   │EventBroadcaster│  │
+│  │InputMessageQueue│  │InstanceManager  │   │EventBroadcaster│  │
 │  │  (unchanged)   │   │ (+add source)  │   │ +subscribe_all │  │
 │  └────────────────┘   └────────────────┘   └────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -98,7 +98,7 @@ class EventBroadcaster:
 ```python
 await self.broadcaster.broadcast(Event(
     type="completed",
-    session_id=session_id,
+    instance_id=instance_id,
     message_id=msg.message_id,
     data={
         "content": result.content,
@@ -132,7 +132,7 @@ CREATE INDEX idx_processed_msg_cleanup ON processed_external_messages(processed_
 
 ```python
 # daemon/sources/mapper.py
-class SessionMapper:
+class InstanceMapper:
     async def is_duplicate(self, source_id: str, external_msg_id: str) -> bool:
         """Check and mark as processed atomically. Returns True if duplicate.
         
@@ -156,7 +156,7 @@ class SessionMapper:
 **Reality**: The integration requires:
 
 1. **EventBroadcaster modification** - Add global subscription support
-2. **SessionManager modification** - Add source to completed events
+2. **InstanceManager modification** - Add source to completed events
 3. **New tables** - source_configs, session_mappings, processed_external_messages
 4. **New module** - Entire `daemon/sources/` directory (~500+ lines)
 5. **API endpoints** - ~100-150 lines, not 50
@@ -375,7 +375,7 @@ CREATE TABLE session_mappings (
     mapping_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,           -- Which source this belongs to
     external_user_id TEXT NOT NULL,    -- Telegram chat_id, webhook client_id
-    agent_session_id TEXT NOT NULL,    -- The agent session handling this user
+    agent_instance_id TEXT NOT NULL,    -- The agent instance handling this user
     agent_dir TEXT NOT NULL,           -- Which agent config to use
     metadata JSON,                     -- User info, preferences
     last_message_at TIMESTAMP,
@@ -385,7 +385,7 @@ CREATE TABLE session_mappings (
 );
 
 CREATE INDEX idx_session_mappings_source ON session_mappings(source_id);
-CREATE INDEX idx_session_mappings_session ON session_mappings(agent_session_id);
+CREATE INDEX idx_session_mappings_session ON session_mappings(agent_instance_id);
 
 -- Deduplication: track processed external messages
 CREATE TABLE processed_external_messages (
@@ -638,8 +638,8 @@ class ResponseDispatcher:
 2. TelegramAdapter receives via polling/webhook
 3. Adapter creates IncomingMessage and calls _emit_message()
 4. SourceManager._handle_incoming() receives message
-5. SessionMapper.get_or_create_session() finds or creates agent session
-6. InputMessageQueue.enqueue(session_id, content, source="telegram:chat_id")
+5. InstanceMapper.get_or_create_instance() finds or creates agent instance
+6. InputMessageQueue.enqueue(instance_id, content, source="telegram:chat_id")
 7. LangGraph processes message (unchanged)
 8. EventBroadcaster broadcasts "completed" event
 ```
@@ -648,7 +648,7 @@ class ResponseDispatcher:
 
 ```
 1. LangGraph completes with response
-2. EventBroadcaster.broadcast("completed", session_id, source)
+2. EventBroadcaster.broadcast("completed", instance_id, source)
 3. ResponseDispatcher.on_event() receives event
 4. Parse source field: "telegram:chat_id" -> source_type, external_user_id
 5. Look up adapter in SourceRegistry
@@ -673,7 +673,7 @@ daemon/
 │   ├── __init__.py             # ✅ Exports
 │   ├── base.py                 # ✅ Interfaces (IncomingMessage, Adapter ABC)
 │   ├── registry.py             # ✅ SourceRegistry with supervisor + timeout
-│   ├── mapper.py               # ✅ SessionMapper + atomic deduplication
+│   ├── mapper.py               # ✅ InstanceMapper + atomic deduplication
 │   ├── dispatcher.py           # ✅ ResponseDispatcher with async start + LRU
 │   ├── persistence.py          # ✅ DB operations for sources
 │   ├── circuit_breaker.py      # ✅ CircuitBreaker with async lock
@@ -748,13 +748,13 @@ class EventBroadcaster:
                 logger.warning("Global subscriber queue full, dropping event")
 ```
 
-### 2. SessionManager - Add Source to Completed Event (daemon/manager.py)
+### 2. InstanceManager - Add Source to Completed Event (daemon/manager.py)
 
 ```python
 # In _process_queue(), when broadcasting completed event:
 await self.broadcaster.broadcast(Event(
     type="completed",
-    session_id=session_id,
+    instance_id=instance_id,
     message_id=msg.message_id,
     data={
         "content": result.content,
@@ -765,13 +765,13 @@ await self.broadcaster.broadcast(Event(
 ))
 ```
 
-### 3. SessionManager - Initialize Source System (daemon/manager.py)
+### 3. InstanceManager - Initialize Source System (daemon/manager.py)
 
 ```python
 from .sources.dispatcher import ResponseDispatcher
 from .sources.registry import SourceRegistry
 
-class SessionManager:
+class InstanceManager:
     def __init__(self, config: Config):
         # ... existing initialization ...
         
@@ -821,7 +821,7 @@ def init_db(conn: sqlite3.Connection):
 
 ### Phase 0.5: Critical Core Fixes ✅ COMPLETE
 - [x] Add `subscribe_all()` and `unsubscribe_all()` methods to `EventBroadcaster` (daemon/events.py)
-- [x] Add `source` field to completed event in `SessionManager` (daemon/manager.py)
+- [x] Add `source` field to completed event in `InstanceManager` (daemon/manager.py)
 - [x] Add new tables to persistence (source_configs, session_mappings, processed_external_messages)
 - [x] Enable WAL mode for SQLite concurrency
 - [x] Verify core changes don't break existing functionality (215 tests pass)
@@ -841,8 +841,8 @@ def init_db(conn: sqlite3.Connection):
 ### Phase 2: Core Components ✅ COMPLETE
 - [x] Create `daemon/sources/registry.py` - SourceRegistry with supervisor pattern + exponential backoff + start timeout
 - [x] Create `daemon/sources/dispatcher.py` - ResponseDispatcher with per-user locks + LRU eviction
-- [x] Integrate registry and dispatcher into SessionManager
-- [x] Add `start_sources()` and `stop_sources()` methods to SessionManager
+- [x] Integrate registry and dispatcher into InstanceManager
+- [x] Add `start_sources()` and `stop_sources()` methods to InstanceManager
 - [x] Code review fixes applied:
   - [x] Fix: `_handle_message()` calls `queue.enqueue()` with correct parameters
   - [x] Fix: `dispatcher.start()` is now async
@@ -1151,8 +1151,8 @@ class SourceCleanup:
         cursor = self._conn.execute("""
             DELETE FROM session_mappings 
             WHERE last_message_at < ?
-            AND agent_session_id NOT IN (
-                SELECT DISTINCT session_id FROM message_queue 
+            AND agent_instance_id NOT IN (
+                SELECT DISTINCT instance_id FROM message_queue 
                 WHERE status != 'completed'
             )
         """, (cutoff,))
@@ -1163,7 +1163,7 @@ class SourceCleanup:
         return stats
 ```
 
-Start cleanup job in SessionManager:
+Start cleanup job in InstanceManager:
 
 ```python
 async def start(self):

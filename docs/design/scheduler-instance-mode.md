@@ -1,36 +1,36 @@
-# Scheduler Session Management Feature Design
+# Scheduler Instance Management Feature Design
 
 ## Overview
 
-Add configurable session reuse for scheduled tasks. Currently, schedulers always reuse the same session (via LangGraph checkpointing). This proposal adds a `session_mode` option allowing users to choose between:
+Add configurable instance reuse for scheduled tasks. Currently, schedulers always reuse the same instance (via LangGraph checkpointing). This proposal adds an `instance_mode` option allowing users to choose between:
 
-- **New Session** (default): Spawn fresh session each run
-- **Reuse Session**: Reuse same session across runs, with `#N` message prefix
+- **New Instance** (default): Spawn fresh instance each run
+- **Reuse Instance**: Reuse same instance across runs, with `#N` message prefix
 
 ---
 
 ## Scheduler Types
 
-| Type | New Session | Reuse Session | Default |
+| Type | New Instance | Reuse Instance | Default |
 |------|:-----------:|:-------------:|:-------:|
-| cron | ✅ | ✅ | New Session |
-| interval | ✅ | ✅ | New Session |
-| one_time | ✅ | ❌ (forced) | New Session |
+| cron | ✅ | ✅ | New Instance |
+| interval | ✅ | ✅ | New Instance |
+| one_time | ✅ | ❌ (forced) | New Instance |
 
 ---
 
 ## Configuration
 
-### New Enum: `SchedulerSessionMode`
+### New Enum: `SchedulerInstanceMode`
 
 **File:** `daemon/models.py`
 
 ```python
-class SchedulerSessionMode(str, Enum):
-    """Session management mode for scheduled executions."""
+class SchedulerInstanceMode(str, Enum):
+    """Instance management mode for scheduled executions."""
     
-    NEW_SESSION = "new_session"      # Spawn fresh session each run (default)
-    REUSE_SESSION = "reuse_session"  # Reuse same session across runs
+    NEW_INSTANCE = "new_instance"      # Spawn fresh instance each run (default)
+    REUSE_INSTANCE = "reuse_instance"  # Reuse same instance across runs
 ```
 
 ### Scheduler Config Schema
@@ -46,7 +46,7 @@ class SchedulerSessionMode(str, Enum):
     "timezone": "UTC",
     
     # NEW
-    "session_mode": "new_session",     # "new_session" or "reuse_session"
+    "instance_mode": "new_instance",   # "new_instance" or "reuse_instance"
     
     # Existing
     "project_id": "my-project",
@@ -59,7 +59,7 @@ class SchedulerSessionMode(str, Enum):
 
 ## Message Formatting
 
-### New Session Mode
+### New Instance Mode
 
 ```
 Daily health check
@@ -67,7 +67,7 @@ Daily health check
 
 (No prefix, no continuation context)
 
-### Reuse Session Mode
+### Reuse Instance Mode
 
 ```
 #3 Daily health check
@@ -78,7 +78,7 @@ Daily health check
 This is **run #3** of a recurring scheduled task.
 
 **Context:**
-- Mode: Session reuse (incremental work)
+- Mode: Instance reuse (incremental work)
 
 **Instructions:**
 - Previous runs have built up conversation history you can reference
@@ -98,7 +98,7 @@ CONTINUATION_TEMPLATE = """#{run_number} {original_message}
 This is **run #{run_number}** of a recurring scheduled task.
 
 **Context:**
-- Mode: Session reuse (incremental work)
+- Mode: Instance reuse (incremental work)
 
 **Instructions:**
 - Previous runs have built up conversation history you can reference
@@ -121,7 +121,7 @@ This is **run #{run_number}** of a recurring scheduled task.
 }
 ```
 
-**Rationale:** Counter belongs to the scheduler, not the session. If a reused session crashes and a new one is created, the counter continues incrementing correctly.
+**Rationale:** Counter belongs to the scheduler, not the instance. If a reused instance crashes and a new one is created, the counter continues incrementing correctly.
 
 ---
 
@@ -131,21 +131,21 @@ This is **run #{run_number}** of a recurring scheduled task.
 
 | File | Changes |
 |------|---------|
-| `daemon/models.py` | Add `SchedulerSessionMode` enum |
-| `daemon/sources/adapters/scheduler.py` | Add `session_mode` parsing, run counter, message formatting |
-| `daemon/sources/mapper.py` | Add `force_new` parameter to `get_or_create_session()` |
-| `daemon/sources/registry.py` | Pass `force_new_session` from metadata to mapper |
+| `daemon/models.py` | Add `SchedulerInstanceMode` enum |
+| `daemon/sources/adapters/scheduler.py` | Add `instance_mode` parsing, run counter, message formatting |
+| `daemon/sources/mapper.py` | Add `force_new` parameter to `get_or_create_instance()` |
+| `daemon/sources/registry.py` | Pass `force_new_instance` from metadata to mapper |
 | `daemon/repositories/source/repository.py` | Add `increment_scheduler_run_counter()` method |
-| `daemon/api.py` | Validate `session_mode` in schedule create/update |
+| `daemon/api.py` | Validate `instance_mode` in schedule create/update |
 
 ### 1. Model Changes (`daemon/models.py`)
 
 ```python
-class SchedulerSessionMode(str, Enum):
-    """Session management mode for scheduled executions."""
+class SchedulerInstanceMode(str, Enum):
+    """Instance management mode for scheduled executions."""
     
-    NEW_SESSION = "new_session"
-    REUSE_SESSION = "reuse_session"
+    NEW_INSTANCE = "new_instance"
+    REUSE_INSTANCE = "reuse_instance"
 ```
 
 ### 2. Scheduler Adapter (`daemon/sources/adapters/scheduler.py`)
@@ -153,13 +153,13 @@ class SchedulerSessionMode(str, Enum):
 **New methods:**
 
 ```python
-def _get_session_mode(self) -> SchedulerSessionMode:
-    """Get session mode from config, defaulting to NEW_SESSION."""
-    mode = self._scheduler_config.get("session_mode", "new_session")
-    # One-time schedules always use new session
+def _get_instance_mode(self) -> SchedulerInstanceMode:
+    """Get instance mode from config, defaulting to NEW_INSTANCE."""
+    mode = self._scheduler_config.get("instance_mode", "new_instance")
+    # One-time schedules always use new instance
     if self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
-        return SchedulerSessionMode.NEW_SESSION
-    return SchedulerSessionMode(mode)
+        return SchedulerInstanceMode.NEW_INSTANCE
+    return SchedulerInstanceMode(mode)
 
 def _increment_run_counter(self) -> int:
     """Atomically increment and return the run counter."""
@@ -182,10 +182,10 @@ async def _emit_scheduled_message(self) -> None:
     async def execute():
         self._running_executions += 1
         try:
-            session_mode = self._get_session_mode()
+            instance_mode = self._get_instance_mode()
             
             run_number = None
-            if session_mode == SchedulerSessionMode.REUSE_SESSION:
+            if instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
                 run_number = self._increment_run_counter()
             
             message_content = self._message_content
@@ -200,11 +200,11 @@ async def _emit_scheduled_message(self) -> None:
                     "execution_id": execution_id,
                     "schedule_type": self._schedule_type,
                     "trigger_time": datetime.now(self._timezone).isoformat(),
-                    "session_mode": session_mode.value,
+                    "instance_mode": instance_mode.value,
                     "run_number": run_number,
                 },
                 "agent": self._agent,
-                "force_new_session": (session_mode == SchedulerSessionMode.NEW_SESSION),
+                "force_new_instance": (instance_mode == SchedulerInstanceMode.NEW_INSTANCE),
             }
             
             await self._message_handler(self._to_message(message_content), metadata)
@@ -212,32 +212,32 @@ async def _emit_scheduled_message(self) -> None:
             self._running_executions -= 1
 ```
 
-### 3. SessionMapper (`daemon/sources/mapper.py`)
+### 3. InstanceMapper (`daemon/sources/mapper.py`)
 
 ```python
-async def get_or_create_session(
+async def get_or_create_instance(
     self,
     source_id: str,
     external_user_id: str,
     agent_dir: str,
     force_new: bool = False,  # NEW
 ) -> str:
-    """Get existing session or create a new one."""
+    """Get existing instance or create a new one."""
     
     mapping = self.get_mapping(source_id, external_user_id)
     
-    # NEW: Force new session if requested
+    # NEW: Force new instance if requested
     if force_new and mapping is not None:
-        old_session_id = mapping["agent_session_id"]
-        self.source_repo.delete_session_mapping(mapping["mapping_id"])
+        old_instance_id = mapping["agent_instance_id"]
+        self.source_repo.delete_instance_mapping(mapping["mapping_id"])
         logger.info(
-            f"Force new session: deleted mapping for {source_id}:{external_user_id}, "
-            f"old_session={old_session_id}"
+            f"Force new instance: deleted mapping for {source_id}:{external_user_id}, "
+            f"old_instance={old_instance_id}"
         )
         mapping = None
     
     if mapping is not None:
-        return mapping["agent_session_id"]
+        return mapping["agent_instance_id"]
     
     # ... rest of creation logic ...
 ```
@@ -248,11 +248,11 @@ async def get_or_create_session(
 async def _handle_message(self, source_id: str, msg: IncomingMessage) -> None:
     # ...
     
-    # Check for force_new_session flag from scheduler metadata
-    force_new = msg.metadata.get("force_new_session", False) if msg.metadata else False
+    # Check for force_new_instance flag from scheduler metadata
+    force_new = msg.metadata.get("force_new_instance", False) if msg.metadata else False
     
-    # Get or create the session
-    session_id = await mapper.get_or_create_session(
+    # Get or create the instance
+    instance_id = await mapper.get_or_create_instance(
         source_id=source_id,
         external_user_id=msg.external_user_id,
         agent_dir=agent_dir,
@@ -291,20 +291,20 @@ def increment_scheduler_run_counter(self, source_id: str) -> int:
 def _validate_scheduler_config(config: dict) -> dict:
     """Validate and normalize scheduler config."""
     schedule_type = config.get("type")
-    session_mode = config.get("session_mode", "new_session")
+    instance_mode = config.get("instance_mode", "new_instance")
     
-    # One-time schedules must use new session
+    # One-time schedules must use new instance
     if schedule_type == "one_time":
-        config["session_mode"] = "new_session"
-    elif session_mode not in ["new_session", "reuse_session"]:
+        config["instance_mode"] = "new_instance"
+    elif instance_mode not in ["new_instance", "reuse_instance"]:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid session_mode: {session_mode}. "
-                   f"Must be 'new_session' or 'reuse_session'."
+            detail=f"Invalid instance_mode: {instance_mode}. "
+                   f"Must be 'new_instance' or 'reuse_instance'."
         )
     
-    # Reuse session mode forces max_concurrent=1
-    if session_mode == "reuse_session":
+    # Reuse instance mode forces max_concurrent=1
+    if instance_mode == "reuse_instance":
         config["max_concurrent"] = 1
     
     return config
@@ -314,55 +314,55 @@ def _validate_scheduler_config(config: dict) -> dict:
 
 ## Edge Cases
 
-### 1. Reused Session Crashes
+### 1. Reused Instance Crashes
 
-- Run counter stored in scheduler config (not session) → counter continues correctly
-- SessionMapper creates new session automatically
+- Run counter stored in scheduler config (not instance) → counter continues correctly
+- InstanceMapper creates new instance automatically
 - Agent sees `#N` prefix but no prior context → should adapt
 
 ### 2. Mode Switch (reuse → new)
 
-- Next run uses new session
-- Old reused session orphaned
-- Counter continues (represents scheduler invocations, not session invocations)
+- Next run uses new instance
+- Old reused instance orphaned
+- Counter continues (represents scheduler invocations, not instance invocations)
 
 ### 3. Mode Switch (new → reuse)
 
-- Next run creates/uses persistent session
+- Next run creates/uses persistent instance
 - Counter starts at 1 (new context for this mode)
 
 ### 4. Concurrent Execution
 
-- For `reuse_session` mode, implicitly force `max_concurrent=1`
-- Prevents race conditions on shared session state
+- For `reuse_instance` mode, implicitly force `max_concurrent=1`
+- Prevents race conditions on shared instance state
 
 ### 5. One-Time Schedule
 
-- `session_mode` is ignored, always uses new session
+- `instance_mode` is ignored, always uses new instance
 - Config normalization enforces this
 
 ---
 
 ## Testing Checklist
 
-### New Session Mode (Default)
-- [ ] Each run creates fresh session
+### New Instance Mode (Default)
+- [ ] Each run creates fresh instance
 - [ ] No run number prefix
 - [ ] No context from previous runs
 
-### Reuse Session Mode
-- [ ] Same session used across runs
+### Reuse Instance Mode
+- [ ] Same instance used across runs
 - [ ] Run number prefix appears (#1, #2, #3)
 - [ ] Context persists between runs
 - [ ] Counter increments correctly
 
 ### One-Time Schedules
-- [ ] Always uses new session
-- [ ] Validation rejects `reuse_session` mode
+- [ ] Always uses new instance
+- [ ] Validation rejects `reuse_instance` mode
 
 ### Error Recovery
 - [ ] Run counter continues after crash
-- [ ] New session created if old one dies
+- [ ] New instance created if old one dies
 - [ ] Message indicates crash if applicable
 
 ---
@@ -370,6 +370,6 @@ def _validate_scheduler_config(config: dict) -> dict:
 ## Future Considerations (Out of Scope)
 
 1. **Reset counter API**: `POST /schedules/{id}/reset-counter`
-2. **Session cleanup**: Remove orphaned sessions when mode changes
+2. **Instance cleanup**: Remove orphaned instances when mode changes
 3. **Error context**: Include last execution error in continuation message
 4. **Configurable template**: Allow users to customize continuation text

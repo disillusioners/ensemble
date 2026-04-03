@@ -10,17 +10,17 @@
 
 ---
 
-## Session Naming Convention
+## Instance Naming Convention
 
-Use simple, consistent session names:
+Use simple, consistent instance names:
 
-| Session Name | Purpose | Example |
+| Instance Name | Purpose | Example |
 |--------------|---------|---------|
 | `explore` | Understand codebase structure | Explore auth module |
 | `draft` | Draft and refine plan content | Draft feature plan |
 | `track` | Monitor execution progress | Check task status |
 
-**Note**: Project is set during session initialization, no need to include in session name.
+**Note**: Project is set during instance initialization, no need to include in instance name.
 
 ---
 
@@ -114,7 +114,7 @@ Use simple, consistent session names:
 **A well-sized phase:**
 - Covers ONE logical module or feature area
 - Contains 3-10 tasks
-- Can be completed by 1 coder session (not 0.5 sessions, not 3 sessions)
+- Can be completed by 1 coder instance (not 0.5 instances, not 3 instances)
 - Is self-contained enough to review and test as a unit
 - Groups related components that belong together
 
@@ -127,7 +127,7 @@ Use simple, consistent session names:
 **Too big signals (split further):**
 - 15+ tasks
 - Spans multiple unrelated modules
-- Would take multiple coder sessions
+- Would take multiple coder instances
 - No single coherent objective
 
 #### Required File Output Structure
@@ -248,7 +248,7 @@ Use simple, consistent session names:
 
 ### During Execution
 
-1. **Initialize tracking session** (via opencode)
+1. **Initialize tracking instance** (via opencode)
    ```bash
    opencode_skill init-session <project> plan-track <working_dir>
    ```
@@ -264,23 +264,23 @@ Use simple, consistent session names:
 
 ---
 
-## Opencode Session Patterns
+## Opencode Instance Patterns
 
-### Exploration Session
+### Exploration Instance
 ```bash
 opencode_skill init-session <project> plan-explore <working_dir>
 opencode_skill --sync <project> plan-explore "Explore the auth module structure"
 opencode_skill <project> plan-explore /wait
 ```
 
-### Drafting Session
+### Drafting Instance
 ```bash
 opencode_skill init-session <project> plan-draft <working_dir>
 opencode_skill --sync <project> plan-draft "Draft a plan for feature X based on exploration findings"
 opencode_skill <project> plan-draft /wait
 ```
 
-### Tracking Session
+### Tracking Instance
 ```bash
 opencode_skill init-session <project> plan-track <working_dir>
 opencode_skill --sync <project> plan-track "Check progress on task list and update status"

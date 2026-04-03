@@ -76,8 +76,8 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 - [ ] Area 1
 - [ ] Area 2
 
-### Session Breakdown
-| Session | Target | Focus | Priority |
+### Instance Breakdown
+| Instance | Target | Focus | Priority |
 |---------|--------|-------|----------|
 | ... | ... | ... | P0/P1 |
 
@@ -94,8 +94,8 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 ## Scope
 [What was reviewed]
 
-## Sessions Used
-[Opencode session IDs]
+## Instances Used
+[Opencode instance IDs]
 
 ## Findings
 

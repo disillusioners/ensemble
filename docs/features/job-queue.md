@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the Job Queue feature for agents-ensemble. The feature ensures that only one session can modify a project's files at a time by implementing a per-project job queue with the following characteristics:
+This document describes the Job Queue feature for agents-ensemble. The feature ensures that only one instance can modify a project's files at a time by implementing a per-project job queue with the following characteristics:
 
 - **Lock by project_id** - Trust-based locking, no filesystem enforcement
 - **Per-project serialization** - Only one job per project can run at a time
@@ -27,7 +27,7 @@ This document describes the Job Queue feature for agents-ensemble. The feature e
 | JobProcessor | ⏳ Pending | Background worker for queued jobs |
 | DELETE /tasks/{id} | ⏳ Pending | Cancel/abort tasks |
 | SSE /tasks/{id}/events | ⏳ Pending | Real-time task updates |
-| SessionManager Integration | ⏳ Pending | Enhanced terminate_session() |
+| InstanceManager Integration | ⏳ Pending | Enhanced terminate_instance() |
 | Scheduler Integration | ⏳ Pending | project_id routing |
 
 ### Sprint 1 Commits
@@ -72,7 +72,7 @@ daemon/routers/
 - Background JobProcessor worker
 - DELETE /api/tasks/{task_id} - Cancel pending/running tasks
 - GET /api/tasks/{task_id}/events - SSE endpoint
-- SessionManager.terminate_session() integration
+- InstanceManager.terminate_instance() integration
 - Scheduler project_id routing
 - Cascade terminate to children
 
@@ -105,7 +105,7 @@ daemon/routers/
 │  │                     │    │                                              │ │
 │  │  • enqueue()       │    │  • acquire_lock(project_id) → task_id        │ │
 │  │  • dequeue()       │    │  • release_lock(project_id)                  │ │
-│  │  • get_task()      │    │  • get_locked_project(session_id)              │ │
+│  │  • get_task()      │    │  • get_locked_project(instance_id)              │ │
 │  │  • cancel_task()   │    │  • wait_for_lock(project_id, timeout)         │ │
 │  │  • list_tasks()   │    │                                              │ │
 │  └─────────┬───────────┘    └──────────────────────────────────────────────┘ │
@@ -130,22 +130,22 @@ daemon/routers/
 │                          EXISTING COMPONENTS                                    │
 │                                                                                  │
 │  ┌─────────────────────┐    ┌─────────────────────┐    ┌───────────────────┐ │
-│  │  SessionManager     │◄───│  InputMessageQueue  │───►│  SchedulerAdapter │ │
+│  │  InstanceManager    │◄───│  InputMessageQueue  │───►│  SchedulerAdapter │ │
 │  │  (daemon/manager.py)│    │  (daemon/queue.py)  │    │  (scheduler.py)   │ │
 │  │                     │    │                     │    │                   │ │
-│  │  • spawn_session() │    │  • enqueue()        │    │  • _emit_message()│ │
+│  │  • spawn_instance() │    │  • enqueue()        │    │  • _emit_message()│ │
 │  │  • send_message()  │    │  • dequeue()        │    │  • project_id    │ │
 │  │  • terminate_      │    │  • watchdog         │    │    (optional)     │ │
-│  │    session() ←NEW  │    │                     │    │                   │ │
+│  │    instance() ←NEW  │    │                     │    │                   │ │
 │  └─────────────────────┘    └─────────────────────┘    └───────────────────┘ │
 │                                                                                  │
 │  ┌─────────────────────┐    ┌─────────────────────┐                           │
-│  │  EventBroadcaster  │    │  SessionRepository  │                           │
-│  │  (daemon/events.py)│    │  (session/models)   │                           │
+│  │  EventBroadcaster  │    │  InstanceRepository │                           │
+│  │  (daemon/events.py)│    │  (instance/models)  │                           │
 │  │                     │    │                      │                           │
 │  │  • broadcast()     │    │  • create()          │                           │
 │  │  • event_to_sse() │    │  • update_status()   │                           │
-│  └─────────────────────┘    │  • terminate_session │                           │
+│  └─────────────────────┘    │  • terminate_instance │                           │
 │                             └─────────────────────┘                           │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -184,7 +184,7 @@ class JobItem(SQLModel, table=True):
     completed_at: Optional[str] = None
     
     # Result (filled on completion)
-    session_id: Optional[str] = Field(default=None, index=True)
+    instance_id: Optional[str] = Field(default=None, index=True)
     error_message: Optional[str] = None
     result_summary: Optional[str] = None
     
@@ -208,7 +208,7 @@ class TaskLockInfo(Pydantic BaseModel):
     """In-memory lock tracking."""
     task_id: str
     project_id: str
-    session_id: str
+    instance_id: str
     locked_at: datetime
 ```
 
@@ -217,7 +217,7 @@ class TaskLockInfo(Pydantic BaseModel):
 ```
 JobItem
 ├── project_id (FK to Project.project_id, optional)
-├── session_id (FK to Session.session_id, optional)
+├── instance_id (FK to Instance.instance_id, optional)
 └── status (indexed for filtering)
 ```
 
@@ -251,7 +251,7 @@ Content-Type: application/json
 {
     "task_id": "task-uuid",
     "status": "processing",
-    "session_id": "session-uuid",
+    "instance_id": "instance-uuid",
     "message": "Task started immediately"
 }
 ```
@@ -315,7 +315,7 @@ Content-Type: application/json
 {
     "task_id": "task-uuid",
     "status": "completed",
-    "session_id": "session-uuid",
+    "instance_id": "instance-uuid",
     "created_at": "2025-03-15T10:00:00Z",
     "started_at": "2025-03-15T10:00:01Z",
     "completed_at": "2025-03-15T10:05:00Z",
@@ -377,7 +377,7 @@ event: content_chunk
 data: {"chunk": "Found issue at line 42..."}
 
 event: completed
-data: {"task_id": "task-uuid", "status": "completed", "session_id": "session-uuid", "result_summary": "..."}
+data: {"task_id": "task-uuid", "status": "completed", "instance_id": "instance-uuid", "result_summary": "..."}
 
 event: keepalive
 data: {}
@@ -406,7 +406,7 @@ Content-Type: application/json
 }
 ```
 
-**Response (aborted running - terminates session):**
+**Response (aborted running - terminates instance):**
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json
@@ -414,7 +414,7 @@ Content-Type: application/json
 {
     "task_id": "task-uuid",
     "status": "cancelled",
-    "message": "Task aborted, session terminated with children"
+    "message": "Task aborted, instance terminated with children"
 }
 ```
 
@@ -500,9 +500,9 @@ Content-Type: application/json
                     ▼                                           ▼
         ┌───────────────────────┐               ┌───────────────────────────┐
         │ Execute immediately   │               │ Acquire project lock      │
-        │ • spawn_session()     │               │ • LockManager.acquire()   │
+        │ • spawn_instance()    │               │ • LockManager.acquire()   │
         │ • Return 200 +        │               └────────────┬──────────────┘
-        │   session_id          │                                │
+        │   instance_id          │                                │
         └───────────────────────┘                    ┌──────────┴──────────┐
                                                       │                     │
                                                       ▼                     ▼
@@ -564,22 +564,22 @@ Content-Type: application/json
                                     │
                                     ▼
                       ┌───────────────────────────┐
-                      │ Spawn session:            │
-                      │ SessionManager.spawn_     │
-                      │   session()               │
+                      │ Spawn instance:            │
+                      │ InstanceManager.spawn_     │
+                      │   instance()               │
                       └─────────────┬─────────────┘
                                     │
                                     ▼
                       ┌───────────────────────────┐
                       │ Update task with          │
-                      │ session_id                │
+                      │ instance_id                │
                       │                           │
-                      │ Send message to session   │
+                      │ Send message to instance   │
                       └─────────────┬─────────────┘
                                     │
                                     ▼
                       ┌───────────────────────────┐
-                      │ Wait for session         │
+                      │ Wait for instance         │
                       │ completion (SSE/events) │
                       └─────────────┬─────────────┘
                                     │
@@ -645,9 +645,9 @@ Content-Type: application/json
                     │                                            │
                     │                                            ▼
                     │                                ┌───────────────────────────┐
-                    │                                │ Terminate session:        │
-                    │                                │ SessionManager.terminate_ │
-                    │                                │   session() ENHANCED      │
+                     │                                │ Terminate instance:        │
+                     │                                │ InstanceManager.terminate_ │
+                     │                                │   instance() ENHANCED      │
                     │                                │                           │
                     │                                │ → Cancel active requests  │
                     │                                │ → Delete queue messages   │
@@ -725,16 +725,16 @@ async def _emit_scheduled_message(self):
 
 ---
 
-### 2. SessionManager Integration
+### 2. InstanceManager Integration
 
 Location: `daemon/manager.py`
 
-**Enhancement:** Add job_queue_service dependency and enhance terminate_session().
+**Enhancement:** Add job_queue_service dependency and enhance terminate_instance().
 
 ```python
 # daemon/manager.py
 
-class SessionManager:
+class InstanceManager:
     def __init__(self, ...):
         # Existing initialization
         ...
@@ -746,35 +746,35 @@ class SessionManager:
         """Set job queue service for integration."""
         self._job_queue_service = service
     
-    def terminate_session(self, session_id: str) -> bool:
-        """Terminate session with full cleanup."""
+    def terminate_instance(self, instance_id: str) -> bool:
+        """Terminate instance with full cleanup."""
         
-        # 1. NEW: Cancel any active requests for this session
-        active_requests = self._request_registry.get_active_for_session(session_id)
+        # 1. NEW: Cancel any active requests for this instance
+        active_requests = self._request_registry.get_active_for_instance(instance_id)
         for msg_id in active_requests:
             self._request_registry.cancel(msg_id, CancellationReason.MANUAL)
         
-        # 2. NEW: Clean up queue messages for this session
+        # 2. NEW: Clean up queue messages for this instance
         if self._job_queue_service:
-            self._job_queue_service.cancel_tasks_by_session(session_id)
+            self._job_queue_service.cancel_tasks_by_instance(instance_id)
         
-        # 3. NEW: Terminate child sessions (cascade)
-        children = self._session_repository.get_children(session_id)
+        # 3. NEW: Terminate child instances (cascade)
+        children = self._instance_repository.get_children(instance_id)
         for child_id in children:
-            self.terminate_session(child_id)
+            self.terminate_instance(child_id)
         
         # 4. Existing logic
-        self._processing.discard(session_id)
-        self.broadcaster.cleanup_session(session_id)
+        self._processing.discard(instance_id)
+        self.broadcaster.cleanup_instance(instance_id)
         
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+        if instance_id in self.instances:
+            del self.instances[instance_id]
         
-        self._session_repository.update_status(session_id, "terminated")
+        self._instance_repository.update_status(instance_id, "terminated")
         
-        # 5. NEW: Release project lock if this session held one
+        # 5. NEW: Release project lock if this instance held one
         if self._job_queue_service:
-            self._job_queue_service.release_lock_by_session(session_id)
+            self._job_queue_service.release_lock_by_instance(instance_id)
         
         return True
 ```
@@ -788,11 +788,11 @@ Location: `daemon/queue.py`
 The Job Queue is orthogonal to the existing InputMessageQueue:
 
 - **InputMessageQueue**: Per-session message queuing (what to send to a session)
-- **JobQueue**: Per-project task queuing (which session can run)
+- **JobQueue**: Per-project task queuing (which instance can run)
 
 They work at different layers:
-1. JobQueue decides which task (session) can proceed
-2. Once session is running, InputMessageQueue handles its message stream
+1. JobQueue decides which task (instance) can proceed
+2. Once instance is running, InputMessageQueue handles its message stream
 
 ---
 
@@ -817,11 +817,11 @@ TASK_EVENT_TYPES = [
 
 ---
 
-## Enhancement: terminate_session() for Cascade to Children
+## Enhancement: terminate_instance() for Cascade to Children
 
 ### Current Implementation Gap
 
-Current `terminate_session()` in `daemon/manager.py:1548-1572`:
+Current `terminate_instance()` in `daemon/manager.py:1548-1572`:
 - ❌ Does NOT cancel in-flight requests
 - ❌ Does NOT clean up queue messages
 - ❌ Does NOT terminate child sessions
@@ -829,11 +829,11 @@ Current `terminate_session()` in `daemon/manager.py:1548-1572`:
 ### Enhanced Implementation
 
 ```python
-# daemon/manager.py - Enhanced terminate_session()
+# daemon/manager.py - Enhanced terminate_instance()
 
-def terminate_session(
+def terminate_instance(
     self, 
-    session_id: str, 
+    instance_id: str, 
     *,
     cancel_requests: bool = True,
     cleanup_queue: bool = True,
@@ -841,37 +841,37 @@ def terminate_session(
     reason: str = CancellationReason.MANUAL.value
 ) -> bool:
     """
-    Terminate a session with full cleanup.
+    Terminate an instance with full cleanup.
     
     Args:
-        session_id: The session to terminate.
-        cancel_requests: Cancel in-flight requests for this session.
+        instance_id: The instance to terminate.
+        cancel_requests: Cancel in-flight requests for this instance.
         cleanup_queue: Remove pending messages from queue.
-        cascade_children: Also terminate child sessions.
+        cascade_children: Also terminate child instances.
         reason: Cancellation reason for tracking.
     
     Returns:
         True if terminated, False if not found.
     """
     # Early validation
-    if session_id not in self.sessions:
+    if instance_id not in self.instances:
         return False
     
     # 1. Cancel in-flight requests
     if cancel_requests:
-        active = self._request_registry.get_active_for_session(session_id)
+        active = self._request_registry.get_active_for_instance(instance_id)
         for msg_id in active:
             self._request_registry.cancel(msg_id, reason)
     
     # 2. Clean up queue messages
     if cleanup_queue and hasattr(self, '_job_queue_service'):
-        self._job_queue_service.cancel_tasks_by_session(session_id)
+        self._job_queue_service.cancel_tasks_by_instance(instance_id)
     
     # 3. Cascade to children FIRST (they hold resources too)
     if cascade_children:
-        children = self._session_repository.get_children(session_id)
+        children = self._instance_repository.get_children(instance_id)
         for child_id in children:
-            self.terminate_session(
+            self.terminate_instance(
                 child_id,
                 cancel_requests=cancel_requests,
                 cleanup_queue=cleanup_queue,
@@ -879,21 +879,21 @@ def terminate_session(
                 reason=reason
             )
     
-    # 4. Stop processing this session
-    self._processing.discard(session_id)
+    # 4. Stop processing this instance
+    self._processing.discard(instance_id)
     
     # 5. Clean up event broadcaster
-    self.broadcaster.cleanup_session(session_id)
+    self.broadcaster.cleanup_instance(instance_id)
     
     # 6. Remove from memory
-    del self.sessions[session_id]
+    del self.instances[instance_id]
     
     # 7. Update database status
-    self._session_repository.update_status(session_id, "terminated")
+    self._instance_repository.update_status(instance_id, "terminated")
     
     # 8. Release project lock (if job queue is active)
     if hasattr(self, '_job_queue_service') and self._job_queue_service:
-        self._job_queue_service.release_lock_by_session(session_id)
+        self._job_queue_service.release_lock_by_instance(instance_id)
     
     return True
 ```
@@ -928,11 +928,11 @@ class JobQueueService:
     def __init__(
         self,
         repository: JobRepository,
-        session_manager: SessionManager,
+        instance_manager: InstanceManager,
         event_broadcaster: EventBroadcaster
     ):
         self._repository = repository
-        self._session_manager = session_manager
+        self._instance_manager = instance_manager
         self._broadcaster = event_broadcaster
         self._lock_manager = JobLockManager(repository)
         self._processor: JobProcessor | None = None
@@ -953,7 +953,7 @@ class JobQueueService:
         If project_id is None or no lock contention, executes immediately.
         Otherwise, queues for later processing.
         
-        Returns task with status and (if immediate) session_id.
+        Returns task with status and (if immediate) instance_id.
         """
         pass
     
@@ -984,12 +984,12 @@ class JobQueueService:
         """Release lock for project."""
         pass
     
-    def release_lock_by_session(self, session_id: str) -> None:
-        """Release any lock held by a session."""
+    def release_lock_by_instance(self, instance_id: str) -> None:
+        """Release any lock held by an instance."""
         pass
     
-    def get_locked_project(self, session_id: str) -> str | None:
-        """Get project_id if session holds a lock."""
+    def get_locked_instance(self, instance_id: str) -> str | None:
+        """Get project_id if instance holds a lock."""
         pass
     
     # ========== Internal / Background ==========
@@ -1013,7 +1013,7 @@ class LockInfo:
     """Information about a held lock."""
     task_id: str
     project_id: str
-    session_id: str
+    instance_id: str
     locked_at: datetime
 
 
@@ -1025,14 +1025,14 @@ class JobLockManager:
         self._locks: dict[str, LockInfo] = {}  # project_id -> LockInfo
         self._waiters: dict[str, asyncio.Queue[tuple[str, asyncio.Event]]] = {}
     
-    def acquire(self, project_id: str, task_id: str, session_id: str) -> bool:
+    def acquire(self, project_id: str, task_id: str, instance_id: str) -> bool:
         """
         Try to acquire lock for project.
         
         Args:
             project_id: The project to lock
             task_id: The task acquiring the lock
-            session_id: The session running the task
+            instance_id: The instance running the task
             
         Returns:
             True if lock acquired, False if already held
@@ -1043,7 +1043,7 @@ class JobLockManager:
         self._locks[project_id] = LockInfo(
             task_id=task_id,
             project_id=project_id,
-            session_id=session_id,
+            instance_id=instance_id,
             locked_at=datetime.utcnow()
         )
         return True
@@ -1067,11 +1067,11 @@ class JobLockManager:
         self._notify_waiter(project_id)
         return True
     
-    def release_by_session(self, session_id: str) -> list[str]:
-        """Release any locks held by a session. Returns released project_ids."""
+    def release_by_instance(self, instance_id: str) -> list[str]:
+        """Release any locks held by an instance. Returns released project_ids."""
         released = []
         for project_id, info in list(self._locks.items()):
-            if info.session_id == session_id:
+            if info.instance_id == instance_id:
                 del self._locks[project_id]
                 released.append(project_id)
                 self._notify_waiter(project_id)
@@ -1106,10 +1106,10 @@ class JobProcessor:
     def __init__(
         self,
         job_queue_service: JobQueueService,
-        session_manager: SessionManager
+        instance_manager: InstanceManager
     ):
         self._job_queue = job_queue_service
-        self._session_manager = session_manager
+        self._instance_manager = instance_manager
         self._running = False
         self._tasks: list[asyncio.Task] = []
     
@@ -1160,25 +1160,25 @@ class JobProcessor:
     
     async def _execute_task(self, task: JobItem) -> None:
         """Execute a single task."""
-        # Spawn session
-        session_id = self._session_manager.spawn_session(
+        # Spawn instance
+        instance_id = self._instance_manager.spawn_instance(
             agent_dir=task.agent_dir,
-            session_id=None  # Auto-generate
+            instance_id=None  # Auto-generate
         )
         
-        # Update task with session
-        task.session_id = session_id
+        # Update task with instance
+        task.instance_id = instance_id
         await self._job_queue._repository.update(task)
         
-        # Send message to session
-        await self._session_manager.send_message(
-            session_id=session_id,
+        # Send message to instance
+        await self._instance_manager.send_message(
+            instance_id=instance_id,
             message=task.message,
             source=task.source
         )
         
         # Wait for completion (via events)
-        await self._wait_for_session_completion(session_id, task.task_id)
+        await self._wait_for_instance_completion(instance_id, task.task_id)
 ```
 
 ---
@@ -1194,26 +1194,26 @@ If lock cannot be acquired (timeout or max waiters reached):
 
 ### Session Spawn Failure
 
-If session cannot be created:
+If instance cannot be created:
 - Update task status to FAILED
 - Set error_message with reason
 - Release any lock held
 - Notify via events
 
-### Session Completion with Children
+### Instance Completion with Children
 
-Per decision: When session completes (success/fail/error), terminate all child sessions as safety measure.
+Per decision: When instance completes (success/fail/error), terminate all child instances as safety measure.
 
 ```python
-async def _on_session_completed(self, session_id: str, task_id: str) -> None:
-    """Handle session completion."""
+async def _on_instance_completed(self, instance_id: str, task_id: str) -> None:
+    """Handle instance completion."""
     # Terminate all children as safety measure
-    children = self._session_repository.get_children(session_id)
+    children = self._instance_repository.get_children(instance_id)
     for child_id in children:
-        self._session_manager.terminate_session(child_id)
+        self._instance_manager.terminate_instance(child_id)
     
     # Release project lock
-    self._lock_manager.release_by_session(session_id)
+    self._lock_manager.release_by_instance(instance_id)
     
     # Trigger next task for project
     await self._trigger_next_task(task.project_id)
@@ -1281,7 +1281,7 @@ Current implementation is single-node. For multi-node:
    - test_double_acquire_fails
    - test_release_wrong_task_fails
    - test_waiter_notification
-   - test_release_by_session
+   - test_release_by_instance
 
 3. **JobProcessor**:
    - test_processes_queued_task
@@ -1299,7 +1299,7 @@ Current implementation is single-node. For multi-node:
 
 3. **Cancellation**:
    - Cancel pending → removed from queue
-   - Cancel running → session terminated → children terminated
+   - Cancel running → instance terminated → children terminated
 
 4. **Crash recovery**:
    - Simulate crash mid-task → task marked failed on restart
@@ -1325,7 +1325,7 @@ CREATE TABLE job_queue_items (
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT,
-    session_id TEXT,
+    instance_id TEXT,
     error_message TEXT,
     result_summary TEXT,
     metadata TEXT DEFAULT '{}',
@@ -1334,7 +1334,7 @@ CREATE TABLE job_queue_items (
 
 CREATE INDEX idx_job_queue_project ON job_queue_items(project_id) WHERE project_id IS NOT NULL;
 CREATE INDEX idx_job_queue_status ON job_queue_items(status);
-CREATE INDEX idx_job_queue_session ON job_queue_items(session_id);
+CREATE INDEX idx_job_queue_instance ON job_queue_items(instance_id);
 ```
 
 ### Configuration
@@ -1354,7 +1354,7 @@ class Config:
 
 - If job_queue service is not configured, fall back to immediate execution
 - Scheduler with project_id but no queue → warning log, execute immediately
-- Existing sessions without task tracking → unaffected
+- Existing instances without task tracking → unaffected
 
 ---
 
@@ -1373,7 +1373,7 @@ class Config:
 - [ ] Implement JobProcessor background worker
 - [ ] Add DELETE /tasks/{task_id} endpoint
 - [ ] Add SSE /tasks/{task_id}/events endpoint
-- [ ] Integrate with SessionManager.terminate_session()
+- [ ] Integrate with InstanceManager.terminate_instance()
 - [ ] Integrate with SchedulerAdapter
 - [ ] Add configuration options
 - [ ] Write unit tests

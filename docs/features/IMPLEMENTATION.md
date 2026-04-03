@@ -4,7 +4,7 @@
 
 ## Sprint 1 Summary
 
-Sprint 1 delivered the foundational Job Queue infrastructure for agents-ensemble. The implementation ensures that only one session can modify a project's files at a time through per-project locking with priority-based queuing.
+Sprint 1 delivered the foundational Job Queue infrastructure for agents-ensemble. The implementation ensures that only one instance can modify a project's files at a time through per-project locking with priority-based queuing.
 
 ### What Was Built
 
@@ -70,15 +70,15 @@ Sprint 1 delivered the foundational Job Queue infrastructure for agents-ensemble
 
 1. **Task Submission** (POST /api/tasks)
    - Validate request
-   - If no project_id → spawn session immediately
+   - If no project_id → spawn instance immediately
    - If project_id → acquire lock
-     - Lock free → spawn session immediately
+      - Lock free → spawn instance immediately
      - Lock held → queue task, return 202
 
 2. **Task Processing**
-   - Lock acquired → session spawns
-   - Session processes → updates task status
-   - Session completes → release lock → process next
+   - Lock acquired → instance spawns
+   - Instance processes → updates task status
+   - Instance completes → release lock → process next
 
 3. **Task Status** (GET /api/tasks/{id})
    - Query SQLite for task state
@@ -104,7 +104,7 @@ curl -X POST http://localhost:8079/api/tasks \
 {
   "task_id": "task-uuid",
   "status": "processing",
-  "session_id": "session-uuid",
+  "instance_id": "instance-uuid",
   "message": "Task started immediately"
 }
 ```
@@ -143,7 +143,7 @@ curl http://localhost:8079/api/tasks/task-uuid
 {
   "task_id": "task-uuid",
   "status": "completed",
-  "session_id": "session-uuid",
+  "instance_id": "instance-uuid",
   "created_at": "2026-03-16T10:00:00Z",
   "started_at": "2026-03-16T10:00:01Z",
   "completed_at": "2026-03-16T10:05:00Z",
@@ -184,13 +184,13 @@ The following features are planned for Sprint 2:
 | DELETE /tasks/{id} | Cancel pending or abort running tasks | ⏳ Pending |
 | SSE /tasks/{id}/events | Real-time task progress via Server-Sent Events | ⏳ Pending |
 | TaskProcessor | Background worker that processes queued tasks | ⏳ Pending |
-| SessionManager Integration | Enhanced terminate_session() with cascade | ⏳ Pending |
+| InstanceManager Integration | Enhanced terminate_instance() with cascade | ⏳ Pending |
 | Scheduler Integration | Route scheduled jobs through job queue | ⏳ Pending |
 
 ### Workaround for Missing DELETE
 
 Currently, running tasks cannot be cancelled via API. To stop a task:
-1. Terminate the session directly: `DELETE /api/sessions/{session_id}`
+1. Terminate the instance directly: `DELETE /api/instances/{instance_id}`
 2. The task will be marked as failed automatically
 
 ### Workaround for Missing SSE
@@ -216,7 +216,7 @@ The TaskProcessor is a background worker that continuously monitors queued tasks
 │       a. Get next task (highest priority, FIFO)                │
 │       b. Try to acquire lock                                   │
 │       c. If acquired:                                          │
-│          - Spawn session                                        │
+│          - Spawn instance                                        │
 │          - Wait for completion                                  │
 │          - Release lock                                         │
 │          - Process next task                                    │
@@ -232,7 +232,7 @@ Cancel pending tasks or abort running tasks:
 curl -X DELETE http://localhost:8079/api/tasks/task-uuid
 # Response: { "task_id": "uuid", "status": "cancelled" }
 
-# Abort running task (terminates session)
+# Abort running task (terminates instance)
 curl -X DELETE http://localhost:8079/api/tasks/task-uuid
 # Response: { "task_id": "uuid", "status": "cancelled", "message": "Task aborted" }
 ```

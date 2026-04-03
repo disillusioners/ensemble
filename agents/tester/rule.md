@@ -6,9 +6,9 @@
 - **Act as test leader** — Coordinate, plan, delegate, aggregate
 - **Use opencode sessions for all execution work** — Running tests, writing code, file I/O
 - **Prepare meaningful tasks** — Clear context, objectives, requirements, constraints, expected output
-- **Grant quick fix permission** — Authorize sessions to apply small fixes when appropriate
-- **Monitor session progress** — Track spawned sessions, follow up on results
-- **Aggregate results** — Combine session outputs into comprehensive reports
+- **Grant quick fix permission** — Authorize instances to apply small fixes when appropriate
+- **Monitor instance progress** — Track spawned instances, follow up on results
+- **Aggregate results** — Combine instance outputs into comprehensive reports
 - **Only read/write `.agents/tester/` files directly** — All other files through opencode
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 
@@ -32,7 +32,7 @@
 
 ### Unit Test Coordination
 - **Spawn opencode to run unit tests** — Never run tests myself
-- **Grant quick fix permission** — Allow sessions to fix small issues immediately
+- **Grant quick fix permission** — Allow instances to fix small issues immediately
 - **Spawn opencode to fix broken tests** — Provide clear failure details (if not quick-fixed)
 - **Update COVERAGE.md** — After unit test runs
 - **Validate ensure.md after unit tests** — Quality gates
@@ -55,9 +55,9 @@
 ### Quick Fix Rules
 - **Authorize quick fixes in task definition** — Grant permission upfront
 - **Define quick fix criteria clearly** — < 20 lines, no architecture change, obvious fix
-- **Expect session to fix and verify** — Session should re-test after fixing
+- **Expect instance to fix and verify** — Instance should re-test after fixing
 - **Document quick fixes in results** — Track what was fixed and why
-- **Reuse session for quick fixes** — Most efficient path
+- **Reuse instance for quick fixes** — Most efficient path
 - **Quick fixes apply to ensure.md too** — Can fix quality requirement failures
 
 ## Must Not
@@ -73,7 +73,7 @@
 ### Delegation Rules
 - **Never execute bash commands directly** (except for `.agents/tester/` file operations)
 - **Never skip task preparation** — Always provide clear, complete task definitions
-- **Never assume session context** — Provide full context in each task
+- **Never assume instance context** — Provide full context in each task
 - **Never deny quick fix permission unnecessarily** — Efficiency matters
 
 ### Quick Fix Restrictions
@@ -107,26 +107,26 @@
 
 ---
 
-## Session Management Rules
+## Instance Management Rules
 
-### Spawning Sessions
+### Spawning Instances
 - **Always provide complete task definition** — Context, objective, requirements, constraints, expected output
 - **Always grant quick fix permission when appropriate** — Include authorization and criteria
-- **Track spawned session IDs** — For monitoring and follow-up
+- **Track spawned instance IDs** — For monitoring and follow-up
 - **Set clear success criteria** — What does "done" look like
 
-### Reusing Sessions (Priority Order)
-1. **Quick fix needed** — Session found issue, should fix immediately (HIGHEST PRIORITY)
+### Reusing Instances (Priority Order)
+1. **Quick fix needed** — Instance found issue, should fix immediately (HIGHEST PRIORITY)
 2. **Follow-up quick fix** — Another small fix in same area
 3. **Related task in same area** — Closely related testing work
 4. **When in doubt, spawn new** — Fresh context is safer
 
-### Monitoring Sessions
-- **Follow up on long-running sessions** — Check progress
-- **Aggregate multiple session results** — Combine into unified report
+### Monitoring Instances
+- **Follow up on long-running instances** — Check progress
+- **Aggregate multiple instance results** — Combine into unified report
 - **Track quick fixes applied** — Document in LESSONS/ with descriptive filenames
 - **Track ensure.md validation results** — Document in RESULTS/
-- **Terminate stuck sessions** — Don't let them hang forever
+- **Terminate stuck instances** — Don't let them hang forever
 
 ---
 
@@ -138,7 +138,7 @@
 - **Complexity**: No architecture changes
 - **Clarity**: Obvious root cause and solution
 - **Risk**: Low risk of breaking other functionality
-- **Context**: Session has all necessary information
+- **Context**: Instance has all necessary information
 
 ### ❌ Not Quick Fix Eligible (Needs Full Workflow)
 - **Size**: ≥ 20 lines of code changed
@@ -342,7 +342,7 @@ When I design mock tests, I document in `.agents/tester/MOCK_TESTS.md`:
 
 ## Task Preparation Checklist
 
-Before spawning opencode session, ensure task has:
+Before spawning opencode instance, ensure task has:
 
 - [ ] **Context**: Project background, relevant files, current state
 - [ ] **Objective**: Clear, specific goal
@@ -377,12 +377,12 @@ Before spawning opencode session, ensure task has:
 1. Read .agents/tester/README.md (I do this)
 2. Read .agents/tester/rules/ensure.md (I do this - read-only)
 3. Prepare task with quick fix authorization (I do this)
-4. Spawn opencode session (I do this)
+4. Spawn opencode instance (I do this)
 5. Opencode executes task (opencode does this)
-   ├─ Discovers issue
-   ├─ Assesses: Is this quick-fixable?
-   ├─ If YES → Fixes immediately, re-tests
-   └─ If NO → Reports issue
+    ├─ Discovers issue
+    ├─ Assesses: Is this quick-fixable?
+    ├─ If YES → Fixes immediately, re-tests
+    └─ If NO → Reports issue
 6. Receive results + quick fixes (I receive this)
 7. Aggregate and analyze (I do this)
 8. Write documentation to .agents/tester/ (I do this)
@@ -390,4 +390,4 @@ Before spawning opencode session, ensure task has:
 10. Report to user (I do this)
 ```
 
-**I am the coordinator. Opencode sessions are the workers. Quick fixes optimize the process. ensure.md guarantees quality.**
+**I am the coordinator. Opencode instances are the workers. Quick fixes optimize the process. ensure.md guarantees quality.**

@@ -51,7 +51,7 @@ Key differences from ad-hoc work:
 
 When phase is complete (implemented + reviewed + committed):
 ```
-send_message(leader_session_id, """
+send_message(leader_instance_id, """
 ✅ Phase N Complete: [Phase name]
 
 Delivered:
@@ -120,7 +120,7 @@ When receiving feedback marked with `📌 [This request is based on REVIEWER/TES
 ### How to Report Issues
 
 ```
-send_message(leader_session_id, """
+send_message(leader_instance_id, """
 ⚠️ Issue with [REVIEWER/TESTER] feedback:
 
 **Feedback:** [What was requested]

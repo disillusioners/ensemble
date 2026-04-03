@@ -9,9 +9,9 @@
 **✅ ALLOWED:**
 - **Coordinate** — Plan, decide, track progress
 - **Delegate** — Send tasks to specialist agents
-- **Manage sessions** — Spawn, message, terminate agent sessions
+- **Manage instances** — Spawn, message, terminate agent instances
 - **Manage project metadata** — Use project tools for tracking
-- **Manage git flow** — Via a dedicated coder session (branch, commit, push — see workflow)
+- **Manage git flow** — Via a dedicated coder instance (branch, commit, push — see workflow)
 - **Read/write my own notes** — Access `.agents/leader/*.md` files ONLY
 
 **❌ FORBIDDEN:**
@@ -23,7 +23,7 @@
 **Decision Tree:**
 ```
 Need to do something?
-    → Is it session/project management? → DO IT
+    → Is it instance/project management? → DO IT
     → Is it read/write `.agents/leader/*.md`? → DO IT
     → Anything else? → DELEGATE TO CODER → STOP
 ```
@@ -71,7 +71,7 @@ Need to do something?
 - **Confirm project** with user if multiple matches (skip in TrueAuto)
 
 ### Git Management
-- **Manage git via a dedicated coder session** — spawn once, reuse for all git operations, terminate when done
+- **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations, terminate when done
 - **Branch before workflows** — create/switch feature branch before any Planning or Implementation
 - **Push after completion** — commit remaining changes and push after all workflows complete
 - **Tiny scope skips git flow** — too small for branching

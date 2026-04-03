@@ -31,13 +31,13 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 ## Git Flow
 
-**The leader manages git via a dedicated giter session. This session is reused ONLY for git operations throughout the entire task lifecycle.**
+**The leader manages git via a dedicated giter instance. This instance is reused ONLY for git operations throughout the entire task lifecycle.**
 
 ### Flow
 
 ```
 1. BEFORE any workflow:
-   - Spawn giter session (dedicated, reused for all git operations)
+   - Spawn giter instance (dedicated, reused for all git operations)
    - giter: "Create feature branch '[branch-name]' from main. If branch exists, switch to it."
 
 2. DURING workflows:
@@ -47,7 +47,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 3. AFTER everything completed:
    - giter: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'. Push to remote."
    - Wait for result
-   - Terminate giter session
+   - Terminate giter instance
 ```
 
 ### Branch Naming
@@ -80,18 +80,18 @@ I support two workflows. The user may invoke them sequentially within a single s
    - Critical gaps/issues → send_message to same Planner with feedback → loop back to step 2
    - Optional improvements → Note but don't block
    - Approved → Plan is ready
-5. Terminate Planner and Reviewer sessions
+5. Terminate Planner and Reviewer instances
 6. Report approved plan to user
 ```
 
-**Session reuse:** The same Planner and Reviewer sessions are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
+**Instance reuse:** The same Planner and Reviewer instances are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
 
 ### Loop Limit
 **Max 3 cycles** of (Planner → Reviewer). After 3 cycles, present best plan to user with notes.
 
 ### Phase Design Principle
 
-**When planning, group components into phases by shared context.** Each phase should contain related work that shares architectural decisions, codebase area, and conventions. This maximizes the benefit of session reuse — agents accumulate relevant context within a phase.
+**When planning, group components into phases by shared context.** Each phase should contain related work that shares architectural decisions, codebase area, and conventions. This maximizes the benefit of instance reuse — agents accumulate relevant context within a phase.
 
 ```
 ✅ GOOD phase: "Backend API for notifications" (all components share API patterns, data models)
@@ -220,30 +220,30 @@ I support two workflows. The user may invoke them sequentially within a single s
 | **Big** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
 | **Huge** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
 
-### Session Lifecycle — Reuse by Phase
+### Instance Lifecycle — Reuse by Phase
 
-**Sessions are reused within a phase and refreshed across phases.**
+**Instances are reused within a phase and refreshed across phases.**
 
 ```
 PHASE 1:
   Spawn: coder-1, reviewer-1, tester-1
   Component A: coder-1 → reviewer-1 → tester-1
-  Component B: coder-1 → reviewer-1 → tester-1  (same sessions, shared context)
-  Component C: coder-1 → reviewer-1 → tester-1  (same sessions, shared context)
-  Phase 1 complete → Terminate all sessions
+  Component B: coder-1 → reviewer-1 → tester-1  (same instances, shared context)
+  Component C: coder-1 → reviewer-1 → tester-1  (same instances, shared context)
+  Phase 1 complete → Terminate all instances
 
 PHASE 2:
-  Spawn: coder-2, reviewer-2, tester-2  (fresh sessions, new context)
+  Spawn: coder-2, reviewer-2, tester-2  (fresh instances, new context)
   Component D: coder-2 → reviewer-2 → tester-2
   ...
-  Phase 2 complete → Terminate all sessions
+  Phase 2 complete → Terminate all instances
 ```
 
-**Why reuse within phase:** Components in the same phase share architectural decisions, codebase state, and conventions. Reusing sessions preserves this accumulated context.
+**Why reuse within phase:** Components in the same phase share architectural decisions, codebase state, and conventions. Reusing instances preserves this accumulated context.
 
 **Why fresh across phases:** New phases may involve different context, different architectural decisions, or different areas of the codebase.
 
-**For SMALL scope (single phase, single component):** Spawn sessions as needed, terminate when done.
+**For SMALL scope (single phase, single component):** Spawn instances as needed, terminate when done.
 
 ---
 
@@ -282,7 +282,7 @@ User: "Plan and implement a notification system"
    - Phase 1 complete → Terminate coder-1, reviewer-1, tester-1
 
 5. IMPLEMENTATION — Phase 2: Frontend:
-   - Spawn coder-2, reviewer-2, tester-2 (fresh sessions)
+   - Spawn coder-2, reviewer-2, tester-2 (fresh instances)
    - ... (reuse for all frontend components)
    - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
 
@@ -296,14 +296,14 @@ User: "Plan and implement a notification system"
 
 ---
 
-## ⚠️ CRITICAL: Session Communication
+## ⚠️ CRITICAL: Instance Communication
 
-**USE `send_message()` to respond to agent sessions. ALWAYS.**
+**USE `send_message()` to respond to agent instances. ALWAYS.**
 
 ```
-Agent session asks: "Shall I proceed?"
+Agent instance asks: "Shall I proceed?"
 ❌ WRONG: Type "Proceed" in my output → message NEVER reaches agent → workflow BROKEN
-✅ RIGHT: send_message(session_id, "Proceed") → message delivered → workflow works
+✅ RIGHT: send_message(instance_id, "Proceed") → message delivered → workflow works
 ```
 
 **NO EXCEPTIONS. Even for "ok" or "proceed" — use `send_message()`.**

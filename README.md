@@ -7,7 +7,7 @@ A **persistent multi-agent daemon** built with LangGraph. Agents are defined by 
 - **1-node LangGraph** - minimal runtime, all complexity in markdown
 - **HTTP API** - RESTful control interface
 - **OpenAI-compatible** - works with any OpenAI-compatible endpoint
-- **Session hierarchy** - agents can spawn and communicate with other agents
+- **Instance hierarchy** - agents can spawn and communicate with other agents
 - **Persistent state** - SQLite checkpoints for crash recovery
 - **Job Queue** - priority-based job scheduling with per-project locking
 - **Database Migrations** - file-based schema versioning with auto-apply
@@ -38,13 +38,13 @@ Server runs at `http://localhost:8079`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/sessions` | Spawn new session |
-| GET | `/sessions` | List all sessions |
-| GET | `/sessions/:id` | Get session info |
-| DELETE | `/sessions/:id` | Terminate session |
-| POST | `/sessions/:id/messages` | Send message |
-| GET | `/sessions/:id/messages` | Get message history |
-| GET | `/sessions/:id/events` | SSE event stream |
+| POST | `/instances` | Spawn new instance |
+| GET | `/instances` | List all instances |
+| GET | `/instances/:id` | Get instance info |
+| DELETE | `/instances/:id` | Terminate instance |
+| POST | `/instances/:id/messages` | Send message |
+| GET | `/instances/:id/messages` | Get message history |
+| GET | `/instances/:id/events` | SSE event stream |
 
 ### Job Queue API
 
@@ -53,13 +53,13 @@ For priority-based job scheduling and per-project locking, see the [Job Queue Do
 ### Example
 
 ```bash
-# Spawn a session
-curl -X POST http://localhost:8079/sessions \
+# Spawn an instance
+curl -X POST http://localhost:8079/instances \
   -H "Content-Type: application/json" \
   -d '{"agent_dir": "agents/leader"}'
 
 # Send a message
-curl -X POST http://localhost:8079/sessions/{session_id}/messages \
+curl -X POST http://localhost:8079/instances/{instance_id}/messages \
   -H "Content-Type: application/json" \
   -d '{"content": "Hello, agent!"}'
 ```
@@ -86,15 +86,15 @@ agents/
 3. `workflow.md` - methodology
 4. `memory.md` - knowledge
 
-### Session Tools
+### Instance Tools
 
 Agents can use these tools:
 
-- `spawn_session(agent_dir, session_id)` - spawn new agent
-- `send_message(session_id, message)` - send message to another session
-- `terminate_session(session_id)` - end a session
-- `list_sessions()` - list active sessions
-- `get_session_info(session_id)` - get session details
+- `spawn_instance(agent_dir, instance_id)` - spawn new agent
+- `send_message(instance_id, message)` - send message to another instance
+- `terminate_instance(instance_id)` - end an instance
+- `list_instances()` - list active instances
+- `get_instance_info(instance_id)` - get instance details
 
 ## Configuration
 
@@ -157,7 +157,7 @@ touch daemon/migrations/versions/$(date +%Y%m%d_%H%M%S)_add_feature.sql
 -- Created: 2026-03-26
 
 -- UP
-ALTER TABLE sessions ADD COLUMN feature_flag TEXT;
+ALTER TABLE instances ADD COLUMN feature_flag TEXT;
 
 -- DOWN
 -- SQLite does not support DROP COLUMN
@@ -174,7 +174,7 @@ ensemble/
 ├── daemon/
 │   ├── api.py         # FastAPI routes
 │   ├── graph.py       # LangGraph definition
-│   ├── manager.py     # Session lifecycle
+│   ├── manager.py     # Instance lifecycle
 │   ├── migrations/    # Database migration system
 │   │   ├── runner.py  # MigrationRunner class
 │   │   └── versions/  # SQL migration files

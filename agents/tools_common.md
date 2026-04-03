@@ -29,14 +29,14 @@ time(format_type="iso")                      # Get current time
 
 **Rules**: Always set `workdir` to the project directory. Never omit it.
 
-## Session Management
+## Instance Management
 
 ```
-spawn_session(agent_dir, session_id=None)  # Spawn new agent
-send_message(session_id, message)          # Send to session queue
-terminate_session(session_id)              # Kill session
-list_sessions()                            # List all sessions
-get_session_info(session_id)               # Get session details
+spawn_instance(agent_dir, instance_id=None)  # Spawn new agent
+send_message(instance_id, message)           # Send to instance queue
+terminate_instance(instance_id)              # Kill instance
+list_instances()                             # List all instances
+get_instance_info(instance_id)               # Get instance details
 ```
 
 ## Project Management

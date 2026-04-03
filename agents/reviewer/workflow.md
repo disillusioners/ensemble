@@ -40,10 +40,10 @@ Before spawning any sessions, create a structured review plan:
 ```
 
 ### 3. Execute Review Plan
-For each session in plan order:
+For each instance in plan order:
 ```
-spawn_session("opencode", project_id)
-send_message(session_id, "Review [target] for [concerns]. Report: file:line, issue, severity, fix.")
+spawn_instance("opencode", project_id)
+send_message(instance_id, "Review [target] for [concerns]. Report: file:line, issue, severity, fix.")
 ```
 
 ### 4. Collect Results
