@@ -4,55 +4,55 @@ import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
-import { Agent, SessionInfo } from '../../models';
+import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 
-export interface SessionTreeNode {
-  session: SessionInfo;
-  children: SessionTreeNode[];
+export interface InstanceTreeNode {
+  instance: InstanceInfo;
+  children: InstanceTreeNode[];
 }
 
 @Component({
-  selector: 'app-session-list',
+  selector: 'app-instance-list',
   standalone: true,
   imports: [CommonModule, RouterModule, MatButtonModule, MatIconModule, MatListModule, AgentSwitcherComponent],
-  templateUrl: './session-list.html',
-  styleUrl: './session-list.scss'
+  templateUrl: './instance-list.html',
+  styleUrl: './instance-list.scss'
 })
-export class SessionListComponent {
+export class InstanceListComponent {
   readonly agents = input<Agent[]>([]);
-  readonly sessions = input<SessionInfo[]>([]);
-  readonly currentSessionId = input<string | null>(null);
+  readonly instances = input<InstanceInfo[]>([]);
+  readonly currentInstanceId = input<string | null>(null);
   readonly selectedAgent = input<Agent | null>(null);
   readonly hasMore = input<boolean>(false);
   readonly isLoadingMore = input<boolean>(false);
-  @Output() deleteSession = new EventEmitter<string>();
-  @Output() newSession = new EventEmitter<void>();
+  @Output() deleteInstance = new EventEmitter<string>();
+  @Output() newInstance = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
   @Output() loadMore = new EventEmitter<void>();
 
-  // Track expanded/collapsed state per session
-  readonly expandedSessions = signal<Set<string>>(new Set());
+  // Track expanded/collapsed state per instance
+  readonly expandedInstances = signal<Set<string>>(new Set());
 
-  // Build tree structure from flat session list
-  readonly sessionTree = computed(() => {
-    const sessions = this.sessions();
-    if (!sessions?.length) return [];
+  // Build tree structure from flat instance list
+  readonly instanceTree = computed(() => {
+    const instances = this.instances();
+    if (!instances?.length) return [];
 
-    const sessionMap = new Map<string, SessionTreeNode>();
+    const instanceMap = new Map<string, InstanceTreeNode>();
     
-    // Create nodes for all sessions
-    sessions.forEach(session => {
-      sessionMap.set(session.session_id, { session, children: [] });
+    // Create nodes for all instances
+    instances.forEach(instance => {
+      instanceMap.set(instance.instance_id, { instance, children: [] });
     });
 
-    const rootNodes: SessionTreeNode[] = [];
+    const rootNodes: InstanceTreeNode[] = [];
 
     // Build tree by attaching children to parents
-    sessions.forEach(session => {
-      const node = sessionMap.get(session.session_id)!;
-      if (session.parent_id && sessionMap.has(session.parent_id)) {
-        sessionMap.get(session.parent_id)!.children.push(node);
+    instances.forEach(instance => {
+      const node = instanceMap.get(instance.instance_id)!;
+      if (instance.parent_id && instanceMap.has(instance.parent_id)) {
+        instanceMap.get(instance.parent_id)!.children.push(node);
       } else {
         rootNodes.push(node);
       }
@@ -97,49 +97,49 @@ export class SessionListComponent {
     };
   }
 
-  onDeleteSession(sessionId: string, event: Event): void {
+  onDeleteInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Delete this session?')) {
-      this.deleteSession.emit(sessionId);
+    if (confirm('Delete this instance?')) {
+      this.deleteInstance.emit(instanceId);
     }
   }
 
-  onStopSession(sessionId: string, event: Event): void {
+  onStopInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Stop this running session?')) {
-      this.deleteSession.emit(sessionId);
+    if (confirm('Stop this running instance?')) {
+      this.deleteInstance.emit(instanceId);
     }
   }
 
-  onNewSession(): void {
-    this.newSession.emit();
+  onNewInstance(): void {
+    this.newInstance.emit();
   }
 
   onAgentChange(agent: Agent): void {
     this.agentChange.emit(agent);
   }
 
-  getSessionIdShort(sessionId: string): string {
-    return sessionId.slice(0, 12) + '...';
+  getInstanceIdShort(instanceId: string): string {
+    return instanceId.slice(0, 12) + '...';
   }
 
-  isExpanded(sessionId: string): boolean {
-    return this.expandedSessions().has(sessionId);
+  isExpanded(instanceId: string): boolean {
+    return this.expandedInstances().has(instanceId);
   }
 
-  toggleExpand(sessionId: string, event: Event): void {
+  toggleExpand(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    const expanded = this.expandedSessions();
+    const expanded = this.expandedInstances();
     const newSet = new Set(expanded);
-    if (newSet.has(sessionId)) {
-      newSet.delete(sessionId);
+    if (newSet.has(instanceId)) {
+      newSet.delete(instanceId);
     } else {
-      newSet.add(sessionId);
+      newSet.add(instanceId);
     }
-    this.expandedSessions.set(newSet);
+    this.expandedInstances.set(newSet);
   }
 
   onLoadMore(): void {

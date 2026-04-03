@@ -15,7 +15,7 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
-  session_id: string | null;
+  instance_id: string | null;
   error_message: string | null;
   result_summary: string | null;
   job_metadata: Record<string, any>;
@@ -43,7 +43,7 @@ export interface JobEventPayload {
   job_id: string;
   status?: JobStatus;
   previous_status?: JobStatus;
-  session_id?: string;
+  instance_id?: string;
   result_summary?: string;
   error_message?: string;
 }

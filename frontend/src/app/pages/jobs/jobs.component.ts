@@ -261,7 +261,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           ? {
               ...job,
               status: status.status || job.status,
-              session_id: status.session_id || job.session_id,
+              instance_id: status.instance_id || job.instance_id,
               result_summary: status.result_summary || job.result_summary,
               error_message: status.error_message || job.error_message,
               completed_at: status.status === 'completed' || status.status === 'failed'
@@ -428,8 +428,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected onDrawerViewSession(sessionId: string): void {
-    this.router.navigate(['/sessions', sessionId]);
+  protected onDrawerViewInstance(instanceId: string): void {
+    this.router.navigate(['/instances', instanceId]);
   }
 
   protected getAgentDisplayName(agentId: string): string {

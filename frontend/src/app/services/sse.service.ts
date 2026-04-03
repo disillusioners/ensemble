@@ -12,35 +12,35 @@ export class SseService {
   private reconnectAttempts = 0;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private isConnected = false;
-  private currentSessionId: string | null = null;
+  private currentInstanceId: string | null = null;
 
   // Signals for reactive state
   isStreaming = signal(false);
   events = signal<SSEEvent[]>([]);
   latestCompletedMessage = signal<Message | null>(null);
-  latestError = signal<{ message_id: string; error: string; session_id?: string | null } | null>(null);
+  latestError = signal<{ message_id: string; error: string; instance_id?: string | null } | null>(null);
   statusUpdates = signal<Map<string, string>>(new Map());
   partialMessages = signal<Map<string, Message>>(new Map());
-  titleUpdates = signal<{ session_id: string; title: string } | null>(null);
+  titleUpdates = signal<{ instance_id: string; title: string } | null>(null);
 
   constructor(private ngZone: NgZone) {}
 
   /**
-   * Validates that an event belongs to the current session.
-   * This prevents race conditions where events from a previous session
-   * arrive after switching to a new session.
+   * Validates that an event belongs to the current instance.
+   * This prevents race conditions where events from a previous instance
+   * arrive after switching to a new instance.
    */
-  private isValidSessionEvent(data: { session_id?: string }): boolean {
-    if (data.session_id !== this.currentSessionId) {
+  private isValidInstanceEvent(data: { instance_id?: string }): boolean {
+    if (data.instance_id !== this.currentInstanceId) {
       console.warn(
-        `[SSE] Ignoring event from wrong session: ${data.session_id} (current: ${this.currentSessionId})`
+        `[SSE] Ignoring event from wrong instance: ${data.instance_id} (current: ${this.currentInstanceId})`
       );
       return false;
     }
     return true;
   }
 
-  private _createEmptyMessage(messageId: string, sessionId: string): Message {
+  private _createEmptyMessage(messageId: string, instanceId: string): Message {
     return {
       type: 'message',
       message_id: messageId,
@@ -50,48 +50,48 @@ export class SseService {
       thinking_extracted: undefined,
       tool_calls: undefined,
       created_at: new Date().toISOString(),
-      session_id: sessionId,  // Store session ID for validation
+      instance_id: instanceId,  // Store instance ID for validation
     };
   }
 
   /**
-   * Connects to SSE stream for the specified session.
-   * Ensures disconnect() is called BEFORE setting new sessionId to prevent
-   * race conditions where events from the previous session interfere.
+   * Connects to SSE stream for the specified instance.
+   * Ensures disconnect() is called BEFORE setting new instanceId to prevent
+   * race conditions where events from the previous instance interfere.
    */
-  connect(sessionId: string): void {
-    console.log('[SSE] connect() called with sessionId:', sessionId, 'currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected);
-    if (this.currentSessionId === sessionId && this.isConnected && this.eventSource) {
-      console.log('[SSE] Already connected to this session, returning early');
+  connect(instanceId: string): void {
+    console.log('[SSE] connect() called with instanceId:', instanceId, 'currentInstanceId:', this.currentInstanceId, 'isConnected:', this.isConnected);
+    if (this.currentInstanceId === instanceId && this.isConnected && this.eventSource) {
+      console.log('[SSE] Already connected to this instance, returning early');
       return;
     }
 
-    // CRITICAL FIX: Call disconnect() FIRST to reset currentSessionId to null,
-    // THEN set the new sessionId. This prevents connectInternal() from seeing
-    // a stale/null sessionId and returning early.
+    // CRITICAL FIX: Call disconnect() FIRST to reset currentInstanceId to null,
+    // THEN set the new instanceId. This prevents connectInternal() from seeing
+    // a stale/null instanceId and returning early.
     this.disconnect();
-    this.currentSessionId = sessionId;
+    this.currentInstanceId = instanceId;
     this.clearEvents();
     console.log('[SSE] Calling connectInternal()');
     this.connectInternal();
   }
 
   private connectInternal(): void {
-    console.log('[SSE] connectInternal() called, currentSessionId:', this.currentSessionId, 'isConnected:', this.isConnected, 'eventSource:', !!this.eventSource);
-    if (!this.currentSessionId) return;
+    console.log('[SSE] connectInternal() called, currentInstanceId:', this.currentInstanceId, 'isConnected:', this.isConnected, 'eventSource:', !!this.eventSource);
+    if (!this.currentInstanceId) return;
 
     if (this.isConnected && this.eventSource) {
       return;
     }
 
-    const url = `${this.API_BASE}/sessions/${this.currentSessionId}/events`;
+    const url = `${this.API_BASE}/instances/${this.currentInstanceId}/events`;
     console.log('[SSE] Creating EventSource with URL:', url);
     const eventSource = new EventSource(url);
     this.eventSource = eventSource;
     this.isStreaming.set(true);
 
     eventSource.addEventListener('connected', () => {
-      console.log('SSE connected to session:', this.currentSessionId);
+      console.log('SSE connected to instance:', this.currentInstanceId);
       this.reconnectAttempts = 0;
       this.isConnected = true;
     });
@@ -100,11 +100,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'message_queued',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -120,11 +120,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'status_changed',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -142,11 +142,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'content_chunk',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -155,7 +155,7 @@ export class SseService {
           // Update partial message with streaming content
           if (data.message_id && data.chunk) {
             this.partialMessages.update(prev => {
-              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.instance_id);
               const updated = {
                 ...existing,
                 content: (existing.content || '') + data.chunk,
@@ -173,11 +173,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_call',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -192,11 +192,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'thinking',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -205,7 +205,7 @@ export class SseService {
           // Update or create a partial message with thinking
           if (data.message_id) {
             this.partialMessages.update(prev => {
-              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.instance_id);
               const updated = {
                 ...existing,
                 thinking: data.content || existing.thinking,
@@ -223,11 +223,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_complete',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -236,7 +236,7 @@ export class SseService {
           // Add tool to partial message
           if (data.message_id) {
             this.partialMessages.update(prev => {
-              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.session_id);
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.instance_id);
               const newToolCall = {
                 id: data.id || `tool-${Date.now()}`,
                 name: data.name || '',
@@ -260,12 +260,12 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           console.log('[SSE] Received completed event:', data.message_id, 'content length:', data.content?.length);
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'completed',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -289,7 +289,7 @@ export class SseService {
               thinking_extracted: data.thinking_extracted || undefined,
               tool_calls: toolCalls,
               created_at: new Date().toISOString(),
-              session_id: data.session_id || this.currentSessionId,  // FIX: Include session_id for validation
+              instance_id: data.instance_id || this.currentInstanceId,  // FIX: Include instance_id for validation
             };
             this.latestCompletedMessage.set(message);
             console.log('[SSE] Set latestCompletedMessage for:', data.message_id);
@@ -317,11 +317,11 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'error',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
@@ -331,7 +331,7 @@ export class SseService {
             this.latestError.set({ 
               message_id: data.message_id, 
               error: String(data.error),
-              session_id: data.session_id || this.currentSessionId 
+              instance_id: data.instance_id || this.currentInstanceId 
             });
             this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'failed'));
           }
@@ -349,18 +349,18 @@ export class SseService {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          if (!this.isValidSessionEvent(data)) return;
+          if (!this.isValidInstanceEvent(data)) return;
           const event: SSEEvent = {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'title_updated',
-            session_id: data.session_id,
+            instance_id: data.instance_id,
             message_id: data.message_id,
             data: data,
           };
           this.events.update(prev => [...prev, event]);
           
-          if (data.session_id && data.title) {
-            this.titleUpdates.set({ session_id: data.session_id, title: data.title });
+          if (data.instance_id && data.title) {
+            this.titleUpdates.set({ instance_id: data.instance_id, title: data.title });
           }
         } catch (err) {
           console.error('Failed to parse title_updated event:', err);
@@ -405,13 +405,13 @@ export class SseService {
       this.eventSource = null;
     }
     this.isStreaming.set(false);
-    this.currentSessionId = null;
+    this.currentInstanceId = null;
   }
 
   /**
    * Clears all event-related state.
-   * IMPORTANT: This is called during session switching to ensure no stale events
-   * or partial messages from the previous session leak into the new session.
+   * IMPORTANT: This is called during instance switching to ensure no stale events
+   * or partial messages from the previous instance leak into the new instance.
    */
   clearEvents(): void {
     this.events.set([]);
@@ -419,7 +419,7 @@ export class SseService {
     this.latestError.set(null);
     this.statusUpdates.set(new Map());
     // CRITICAL FIX: Clear partial messages to prevent stale content from
-    // previous session leaking into the new session's pendingMessage display.
+    // previous instance leaking into the new instance's pendingMessage display.
     this.partialMessages.set(new Map());
     this.titleUpdates.set(null);
   }

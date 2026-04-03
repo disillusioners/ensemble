@@ -1,5 +1,5 @@
-<!-- Empty state - no session -->
-@if (!sessionId) {
+<!-- Empty state - no instance -->
+@if (!instanceId) {
   <div class="empty-state">
     <div class="empty-state-icon" [style.backgroundColor]="agentColor + '20'">
       <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>
@@ -194,7 +194,7 @@
     </div>
 
     <!-- Scroll to bottom button -->
-    @if (sessionId && !isNearBottom()) {
+    @if (instanceId && !isNearBottom()) {
       <button 
         class="scroll-to-bottom-btn" 
         (click)="scrollToBottom()"

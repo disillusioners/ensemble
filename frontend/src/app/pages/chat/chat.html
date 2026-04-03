@@ -1,18 +1,18 @@
 <div class="chat-container">
-  <!-- Session sidebar -->
-  <div class="session-sidebar">
-    <app-session-list
+  <!-- Instance sidebar -->
+  <div class="instance-sidebar">
+    <app-instance-list
       [agents]="agents()"
-      [sessions]="sessions()"
-      [currentSessionId]="currentSession()?.session_id || null"
+      [instances]="instances()"
+      [currentInstanceId]="currentInstance()?.instance_id || null"
       [selectedAgent]="selectedAgent()"
-      [hasMore]="hasMoreSessions()"
+      [hasMore]="hasMoreInstances()"
       [isLoadingMore]="isLoadingMore()"
-      (deleteSession)="onDeleteSession($event)"
-      (newSession)="onNewSession()"
+      (deleteInstance)="onDeleteInstance($event)"
+      (newInstance)="onNewInstance()"
       (agentChange)="onAgentChange($event)"
-      (loadMore)="onLoadMoreSessions()"
-    ></app-session-list>
+      (loadMore)="onLoadMoreInstances()"
+    ></app-instance-list>
   </div>
 
   <!-- Chat area -->
@@ -30,16 +30,16 @@
           <mat-icon>arrow_back</mat-icon>
         </button>
         
-        <!-- Session info -->
-        @if (currentSession()) {
-          <div class="session-info">
-            <span class="agent-icon">{{ sessionAgent()?.icon || '🤖' }}</span>
-            <span class="agent-name">{{ sessionAgent()?.name || 'Agent' }}</span>
+        <!-- Instance info -->
+        @if (currentInstance()) {
+          <div class="instance-info">
+            <span class="agent-icon">{{ instanceAgent()?.icon || '🤖' }}</span>
+            <span class="agent-name">{{ instanceAgent()?.name || 'Agent' }}</span>
           </div>
         }
       </div>
       
-      <!-- Breadcrumb / Session info -->
+      <!-- Breadcrumb / Instance info -->
       <div class="header-right">
         <!-- Toggle buttons -->
         <div class="toggle-buttons">
@@ -60,9 +60,9 @@
             🔧 Tools
           </button>
         </div>
-        @if (currentSession()) {
-          <span class="session-id">
-            {{ currentSession()!.session_id.slice(0, 8) }}...
+        @if (currentInstance()) {
+          <span class="instance-id">
+            {{ currentInstance()!.instance_id.slice(0, 8) }}...
           </span>
         }
       </div>
@@ -81,13 +81,13 @@
       </div>
     }
     
-    <!-- Session not found message -->
-    @if (sessionNotFound()) {
-      <div class="session-not-found">
+    <!-- Instance not found message -->
+    @if (instanceNotFound()) {
+      <div class="instance-not-found">
         <div class="not-found-icon">⚠️</div>
-        <h2>Session Not Found</h2>
-        <p>The session <code>{{ sessionNotFound() }}</code> could not be found.</p>
-        <p class="hint">This may happen if the session was created by a job and has since been removed, or if the session ID is invalid.</p>
+        <h2>Instance Not Found</h2>
+        <p>The instance <code>{{ instanceNotFound() }}</code> could not be found.</p>
+        <p class="hint">This may happen if the instance was created by a job and has since been removed, or if the instance ID is invalid.</p>
         <button mat-flat-button color="primary" (click)="onBackToHome()">
           <mat-icon>home</mat-icon>
           Back to Home
@@ -95,24 +95,24 @@
       </div>
     }
     
-    <!-- Chat interface (only show when session is loaded) -->
-    @if (currentSession() && !sessionNotFound()) {
+    <!-- Chat interface (only show when instance is loaded) -->
+    @if (currentInstance() && !instanceNotFound()) {
       <app-chat-interface
         [messages]="messages()"
         [pendingMessage]="pendingMessage()"
         [isLoading]="isSending()"
-        [agent]="sessionAgent()"
-        [sessionId]="currentSession()?.session_id || null"
+        [agent]="instanceAgent()"
+        [instanceId]="currentInstance()?.instance_id || null"
         [showThinking]="showThinking()"
         [showToolCalls]="showToolCalls()"
       ></app-chat-interface>
     }
     
-    @if (currentSession() && !sessionNotFound()) {
+    @if (currentInstance() && !instanceNotFound()) {
       <app-message-input
         (sendMessage)="onSendMessage($event)"
         [disabled]="isSending()"
-        [agentColor]="sessionAgent()?.id || 'coder'"
+        [agentColor]="instanceAgent()?.id || 'coder'"
       ></app-message-input>
     }
   </div>

@@ -5,9 +5,9 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { AgentSelectorComponent } from '../../components/agent-selector/agent-selector.component';
-import type { Agent, AgentCreate, SessionInfo } from '../../models';
+import type { Agent, AgentCreate, InstanceInfo } from '../../models';
 
-const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
+const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
 @Component({
   selector: 'app-home',
@@ -23,11 +23,11 @@ export class HomeComponent implements OnInit, OnDestroy {
   private pollInterval: ReturnType<typeof setInterval> | null = null;
 
   readonly agents = signal<Agent[]>([]);
-  readonly sessions = signal<SessionInfo[]>([]);
+  readonly instances = signal<InstanceInfo[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isLoading = signal(false);
 
-  readonly hasSessions = computed(() => this.sessions().length > 0);
+  readonly hasInstances = computed(() => this.instances().length > 0);
 
   ngOnInit(): void {
     this.loadInitialData();
@@ -54,7 +54,7 @@ export class HomeComponent implements OnInit, OnDestroy {
           }
         }
         
-        this.loadSessions();
+        this.loadInstances();
       },
       error: (err) => {
         console.error('Failed to load agents:', err);
@@ -63,14 +63,14 @@ export class HomeComponent implements OnInit, OnDestroy {
     });
   }
 
-  private loadSessions(): void {
-    this.api.listSessions().subscribe({
+  private loadInstances(): void {
+    this.api.listInstances().subscribe({
       next: (response) => {
-        this.sessions.set(response.sessions);
+        this.instances.set(response.instances);
         this.isLoading.set(false);
       },
       error: (err) => {
-        console.error('Failed to load sessions:', err);
+        console.error('Failed to load instances:', err);
         this.isLoading.set(false);
       }
     });
@@ -78,7 +78,7 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   private startPolling(): void {
     this.pollInterval = setInterval(() => {
-      this.loadSessions();
+      this.loadInstances();
     }, 10000);
   }
 
@@ -94,31 +94,31 @@ export class HomeComponent implements OnInit, OnDestroy {
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
-  protected onCreateSession(): void {
+  protected onCreateInstance(): void {
     const agent = this.selectedAgent();
     if (!agent) return;
 
     this.isLoading.set(true);
     const agentPath = `./agents/${agent.id}`;
     
-    this.api.createSession(agentPath).subscribe({
-      next: (session) => {
-        this.sessions.update(prev => [session, ...prev]);
-        this.router.navigate(['/sessions', session.session_id]);
+    this.api.createInstance(agentPath).subscribe({
+      next: (instance) => {
+        this.instances.update(prev => [instance, ...prev]);
+        this.router.navigate(['/instances', instance.instance_id]);
       },
       error: (err) => {
-        console.error('Failed to create session:', err);
-        alert(`Failed to create session: ${err}`);
+        console.error('Failed to create instance:', err);
+        alert(`Failed to create instance: ${err}`);
         this.isLoading.set(false);
       }
     });
   }
 
-  protected onContinueSession(sessionId: string): void {
-    if (sessionId === 'latest' && this.sessions().length > 0) {
-      this.router.navigate(['/sessions', this.sessions()[0].session_id]);
-    } else if (sessionId !== 'latest') {
-      this.router.navigate(['/sessions', sessionId]);
+  protected onContinueInstance(instanceId: string): void {
+    if (instanceId === 'latest' && this.instances().length > 0) {
+      this.router.navigate(['/instances', this.instances()[0].instance_id]);
+    } else if (instanceId !== 'latest') {
+      this.router.navigate(['/instances', instanceId]);
     }
   }
 
@@ -156,14 +156,14 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.isLoading.set(true);
     const agentPath = './agents/_mother';
     
-    this.api.createSession(agentPath).subscribe({
-      next: (session) => {
-        this.sessions.update(prev => [session, ...prev]);
-        this.router.navigate(['/sessions', session.session_id]);
+    this.api.createInstance(agentPath).subscribe({
+      next: (instance) => {
+        this.instances.update(prev => [instance, ...prev]);
+        this.router.navigate(['/instances', instance.instance_id]);
       },
       error: (err) => {
-        console.error('Failed to start Mother session:', err);
-        alert(`Failed to start Mother session: ${err}`);
+        console.error('Failed to start Mother instance:', err);
+        alert(`Failed to start Mother instance: ${err}`);
         this.isLoading.set(false);
       }
     });

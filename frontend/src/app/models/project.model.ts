@@ -20,7 +20,7 @@ export interface Project {
     session?: string[];
     [key: string]: string[] | undefined;
   };
-  creator_session_id: string | null;
+  creator_instance_id: string | null;
   creator_agent_id: string | null;
   created_at: string;
   updated_at: string | null;

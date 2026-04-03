@@ -108,10 +108,10 @@
       <div class="result-summary">
         {{ job().result_summary }}
       </div>
-      @if (job().session_id) {
-        <div class="session-link">
-          <span class="label">Session ID:</span>
-          <code class="value">{{ job().session_id }}</code>
+      @if (job().instance_id) {
+        <div class="instance-link">
+          <span class="label">Instance ID:</span>
+          <code class="value">{{ job().instance_id }}</code>
         </div>
       }
     </section>
@@ -155,12 +155,12 @@
           Retry Job
         </button>
       }
-      @if (hasSession()) {
+      @if (hasInstance()) {
         <button mat-stroked-button
                 color="accent"
                 (click)="onViewSession()">
           <mat-icon>visibility</mat-icon>
-          View Session
+          View Instance
         </button>
       }
       <button mat-stroked-button

@@ -16,12 +16,12 @@ import { AddAgentModalComponent } from '../add-agent-modal/add-agent-modal.compo
 export class AgentSelectorComponent {
   @Input() agents: Agent[] = [];
   @Input() selectedAgent: Agent | null = null;
-  @Input() hasSessions = false;
+  @Input() hasInstances = false;
   @Input() isLoading = false;
 
   @Output() selectAgent = new EventEmitter<Agent>();
-  @Output() createSession = new EventEmitter<void>();
-  @Output() continueSession = new EventEmitter<string>();
+  @Output() createInstance = new EventEmitter<void>();
+  @Output() continueInstance = new EventEmitter<string>();
   @Output() addAgent = new EventEmitter<AgentCreate>();
   @Output() deleteAgent = new EventEmitter<string>();
   @Output() startMother = new EventEmitter<void>();
@@ -58,12 +58,12 @@ export class AgentSelectorComponent {
     this.selectAgent.emit(agent);
   }
 
-  protected onCreateSession(): void {
-    this.createSession.emit();
+  protected onCreateInstance(): void {
+    this.createInstance.emit();
   }
 
-  protected onContinueSession(sessionId: string): void {
-    this.continueSession.emit(sessionId);
+  protected onContinueInstance(instanceId: string): void {
+    this.continueInstance.emit(instanceId);
   }
 
   protected onStartMother(): void {

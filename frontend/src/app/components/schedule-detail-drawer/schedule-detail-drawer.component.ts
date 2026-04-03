@@ -404,13 +404,13 @@ export class ScheduleDetailDrawerComponent {
   }
 
   getSessionModeLabel(mode: SessionMode | undefined): string {
-    return mode === 'reuse_session' ? 'Reuse Session' : 'New Session';
+    return mode === 'reuse_session' ? 'Reuse Instance' : 'New Instance';
   }
 
   getSessionModeDescription(mode: SessionMode | undefined): string {
     return mode === 'reuse_session' 
       ? 'Continue from previous run' 
-      : 'Start a fresh conversation session';
+      : 'Start a fresh conversation instance';
   }
 
   formatDate(dateStr?: string | null): string {

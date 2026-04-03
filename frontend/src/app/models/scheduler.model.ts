@@ -45,7 +45,7 @@ export interface ScheduleExecution {
   status: ExecutionStatus;
   started_at: string;
   completed_at?: string;
-  session_id?: string;   // Resulting session from execution
+  instance_id?: string;   // Resulting instance from execution
   error?: string;        // Error message if failed
 }
 

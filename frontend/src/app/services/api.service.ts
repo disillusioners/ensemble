@@ -2,8 +2,8 @@ import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import type { 
-  SessionInfo, 
-  SessionListResponse, 
+  InstanceInfo, 
+  InstanceListResponse, 
   MessageResponse, 
   Message, 
   HealthResponse, 
@@ -17,9 +17,9 @@ import type {
   SourceActionResponse,
   SourceTestRequest,
   SourceTestResponse,
-  SessionMapping,
-  SessionMappingCreate,
-  SessionMappingListResponse,
+  InstanceMapping,
+  InstanceMappingCreate,
+  InstanceMappingListResponse,
   DeleteResponse
 } from '../models';
 
@@ -49,35 +49,35 @@ export class ApiService {
     return this.http.delete<{ deleted: boolean; agent_id: string }>(`${this.API_BASE}/agents/${agentId}`);
   }
 
-  // Sessions
-  createSession(agentId: string, sessionId?: string): Observable<SessionInfo> {
-    return this.http.post<SessionInfo>(`${this.API_BASE}/sessions`, { 
+  // Instances
+  createInstance(agentId: string, instanceId?: string): Observable<InstanceInfo> {
+    return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, { 
       agent_id: agentId, 
-      session_id: sessionId 
+      instance_id: instanceId 
     });
   }
 
-  listSessions(limit: number = 100, offset: number = 0): Observable<SessionListResponse> {
-    return this.http.get<SessionListResponse>(`${this.API_BASE}/sessions`, {
+  listInstances(limit: number = 100, offset: number = 0): Observable<InstanceListResponse> {
+    return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, {
       params: { limit: limit.toString(), offset: offset.toString() }
     });
   }
 
-  getSession(sessionId: string): Observable<SessionInfo> {
-    return this.http.get<SessionInfo>(`${this.API_BASE}/sessions/${sessionId}`);
+  getInstance(instanceId: string): Observable<InstanceInfo> {
+    return this.http.get<InstanceInfo>(`${this.API_BASE}/instances/${instanceId}`);
   }
 
-  deleteSession(sessionId: string): Observable<{ terminated: boolean }> {
-    return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/sessions/${sessionId}`);
+  deleteInstance(instanceId: string): Observable<{ terminated: boolean }> {
+    return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/instances/${instanceId}`);
   }
 
   // Messages
-  sendMessage(sessionId: string, content: string): Observable<MessageResponse> {
-    return this.http.post<MessageResponse>(`${this.API_BASE}/sessions/${sessionId}/messages`, { content });
+  sendMessage(instanceId: string, content: string): Observable<MessageResponse> {
+    return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, { content });
   }
 
-  getMessages(sessionId: string): Observable<Message[]> {
-    return this.http.get<Message[]>(`${this.API_BASE}/sessions/${sessionId}/messages`);
+  getMessages(instanceId: string): Observable<Message[]> {
+    return this.http.get<Message[]>(`${this.API_BASE}/instances/${instanceId}/messages`);
   }
 
   // Sources
@@ -114,12 +114,12 @@ export class ApiService {
   }
 
   // Mappings
-  listMappings(sourceId: string): Observable<SessionMappingListResponse> {
-    return this.http.get<SessionMappingListResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`);
+  listMappings(sourceId: string): Observable<InstanceMappingListResponse> {
+    return this.http.get<InstanceMappingListResponse>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`);
   }
 
-  createMapping(sourceId: string, mapping: SessionMappingCreate): Observable<SessionMapping> {
-    return this.http.post<SessionMapping>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`, mapping);
+  createMapping(sourceId: string, mapping: InstanceMappingCreate): Observable<InstanceMapping> {
+    return this.http.post<InstanceMapping>(`${this.API_BASE}/sources/${encodeURIComponent(sourceId)}/mappings`, mapping);
   }
 
   deleteMapping(sourceId: string, mappingId: string): Observable<DeleteResponse> {

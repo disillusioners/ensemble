@@ -71,9 +71,9 @@
               </mat-form-field>
             </div>
 
-            <!-- Session Mode -->
+            <!-- Instance Mode -->
             <div class="detail-item full-width">
-              <span class="label">Session Mode</span>
+              <span class="label">Instance Mode</span>
               <div class="radio-group" [class.disabled]="!isSessionModeEnabled">
                 <label class="radio-option" [class.disabled]="!isSessionModeEnabled">
                   <input
@@ -84,8 +84,8 @@
                     [disabled]="!isSessionModeEnabled"
                   />
                   <span class="radio-content">
-                    <span class="radio-label">New Session</span>
-                    <span class="radio-description">Start a fresh conversation session</span>
+                    <span class="radio-label">New Instance</span>
+                    <span class="radio-description">Start a fresh conversation instance</span>
                   </span>
                 </label>
                 <label class="radio-option" [class.disabled]="!isSessionModeEnabled || isReuseSessionDisabled">
@@ -97,7 +97,7 @@
                     [disabled]="!isSessionModeEnabled || isReuseSessionDisabled"
                   />
                   <span class="radio-content">
-                    <span class="radio-label">Reuse Session</span>
+                    <span class="radio-label">Reuse Instance</span>
                     <span class="radio-description">Continue from previous run</span>
                   </span>
                 </label>
@@ -107,7 +107,7 @@
                   <svg class="hint-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  One-time schedules always create a new session
+                  One-time schedules always create a new instance
                 </p>
               }
             </div>
@@ -268,7 +268,7 @@
           }
 
           <div class="detail-item">
-            <span class="label">Session Mode</span>
+            <span class="label">Instance Mode</span>
             <span class="value">{{ getSessionModeLabel(sched.config.session_mode) }}</span>
           </div>
         }
@@ -320,10 +320,10 @@
                 @if (formatExecutionDuration(execution); as duration) {
                   <span class="duration">Duration: {{ duration }}</span>
                 }
-                @if (execution.session_id) {
-                  <span class="session-link">
-                    <span class="label">Session:</span>
-                    <code class="value">{{ execution.session_id }}</code>
+                @if (execution.instance_id) {
+                  <span class="instance-link">
+                    <span class="label">Instance:</span>
+                    <code class="value">{{ execution.instance_id }}</code>
                   </span>
                 }
                 @if (execution.error) {

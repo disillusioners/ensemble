@@ -1,10 +1,10 @@
-// Session types
-export type SessionStatus = 'idle' | 'running' | 'waiting' | 'error' | 'terminated';
+// Instance types
+export type InstanceStatus = 'idle' | 'running' | 'waiting' | 'error' | 'terminated';
 
-export interface SessionInfo {
-  session_id: string;
+export interface InstanceInfo {
+  instance_id: string;
   agent_id: string;
-  status: SessionStatus;
+  status: InstanceStatus;
   parent_id: string | null;
   children: string[];
   title?: string | null;
@@ -12,8 +12,8 @@ export interface SessionInfo {
   updated_at: string | null;
 }
 
-export interface SessionListResponse {
-  sessions: SessionInfo[];
+export interface InstanceListResponse {
+  instances: InstanceInfo[];
   total: number;
   limit: number;
   offset: number;
@@ -31,9 +31,9 @@ export interface Message {
   tool_calls?: ToolCall[];
   error?: string;
   created_at: string;
-  // Session ID for tracking which session this message belongs to
-  // Used for session validation in SSE event routing
-  session_id?: string;
+  // Instance ID for tracking which instance this message belongs to
+  // Used for instance validation in SSE event routing
+  instance_id?: string;
 }
 
 export interface ToolCall {
@@ -105,7 +105,7 @@ export type EventType =
 export interface SSEEvent {
   event_id: number;
   type: EventType;
-  session_id: string;
+  instance_id: string;
   message_id: string | null;
   data: Record<string, unknown>;
 }
@@ -163,26 +163,26 @@ export interface SourceTestResponse {
   message: string;
 }
 
-// Session Mapping types
-export interface SessionMapping {
+// Instance Mapping types
+export interface InstanceMapping {
   mapping_id: string;
   source_id: string;
   external_user_id: string;
-  agent_session_id: string;
+  agent_instance_id: string;
   agent_id: string;
   metadata?: Record<string, unknown>;
   last_message_at?: string;
   created_at: string;
 }
 
-export interface SessionMappingCreate {
+export interface InstanceMappingCreate {
   external_user_id: string;
   agent_id: string;
   metadata?: Record<string, unknown>;
 }
 
-export interface SessionMappingListResponse {
-  mappings: SessionMapping[];
+export interface InstanceMappingListResponse {
+  mappings: InstanceMapping[];
 }
 
 export interface DeleteResponse {

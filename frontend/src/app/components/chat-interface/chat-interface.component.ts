@@ -18,7 +18,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   @Input() pendingMessage: Message | null = null;
   @Input() isLoading = false;
   @Input() agent: Agent | null | undefined = null;
-  @Input() sessionId: string | null = null;
+  @Input() instanceId: string | null = null;
   @Input() showThinking = true;
   @Input() showToolCalls = true;
 
@@ -34,13 +34,13 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   };
 
   ngOnChanges(changes: SimpleChanges): void {
-    const sessionIdChanged = changes['sessionId'];
+    const instanceIdChanged = changes['instanceId'];
     const messagesChanged = changes['messages'] && changes['messages'].currentValue?.length !== changes['messages'].previousValue?.length;
     const pendingMessageChanged = changes['pendingMessage'];
     const isLoadingChanged = changes['isLoading'];
 
-    // Reset scroll state when switching sessions
-    if (sessionIdChanged) {
+    // Reset scroll state when switching instances
+    if (instanceIdChanged) {
       this.userHasScrolled.set(false);
       this.isNearBottom.set(true);
       this.shouldScroll.set(true);

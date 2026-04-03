@@ -1,4 +1,4 @@
-.session-list-container {
+.instance-list-container {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -33,7 +33,7 @@
   margin: 0;
 }
 
-.new-session-btn {
+.new-instance-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -82,7 +82,7 @@
   margin: 0;
 }
 
-.session-list {
+.instance-list {
   flex: 1;
   overflow-y: auto;
   overflow-x: visible;
@@ -110,7 +110,7 @@
   }
 }
 
-.sessions {
+.instances {
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -118,7 +118,7 @@
   overflow: visible;
 }
 
-.session-item {
+.instance-item {
   display: block;
   position: relative;
   padding: 12px;
@@ -149,14 +149,14 @@
   }
 }
 
-.session-content {
+.instance-content {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
 
-.session-info {
+.instance-info {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -201,7 +201,7 @@
   flex-shrink: 0;
 }
 
-.session-details {
+.instance-details {
   min-width: 0;
 }
 
@@ -235,7 +235,7 @@
   }
 }
 
-.session-id {
+.instance-id {
   font-size: 12px;
   font-family: monospace;
   color: #64748b;
@@ -245,7 +245,7 @@
   text-overflow: ellipsis;
 }
 
-.session-meta {
+.instance-meta {
   display: flex;
   flex-direction: column;
   align-items: flex-end;

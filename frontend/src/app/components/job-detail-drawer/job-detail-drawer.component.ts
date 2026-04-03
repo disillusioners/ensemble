@@ -90,9 +90,9 @@ export class JobDetailDrawerComponent {
     return this.job().status === 'failed';
   });
 
-  hasSession = computed(() => {
+  hasInstance = computed(() => {
     const job = this.job();
-    return !!(job.session_id);
+    return !!(job.instance_id);
   });
 
   formattedMetadata = computed(() => {
@@ -116,9 +116,9 @@ export class JobDetailDrawerComponent {
   }
 
   onViewSession(): void {
-    const sessionId = this.job().session_id;
-    if (sessionId) {
-      this.viewSession.emit(sessionId);
+    const instanceId = this.job().instance_id;
+    if (instanceId) {
+      this.viewSession.emit(instanceId);
     }
   }
 

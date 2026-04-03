@@ -7,12 +7,12 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
-import { SessionListComponent } from '../../components/session-list/session-list.component';
+import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent } from '../../components/message-input/message-input.component';
-import type { Agent, SessionInfo, Message } from '../../models';
+import type { Agent, InstanceInfo, Message } from '../../models';
 
-const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
+const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
 @Component({
   selector: 'app-chat',
@@ -23,7 +23,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-session-agent';
     MatButtonModule,
     MatIconModule,
     MatProgressSpinnerModule,
-    SessionListComponent,
+    InstanceListComponent,
     ChatInterfaceComponent,
     MessageInputComponent
   ],
@@ -40,17 +40,17 @@ export class ChatComponent implements OnInit, OnDestroy {
   private messagesSubscription: Subscription | null = null;
 
   readonly agents = signal<Agent[]>([]);
-  readonly sessions = signal<SessionInfo[]>([]);
-  readonly currentSession = signal<SessionInfo | null>(null);
+  readonly instances = signal<InstanceInfo[]>([]);
+  readonly currentInstance = signal<InstanceInfo | null>(null);
   readonly messages = signal<Message[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
   readonly pendingMessage = signal<Message | null>(null);
-  readonly totalSessions = signal(0);
-  readonly hasMoreSessions = signal(false);
+  readonly totalInstances = signal(0);
+  readonly hasMoreInstances = signal(false);
   readonly isLoadingMore = signal(false);
-  readonly sessionNotFound = signal<string | null>(null);
+  readonly instanceNotFound = signal<string | null>(null);
 
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
@@ -58,11 +58,11 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   readonly isStreaming = this.sseService.isStreaming;
 
-  // Computed session agent
-  readonly sessionAgent = computed(() => {
-    const session = this.currentSession();
-    if (!session) return null;
-    return this.agents().find(a => session.agent_id.includes(a.id)) || null;
+  // Computed instance agent
+  readonly instanceAgent = computed(() => {
+    const instance = this.currentInstance();
+    if (!instance) return null;
+    return this.agents().find(a => instance.agent_id.includes(a.id)) || null;
   });
 
   constructor() {
@@ -79,10 +79,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle SSE completed messages
     effect(() => {
       const latestMessage = this.sseService.latestCompletedMessage();
-      const currentSession = this.currentSession();
+      const currentInstance = this.currentInstance();
       console.log('[Chat] completed effect triggered, latestMessage:', latestMessage?.message_id, 'role:', latestMessage?.role);
-      // FIX: Validate session_id to prevent cross-session message leakage
-      if (latestMessage && latestMessage.role === 'assistant' && latestMessage.session_id === currentSession?.session_id) {
+      // FIX: Validate instance_id to prevent cross-instance message leakage
+      if (latestMessage && latestMessage.role === 'assistant' && latestMessage.instance_id === currentInstance?.instance_id) {
         this.messages.update(prev => {
           const existingIndex = prev.findIndex(m => m.message_id === latestMessage.message_id);
           if (existingIndex >= 0) {
@@ -114,24 +114,24 @@ export class ChatComponent implements OnInit, OnDestroy {
     }, { allowSignalWrites: true });
 
     // Effect to handle partial/progressive messages
-    // CRITICAL FIX: Added session validation to prevent stale partial messages
-    // from previous sessions displaying in the current session.
+    // CRITICAL FIX: Added instance validation to prevent stale partial messages
+    // from previous instances displaying in the current instance.
     effect(() => {
       const partialMessages = this.sseService.partialMessages();
-      const currentSession = this.currentSession();
-      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentSession:', currentSession?.session_id);
+      const currentInstance = this.currentInstance();
+      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentInstance:', currentInstance?.instance_id);
       
-      if (partialMessages && partialMessages.size > 0 && currentSession) {
-        // Only display partial messages that belong to the current session
+      if (partialMessages && partialMessages.size > 0 && currentInstance) {
+        // Only display partial messages that belong to the current instance
         const validPartial = Array.from(partialMessages.values()).find(
-          m => m.session_id === currentSession.session_id
+          m => m.instance_id === currentInstance.instance_id
         );
         
         if (validPartial) {
           console.log('[Chat] Setting pendingMessage for valid partial:', validPartial.message_id, 'content length:', validPartial.content?.length);
           this.pendingMessage.set(validPartial);
         } else {
-          console.log('[Chat] No partial messages for current session, clearing pendingMessage');
+          console.log('[Chat] No partial messages for current instance, clearing pendingMessage');
           this.pendingMessage.set(null);
         }
       } else {
@@ -143,17 +143,17 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle title updates from SSE
     effect(() => {
       const titleUpdate = this.sseService.titleUpdates();
-      const currentSession = this.currentSession();
-      // FIX: Validate session_id to prevent stale title updates from other sessions
-      if (titleUpdate && titleUpdate.session_id === currentSession?.session_id) {
-        this.sessions.update(prev => prev.map(s => 
-          s.session_id === titleUpdate.session_id 
-            ? { ...s, title: titleUpdate.title }
-            : s
+      const currentInstance = this.currentInstance();
+      // FIX: Validate instance_id to prevent stale title updates from other instances
+      if (titleUpdate && titleUpdate.instance_id === currentInstance?.instance_id) {
+        this.instances.update(prev => prev.map(i => 
+          i.instance_id === titleUpdate.instance_id 
+            ? { ...i, title: titleUpdate.title }
+            : i
         ));
-        // Also update currentSession if it matches
-        if (this.currentSession()?.session_id === titleUpdate.session_id) {
-          this.currentSession.update(s => s ? { ...s, title: titleUpdate.title } : null);
+        // Also update currentInstance if it matches
+        if (this.currentInstance()?.instance_id === titleUpdate.instance_id) {
+          this.currentInstance.update(i => i ? { ...i, title: titleUpdate.title } : null);
         }
         // Reset the signal so it can trigger again
         this.sseService.titleUpdates.set(null);
@@ -163,9 +163,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle SSE errors - reset the signal after consumption
     effect(() => {
       const latestError = this.sseService.latestError();
-      const currentSession = this.currentSession();
-      // FIX: Validate session_id to prevent stale errors from affecting current session
-      if (latestError && currentSession && latestError.session_id === currentSession?.session_id) {
+      const currentInstance = this.currentInstance();
+      // FIX: Validate instance_id to prevent stale errors from affecting current instance
+      if (latestError && currentInstance && latestError.instance_id === currentInstance?.instance_id) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
         // Reset the signal so it can trigger again
@@ -182,12 +182,12 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.messagesSubscription = null;
     }
     // CRITICAL FIX: Clear events BEFORE disconnect to ensure no stale state.
-    // This also clears partialMessages which would otherwise leak between sessions.
+    // This also clears partialMessages which would otherwise leak between instances.
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.pendingMessage.set(null);
     this.messages.set([]);
-    this.currentSession.set(null);
+    this.currentInstance.set(null);
     if (this.routeSubscription) {
       this.routeSubscription.unsubscribe();
     }
@@ -199,8 +199,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     
     // Subscribe to route parameter changes
     this.routeSubscription = this.route.params.subscribe(params => {
-      const sessionId = params['sessionId'];
-      this.handleSessionIdChange(sessionId);
+      const instanceId = params['instanceId'];
+      this.handleInstanceIdChange(instanceId);
     });
   }
 
@@ -218,80 +218,80 @@ export class ChatComponent implements OnInit, OnDestroy {
           }
         }
 
-        this.loadSessions();
+        this.loadInstances();
       },
       error: (err) => console.error('Failed to load agents:', err)
     });
   }
 
-  private loadSessions(append: boolean = false): void {
+  private loadInstances(append: boolean = false): void {
     if (append) {
       this.isLoadingMore.set(true);
     }
     
-    const currentSessions = this.sessions();
-    const offset = append ? currentSessions.length : 0;
+    const currentInstances = this.instances();
+    const offset = append ? currentInstances.length : 0;
     
-    this.api.listSessions(100, offset).subscribe({
+    this.api.listInstances(100, offset).subscribe({
       next: (response) => {
         if (append) {
-          // Deduplicate when appending - filter out sessions we already have
-          const existingIds = new Set(currentSessions.map(s => s.session_id));
-          const newSessions = response.sessions.filter(s => !existingIds.has(s.session_id));
-          this.sessions.update(prev => [...prev, ...newSessions]);
+          // Deduplicate when appending - filter out instances we already have
+          const existingIds = new Set(currentInstances.map(i => i.instance_id));
+          const newInstances = response.instances.filter(i => !existingIds.has(i.instance_id));
+          this.instances.update(prev => [...prev, ...newInstances]);
         } else {
           // When not appending (polling refresh), merge intelligently
-          // Keep any sessions we've loaded beyond the first page that still exist
-          const currentSessionIds = new Set(currentSessions.map(s => s.session_id));
-          const responseSessionIds = new Set(response.sessions.map(s => s.session_id));
+          // Keep any instances we've loaded beyond the first page that still exist
+          const currentInstanceIds = new Set(currentInstances.map(i => i.instance_id));
+          const responseInstanceIds = new Set(response.instances.map(i => i.instance_id));
           
-          // If user has loaded more pages, preserve sessions not in this response
-          if (currentSessions.length > response.sessions.length) {
-            const extraSessions = currentSessions.filter(
-              s => !responseSessionIds.has(s.session_id)
+          // If user has loaded more pages, preserve instances not in this response
+          if (currentInstances.length > response.instances.length) {
+            const extraInstances = currentInstances.filter(
+              i => !responseInstanceIds.has(i.instance_id)
             );
-            this.sessions.set([...response.sessions, ...extraSessions]);
+            this.instances.set([...response.instances, ...extraInstances]);
             // Recalculate has_more based on what we have vs total
-            this.hasMoreSessions.set((response.sessions.length + extraSessions.length) < response.total);
+            this.hasMoreInstances.set((response.instances.length + extraInstances.length) < response.total);
           } else {
-            this.sessions.set(response.sessions);
-            this.hasMoreSessions.set(response.has_more);
+            this.instances.set(response.instances);
+            this.hasMoreInstances.set(response.has_more);
           }
         }
-        this.totalSessions.set(response.total);
+        this.totalInstances.set(response.total);
         this.isLoadingMore.set(false);
         
-        // Check if current session still exists when sessions are loaded
-        const currentSession = this.currentSession();
-        if (currentSession && !append) {
-          const allSessions = this.sessions();
-          const found = allSessions.find(s => s.session_id === currentSession.session_id);
+        // Check if current instance still exists when instances are loaded
+        const currentInstance = this.currentInstance();
+        if (currentInstance && !append) {
+          const allInstances = this.instances();
+          const found = allInstances.find(i => i.instance_id === currentInstance.instance_id);
           if (!found) {
-            // Session not found in list - mark as not found instead of redirecting
-            console.warn('[Chat] Current session not found in sessions list:', currentSession.session_id);
-            this.sessionNotFound.set(currentSession.session_id);
+            // Instance not found in list - mark as not found instead of redirecting
+            console.warn('[Chat] Current instance not found in instances list:', currentInstance.instance_id);
+            this.instanceNotFound.set(currentInstance.instance_id);
           }
         }
       },
       error: (err) => {
-        console.error('Failed to load sessions:', err);
+        console.error('Failed to load instances:', err);
         this.isLoadingMore.set(false);
       }
     });
   }
 
-  private loadMessages(sessionId: string): void {
+  private loadMessages(instanceId: string): void {
     // FIX: Cancel previous subscription to prevent race conditions
     if (this.messagesSubscription) {
       this.messagesSubscription.unsubscribe();
       this.messagesSubscription = null;
     }
     
-    this.messagesSubscription = this.api.getMessages(sessionId).subscribe({
+    this.messagesSubscription = this.api.getMessages(instanceId).subscribe({
       next: (msgs) => {
-        // FIX: Only set messages if still on the same session
-        const currentSession = this.currentSession();
-        if (currentSession?.session_id === sessionId) {
+        // FIX: Only set messages if still on the same instance
+        const currentInstance = this.currentInstance();
+        if (currentInstance?.instance_id === instanceId) {
           this.messages.set(msgs);
         }
       },
@@ -301,7 +301,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   private startPolling(): void {
     this.pollInterval = setInterval(() => {
-      this.loadSessions();
+      this.loadInstances();
     }, 10000);
   }
 
@@ -312,52 +312,52 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  private handleSessionIdChange(sessionId: string | undefined): void {
-    console.log('[Chat] handleSessionIdChange called with:', sessionId);
-    // Reset sending state when switching sessions to prevent input lock
+  private handleInstanceIdChange(instanceId: string | undefined): void {
+    console.log('[Chat] handleInstanceIdChange called with:', instanceId);
+    // Reset sending state when switching instances to prevent input lock
     this.isSending.set(false);
     this.pendingMessage.set(null);
     this.sendError.set(null);
 
-    if (!sessionId) {
-      console.log('[Chat] No sessionId, disconnecting SSE');
-      this.currentSession.set(null);
+    if (!instanceId) {
+      console.log('[Chat] No instanceId, disconnecting SSE');
+      this.currentInstance.set(null);
       this.messages.set([]);
       this.sseService.disconnect();
       this.sseService.clearEvents();
       return;
     }
 
-    // Find session in existing list or load it
-    const session = this.sessions().find(s => s.session_id === sessionId);
-    console.log('[Chat] Session found in list:', !!session, 'sessions count:', this.sessions().length);
-    if (session) {
-      console.log('[Chat] Using session from list, connecting SSE');
-      this.currentSession.set(session);
+    // Find instance in existing list or load it
+    const instance = this.instances().find(i => i.instance_id === instanceId);
+    console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instances().length);
+    if (instance) {
+      console.log('[Chat] Using instance from list, connecting SSE');
+      this.currentInstance.set(instance);
       // FIX: Clear stale messages immediately before loading new ones
       this.messages.set([]);
-      this.loadMessages(sessionId);
+      this.loadMessages(instanceId);
       // FIX: Removed redundant clearEvents() - connect() handles it internally
-      this.sseService.connect(sessionId);
+      this.sseService.connect(instanceId);
     } else {
-      // Try to get session from API
-      console.log('[Chat] Session not in list, fetching from API');
-      this.api.getSession(sessionId).subscribe({
-        next: (sessionData) => {
-          console.log('[Chat] Got session from API, connecting SSE');
-          this.sessionNotFound.set(null);
-          this.currentSession.set(sessionData);
+      // Try to get instance from API
+      console.log('[Chat] Instance not in list, fetching from API');
+      this.api.getInstance(instanceId).subscribe({
+        next: (instanceData) => {
+          console.log('[Chat] Got instance from API, connecting SSE');
+          this.instanceNotFound.set(null);
+          this.currentInstance.set(instanceData);
           // FIX: Clear stale messages immediately before loading new ones
           this.messages.set([]);
-          this.loadMessages(sessionId);
+          this.loadMessages(instanceId);
           // FIX: Removed redundant clearEvents() - connect() handles it internally
-          this.sseService.connect(sessionId);
+          this.sseService.connect(instanceId);
         },
         error: (err) => {
-          // Session not found - show error message instead of redirecting
-          console.warn('[Chat] Session not found:', sessionId, 'error:', err);
-          this.sessionNotFound.set(sessionId);
-          this.currentSession.set(null);
+          // Instance not found - show error message instead of redirecting
+          console.warn('[Chat] Instance not found:', instanceId, 'error:', err);
+          this.instanceNotFound.set(instanceId);
+          this.currentInstance.set(null);
           this.messages.set([]);
           this.sseService.disconnect();
           this.sseService.clearEvents();
@@ -366,45 +366,45 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected onDeleteSession(sessionId: string): void {
-    this.api.deleteSession(sessionId).subscribe({
+  protected onDeleteInstance(instanceId: string): void {
+    this.api.deleteInstance(instanceId).subscribe({
       next: () => {
-        this.sessions.update(prev => prev.filter(s => s.session_id !== sessionId));
+        this.instances.update(prev => prev.filter(i => i.instance_id !== instanceId));
         
-        if (this.currentSession()?.session_id === sessionId) {
-          this.currentSession.set(null);
+        if (this.currentInstance()?.instance_id === instanceId) {
+          this.currentInstance.set(null);
           this.router.navigate(['/']);
         }
       },
-      error: (err) => console.error('Failed to delete session:', err)
+      error: (err) => console.error('Failed to delete instance:', err)
     });
   }
 
-  protected onNewSession(): void {
+  protected onNewInstance(): void {
     const agent = this.selectedAgent();
     if (!agent) {
       this.router.navigate(['/']);
       return;
     }
 
-    // Reset state when creating new session
+    // Reset state when creating new instance
     this.isSending.set(false);
     this.pendingMessage.set(null);
     this.sendError.set(null);
-    this.currentSession.set(null);
+    this.currentInstance.set(null);
     this.messages.set([]);
     this.sseService.disconnect();
     this.sseService.clearEvents();
 
     const agentPath = `./agents/${agent.id}`;
     
-    this.api.createSession(agentPath).subscribe({
-      next: (session) => {
-        this.sessions.update(prev => [session, ...prev]);
-        this.router.navigate(['/sessions', session.session_id]);
+    this.api.createInstance(agentPath).subscribe({
+      next: (instance) => {
+        this.instances.update(prev => [instance, ...prev]);
+        this.router.navigate(['/instances', instance.instance_id]);
       },
       error: (err) => {
-        console.error('Failed to create session:', err);
+        console.error('Failed to create instance:', err);
       }
     });
   }
@@ -415,8 +415,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   protected onSendMessage(content: string): void {
-    const session = this.currentSession();
-    if (!session) return;
+    const instance = this.currentInstance();
+    if (!instance) return;
 
     // Clear any previous error
     this.sendError.set(null);
@@ -433,7 +433,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     this.isSending.set(true);
     
-    this.api.sendMessage(session.session_id, content).subscribe({
+    this.api.sendMessage(instance.instance_id, content).subscribe({
       next: (_response) => {
         // The assistant response will come via SSE
         // Note: We don't need to update the user message's ID since the queue message_id
@@ -468,9 +468,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.router.navigate(['/']);
   }
 
-  protected onLoadMoreSessions(): void {
-    if (this.hasMoreSessions() && !this.isLoadingMore()) {
-      this.loadSessions(true);
+  protected onLoadMoreInstances(): void {
+    if (this.hasMoreInstances() && !this.isLoadingMore()) {
+      this.loadInstances(true);
     }
   }
 
