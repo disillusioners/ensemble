@@ -77,7 +77,7 @@ class TestInputMessageQueue:
         
         # Enqueue a message
         message_id = queue.enqueue(
-            session_id=instance_id,
+            instance_id=instance_id,
             content="Hello, world!",
             source="test",
             priority=1

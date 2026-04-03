@@ -116,7 +116,7 @@ def mock_instance_repository():
     """Create a mock instance repository."""
     mock_repo = MagicMock()
     # Default return values for common methods
-    mock_repo.create.return_value = MagicMock(session_id="test-instance")
+    mock_repo.create.return_value = MagicMock(instance_id="test-instance")
     mock_repo.get.return_value = None
     mock_repo.list.return_value = ([], 0)
     return mock_repo
@@ -345,26 +345,26 @@ class TestListInstances:
             
             # Mock the list method to return instances
             mock_instance1 = MagicMock()
-            mock_instance1.session_id = "instance-1"
+            mock_instance1.instance_id = "instance-1"
             mock_instance1.agent_dir = "/path/1"
             mock_instance1.status = "running"
-            mock_instance1.session_metadata = {}
-            mock_instance1.to_dict.return_value = {"session_id": "instance-1", "agent_dir": "/path/1", "status": "running"}
+            mock_instance1.instance_metadata = {}
+            mock_instance1.to_dict.return_value = {"instance_id": "instance-1", "agent_dir": "/path/1", "status": "running"}
             
             mock_instance2 = MagicMock()
-            mock_instance2.session_id = "instance-2"
+            mock_instance2.instance_id = "instance-2"
             mock_instance2.agent_dir = "/path/2"
             mock_instance2.status = "idle"
-            mock_instance2.session_metadata = {}
-            mock_instance2.to_dict.return_value = {"session_id": "instance-2", "agent_dir": "/path/2", "status": "idle"}
+            mock_instance2.instance_metadata = {}
+            mock_instance2.to_dict.return_value = {"instance_id": "instance-2", "agent_dir": "/path/2", "status": "idle"}
             
             mock_instance_repository.list.return_value = ([mock_instance1, mock_instance2], 2)
             
             instances, total = manager.list_instances()
             
             assert len(instances) == 2
-            assert instances[0]["session_id"] == "instance-1"
-            assert instances[1]["session_id"] == "instance-2"
+            assert instances[0]["instance_id"] == "instance-1"
+            assert instances[1]["instance_id"] == "instance-2"
             assert total == 2
 
 
@@ -568,7 +568,7 @@ class TestGenerateInstanceTitle:
             
             # Mock the instance repository to return a instance with no title
             mock_instance = MagicMock()
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
@@ -591,7 +591,7 @@ class TestGenerateInstanceTitle:
             
             # Mock the instance repository to return a instance with existing title
             mock_instance = MagicMock()
-            mock_instance.session_metadata = {"title": "Existing Title"}
+            mock_instance.instance_metadata = {"title": "Existing Title"}
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method - should return None since title exists
@@ -617,7 +617,7 @@ class TestGenerateInstanceTitle:
             
             # Mock the instance repository
             mock_instance = MagicMock()
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method - should not raise (exception is caught in try/except)
@@ -650,7 +650,7 @@ class TestGenerateInstanceTitle:
             
             # Mock the instance repository
             mock_instance = MagicMock()
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
@@ -694,7 +694,7 @@ class TestGenerateInstanceTitle:
             
             # Mock the instance repository
             mock_instance = MagicMock()
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
@@ -728,7 +728,7 @@ class TestGenerateAndBroadcastInstanceTitle:
             event = call_args[0][0]
             assert isinstance(event, Event)
             assert event.type == "title_updated"
-            assert event.session_id == "test-instance"
+            assert event.instance_id == "test-instance"
             assert event.message_id == ""
             assert event.data == {"title": "Test Title"}
 
@@ -791,7 +791,7 @@ class TestGenerateAndBroadcastInstanceTitle:
             
             # Assert event structure
             assert event.type == "title_updated"
-            assert event.session_id == "instance-123"
+            assert event.instance_id == "instance-123"
             assert event.message_id == ""
             assert event.data == {"title": "Exact Title"}
 
@@ -848,13 +848,13 @@ class TestTitleGenerationFireAndForget:
             # Mock dequeue to return one message then None
             queued_msg = QueuedMessage(
                 message_id="msg-123",
-                session_id="test-instance",
+                instance_id="test-instance",
                 content="Hello!",
                 source="test",
                 retry_count=0
             )
             manager._queue_repository = Mock()
-            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.dequeue_by_instance = Mock(side_effect=[queued_msg, None])
             manager._queue_repository.get_status = Mock(return_value="processing")
             manager._queue_repository.complete = Mock()
             manager._queue_repository.is_empty = Mock(return_value=True)
@@ -862,7 +862,7 @@ class TestTitleGenerationFireAndForget:
             # Mock instance metadata
             mock_instance = Mock()
             mock_instance.parent_id = None
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Record start time
@@ -922,13 +922,13 @@ class TestTitleGenerationFireAndForget:
             # Mock dequeue to return one message then None
             queued_msg = QueuedMessage(
                 message_id="msg-123",
-                session_id="test-instance",
-                content="Hello again!",
+                instance_id="test-instance",
+                content="Hello!",
                 source="test",
                 retry_count=0
             )
             manager._queue_repository = Mock()
-            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.dequeue_by_instance = Mock(side_effect=[queued_msg, None])
             manager._queue_repository.get_status = Mock(return_value="processing")
             manager._queue_repository.complete = Mock()
             manager._queue_repository.is_empty = Mock(return_value=True)
@@ -936,7 +936,7 @@ class TestTitleGenerationFireAndForget:
             # Mock instance metadata
             mock_instance = Mock()
             mock_instance.parent_id = None
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Run _process_queue
@@ -986,13 +986,13 @@ class TestTitleGenerationFireAndForget:
             # Mock dequeue to return one message then None
             queued_msg = QueuedMessage(
                 message_id="msg-123",
-                session_id="test-instance",
+                instance_id="test-instance",
                 content="Hello!",
                 source="test",
                 retry_count=0
             )
             manager._queue_repository = Mock()
-            manager._queue_repository.dequeue_by_session = Mock(side_effect=[queued_msg, None])
+            manager._queue_repository.dequeue_by_instance = Mock(side_effect=[queued_msg, None])
             manager._queue_repository.get_status = Mock(return_value="processing")
             manager._queue_repository.complete = Mock()
             manager._queue_repository.is_empty = Mock(return_value=True)
@@ -1000,7 +1000,7 @@ class TestTitleGenerationFireAndForget:
             # Mock instance metadata
             mock_instance = Mock()
             mock_instance.parent_id = None
-            mock_instance.session_metadata = {}
+            mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
             # Measure how long _process_queue takes

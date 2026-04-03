@@ -86,17 +86,17 @@ class JobRepository:
             job = db_session.get(JobItem, job_id)
             return job
 
-    def get_by_session(self, session_id: str) -> Optional[JobItem]:
-        """Get a job by session ID.
+    def get_by_instance(self, instance_id: str) -> Optional[JobItem]:
+        """Get a job by instance ID.
         
         Args:
-            session_id: Session identifier.
+            instance_id: Instance identifier.
             
         Returns:
             JobItem if found, None otherwise.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.session_id == session_id)
+            stmt = select(JobItem).where(JobItem.instance_id == instance_id)
             job = db_session.exec(stmt).first()
             return job
 
@@ -215,7 +215,7 @@ class JobRepository:
     def start_job(
         self,
         job_id: str,
-        session_id: str,
+        instance_id: str,
     ) -> Optional[JobItem]:
         """Mark a job as processing (started).
         
@@ -223,7 +223,7 @@ class JobRepository:
         
         Args:
             job_id: Job identifier.
-            session_id: Session ID that is processing this job.
+            instance_id: Instance ID that is processing this job.
             
         Returns:
             Updated JobItem if found, None otherwise.
@@ -242,7 +242,7 @@ class JobRepository:
             job_id,
             status=JobStatus.PROCESSING.value,
             started_at=datetime.utcnow().isoformat(),
-            session_id=session_id,
+            instance_id=instance_id,
         )
 
     def complete_job(

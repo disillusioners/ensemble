@@ -32,7 +32,7 @@ from sqlmodel import SQLModel, Session
 # Without these imports, SQLModel.metadata.create_all() won't create the tables
 from daemon.repositories.project.models import Project, ProjectTagLink, ProjectShortnameLink  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceHierarchy  # noqa: F401
-from daemon.repositories.source.models import SourceConfig, SessionMapping, ProcessedMessage, ScheduleExecution  # noqa: F401
+from daemon.repositories.source.models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution  # noqa: F401
 from daemon.repositories.job_queue.models import JobItem  # noqa: F401
 
 # Configure logging to see migration output

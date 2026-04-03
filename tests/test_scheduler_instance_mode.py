@@ -995,7 +995,7 @@ class TestInstanceModeEdgeCases:
 
 
 @pytest.fixture
-def mock_session_repo():
+def mock_instance_repo():
     """Create a mock SessionRepository."""
     repo = MagicMock()
     return repo
@@ -1004,7 +1004,7 @@ def mock_session_repo():
 class TestSkipInstanceRunning:
     """Tests for skipping execution when mapped instance is still running."""
 
-    def test_is_instance_active_returns_false_for_new_instance_mode(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_false_for_new_instance_mode(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns False for new_instance mode."""
         config = make_config("test-skip-new-instance", {
             "interval_seconds": 60,
@@ -1013,7 +1013,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "new_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1022,7 +1022,7 @@ class TestSkipInstanceRunning:
         assert instance_id is None
         assert status is None
 
-    def test_is_instance_active_returns_false_when_no_mapping(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_false_when_no_mapping(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns False when no instance mapping exists."""
         mock_source_repo.get_instance_mapping.return_value = None
         
@@ -1033,7 +1033,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1041,7 +1041,7 @@ class TestSkipInstanceRunning:
         assert instance_id is None
         assert status is None
 
-    def test_is_instance_active_returns_false_when_instance_idle(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_false_when_instance_idle(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns False when instance is idle."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-123"
@@ -1049,7 +1049,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "idle"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-idle-instance", {
             "interval_seconds": 60,
@@ -1058,7 +1058,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1066,7 +1066,7 @@ class TestSkipInstanceRunning:
         assert instance_id == "instance-123"
         assert status == "idle"
 
-    def test_is_instance_active_returns_true_when_instance_running(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_true_when_instance_running(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns True when instance is running."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-123"
@@ -1074,7 +1074,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "running"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-running-instance", {
             "interval_seconds": 60,
@@ -1083,7 +1083,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1091,7 +1091,7 @@ class TestSkipInstanceRunning:
         assert instance_id == "instance-123"
         assert status == "running"
 
-    def test_is_instance_active_returns_true_when_instance_waiting(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_true_when_instance_waiting(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns True when instance is waiting."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-456"
@@ -1099,7 +1099,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "waiting"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-waiting-instance", {
             "interval_seconds": 60,
@@ -1108,7 +1108,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1116,7 +1116,7 @@ class TestSkipInstanceRunning:
         assert instance_id == "instance-456"
         assert status == "waiting"
 
-    def test_is_instance_active_returns_false_when_instance_error(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_false_when_instance_error(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns False when instance is in error state."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-789"
@@ -1124,7 +1124,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "error"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-error-instance", {
             "interval_seconds": 60,
@@ -1133,7 +1133,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1141,7 +1141,7 @@ class TestSkipInstanceRunning:
         assert instance_id == "instance-789"
         assert status == "error"
 
-    def test_is_instance_active_returns_false_when_instance_terminated(self, mock_on_message, mock_source_repo, mock_session_repo):
+    def test_is_instance_active_returns_false_when_instance_terminated(self, mock_on_message, mock_source_repo, mock_instance_repo):
         """Test that _is_instance_active returns False when instance is terminated."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-terminated"
@@ -1149,7 +1149,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "terminated"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-terminated-instance", {
             "interval_seconds": 60,
@@ -1158,7 +1158,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1185,7 +1185,7 @@ class TestSkipInstanceRunning:
         assert status is None
 
     @pytest.mark.asyncio
-    async def test_skip_execution_when_instance_running(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+    async def test_skip_execution_when_instance_running(self, mock_on_message, mock_source_repo, mock_instance_repo, mock_execution_callback):
         """Test that execution is skipped when mapped instance is still running."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-running"
@@ -1193,7 +1193,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "running"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-execution-running", {
             "interval_seconds": 60,
@@ -1207,7 +1207,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_session_repo
+            session_repo=mock_instance_repo
         )
         await adapter.start()
         
@@ -1229,7 +1229,7 @@ class TestSkipInstanceRunning:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_execute_when_instance_idle(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+    async def test_execute_when_instance_idle(self, mock_on_message, mock_source_repo, mock_instance_repo, mock_execution_callback):
         """Test that execution proceeds when mapped instance is idle."""
         mock_mapping = MagicMock()
         mock_mapping.agent_instance_id = "instance-idle"
@@ -1237,7 +1237,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "idle"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-skip-execution-idle", {
             "interval_seconds": 60,
@@ -1251,7 +1251,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_session_repo
+            session_repo=mock_instance_repo
         )
         await adapter.start()
         
@@ -1271,7 +1271,7 @@ class TestSkipInstanceRunning:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_new_instance_mode_never_skips(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+    async def test_new_instance_mode_never_skips(self, mock_on_message, mock_source_repo, mock_instance_repo, mock_execution_callback):
         """Test that new_instance mode never skips regardless of instance state."""
         # Even if instance is "running", new_instance should not check instance state
         mock_mapping = MagicMock()
@@ -1280,7 +1280,7 @@ class TestSkipInstanceRunning:
         
         mock_session = MagicMock()
         mock_session.status = "running"
-        mock_session_repo.get.return_value = mock_session
+        mock_instance_repo.get.return_value = mock_session
         
         config = make_config("test-new-instance-never-skips", {
             "interval_seconds": 60,
@@ -1294,7 +1294,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_session_repo
+            session_repo=mock_instance_repo
         )
         await adapter.start()
         

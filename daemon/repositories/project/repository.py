@@ -93,7 +93,7 @@ class SQLModelProjectRepository:
         shortnames: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         project_id: str | None = None,
-        creator_session_id: str | None = None,
+        creator_instance_id: str | None = None,
         creator_agent_id: str | None = None,
     ) -> Project:
         """Create a new project."""
@@ -123,7 +123,7 @@ class SQLModelProjectRepository:
                 description=description,
                 project_metadata=metadata or {},
                 relationships={},
-                creator_session_id=creator_session_id,
+                creator_instance_id=creator_instance_id,
                 creator_agent_id=creator_agent_id,
                 created_at=now,
                 updated_at=now,
@@ -167,19 +167,19 @@ class SQLModelProjectRepository:
             project = session.exec(stmt).first()
             return self._enrich_project(session, project)
 
-    def get_by_session(self, session_id: str) -> list[Project]:
-        """Get all projects linked to a session."""
+    def get_by_instance(self, instance_id: str) -> list[Project]:
+        """Get all projects linked to an instance."""
         with Session(self.engine) as session:
             stmt = select(Project).where(
-                (Project.creator_session_id == session_id)
-                | col(Project.relationships).contains(f'"sessions"')
+                (Project.creator_instance_id == instance_id)
+                | col(Project.relationships).contains(f'"instances"')
             )
             projects = list(session.exec(stmt))
             result = []
             for p in projects:
-                if p.creator_session_id == session_id:
+                if p.creator_instance_id == instance_id:
                     result.append(p)
-                elif "sessions" in p.relationships and session_id in p.relationships.get("sessions", []):
+                elif "instances" in p.relationships and instance_id in p.relationships.get("instances", []):
                     result.append(p)
             return self._enrich_projects(session, result)
 
