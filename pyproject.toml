@@ -43,3 +43,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["daemon"]
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.3.0",
+]

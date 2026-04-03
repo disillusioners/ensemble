@@ -5,19 +5,7 @@ import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
-# Mock the langgraph module before importing persistence
-mock_sqlite_saver = MagicMock()
-mock_async_sqlite_saver = MagicMock()
-sys.modules['langgraph'] = MagicMock()
-sys.modules['langgraph.checkpoint'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite'].SqliteSaver = mock_sqlite_saver
-sys.modules['langgraph.checkpoint.sqlite.aio'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite.aio'].AsyncSqliteSaver = mock_async_sqlite_saver
-
-# Mock daemon.manager to avoid import chain issues
-sys.modules['daemon'] = MagicMock()
-sys.modules['daemon.manager'] = MagicMock()
+# langgraph mocking is handled by conftest.py
 
 from daemon.persistence import (
     get_checkpointer,

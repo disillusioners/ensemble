@@ -334,13 +334,19 @@ class MigrationRunner:
                                     f"Migration {migration.version}: column already exists, skipping (idempotent)"
                                 )
                             elif "no such table" in err_str:
-                                # Table doesn't exist - this is safe to skip when:
-                                # 1. create_all() already created tables with new names (rename migration)
-                                # 2. The table was never created (baseline migration on fresh DB)
-                                # 3. The table was already renamed by an earlier step
-                                logger.info(
-                                    f"Migration {migration.version}: table doesn't exist, skipping (idempotent)"
-                                )
+                                # Only treat as idempotent for CREATE statements
+                                # ALTER/UPDATE/INSERT/DELETE on nonexistent tables are real errors
+                                stmt_upper = stmt.upper().strip()
+                                if stmt_upper.startswith(("CREATE ", "CREATE\n")):
+                                    # Table doesn't exist - this is safe to skip when:
+                                    # 1. create_all() already created tables with new names (rename migration)
+                                    # 2. The table was never created (baseline migration on fresh DB)
+                                    # 3. The table was already renamed by an earlier step
+                                    logger.info(
+                                        f"Migration {migration.version}: table doesn't exist, skipping (idempotent)"
+                                    )
+                                else:
+                                    raise
                             elif "already exists" in err_str:
                                 # Table/index already exists - idempotent for CREATE statements
                                 logger.info(

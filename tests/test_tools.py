@@ -70,12 +70,12 @@ class TestBashTool:
 class TestListDirectoryTool:
     """Tests for list_directory tool."""
 
-    def test_list_directory_current(self):
+    def test_list_directory_current(self, tmp_path):
         """Test listing current directory."""
-        result = list_directory.invoke({})
+        result = list_directory.invoke({"path": ".", "workdir": str(tmp_path)})
 
-        # Should return some content (the current directory has files)
-        assert result != ""
+        # Should return some content (the empty directory has no output or "empty directory")
+        assert "empty" in result.lower() or result == ""
 
     def test_list_directory_specific_path(self, tmp_path):
         """Test listing a specific directory."""
@@ -84,7 +84,7 @@ class TestListDirectoryTool:
         (tmp_path / "file2.txt").write_text("content")
         (tmp_path / "subdir").mkdir()
 
-        result = list_directory.invoke({"path": str(tmp_path)})
+        result = list_directory.invoke({"path": ".", "workdir": str(tmp_path)})
 
         assert "file1.txt" in result
         assert "file2.txt" in result
@@ -98,7 +98,7 @@ class TestListDirectoryTool:
         normal_file = tmp_path / "visible.txt"
         normal_file.write_text("content")
 
-        result = list_directory.invoke({"path": str(tmp_path), "show_hidden": True})
+        result = list_directory.invoke({"path": ".", "workdir": str(tmp_path), "show_hidden": True})
 
         assert ".hidden" in result
         assert "visible.txt" in result
@@ -111,14 +111,14 @@ class TestListDirectoryTool:
         normal_file = tmp_path / "visible.txt"
         normal_file.write_text("content")
 
-        result = list_directory.invoke({"path": str(tmp_path), "show_hidden": False})
+        result = list_directory.invoke({"path": ".", "workdir": str(tmp_path), "show_hidden": False})
 
         assert ".hidden" not in result
         assert "visible.txt" in result
 
-    def test_list_directory_nonexistent(self):
+    def test_list_directory_nonexistent(self, tmp_path):
         """Test error for non-existent path."""
-        result = list_directory.invoke({"path": "/nonexistent_path_12345"})
+        result = list_directory.invoke({"path": "nonexistent_path_12345", "workdir": str(tmp_path)})
 
         assert "ERROR" in result
         assert "does not exist" in result
@@ -128,7 +128,7 @@ class TestListDirectoryTool:
         test_file = tmp_path / "testfile.txt"
         test_file.write_text("content")
 
-        result = list_directory.invoke({"path": str(test_file)})
+        result = list_directory.invoke({"path": "testfile.txt", "workdir": str(tmp_path)})
 
         assert "ERROR" in result
         assert "Not a directory" in result
@@ -138,7 +138,7 @@ class TestListDirectoryTool:
         empty_dir = tmp_path / "empty"
         empty_dir.mkdir()
 
-        result = list_directory.invoke({"path": str(empty_dir)})
+        result = list_directory.invoke({"path": "empty", "workdir": str(tmp_path)})
 
         assert "empty directory" in result.lower() or result == ""
 
@@ -151,7 +151,7 @@ class TestReadFileTool:
         test_file = tmp_path / "test.txt"
         test_file.write_text("line1\nline2\nline3")
 
-        result = read_file.invoke({"path": str(test_file)})
+        result = read_file.invoke({"path": "test.txt", "workdir": str(tmp_path)})
 
         assert "1: line1" in result
         assert "2: line2" in result
@@ -162,7 +162,7 @@ class TestReadFileTool:
         test_file = tmp_path / "test.txt"
         test_file.write_text("line1\nline2\nline3\nline4\nline5")
 
-        result = read_file.invoke({"path": str(test_file), "offset": 3})
+        result = read_file.invoke({"path": "test.txt", "workdir": str(tmp_path), "offset": 3})
 
         assert "3: line3" in result
         assert "4: line4" in result
@@ -175,7 +175,7 @@ class TestReadFileTool:
         test_file = tmp_path / "test.txt"
         test_file.write_text("line1\nline2\nline3\nline4\nline5")
 
-        result = read_file.invoke({"path": str(test_file), "limit": 2})
+        result = read_file.invoke({"path": "test.txt", "workdir": str(tmp_path), "limit": 2})
 
         assert "1: line1" in result
         assert "2: line2" in result
@@ -186,15 +186,15 @@ class TestReadFileTool:
         test_file = tmp_path / "test.txt"
         test_file.write_text("line1\nline2\nline3\nline4\nline5")
 
-        result = read_file.invoke({"path": str(test_file), "offset": 2, "limit": 2})
+        result = read_file.invoke({"path": "test.txt", "workdir": str(tmp_path), "offset": 2, "limit": 2})
 
         assert "2: line2" in result
         assert "3: line3" in result
         assert "line4" not in result
 
-    def test_read_file_nonexistent(self):
+    def test_read_file_nonexistent(self, tmp_path):
         """Test error for non-existent file."""
-        result = read_file.invoke({"path": "/nonexistent_file_12345.txt"})
+        result = read_file.invoke({"path": "nonexistent_file_12345.txt", "workdir": str(tmp_path)})
 
         assert "ERROR" in result
         assert "does not exist" in result
@@ -204,7 +204,7 @@ class TestReadFileTool:
         test_dir = tmp_path / "testdir"
         test_dir.mkdir()
 
-        result = read_file.invoke({"path": str(test_dir)})
+        result = read_file.invoke({"path": "testdir", "workdir": str(tmp_path)})
 
         assert "ERROR" in result
         assert "Not a file" in result
@@ -214,7 +214,7 @@ class TestReadFileTool:
         test_file = tmp_path / "test.txt"
         test_file.write_text("line1\nline2\nline3")
 
-        result = read_file.invoke({"path": str(test_file)})
+        result = read_file.invoke({"path": "test.txt", "workdir": str(tmp_path)})
 
         assert "3 lines total" in result
 
@@ -229,7 +229,7 @@ class TestGlobFilesTool:
         (tmp_path / "file2.py").write_text("python")
         (tmp_path / "file3.txt").write_text("text")
 
-        result = glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        result = glob_files.invoke({"pattern": "*.py", "path": ".", "workdir": str(tmp_path)})
 
         assert "file1.py" in result
         assert "file2.py" in result
@@ -239,13 +239,13 @@ class TestGlobFilesTool:
         """Test when no files match the pattern."""
         (tmp_path / "file1.txt").write_text("text")
 
-        result = glob_files.invoke({"pattern": "*.py", "path": str(tmp_path)})
+        result = glob_files.invoke({"pattern": "*.py", "path": ".", "workdir": str(tmp_path)})
 
         assert "No files matching" in result
 
-    def test_glob_files_nonexistent_path(self):
+    def test_glob_files_nonexistent_path(self, tmp_path):
         """Test error for non-existent path."""
-        result = glob_files.invoke({"pattern": "*.py", "path": "/nonexistent_path_12345"})
+        result = glob_files.invoke({"pattern": "*.py", "path": "nonexistent_path_12345", "workdir": str(tmp_path)})
 
         assert "ERROR" in result
         assert "does not exist" in result
@@ -258,7 +258,7 @@ class TestGlobFilesTool:
         (tmp_path / "file1.py").write_text("python")
         (subdir / "file2.py").write_text("python")
 
-        result = glob_files.invoke({"pattern": "**/*.py", "path": str(tmp_path)})
+        result = glob_files.invoke({"pattern": "**/*.py", "path": ".", "workdir": str(tmp_path)})
 
         assert "file1.py" in result
         assert "file2.py" in result or "subdir" in result
@@ -269,15 +269,17 @@ class TestGlobFilesTool:
         (tmp_path / "test.txt").write_text("text")
         (tmp_path / "test_dir").mkdir()
 
-        result = glob_files.invoke({"pattern": "test*", "path": str(tmp_path)})
+        result = glob_files.invoke({"pattern": "test*", "path": ".", "workdir": str(tmp_path)})
 
         # Should only contain the file, not the directory
         assert "test.txt" in result
 
-    def test_glob_files_default_path(self):
+    def test_glob_files_default_path(self, tmp_path):
         """Test glob with default path (current directory)."""
-        result = glob_files.invoke({"pattern": "*.py"})
+        # Create a test file first
+        (tmp_path / "test_glob.py").write_text("python")
 
-        # Should return some result (there are py files in the project)
-        # or "No files matching" if none in current dir
-        assert result != ""
+        result = glob_files.invoke({"pattern": "*.py", "path": ".", "workdir": str(tmp_path)})
+
+        # Should find the file
+        assert "test_glob.py" in result

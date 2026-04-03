@@ -78,7 +78,9 @@ async def test_instance_title_generation_e2e(
     4. Title appears in list_instances()
     """
     from daemon.manager import InstanceManager
-    from daemon.persistence import get_instance_metadata, list_all_instances
+    
+    # Use the manager's instance repository instead of standalone functions
+    # The manager._instance_repository is a SQLModelInstanceRepository
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
@@ -99,8 +101,9 @@ async def test_instance_title_generation_e2e(
     logger.info(f"[TEST] Instance created: {instance_id}")
     
     # Verify initial state - no title
-    initial_meta = get_instance_metadata(manager.conn, instance_id)
-    assert initial_meta is not None
+    instance = manager._instance_repository.get(instance_id)
+    assert instance is not None
+    initial_meta = instance.instance_metadata
     assert initial_meta["title"] is None, "Title should be None before first message"
     logger.info(f"[TEST] Initial title: {initial_meta['title']}")
     
@@ -196,15 +199,25 @@ async def test_instance_title_generation_e2e(
     assert title_updated_received, "title_updated event should be broadcast"
     
     # 2. Check that title is set in metadata
-    final_meta = get_instance_metadata(manager.conn, instance_id)
+    final_instance = manager._instance_repository.get(instance_id)
+    final_meta = final_instance.instance_metadata
     logger.info(f"[TEST] Final title from metadata: {final_meta['title']}")
     assert final_meta is not None
     assert final_meta["title"] is not None, "Title should be set after first message"
     assert len(final_meta["title"]) > 0, "Title should not be empty"
     
     # 3. Check that title appears in list_instances()
-    instances = list_all_instances(manager.conn)
-    logger.info(f"[TEST] Total instances: {len(instances)}")
+    instances_list, total = manager._instance_repository.list()
+    logger.info(f"[TEST] Total instances: {total}")
+    
+    # Convert to dict format for compatibility with existing test logic
+    instances = [
+        {
+            "instance_id": inst.instance_id,
+            "title": inst.instance_metadata.get("title"),
+        }
+        for inst in instances_list
+    ]
     
     instance = next((s for s in instances if s["instance_id"] == instance_id), None)
     assert instance is not None, "Instance should exist in list"
@@ -241,7 +254,7 @@ async def test_instance_title_not_regenerated(
     This tests the logic that skips title generation when title already exists.
     """
     from daemon.manager import InstanceManager
-    from daemon.persistence import get_instance_metadata, update_instance_title
+    # Use manager._instance_repository instead of standalone persistence functions
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
@@ -258,12 +271,12 @@ async def test_instance_title_not_regenerated(
     instance_id = manager.spawn_instance(agent_id="coder")
     
     # Pre-set a title before sending any messages
-    update_instance_title(manager.conn, instance_id, "Pre-set Title")
+    manager._instance_repository.update_title(instance_id, "Pre-set Title")
     logger.info(f"[TEST] Pre-set title: 'Pre-set Title'")
     
     # Verify title is set
-    meta = get_instance_metadata(manager.conn, instance_id)
-    assert meta["title"] == "Pre-set Title"
+    instance = manager._instance_repository.get(instance_id)
+    assert instance.instance_metadata["title"] == "Pre-set Title"
     
     # Send first message
     result = await manager.enqueue_message(
@@ -284,7 +297,8 @@ async def test_instance_title_not_regenerated(
         await asyncio.sleep(0.5)
     
     # Verify title is still the pre-set one (not regenerated)
-    final_meta = get_instance_metadata(manager.conn, instance_id)
+    final_instance = manager._instance_repository.get(instance_id)
+    final_meta = final_instance.instance_metadata
     logger.info(f"[TEST] Final title: {final_meta['title']}")
     
     # The title should NOT have been overwritten by a new generated title

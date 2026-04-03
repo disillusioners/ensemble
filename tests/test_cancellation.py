@@ -60,11 +60,12 @@ class TestCancellationReason:
         assert CancellationReason.WATCHDOG_RETRY.value == "watchdog_retry"
         assert CancellationReason.MANUAL.value == "manual"
         assert CancellationReason.SHUTDOWN.value == "shutdown"
+        assert CancellationReason.SESSION_TERMINATED.value == "session_terminated"
 
     def test_all_reasons_defined(self):
         """Ensure no missing reasons."""
         reasons = list(CancellationReason)
-        assert len(reasons) == 4
+        assert len(reasons) == 5
 
 
 # =============================================================================

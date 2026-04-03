@@ -28,7 +28,6 @@ from daemon.cancellation import CancellationReason
 from daemon.request_registry import ActiveRequestRegistry
 from daemon.repositories.message_queue import SQLModelMessageQueueRepository
 from daemon.repositories.message_queue.models import MessageQueue, MessageStatus as RepoMessageStatus
-from daemon.persistence import init_database
 
 
 @pytest.fixture
@@ -609,7 +608,7 @@ class TestInstanceWatchdog:
         # Message should be in retrying state
         msg = queue_repository.get(message.message_id)
         assert msg.status == "retrying"
-        assert msg.retry_count == 0  # Repository doesn't increment retry count
+        assert msg.retry_count == 1  # Watchdog increments from 0 to 1 on first retry
 
     def test_schedules_retry_for_stuck(self, watchdog, queue_repository):
         """Test that stuck messages are scheduled for retry."""
@@ -814,7 +813,7 @@ class TestQueueIntegration:
         # Message should be scheduled for retry
         msg = repo.get(message.message_id)
         assert msg.status == "retrying"
-        assert msg.retry_count == 0  # Repository doesn't increment retry count
+        assert msg.retry_count == 1  # Watchdog increments from 0 to 1 on first retry
 
     def test_full_retry_cycle(self, full_setup):
         """Test a complete retry cycle from failure to recovery."""
@@ -1058,7 +1057,7 @@ class TestWatchdogCancellationIntegration:
         # Message should be scheduled for retry
         msg = queue_repository.get(message.message_id)
         assert msg.status == "retrying"
-        assert msg.retry_count == 0  # Repository doesn't increment retry count
+        assert msg.retry_count == 1  # Watchdog increments from 0 to 1 on first retry
 
     def test_watchdog_cancels_via_registry(self, queue_repository, request_registry):
         """Watchdog calls registry.cancel with correct reason."""

@@ -44,7 +44,8 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
     "AsyncSqliteSaver": MagicMock()
 })
 
-# Pre-populate sys.modules
+# Save and replace modules (only for non-integration tests)
+_original_modules = {}
 _mock_modules = {
     "langgraph": mock_langgraph,
     "langgraph.graph": mock_langgraph_graph,
@@ -56,12 +57,23 @@ _mock_modules = {
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
 }
 
-# Save and replace modules
-_original_modules = {}
-for key in _mock_modules:
-    if key in sys.modules:
-        _original_modules[key] = sys.modules[key]
-    sys.modules[key] = _mock_modules[key]
+def pytest_collection_modifyitems(items):
+    """Only apply langgraph mocks for unit tests, not integration tests."""
+    import sys
+    for item in items:
+        if "integration" not in item.fspath.strpath:
+            # Apply mocks for this test
+            for key in _mock_modules:
+                if key in sys.modules:
+                    _original_modules[key] = sys.modules[key]
+                sys.modules[key] = _mock_modules[key]
+        else:
+            # Restore real modules for integration tests
+            for key in _mock_modules:
+                if key in _original_modules:
+                    sys.modules[key] = _original_modules[key]
+                elif key in sys.modules and sys.modules[key] is _mock_modules.get(key):
+                    del sys.modules[key]
 
 
 @pytest.fixture

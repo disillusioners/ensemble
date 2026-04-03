@@ -17,6 +17,7 @@ Or to run with specific verbose output:
 """
 
 import os
+import sys
 import pytest
 import asyncio
 import logging
@@ -26,6 +27,39 @@ from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 from datetime import datetime
+
+# Restore real langgraph modules for e2e tests that need actual execution
+# These tests are at the end of the test suite to avoid affecting other tests
+_original_modules = {}
+_langgraph_keys = [
+    "langgraph",
+    "langgraph.graph",
+    "langgraph.graph.state",
+    "langgraph.prebuilt",
+    "langgraph.constants",
+    "langgraph.checkpoint",
+    "langgraph.checkpoint.sqlite",
+    "langgraph.checkpoint.sqlite.aio",
+]
+for key in _langgraph_keys:
+    if key in sys.modules:
+        _original_modules[key] = sys.modules[key]
+        del sys.modules[key]
+
+
+def pytest_configure(config):
+    """Restore original modules after conftest runs."""
+    pass  # Modules already restored at import time
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Restore mock modules after all tests run."""
+    for key in _langgraph_keys:
+        if key in _original_modules:
+            sys.modules[key] = _original_modules[key]
+        elif key in sys.modules:
+            del sys.modules[key]
+
 
 # Setup logging
 logging.basicConfig(
@@ -163,6 +197,9 @@ async def test_single_message_no_duplicate_llm_calls(
     
     manager = InstanceManager(integration_config)
     
+    # Initialize async checkpointer and other async components
+    await manager.initialize()
+    
     # Ensure main loop is set for event broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
@@ -210,9 +247,9 @@ async def test_single_message_no_duplicate_llm_calls(
     while time.time() - start_time < wait_timeout:
         # Check if message was completed (check queue stats)
         stats = manager.get_queue_stats(instance_id)
-        logger.debug(f"[TEST] Queue stats: pending={stats.pending_count}, processing={stats.processing_count}")
+        logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
         
-        if stats.pending_count == 0 and stats.processing_count == 0:
+        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
             # Check if we got a response
             await asyncio.sleep(0.5)  # Small delay to ensure events are processed
             completed_received = True
@@ -257,9 +294,9 @@ async def test_single_message_no_duplicate_llm_calls(
         # Log detailed debugging info
         logger.error("[TEST] Checking queue state...")
         stats = manager.get_queue_stats(instance_id)
-        logger.error(f"[TEST]   Pending: {stats.pending_count}")
-        logger.error(f"[TEST]   Processing: {stats.processing_count}")
-        logger.error(f"[TEST]   Oldest age: {stats.oldest_message_age_seconds}s")
+        logger.error(f"[TEST]   Pending: {stats['pending_count']}")
+        logger.error(f"[TEST]   Processing: {stats['processing_count']}")
+        logger.error(f"[TEST]   Oldest age: {stats['oldest_message_age_seconds']}s")
         
         logger.error("[TEST] Checking processing set...")
         logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
@@ -303,6 +340,7 @@ async def test_sse_events_count(
     integration_config.persistence.db_path = str(test_db_path)
     
     manager = InstanceManager(integration_config)
+    await manager.initialize()
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
     # Track events
@@ -421,6 +459,7 @@ async def test_debug_llm_invocation_count(
     try:
         integration_config.persistence.db_path = str(test_db_path)
         manager = InstanceManager(integration_config)
+        await manager.initialize()
         manager.broadcaster.set_main_loop(asyncio.get_running_loop())
         
         project_root = Path(__file__).parent.parent.parent

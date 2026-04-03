@@ -273,6 +273,7 @@ class TestTelegramAdapterWebhook:
             "message": {
                 "message_id": 1,
                 "chat": {"id": 123456},
+                "from": {"id": 789, "username": "testuser"},
                 "text": "Hello",
             }
         }
@@ -291,6 +292,7 @@ class TestTelegramAdapterWebhook:
             "message": {
                 "message_id": 1,
                 "chat": {"id": 123456},
+                "from": {"id": 789, "username": "testuser"},
                 "text": "Hello",
             }
         }
@@ -325,7 +327,7 @@ class TestTelegramAdapterProcessUpdate:
         msg = mock_on_message.call_args[0][0]
         
         assert isinstance(msg, IncomingMessage)
-        assert msg.external_user_id == "123456"
+        assert msg.external_user_id == "789"  # from_user_id for private chat
         assert msg.content == "Hello bot!"
         assert msg.message_type == "text"
         assert msg.metadata["telegram"]["chat_type"] == "private"
@@ -340,6 +342,7 @@ class TestTelegramAdapterProcessUpdate:
             "message": {
                 "message_id": 100,
                 "chat": {"id": 123456},
+                "from": {"id": 789, "username": "testuser"},
                 "text": "/start",
                 "entities": [{"type": "bot_command", "offset": 0, "length": 6}],
             }
@@ -377,6 +380,7 @@ class TestTelegramAdapterProcessUpdate:
             "message": {
                 "message_id": 100,
                 "chat": {"id": 123456},
+                "from": {"id": 789, "username": "testuser"},
                 "photo": [{"file_id": "abc123"}],
             }
         }
@@ -396,6 +400,7 @@ class TestTelegramAdapterProcessUpdate:
             "edited_message": {
                 "message_id": 100,
                 "chat": {"id": 123456},
+                "from": {"id": 789, "username": "testuser"},
                 "text": "Edited text",
                 "edit_date": 1234567900,
             }
@@ -516,9 +521,9 @@ class TestTelegramAdapterPollingRobustness:
         
         # Simulate the polling loop behavior manually
         updates = [
-            {"update_id": 1, "message": {"message_id": 100, "chat": {"id": 123}, "text": "msg1"}},
-            {"update_id": 2, "message": {"message_id": 101, "chat": {"id": 123}, "text": "msg2"}},
-            {"update_id": 3, "message": {"message_id": 102, "chat": {"id": 123}, "text": "msg3"}},
+            {"update_id": 1, "message": {"message_id": 100, "chat": {"id": 123}, "from": {"id": 789}, "text": "msg1"}},
+            {"update_id": 2, "message": {"message_id": 101, "chat": {"id": 123}, "from": {"id": 789}, "text": "msg2"}},
+            {"update_id": 3, "message": {"message_id": 102, "chat": {"id": 123}, "from": {"id": 789}, "text": "msg3"}},
         ]
         
         # Make the second message fail

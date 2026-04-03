@@ -75,7 +75,7 @@ async def test_list_agents_success(client_with_temp_agents):
     """Test GET /agents returns list of available agents."""
     client, _ = client_with_temp_agents
     
-    response = await client.get("/agents")
+    response = await client.get("/api/agents")
     
     assert response.status_code == 200
     data = response.json()
@@ -96,7 +96,7 @@ async def test_list_agents_excludes_internal(client_with_temp_agents):
     """Test GET /agents excludes internal agents (starting with _)."""
     client, _ = client_with_temp_agents
     
-    response = await client.get("/agents")
+    response = await client.get("/api/agents")
     
     assert response.status_code == 200
     agents = response.json()["agents"]
@@ -116,7 +116,7 @@ async def test_list_agents_empty_directory(client_with_temp_agents):
     coder_dir = temp_agents_dir / "coder"
     shutil.rmtree(coder_dir)
     
-    response = await client.get("/agents")
+    response = await client.get("/api/agents")
     
     assert response.status_code == 200
     data = response.json()
@@ -132,7 +132,7 @@ async def test_list_agents_missing_meta_json(client_with_temp_agents):
     no_meta_dir = temp_agents_dir / "no-meta-agent"
     no_meta_dir.mkdir()
     
-    response = await client.get("/agents")
+    response = await client.get("/api/agents")
     
     assert response.status_code == 200
     agents = response.json()["agents"]
@@ -150,7 +150,7 @@ async def test_create_agent_success(client_with_temp_agents):
     client, temp_agents_dir = client_with_temp_agents
     
     response = await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "test-agent",
             "name": "Test Agent",
@@ -185,7 +185,7 @@ async def test_create_agent_already_exists(client_with_temp_agents):
     client, _ = client_with_temp_agents
     
     response = await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "coder",  # Already exists
             "name": "Another Coder",
@@ -205,7 +205,7 @@ async def test_create_agent_invalid_id(client_with_temp_agents):
     client, _ = client_with_temp_agents
     
     response = await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "Invalid ID!",  # Contains spaces and special chars
             "name": "Invalid",
@@ -225,7 +225,7 @@ async def test_create_agent_with_hyphens_and_underscores(client_with_temp_agents
     client, _ = client_with_temp_agents
     
     response = await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "my_test-agent",
             "name": "Valid ID",
@@ -243,7 +243,7 @@ async def test_create_agent_default_values(client_with_temp_agents):
     client, _ = client_with_temp_agents
     
     response = await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "minimal-agent",
             "name": "Minimal Agent"
@@ -266,7 +266,7 @@ async def test_delete_agent_success(client_with_temp_agents):
     
     # First create an agent to delete
     await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "to-delete",
             "name": "To Delete",
@@ -278,7 +278,7 @@ async def test_delete_agent_success(client_with_temp_agents):
     assert (temp_agents_dir / "to-delete").exists()
     
     # Delete it
-    response = await client.delete("/agents/to-delete")
+    response = await client.delete("/api/agents/to-delete")
     
     assert response.status_code == 200
     data = response.json()
@@ -302,7 +302,7 @@ async def test_delete_agent_not_found(client_with_temp_agents):
     """Test DELETE /agents/{id} with non-existent agent returns 404."""
     client, _ = client_with_temp_agents
     
-    response = await client.delete("/agents/non-existent")
+    response = await client.delete("/api/agents/non-existent")
     
     assert response.status_code == 404
     data = response.json()
@@ -316,7 +316,7 @@ async def test_delete_agent_internal_forbidden(client_with_temp_agents):
     client, _ = client_with_temp_agents
     
     # Try to delete _inner_soul
-    response = await client.delete("/agents/_inner_soul")
+    response = await client.delete("/api/agents/_inner_soul")
     
     assert response.status_code == 400
     data = response.json()
@@ -331,7 +331,7 @@ async def test_delete_agent_preserves_in_trash(client_with_temp_agents):
     
     # Create and delete an agent
     await client.post(
-        "/agents",
+        "/api/agents",
         json={
             "id": "preserve-test",
             "name": "Preserve Test",
@@ -339,7 +339,7 @@ async def test_delete_agent_preserves_in_trash(client_with_temp_agents):
         }
     )
     
-    response = await client.delete("/agents/preserve-test")
+    response = await client.delete("/api/agents/preserve-test")
     trashed_name = response.json()["trashed_as"]
     
     # Verify files are preserved in trash
@@ -362,14 +362,14 @@ async def test_delete_agent_multiple_same_id(client_with_temp_agents):
     # Create, delete, create again, delete again
     for i in range(2):
         await client.post(
-            "/agents",
+            "/api/agents",
             json={
                 "id": "multi-delete",
                 "name": f"Multi Delete {i}",
                 "description": "Test"
             }
         )
-        response = await client.delete("/agents/multi-delete")
+        response = await client.delete("/api/agents/multi-delete")
         assert response.status_code == 200
     
     # Verify both are in trash with unique names

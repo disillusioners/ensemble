@@ -44,7 +44,7 @@ def conn():
             external_user_id TEXT NOT NULL,
             agent_instance_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
-            metadata JSON,
+            mapping_metadata JSON,
             last_message_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(source_id, external_user_id),
@@ -218,7 +218,7 @@ def test_save_instance_mapping(conn):
     assert mapping["external_user_id"] == "user123"
     assert mapping["agent_instance_id"] == "instance-abc"
     assert mapping["agent_dir"] == "/path/to/agent"
-    assert mapping["metadata"] == {"key": "value"}
+    assert mapping["mapping_metadata"] == {"key": "value"}
 
 
 def test_save_instance_mapping_duplicate(conn):
@@ -243,7 +243,7 @@ def test_save_instance_mapping_duplicate(conn):
     mapping = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     assert mapping["agent_instance_id"] == "instance-xyz"
     assert mapping["agent_dir"] == "/new/path"
-    assert mapping["metadata"] == {"key": "value2"}
+    assert mapping["mapping_metadata"] == {"key": "value2"}
 
 
 def test_get_instance_mapping(conn):

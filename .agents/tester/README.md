@@ -18,4 +18,5 @@ Persistent multi-agent daemon built with LangGraph. Agents defined by markdown f
 Testing memory system improvements (inner_soul, access_memory, load_recent_memories, cache invalidation).
 
 ## Recent Test Runs
+- **2026-04-03**: Full suite fix — 1099 passed, 12 skipped (need OPENAI_API_KEY), 0 failed. Fixed session→instance rename issues, agent_dir→agent_id, SQLAlchemy session mismatch, job queue fixtures, lock manager deadlock. See `RESULTS/2026-04-03-full-test-suite-fix.md`
 - **2026-04-02**: Title generation fire-and-forget fix — 7 new unit tests added (all 38 pass). See `RESULTS/2026-04-02-title-generation-fix.md`

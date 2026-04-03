@@ -80,9 +80,8 @@ async def mock_manager():
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
             agent_instance_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
-            metadata TEXT,
+            mapping_metadata TEXT,
             last_message_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(source_id, external_user_id)
@@ -93,6 +92,49 @@ async def mock_manager():
     manager._temp_db_path = temp_db_path  # Store for cleanup
     # Mock source_registry
     manager.source_registry = None
+    
+    # Mock _source_repository for source management tests
+    created_sources = {}
+    def mock_get_source(source_id):
+        return created_sources.get(source_id)
+    def mock_create_source(**kwargs):
+        source = MagicMock()
+        source.source_id = kwargs.get('source_id', 'test')
+        source.source_type = kwargs.get('source_type', 'telegram')
+        source.name = kwargs.get('name', 'Test')
+        source.config = kwargs.get('config', {})
+        source.enabled = kwargs.get('enabled', True)
+        source.status = 'stopped'
+        source.error_message = None
+        source.created_at = '2024-01-01T00:00:00'
+        source.updated_at = '2024-01-01T00:00:00'
+        created_sources[source.source_id] = source
+        return source
+    def mock_update_source(**kwargs):
+        source = MagicMock()
+        source.source_id = kwargs.get('source_id', 'test')
+        source.source_type = kwargs.get('source_type', 'telegram')
+        source.name = kwargs.get('name', 'Test')
+        source.config = kwargs.get('config', {})
+        source.enabled = kwargs.get('enabled', True)
+        source.status = 'stopped'
+        source.error_message = None
+        source.created_at = '2024-01-01T00:00:00'
+        source.updated_at = '2024-01-01T00:00:00'
+        created_sources[source.source_id] = source
+        return source
+    
+    manager._source_repository = MagicMock()
+    manager._source_repository.list_source_configs = MagicMock(return_value=[])
+    manager._source_repository.get_source_config = MagicMock(side_effect=mock_get_source)
+    manager._source_repository.create_source_config = MagicMock(side_effect=mock_create_source)
+    manager._source_repository.update_source_config = MagicMock(side_effect=mock_update_source)
+    def mock_delete_source(source_id):
+        created_sources.pop(source_id, None)
+        return True
+    manager._source_repository.delete_source_config = MagicMock(side_effect=mock_delete_source)
+    manager._source_repository.list_session_mappings = MagicMock(return_value=[])
+    
     yield manager
     # Cleanup: close connection and delete temp file
     try:
@@ -162,7 +204,7 @@ async def test_create_instance_max_limit(client, mock_manager):
     """Test POST /instances with max instances exceeded."""
     # Configure mock to raise ValueError (as the real manager does)
     mock_manager.spawn_instance.side_effect = ValueError(
-        "Max instances limit reached: 5"
+        "Max sessions limit reached: 5"
     )
     
     response = await client.post(

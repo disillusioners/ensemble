@@ -196,8 +196,17 @@ class TestLoadConfig:
 class TestConfigValidation:
     """Tests for Config model validation."""
 
-    def test_config_with_defaults(self):
-        """Test that Config model validates with default values."""
+    def test_config_with_defaults(self, monkeypatch):
+        """Test that Config model validates with default values.
+        
+        Clear environment variables to ensure we're testing actual defaults,
+        not values from .env or environment variables.
+        """
+        # Clear LLM-related environment variables
+        for key in list(os.environ.keys()):
+            if key.startswith("OPENAI_") or key.lower() in ("base_url", "llm_base_url"):
+                monkeypatch.delenv(key, raising=False)
+        
         config = Config()
         
         assert config.llm.base_url == "https://api.openai.com/v1"
@@ -239,9 +248,18 @@ class TestConfigValidation:
 class TestLLMConfig:
     """Tests for LLMConfig."""
 
-    def test_llm_config_defaults(self):
-        """Test LLMConfig default values."""
+    def test_llm_config_defaults(self, monkeypatch):
+        """Test LLMConfig default values.
+        
+        Clear environment variables to ensure we're testing actual defaults,
+        not values from .env or environment variables.
+        """
         from daemon.config import LLMConfig
+        
+        # Clear LLM-related environment variables
+        for key in list(os.environ.keys()):
+            if key.startswith("OPENAI_") or key.lower() in ("base_url", "llm_base_url"):
+                monkeypatch.delenv(key, raising=False)
         
         config = LLMConfig()
         

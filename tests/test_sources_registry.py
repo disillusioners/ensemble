@@ -130,6 +130,31 @@ def mock_manager():
     # Mock spawn_instance
     manager.spawn_instance = MagicMock(return_value="test-instance-id")
     
+    # Mock _process_queue (called via asyncio.create_task)
+    manager._process_queue = AsyncMock()
+    
+    # Mock source repository (used by InstanceMapper in _handle_message)
+    mock_source_repo = MagicMock()
+    mock_source_repo.check_and_mark_processed = MagicMock(return_value=False)  # Not a duplicate
+    mock_source_repo.get_instance_mapping = MagicMock(return_value=None)
+    mock_source_repo.create_instance_mapping = MagicMock(return_value=MagicMock(
+        mapping_id="test-mapping-id",
+        source_id="test-source",
+        external_user_id="user123",
+        agent_instance_id="test-instance",
+        agent_id="coder",
+        agent_dir="/default/agents",
+        mapping_metadata={},
+        last_message_at=None,
+        created_at="2024-01-01T00:00:00",
+    ))
+    mock_source_repo.delete_instance_mapping = MagicMock()
+    mock_source_repo.list_source_configs = MagicMock(return_value=[])
+    mock_source_repo.update_source_status = MagicMock()
+    mock_source_repo.get_source_config = MagicMock(return_value=None)
+    mock_source_repo.update_source_config = MagicMock()
+    manager._source_repo = mock_source_repo
+    
     return manager
 
 
@@ -138,7 +163,7 @@ def mock_manager():
 
 def test_register_adapter(conn, mock_manager):
     """Test registering a new adapter."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test Adapter", {}, {})
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -149,7 +174,7 @@ def test_register_adapter(conn, mock_manager):
 
 def test_register_duplicate_raises(conn, mock_manager):
     """Test that registering a duplicate adapter raises ValueError."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test Adapter", {}, {})
     adapter1 = MockMessageAdapter(config, lambda msg: None)
     adapter2 = MockMessageAdapter(config, lambda msg: None)
@@ -163,7 +188,7 @@ def test_register_duplicate_raises(conn, mock_manager):
 
 def test_unregister_adapter(conn, mock_manager):
     """Test removing an adapter from the registry."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test Adapter", {}, {})
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -178,7 +203,7 @@ def test_unregister_adapter(conn, mock_manager):
 
 def test_unregister_unknown_returns_false(conn, mock_manager):
     """Test that unregistering an unknown adapter returns False."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     result = registry.unregister("unknown-source")
     
@@ -187,7 +212,7 @@ def test_unregister_unknown_returns_false(conn, mock_manager):
 
 def test_get_returns_registered_adapter(conn, mock_manager):
     """Test that get returns the registered adapter."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("my-source", "webhook", "My Source", {}, {})
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -200,7 +225,7 @@ def test_get_returns_registered_adapter(conn, mock_manager):
 
 def test_get_returns_none_for_unknown(conn, mock_manager):
     """Test that get returns None for unknown source."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     result = registry.get("unknown-source")
     
@@ -212,7 +237,7 @@ def test_get_returns_none_for_unknown(conn, mock_manager):
 
 def test_list_adapters_empty(conn, mock_manager):
     """Test that list_adapters returns empty list initially."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     result = registry.list_adapters()
     
@@ -221,7 +246,7 @@ def test_list_adapters_empty(conn, mock_manager):
 
 def test_list_adapters_returns_all(conn, mock_manager):
     """Test that list_adapters returns all registered adapters."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Register multiple adapters
     config1 = SourceConfig("source-1", "telegram", "Telegram 1", {}, {})
@@ -243,7 +268,7 @@ def test_list_adapters_returns_all(conn, mock_manager):
 
 def test_adapter_status_tracking(conn, mock_manager):
     """Test that adapter status is tracked correctly."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test", {}, {})
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -267,7 +292,7 @@ def test_adapter_status_tracking(conn, mock_manager):
 @pytest.mark.asyncio
 async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
     """Test that handle_message calls queue.enqueue with correct parameters."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Create a test message
     msg = IncomingMessage(
@@ -277,11 +302,19 @@ async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
         metadata={"message_id": "msg-001"}
     )
     
-    # Mock persistence functions to avoid database operations
-    with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
-        
-        # Setup mock mapper
+    # Configure mock source repo - not a duplicate
+    mock_manager._source_repo.check_and_mark_processed = MagicMock(return_value=False)
+    
+    # Mock InstanceMapper to return our test instance
+    with patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper, \
+         patch('daemon.sources.mapper.get_registry') as mock_get_registry:
+        mock_agent_registry = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.path = "/default/agents"
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(return_value=mock_agent)
+        mock_get_registry.return_value = mock_agent_registry
+
         mock_mapper_instance = MagicMock()
         mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
         MockInstanceMapper.return_value = mock_mapper_instance
@@ -304,7 +337,7 @@ async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
 @pytest.mark.asyncio
 async def test_handle_message_checks_duplicate(conn, mock_manager):
     """Test that handle_message checks for duplicate messages."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Create a test message with a message_id
     msg = IncomingMessage(
@@ -314,23 +347,23 @@ async def test_handle_message_checks_duplicate(conn, mock_manager):
         metadata={"message_id": "duplicate-msg-id"}
     )
     
-    # Mock is_duplicate_message to return True (duplicate)
-    with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=True) as mock_dup_check:
-        
-        # Call handle_message
-        await registry._handle_message("test-source", msg)
-        
-        # Verify duplicate check was called
-        mock_dup_check.assert_called_once_with(conn, "test-source", "duplicate-msg-id")
-        
-        # queue.enqueue should NOT be called for duplicates
-        mock_manager.queue.enqueue.assert_not_called()
+    # Configure mock source repo to return True (duplicate)
+    mock_manager._source_repo.check_and_mark_processed = MagicMock(return_value=True)
+    
+    # Call handle_message
+    await registry._handle_message("test-source", msg)
+    
+    # Verify duplicate check was called
+    mock_manager._source_repo.check_and_mark_processed.assert_called_once_with("test-source", "duplicate-msg-id")
+    
+    # queue.enqueue should NOT be called for duplicates
+    mock_manager.queue.enqueue.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_handle_message_creates_instance_for_new_user(conn, mock_manager):
     """Test that new users get a new instance created."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Create a test message
     msg = IncomingMessage(
@@ -340,10 +373,19 @@ async def test_handle_message_creates_instance_for_new_user(conn, mock_manager):
         metadata={"message_id": "msg-002"}
     )
     
-    # Mock persistence functions
-    with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
-        
+    # Configure mock source repo - not a duplicate
+    mock_manager._source_repo.check_and_mark_processed = MagicMock(return_value=False)
+    
+    # Mock InstanceMapper
+    with patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper, \
+         patch('daemon.sources.mapper.get_registry') as mock_get_registry:
+        mock_agent_registry = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.path = "/default/agents"
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(return_value=mock_agent)
+        mock_get_registry.return_value = mock_agent_registry
+
         # Setup mock mapper to simulate new user (no existing instance)
         mock_mapper_instance = MagicMock()
         mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="new-instance-id")
@@ -363,7 +405,7 @@ async def test_handle_message_creates_instance_for_new_user(conn, mock_manager):
 @pytest.mark.asyncio
 async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
     """Test that agent_dir from message metadata is used when present."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Create a test message with agent_dir in metadata
     msg = IncomingMessage(
@@ -373,9 +415,19 @@ async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
         metadata={"message_id": "msg-003", "agent_dir": "/custom/agents"}
     )
     
-    with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
-        
+    # Configure mock source repo - not a duplicate
+    mock_manager._source_repo.check_and_mark_processed = MagicMock(return_value=False)
+    
+    # Mock InstanceMapper
+    with patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper, \
+         patch('daemon.sources.mapper.get_registry') as mock_get_registry:
+        mock_agent_registry = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.path = "/custom/agents"
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(return_value=mock_agent)
+        mock_get_registry.return_value = mock_agent_registry
+
         mock_mapper_instance = MagicMock()
         mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
         MockInstanceMapper.return_value = mock_mapper_instance
@@ -386,14 +438,15 @@ async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
         mock_mapper_instance.get_or_create_instance.assert_called_once_with(
             source_id="test-source",
             external_user_id="user123",
-            agent_dir="/custom/agents"
+            agent_id="/custom/agents",
+            force_new=False,
         )
 
 
 @pytest.mark.asyncio
 async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
     """Test that default agent_dir is used when not in metadata."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     # Create a test message WITHOUT agent_dir in metadata
     msg = IncomingMessage(
@@ -403,9 +456,19 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
         metadata={"message_id": "msg-004"}  # No agent_dir
     )
     
-    with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
-        
+    # Configure mock source repo - not a duplicate
+    mock_manager._source_repo.check_and_mark_processed = MagicMock(return_value=False)
+    
+    # Mock InstanceMapper
+    with patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper, \
+         patch('daemon.sources.mapper.get_registry') as mock_get_registry:
+        mock_agent_registry = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.path = "/default/agents"
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(return_value=mock_agent)
+        mock_get_registry.return_value = mock_agent_registry
+
         mock_mapper_instance = MagicMock()
         mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
         MockInstanceMapper.return_value = mock_mapper_instance
@@ -416,7 +479,8 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
         mock_mapper_instance.get_or_create_instance.assert_called_once_with(
             source_id="test-source",
             external_user_id="user123",
-            agent_dir="/default/agents"  # From mock_manager.config.agents.directory
+            agent_id="/default/agents",
+            force_new=False,
         )
 
 
@@ -425,7 +489,7 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
 
 def test_list_adapters_includes_status_info(conn, mock_manager):
     """Test that list_adapters includes detailed status information."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test", {}, {}, enabled=True)
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -445,7 +509,7 @@ def test_list_adapters_includes_status_info(conn, mock_manager):
 
 def test_unregister_cancels_supervisor_task(conn, mock_manager):
     """Test that unregistering cancels the supervisor task if running."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     config = SourceConfig("test-source", "telegram", "Test", {}, {})
     adapter = MockMessageAdapter(config, lambda msg: None)
     
@@ -465,7 +529,7 @@ def test_unregister_cancels_supervisor_task(conn, mock_manager):
 
 def test_get_with_empty_registry(conn, mock_manager):
     """Test that get returns None for empty registry."""
-    registry = SourceRegistry(conn, mock_manager)
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
     
     result = registry.get("nonexistent")
     
