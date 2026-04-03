@@ -1,4 +1,4 @@
-"""Session manager orchestrating all agent sessions."""
+"""Instance manager orchestrating all agent instances."""
 
 import uuid
 import logging
@@ -17,14 +17,14 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from .config import Config
-from .graph import build_session_graph
+from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
     get_session_messages,
     get_checkpointer,
 )
 from .repositories import (
-    SQLModelSessionRepository,
+    SQLModelInstanceRepository,
     SQLModelProjectRepository,
     SQLModelSourceRepository,
     SQLModelMessageQueueRepository,
@@ -39,8 +39,8 @@ from .registry import get_registry
 
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
 from .repositories.session.repository import get_agent_name
-from .repositories.session.models import Session
-from .tools import create_session_tools
+from .repositories.session.models import Instance
+from .tools import create_instance_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .cancellation import (
@@ -208,7 +208,7 @@ class CancellationCallbackHandler(BaseCallbackHandler):
 
 @dataclass
 class MessageResult:
-    """Result of sending a message to a session."""
+    """Result of sending a message to an instance."""
     content: str
     thinking: str | None = None
     thinking_extracted: str | None = None  # Extracted from <think/> tags in content
@@ -219,7 +219,7 @@ class MessageResult:
 class AsyncMessageResult:
     """Result of async message enqueue."""
     message_id: str
-    session_id: str
+    instance_id: str
     status: str = "queued"
 
 
@@ -250,11 +250,11 @@ def parse_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-class SessionManager:
-    """Manages all agent sessions, their graphs, and lifecycle."""
+class InstanceManager:
+    """Manages all agent instances, their graphs, and lifecycle."""
 
     def __init__(self, config: Config):
-        """Initialize the session manager.
+        """Initialize the instance manager.
 
         Args:
             config: Configuration object with LLM, limits, and persistence settings.
@@ -265,8 +265,8 @@ class SessionManager:
         self._checkpointer_db_path = Path(config.persistence.checkpointer_db_path)
         self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
-        # Maps session_id to tuple of (graph, agent_dir)
-        self.sessions: dict[str, tuple[CompiledStateGraph, str]] = {}
+        # Maps instance_id to tuple of (graph, agent_dir)
+        self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
 
         # Create ONE shared database engine for all repositories
         # This prevents database lock contention when multiple components
@@ -305,7 +305,7 @@ class SessionManager:
         self._request_registry = ActiveRequestRegistry()
         
         # Callback for watchdog to notify about failed messages
-        def _on_watchdog_message_failed(session_id: str, message_id: str, error: str) -> None:
+        def _on_watchdog_message_failed(instance_id: str, message_id: str, error: str) -> None:
             """Handle watchdog message failure from sync thread.
             
             Schedules async error report using the stored event loop reference.
@@ -313,17 +313,17 @@ class SessionManager:
             # Use stored loop reference (set during initialize())
             loop = self._loop
             if loop is None:
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop not initialized")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop not initialized")
                 return
             
             if loop.is_closed():
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop is closed")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop is closed")
                 return
             
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._send_error_report(
-                        session_id=session_id,
+                        instance_id=instance_id,
                         error=f"Watchdog timeout: {error}",
                         error_type="watchdog_timeout",
                         message_id=message_id
@@ -333,14 +333,14 @@ class SessionManager:
                 # Add timeout to prevent hanging if loop is shutting down
                 future.result(timeout=5.0)
             except RuntimeError as e:
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: {e}")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: {e}")
             except TimeoutError:
-                logger.warning(f"Error report timed out for {session_id[:8]}...")
+                logger.warning(f"Error report timed out for {instance_id[:8]}...")
             except Exception as e:
-                logger.error(f"Unexpected error sending error report for {session_id[:8]}...: {e}")
+                logger.error(f"Unexpected error sending error report for {instance_id[:8]}...: {e}")
         
         # Callback for watchdog to trigger re-processing of retry-ready messages
-        def _on_watchdog_retry_ready(session_ids: list[str]) -> None:
+        def _on_watchdog_retry_ready(instance_ids: list[str]) -> None:
             """Handle retry-ready messages from watchdog sync thread.
             
             Triggers _process_queue for each session with retry-ready messages.
@@ -355,21 +355,21 @@ class SessionManager:
                 logger.warning("Cannot trigger retry processing: event loop is closed")
                 return
             
-            for session_id in session_ids:
+            for instance_id in instance_ids:
                 try:
-                    logger.info(f"Triggering retry processing for session {session_id[:8]}...")
+                    logger.info(f"Triggering retry processing for instance {instance_id[:8]}...")
                     future = asyncio.run_coroutine_threadsafe(
-                        self._process_queue(session_id),
+                        self._process_queue(instance_id),
                         loop
                     )
                     # Add timeout to prevent hanging
                     future.result(timeout=5.0)
                 except RuntimeError as e:
-                    logger.warning(f"Cannot trigger retry for {session_id[:8]}...: {e}")
+                    logger.warning(f"Cannot trigger retry for {instance_id[:8]}...: {e}")
                 except TimeoutError:
-                    logger.warning(f"Retry trigger timed out for {session_id[:8]}...")
+                    logger.warning(f"Retry trigger timed out for {instance_id[:8]}...")
                 except Exception as e:
-                    logger.error(f"Error triggering retry processing for {session_id[:8]}...: {e}")
+                    logger.error(f"Error triggering retry processing for {instance_id[:8]}...: {e}")
         
         self.watchdog = SessionWatchdog(
             self._queue_repository,
@@ -390,13 +390,13 @@ class SessionManager:
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
-        self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
+        self._instance_repository = create_session_repository(engine=self._engine, create_tables=False)
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
             source_repo=self._source_repository,
             manager=self,
-            session_repo=self._session_repository,
+            session_repo=self._instance_repository,
         )
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
@@ -431,7 +431,7 @@ class SessionManager:
     async def initialize(self) -> None:
         """Initialize the async checkpointer.
         
-        Must be called after SessionManager construction, typically in the FastAPI
+        Must be called after InstanceManager construction, typically in the FastAPI
         lifespan startup. This ensures the async checkpointer is created within
         an async context.
         
@@ -440,12 +440,12 @@ class SessionManager:
         """
         self._loop = asyncio.get_running_loop()
         self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
-        logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
+        logger.info(f"InstanceManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
         
-        This is called by api.py after both SessionManager and JobQueueService
+        This is called by api.py after both InstanceManager and JobQueueService
         are created during application startup. The service is also wired into
         the SourceRegistry so that SchedulerAdapter can route jobs through the
         job queue when project_id is configured.
@@ -458,27 +458,27 @@ class SessionManager:
         if hasattr(self, 'source_registry') and self.source_registry:
             self.source_registry._job_queue_service = service
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
-        logger.info("JobQueueService connected to SessionManager")
+        logger.info("JobQueueService connected to InstanceManager")
 
-    def spawn_session(
+    def spawn_instance(
         self, 
         agent_id: str,
-        session_id: str | None = None, 
+        instance_id: str | None = None, 
         parent_id: str | None = None,
         project_id: str | None = None,
     ) -> str:
-        """Create a new agent session.
+        """Create a new agent instance.
 
         Args:
             agent_id: Agent ID (e.g., "coder").
-            session_id: Optional session ID. Auto-generated if not provided or invalid.
+            instance_id: Optional session ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent session ID for hierarchical sessions.
             project_id: Optional project ID for project context. Use `None` to explicitly
                 indicate no project context is needed. If provided, stored in session
                 metadata so child sessions don't rely on text extraction.
 
         Returns:
-            The session_id of the newly created session.
+            The instance_id of the newly created session.
 
         Raises:
             ValueError: If max_sessions or max_children_per_session limit is exceeded,
@@ -517,30 +517,30 @@ class SessionManager:
             )
         resolved_agent_dir = str(metadata.path)
         
-        # Validate session_id format or auto-generate
-        if session_id is None or not _UUID_PATTERN.match(session_id):
-            if session_id is not None:
+        # Validate instance_id format or auto-generate
+        if instance_id is None or not _UUID_PATTERN.match(instance_id):
+            if instance_id is not None:
                 logger.warning(
-                    f"Invalid session_id format '{session_id}', auto-generating UUID. "
+                    f"Invalid instance_id format '{instance_id}', auto-generating UUID. "
                     "Session IDs must be valid UUIDs like '550e8400-e29b-41d4-a716-446655440000'"
                 )
-            session_id = str(uuid.uuid4())
+            instance_id = str(uuid.uuid4())
 
         # Check max_sessions limit
-        current_session_count = len(self.sessions)
-        if current_session_count >= self.config.limits.max_sessions:
+        current_instance_count = len(self.instances)
+        if current_instance_count >= self.config.limits.max_sessions:
             raise ValueError(
-                f"Max sessions limit reached: {self.config.limits.max_sessions}"
+                f"Max instances limit reached: {self.config.limits.max_sessions}"
             )
 
         # Check max_children_per_session limit if parent_id is provided
         if parent_id is not None:
-            parent_meta = self._session_repository.get(parent_id)
+            parent_meta = self._instance_repository.get(parent_id)
             if parent_meta and parent_meta.children:
                 child_count = len(parent_meta.children)
                 if child_count >= self.config.limits.max_children_per_session:
                     raise ValueError(
-                        f"Max children per session limit reached: "
+                        f"Max children per instance limit reached: "
                         f"{self.config.limits.max_children_per_session}"
                     )
 
@@ -549,7 +549,7 @@ class SessionManager:
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, resolved_agent_id)
+        tools = create_session_tools(self, instance_id, resolved_agent_id)
 
         # Build LLM config
         llm_config = {
@@ -566,7 +566,7 @@ class SessionManager:
         }
 
         # Build graph with checkpointer
-        graph = build_session_graph(
+        graph = build_instance_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
@@ -587,8 +587,8 @@ class SessionManager:
                 )
             session_metadata["project_id"] = project_id
         
-        self._session_repository.create(
-            session_id=session_id,
+        self._instance_repository.create(
+            instance_id=instance_id,
             agent_id=resolved_agent_id,
             agent_dir=resolved_agent_dir,
             parent_id=parent_id,
@@ -596,29 +596,29 @@ class SessionManager:
         )
 
         # Store in sessions dict
-        self.sessions[session_id] = (graph, resolved_agent_dir)
+        self.instances[instance_id] = (graph, resolved_agent_dir)
 
-        return session_id
+        return instance_id
 
-    async def send_message(self, session_id: str, message: str) -> MessageResult:
-        """Send a message to a session and get the response.
+    async def send_message(self, instance_id: str, message: str) -> MessageResult:
+        """Send a message to an instance and get the response.
 
         Args:
-            session_id: The ID of the session to send the message to.
+            instance_id: The ID of the session to send the message to.
             message: The message content to send.
 
         Returns:
             MessageResult with content, thinking, and tool_calls.
 
         Raises:
-            KeyError: If session_id is not found.
+            KeyError: If instance_id is not found.
         """
         # Get session graph (will lazy-load from DB if needed)
-        graph = self.get_session(session_id)
+        graph = self.get_instance(instance_id)
 
         # Invoke with message
         config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {"thread_id": instance_id},
             "recursion_limit": self.config.limits.graph_recursion_limit,
         }
         result = await graph.ainvoke({"messages": [message]}, config)
@@ -716,15 +716,15 @@ class SessionManager:
 
     async def enqueue_message(
         self, 
-        session_id: str, 
+        instance_id: str, 
         message: str, 
         source: str = "api",
         priority: int = 1
     ) -> AsyncMessageResult:
-        """Enqueue a message for a session (non-blocking).
+        """Enqueue a message for an instance (non-blocking).
         
         Args:
-            session_id: The ID of the target session.
+            instance_id: The ID of the target session.
             message: The message content.
             source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
@@ -733,43 +733,43 @@ class SessionManager:
             AsyncMessageResult with message_id and status.
         """
         # Check session exists
-        self.get_session(session_id)  # raises KeyError if not found
+        self.get_instance(instance_id)  # raises KeyError if not found
         
         # Check if this is the first message for this session
         # If so, store the source as root_source in session metadata
         # This preserves the original external source for child sessions that inherit it
-        session_meta = self._session_repository.get(session_id)
+        session_meta = self._instance_repository.get(instance_id)
         if session_meta and session_meta.session_metadata is not None:
             if "root_source" not in session_meta.session_metadata:
                 # First message for this session - store the source as root_source
                 # Skip storing for internal agent sources (they start with "agent:")
                 if not source.startswith("agent:"):
-                    self._session_repository.set_metadata(
-                        session_id=session_id,
+                    self._instance_repository.set_metadata(
+                        instance_id=instance_id,
                         key="root_source",
                         value=source
                     )
-                    logger.debug(f"Stored root_source='{source}' for session {session_id[:8]}...")
+                    logger.debug(f"Stored root_source='{source}' for instance {instance_id[:8]}...")
                 else:
                     # For child sessions spawned via agent tools, propagate root_source from parent
                     # The parent session's metadata should have root_source if it was from external source
                     parent_meta = None
                     if session_meta.parent_id:
-                        parent_meta = self._session_repository.get(session_meta.parent_id)
+                        parent_meta = self._instance_repository.get(session_meta.parent_id)
                     
                     if parent_meta and parent_meta.session_metadata:
                         parent_root = parent_meta.session_metadata.get("root_source")
                         if parent_root:
-                            self._session_repository.set_metadata(
-                                session_id=session_id,
+                            self._instance_repository.set_metadata(
+                                instance_id=instance_id,
                                 key="root_source",
                                 value=parent_root
                             )
-                            logger.debug(f"Propagated root_source='{parent_root}' from parent for child session {session_id[:8]}...")
+                            logger.debug(f"Propagated root_source='{parent_root}' from parent for child instance {instance_id[:8]}...")
         
         # Enqueue the message using repository
         msg = self._queue_repository.enqueue(
-            session_id=session_id,
+            instance_id=instance_id,
             content=message,
             source=source,
             priority=priority,
@@ -779,7 +779,7 @@ class SessionManager:
         # Broadcast message_queued event
         await self.broadcaster.broadcast(Event(
             type="message_queued",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={
                 "content": message,
@@ -789,74 +789,74 @@ class SessionManager:
             }
         ))
         
-        logger.debug(f"Enqueued message {message_id} for session {session_id}")
+        logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
         
         # Trigger async processing with error handling
-        task = asyncio.create_task(self._process_queue(session_id))
-        task.add_done_callback(lambda t: self._handle_queue_task_done(t, session_id))
+        task = asyncio.create_task(self._process_queue(instance_id))
+        task.add_done_callback(lambda t: self._handle_queue_task_done(t, instance_id))
         
         return AsyncMessageResult(
             message_id=message_id,
-            session_id=session_id,
+            instance_id=instance_id,
             status="queued"
         )
 
-    def _handle_queue_task_done(self, task: asyncio.Task, session_id: str) -> None:
+    def _handle_queue_task_done(self, task: asyncio.Task, instance_id: str) -> None:
         """Callback for when _process_queue task completes.
         
         Logs any exceptions that occurred during processing.
         
         Args:
             task: The completed task.
-            session_id: The session ID that was being processed.
+            instance_id: The session ID that was being processed.
         """
         try:
             exc = task.exception()
             if exc:
-                logger.error(f"Queue processing task failed for session {session_id}: {exc}")
+                logger.error(f"Queue processing task failed for instance {instance_id}: {exc}")
         except asyncio.CancelledError:
-            logger.debug(f"Queue processing task cancelled for session {session_id}")
+            logger.debug(f"Queue processing task cancelled for instance {instance_id}")
 
-    async def _process_queue(self, session_id: str) -> None:
-        """Event-driven queue processor for a session."""
-        logger.debug(f"_process_queue called for session {session_id[:8]}...")
+    async def _process_queue(self, instance_id: str) -> None:
+        """Event-driven queue processor for an instance."""
+        logger.debug(f"_process_queue called for instance {instance_id[:8]}...")
         # Check if already processing
         async with self._processing_lock:
-            if session_id in self._processing:
-                logger.debug(f"Session {session_id[:8]}... already being processed, skipping")
+            if instance_id in self._processing:
+                logger.debug(f"Instance {instance_id[:8]}... already being processed, skipping")
                 return
-            self._processing.add(session_id)
-            logger.debug(f"Added session {session_id[:8]}... to processing set")
+            self._processing.add(instance_id)
+            logger.debug(f"Added instance {instance_id[:8]}... to processing set")
         
         try:
-            if not self.circuit_breaker.can_execute(session_id):
-                logger.warning(f"Circuit breaker open for session {session_id[:8]}...")
+            if not self.circuit_breaker.can_execute(instance_id):
+                logger.warning(f"Circuit breaker open for instance {instance_id[:8]}...")
                 # Notify parent if this is a child session with pending messages
-                meta = self._session_repository.get(session_id)
+                meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
                     # Get pending messages (single query, use count from result)
-                    pending = self._queue_repository.list(session_id=session_id, status="ready", limit=100)
+                    pending = self._queue_repository.list(instance_id=instance_id, status="ready", limit=100)
                     if pending:
                         await self._send_error_report(
-                            session_id=session_id,
-                            error=f"Circuit breaker open - session has {len(pending)} message(s) blocked",
+                            instance_id=instance_id,
+                            error=f"Circuit breaker open - instance has {len(pending)} message(s) blocked",
                             error_type="circuit_breaker_open",
                             message_id=pending[0].message_id
                         )
                 return
             
-            logger.debug(f"Starting dequeue loop for session {session_id[:8]}...")
+            logger.debug(f"Starting dequeue loop for instance {instance_id[:8]}...")
             while True:
-                msg = self._queue_repository.dequeue_by_session(session_id)
+                msg = self._queue_repository.dequeue_by_session(instance_id)
                 if msg is None:
-                    logger.debug(f"No more messages for session {session_id[:8]}..., exiting loop")
+                    logger.debug(f"No more messages for instance {instance_id[:8]}..., exiting loop")
                     break
                 
-                logger.info(f"Processing message {msg.message_id[:8]}... for session {session_id[:8]}...")
+                logger.info(f"Processing message {msg.message_id[:8]}... for instance {instance_id[:8]}...")
                 
                 # Check if this is the first message and generate title
                 # Get message count before processing this message
-                existing_messages = await get_session_messages(self.checkpointer, session_id)
+                existing_messages = await get_session_messages(self.checkpointer, instance_id)
                 is_first_message = len(existing_messages) == 0
                 
                 # Check retry_count instead of metadata flag (more reliable)
@@ -865,7 +865,7 @@ class SessionManager:
                 # Broadcast status_changed event
                 await self.broadcaster.broadcast(Event(
                     type="status_changed",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=msg.message_id,
                     data={"status": "processing", "is_retry": is_retry}
                 ))
@@ -873,7 +873,7 @@ class SessionManager:
                 # Register request for cancellation support
                 cancellation_source = self._request_registry.register(
                     message_id=msg.message_id,
-                    session_id=session_id,
+                    instance_id=instance_id,
                     task=asyncio.current_task()
                 )
                 
@@ -882,7 +882,7 @@ class SessionManager:
                     message_content = msg.content
                     if is_first_message:
                         # PRIORITY 1: Use explicit project_id from session metadata
-                        session_meta = self._session_repository.get(session_id)
+                        session_meta = self._instance_repository.get(instance_id)
                         explicit_project_id = (
                             session_meta.session_metadata.get("project_id") 
                             if session_meta and session_meta.session_metadata 
@@ -898,7 +898,7 @@ class SessionManager:
                                 logger.debug(f"Injected explicit project context: {project.name}")
                             else:
                                 logger.warning(
-                                    f"Project '{explicit_project_id}' not found for session {session_id[:8]}... "
+                                    f"Project '{explicit_project_id}' not found for instance {instance_id[:8]}... "
                                     f"(may have been deleted after session creation)"
                                 )
                         else:
@@ -910,7 +910,7 @@ class SessionManager:
                                 message_content = project_context + msg.content
                                 logger.debug(f"Injected inferred project context: {project.name}")
                     result = await self._process_message_with_tracking(
-                        session_id,
+                        instance_id,
                         message_content,
                         msg.message_id,
                         cancellation_token=cancellation_source.token,
@@ -919,7 +919,7 @@ class SessionManager:
                     
                     # Pre-ACK status check to prevent race condition with watchdog
                     # Always record success since processing completed without error
-                    self.circuit_breaker.record_success(session_id)
+                    self.circuit_breaker.record_success(instance_id)
                     
                     # Use repository to check status
                     status = self._queue_repository.get_status(msg.message_id)
@@ -934,14 +934,14 @@ class SessionManager:
                     # Determine the source for the completed event
                     # Root source inheritance: child sessions don't broadcast completed events
                     # Only the root session (parentless) broadcasts with the original external source
-                    meta = self._session_repository.get(session_id)
+                    meta = self._instance_repository.get(instance_id)
                     
                     # Skip broadcast entirely if this is a child session
                     if meta and meta.parent_id:
                         # Child session - internal completion only, no broadcast
                         # The parent session will handle the response
                         logger.debug(
-                            f"Child session {session_id[:8]}... completed internally "
+                            f"Child instance {instance_id[:8]}... completed internally "
                             f"(parent={meta.parent_id[:8]}...), skipping broadcast"
                         )
                     else:
@@ -954,13 +954,13 @@ class SessionManager:
                             # Fallback to msg.source (shouldn't happen for properly initialized sessions)
                             root_source = msg.source
                             logger.warning(
-                                f"Session {session_id[:8]}... missing root_source in metadata, "
+                                f"Session {instance_id[:8]}... missing root_source in metadata, "
                                 f"falling back to msg.source='{root_source}'"
                             )
                         
                         await self.broadcaster.broadcast(Event(
                             type="completed",
-                            session_id=session_id,
+                            instance_id=instance_id,
                             message_id=msg.message_id,
                             data={
                                 "content": result.content,
@@ -974,7 +974,7 @@ class SessionManager:
                     # Fire-and-forget title generation - don't block the completed event
                     if is_first_message:
                         asyncio.create_task(
-                            self._generate_and_broadcast_title(session_id, msg.content)
+                            self._generate_and_broadcast_title(instance_id, msg.content)
                         )
                     
                 except OperationCancelledError as e:
@@ -983,7 +983,7 @@ class SessionManager:
                     # Broadcast cancelled event
                     await self.broadcaster.broadcast(Event(
                         type="cancelled",
-                        session_id=session_id,
+                        instance_id=instance_id,
                         message_id=msg.message_id,
                         data={"reason": e.reason.value}
                     ))
@@ -994,7 +994,7 @@ class SessionManager:
                     
                 except Exception as e:
                     logger.error(f"Error processing message {msg.message_id}: {e}")
-                    self.circuit_breaker.record_failure(session_id)
+                    self.circuit_breaker.record_failure(instance_id)
                     
                     if msg.retry_count < self.config.queue.max_retries:
                         # Use repository to schedule retry
@@ -1002,7 +1002,7 @@ class SessionManager:
                         # Broadcast retry scheduled event
                         await self.broadcaster.broadcast(Event(
                             type="status_changed",
-                            session_id=session_id,
+                            instance_id=instance_id,
                             message_id=msg.message_id,
                             data={
                                 "status": "retrying",
@@ -1016,7 +1016,7 @@ class SessionManager:
                         # Broadcast error event
                         await self.broadcaster.broadcast(Event(
                             type="error",
-                            session_id=session_id,
+                            instance_id=instance_id,
                             message_id=msg.message_id,
                             data={
                                 "error": str(e),
@@ -1026,7 +1026,7 @@ class SessionManager:
                         ))
                         # Send error report to parent if this is a child session
                         await self._send_error_report(
-                            session_id=session_id,
+                            instance_id=instance_id,
                             error=f"Max retries ({msg.retry_count}) exceeded: {e}",
                             error_type="max_retries_exceeded",
                             message_id=msg.message_id
@@ -1037,23 +1037,23 @@ class SessionManager:
                     self._request_registry.unregister(msg.message_id)
             
             # Queue is empty - check if this is a child session and send completion report
-            if self._queue_repository.is_empty(session_id):
-                meta = self._session_repository.get(session_id)
+            if self._queue_repository.is_empty(instance_id):
+                meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
                     # This is a child session that has completed - send report to parent
-                    await self._send_completion_report(session_id)
+                    await self._send_completion_report(instance_id)
         finally:
             async with self._processing_lock:
-                self._processing.discard(session_id)
-                logger.debug(f"Removed session {session_id[:8]}... from processing set")
+                self._processing.discard(instance_id)
+                logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
 
-    def _process_message_sync(self, session_id: str, message: str) -> MessageResult:
+    def _process_message_sync(self, instance_id: str, message: str) -> MessageResult:
         """Synchronous message processing (wraps existing send_message logic)."""
-        return self.send_message(session_id, message)
+        return self.send_message(instance_id, message)
 
     async def _process_message_with_tracking(
         self, 
-        session_id: str, 
+        instance_id: str, 
         message: str,
         message_id: str,
         cancellation_token: CancellationToken | None = None,
@@ -1065,7 +1065,7 @@ class SessionManager:
         to prevent duplicate execution.
         
         Args:
-            session_id: The session ID.
+            instance_id: The session ID.
             message: The message content.
             message_id: The queue message ID.
             cancellation_token: Optional token to check for cancellation.
@@ -1077,7 +1077,7 @@ class SessionManager:
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
-        graph = self.get_session(session_id)
+        graph = self.get_instance(instance_id)
         
         # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
@@ -1099,7 +1099,7 @@ class SessionManager:
             callbacks.append(cancellation_callback)
         
         config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {"thread_id": instance_id},
             "callbacks": callbacks,
             "recursion_limit": self.config.limits.graph_recursion_limit,
         }
@@ -1135,11 +1135,11 @@ class SessionManager:
         
         # Build input - on retry with checkpoint, resume from None
         if is_retry:
-            if await self._has_checkpoint(session_id):
-                logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry #{msg.retry_count})")
+            if await self._has_checkpoint(instance_id):
+                logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{msg.retry_count})")
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
-                logger.warning(f"Retry for session {session_id[:8]}... but no checkpoint found, re-adding message")
+                logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
                 graph_input = {"messages": [message]}
         else:
             # First attempt - add message to conversation
@@ -1179,7 +1179,7 @@ class SessionManager:
                                     # Broadcast thinking event
                                     await self.broadcaster.broadcast(Event(
                                         type="thinking",
-                                        session_id=session_id,
+                                        instance_id=instance_id,
                                         message_id=message_id,
                                         data={"content": thinking_content}
                                     ))
@@ -1200,7 +1200,7 @@ class SessionManager:
                                     # Broadcast tool_call event (tool starting)
                                     await self.broadcaster.broadcast(Event(
                                         type="tool_call",
-                                        session_id=session_id,
+                                        instance_id=instance_id,
                                         message_id=message_id,
                                         data={
                                             "id": tc_id,
@@ -1238,7 +1238,7 @@ class SessionManager:
                             # Broadcast tool_complete event
                             await self.broadcaster.broadcast(Event(
                                 type="tool_complete",
-                                session_id=session_id,
+                                instance_id=instance_id,
                                 message_id=message_id,
                                 data=tool_call_data
                             ))
@@ -1294,7 +1294,7 @@ class SessionManager:
                             if should_flush and thinking_buffer:
                                 await self.broadcaster.broadcast(Event(
                                     type="thinking",
-                                    session_id=session_id,
+                                    instance_id=instance_id,
                                     message_id=message_id,
                                     data={"content": thinking_buffer}
                                 ))
@@ -1312,7 +1312,7 @@ class SessionManager:
                             if should_flush and content_buffer:
                                 await self.broadcaster.broadcast(Event(
                                     type="content_chunk",
-                                    session_id=session_id,
+                                    instance_id=instance_id,
                                     message_id=message_id,
                                     data={"chunk": content_buffer}
                                 ))
@@ -1322,7 +1322,7 @@ class SessionManager:
                                 
                             # Adaptive batching: check queue health periodically
                             if event_count % 20 == 0:
-                                stats = self.broadcaster.get_stats(session_id)
+                                stats = self.broadcaster.get_stats(instance_id)
                                 queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
                                 
                                 # Increase batch size when queue is > 50% full
@@ -1334,7 +1334,7 @@ class SessionManager:
                                     if event_count == 20:  # Log once
                                         logger.info(
                                             f"Queue at {queue_fill_ratio:.0%} capacity, "
-                                            f"increasing batch size for session {session_id[:8]}"
+                                            f"increasing batch size for instance {instance_id[:8]}"
                                         )
                                 else:
                                     adaptive_threshold = CONTENT_BATCH_THRESHOLD
@@ -1346,7 +1346,7 @@ class SessionManager:
             if content_buffer:
                 await self.broadcaster.broadcast(Event(
                     type="content_chunk",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=message_id,
                     data={"chunk": content_buffer}
                 ))
@@ -1356,7 +1356,7 @@ class SessionManager:
             if thinking_buffer:
                 await self.broadcaster.broadcast(Event(
                     type="thinking",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=message_id,
                     data={"content": thinking_buffer}
                 ))
@@ -1367,7 +1367,7 @@ class SessionManager:
             # Broadcast error event
             await self.broadcaster.broadcast(Event(
                 type="error",
-                session_id=session_id,
+                instance_id=instance_id,
                 message_id=message_id,
                 data={"error": str(e), "stage": "streaming"}
             ))
@@ -1381,7 +1381,7 @@ class SessionManager:
         # Validate final_result exists
         final_result = await graph.aget_state(config)
         if not final_result:
-            logger.error(f"No final state for session {session_id} after streaming")
+            logger.error(f"No final state for instance {instance_id} after streaming")
             return MessageResult(content="", tool_calls=None)
         
         messages = final_result.values.get("messages", [])
@@ -1444,11 +1444,11 @@ class SessionManager:
             tool_calls=all_tool_calls if all_tool_calls else None,
         )
 
-    async def _summarize_session(self, session_id: str, agent_name: str) -> str:
-        """Summarize session messages using LLM.
+    async def _summarize_instance(self, instance_id: str, agent_name: str) -> str:
+        """Summarize instance messages using LLM.
         
         Args:
-            session_id: The session ID to summarize.
+            instance_id: The session ID to summarize.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
@@ -1458,7 +1458,7 @@ class SessionManager:
         from langchain_openai import ChatOpenAI
         
         # Get session messages
-        messages = await get_session_messages(self.checkpointer, session_id)
+        messages = await get_session_messages(self.checkpointer, instance_id)
         
         if not messages:
             return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
@@ -1520,77 +1520,77 @@ Provide a concise summary:"""
                 summary = str(content) if content else ""
             return f"{agent_name} has done, bellow is {agent_name} response: {summary}"
         except Exception as e:
-            logger.warning(f"Failed to summarize session {session_id}: {e}")
+            logger.warning(f"Failed to summarize instance {instance_id}: {e}")
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
-    async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
-        """Send completion report to parent session when child is done.
+    async def _send_completion_report(self, instance_id: str, use_llm_summary: bool = False) -> None:
+        """Send completion report to parent instance when child is done.
         
         Called when a child session's queue becomes empty.
         Sends the child's last assistant message (or LLM summary) to the parent.
         
         Args:
-            session_id: The child session ID that has completed.
+            instance_id: The child session ID that has completed.
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
         # Get session metadata
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(instance_id)
         if not meta:
-            logger.warning(f"Cannot send completion report: session {session_id} not found")
+            logger.warning(f"Cannot send completion report: instance {instance_id} not found")
             return
         
         parent_id = meta.parent_id
         if not parent_id:
-            logger.debug(f"Session {session_id} has no parent, skipping completion report")
+            logger.debug(f"Session {instance_id} has no parent, skipping completion report")
             return
         
         agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
         
-        logger.info(f"Session {session_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
+        logger.info(f"Session {instance_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
         
         # Get report content - either last message or LLM summary
         if use_llm_summary:
-            summary = await self._summarize_session(session_id, agent_name)
+            summary = await self._summarize_instance(instance_id, agent_name)
         else:
-            summary = await self._get_last_assistant_message(session_id, agent_name)
+            summary = await self._get_last_assistant_message(instance_id, agent_name)
         
         # Enqueue report message to parent using repository
         msg = self._queue_repository.enqueue(
-            session_id=parent_id,
+            instance_id=parent_id,
             content=summary,
-            source=f"report:{session_id}",
+            source=f"report:{instance_id}",
             priority=1,  # Normal priority as requested
-            message_metadata={"type": "completion_report", "child_session_id": session_id}
+            message_metadata={"type": "completion_report", "child_instance_id": instance_id}
         )
         message_id = msg.message_id
         
         # Broadcast report event
         await self.broadcaster.broadcast(Event(
             type="status_changed",
-            session_id=parent_id,
+            instance_id=parent_id,
             message_id=message_id,
             data={
                 "type": "completion_report",
-                "child_session_id": session_id,
+                "child_instance_id": instance_id,
                 "agent_name": agent_name,
                 "summary": summary
             }
         ))
         
-        logger.info(f"Sent completion report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+        logger.info(f"Sent completion report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
         
         # Trigger parent queue processing
         asyncio.create_task(self._process_queue(parent_id))
 
     async def _send_error_report(
         self, 
-        session_id: str, 
+        instance_id: str, 
         error: str,
         error_type: str = "execution_error",
         message_id: str | None = None
     ) -> None:
-        """Send error report to parent session when child fails permanently.
+        """Send error report to parent instance when child fails permanently.
         
         Called when a child session encounters an unrecoverable error:
         - Max retries exceeded
@@ -1599,7 +1599,7 @@ Provide a concise summary:"""
         - Unhandled exception
         
         Args:
-            session_id: The child session ID that has failed.
+            instance_id: The child session ID that has failed.
             error: The error message describing what went wrong.
             error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
             message_id: Optional message ID that triggered the error.
@@ -1607,33 +1607,33 @@ Provide a concise summary:"""
         try:
             # Prevent duplicate error reports - check if we already sent one
             if message_id:
-                meta_check = self._session_repository.get(session_id)
+                meta_check = self._instance_repository.get(instance_id)
                 if meta_check and meta_check.parent_id:
                     # Check for existing error report in parent's queue
                     existing = self._queue_repository.list(
-                        session_id=meta_check.parent_id, 
+                        instance_id=meta_check.parent_id, 
                         status="ready", 
                         limit=10
                     )
                     for existing_msg in existing:
-                        if existing_msg.source == f"error_report:{session_id}":
-                            logger.debug(f"Error report already queued for session {session_id[:8]}..., skipping duplicate")
+                        if existing_msg.source == f"error_report:{instance_id}":
+                            logger.debug(f"Error report already queued for instance {instance_id[:8]}..., skipping duplicate")
                             return
             
             # Get session metadata
-            meta = self._session_repository.get(session_id)
+            meta = self._instance_repository.get(instance_id)
             if not meta:
-                logger.warning(f"Cannot send error report: session {session_id} not found")
+                logger.warning(f"Cannot send error report: instance {instance_id} not found")
                 return
             
             parent_id = meta.parent_id
             if not parent_id:
-                logger.debug(f"Session {session_id} has no parent, skipping error report")
+                logger.debug(f"Session {instance_id} has no parent, skipping error report")
                 return
             
             agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
             
-            logger.info(f"Session {session_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
+            logger.info(f"Session {instance_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
             
             # Truncate error to prevent massive messages
             truncated_error = error[:2000] if len(error) > 2000 else error
@@ -1646,13 +1646,13 @@ Provide a concise summary:"""
             
             # Enqueue error report message to parent using repository
             msg = self._queue_repository.enqueue(
-                session_id=parent_id,
+                instance_id=parent_id,
                 content=error_report,
-                source=f"error_report:{session_id}",
+                source=f"error_report:{instance_id}",
                 priority=1,  # Normal priority
                 message_metadata={
                     "type": "error_report", 
-                    "child_session_id": session_id,
+                    "child_instance_id": instance_id,
                     "error_type": error_type,
                     "error": truncated_error,
                     "original_message_id": message_id,
@@ -1665,11 +1665,11 @@ Provide a concise summary:"""
             # Broadcast error report event
             await self.broadcaster.broadcast(Event(
                 type="error_report",
-                session_id=parent_id,
+                instance_id=parent_id,
                 message_id=report_message_id,
                 data={
                     "type": "error_report",
-                    "child_session_id": session_id,
+                    "child_instance_id": instance_id,
                     "agent_name": agent_name,
                     "error_type": error_type,
                     "error": truncated_error,
@@ -1678,31 +1678,31 @@ Provide a concise summary:"""
                 }
             ))
             
-            logger.info(f"Sent error report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+            logger.info(f"Sent error report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
             
             # Trigger parent queue processing so it can handle the error
             asyncio.create_task(self._process_queue(parent_id))
             
         except Exception as e:
             logger.error(
-                f"Failed to send error report for session {session_id[:8]}...: {e}. "
+                f"Failed to send error report for instance {instance_id[:8]}...: {e}. "
                 f"Original error was: {error_type}: {error[:200]}"
             )
 
-    async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
-        """Get the last assistant message from session history.
+    async def _get_last_assistant_message(self, instance_id: str, agent_name: str) -> str:
+        """Get the last assistant message from instance history.
         
         This is the default/simple approach for completion reports - just
         pass the agent's last response to the parent.
         
         Args:
-            session_id: The session ID to get message from.
+            instance_id: The session ID to get message from.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_session_messages(self.checkpointer, session_id)
+        messages = await get_session_messages(self.checkpointer, instance_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1720,14 +1720,14 @@ Provide a concise summary:"""
             return f"{agent_name} has done, bellow is {agent_name} response: Task completed (no response message)."
 
         
-    async def _generate_session_title(self, session_id: str, first_message: str) -> str | None:
-        """Generate a session title from the first user message.
+    async def _generate_instance_title(self, instance_id: str, first_message: str) -> str | None:
+        """Generate an instance title from the first user message.
         
         Uses LLM to generate a concise, descriptive title based on the first message.
         The title is stored in the session metadata.
         
         Args:
-            session_id: The session ID to generate title for.
+            instance_id: The session ID to generate title for.
             first_message: The first user message content.
             
         Returns:
@@ -1738,10 +1738,10 @@ Provide a concise summary:"""
             return None
         
         # Check if title already exists
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(instance_id)
         if meta and meta.session_metadata.get("title"):
             # Title already exists, skip
-            logger.debug(f"Title already exists for session {session_id}, skipping generation")
+            logger.debug(f"Title already exists for instance {instance_id}, skipping generation")
             return None
         
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -1799,159 +1799,159 @@ Title:"""
                 title = title[:97] + "..."
             
             # Store title in session metadata
-            self._session_repository.update_title(session_id, title)
-            logger.info(f"Generated title for session {session_id}: {title}")
+            self._instance_repository.update_title(instance_id, title)
+            logger.info(f"Generated title for instance {instance_id}: {title}")
             return title
             
         except Exception as e:
-            logger.warning(f"Failed to generate title for session {session_id}: {e}")
+            logger.warning(f"Failed to generate title for instance {instance_id}: {e}")
             return None
 
     async def _generate_and_broadcast_title(
-        self, session_id: str, message_content: str
+        self, instance_id: str, message_content: str
     ) -> None:
-        """Generate session title asynchronously and broadcast the update.
+        """Generate instance title asynchronously and broadcast the update.
         
         This runs as a fire-and-forget task to avoid delaying the 'completed' event.
         Errors are logged but not retried - title generation is best-effort.
         
         Args:
-            session_id: The session to generate title for
+            instance_id: The session to generate title for
             message_content: The message content to base the title on
         """
         try:
-            title = await self._generate_session_title(session_id, message_content)
+            title = await self._generate_instance_title(instance_id, message_content)
             if title:
                 # Broadcast title_updated event for frontend refresh
                 await self.broadcaster.broadcast(Event(
                     type="title_updated",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id="",  # Title updates don't need message_id
                     data={"title": title}
                 ))
         except Exception as e:
-            logger.warning(f"Failed to generate title for session {session_id}: {e}")
+            logger.warning(f"Failed to generate title for instance {instance_id}: {e}")
 
-    def get_queue_stats(self, session_id: str):
-        """Get queue statistics for a session."""
-        return self._queue_repository.get_stats(session_id)
+    def get_queue_stats(self, instance_id: str):
+        """Get queue statistics for an instance."""
+        return self._queue_repository.get_stats(instance_id)
 
-    async def _has_checkpoint(self, session_id: str) -> bool:
-        """Check if a checkpoint exists for this session.
+    async def _has_checkpoint(self, instance_id: str) -> bool:
+        """Check if a checkpoint exists for this instance.
         
         Args:
-            session_id: The session ID to check.
+            instance_id: The session ID to check.
             
         Returns:
             True if checkpoint exists, False otherwise.
         """
         try:
-            config = {"configurable": {"thread_id": session_id}}
+            config = {"configurable": {"thread_id": instance_id}}
             # Get the current state from async checkpointer
             state = await self.checkpointer.aget(config)
             return state is not None
         except Exception:
             return False
 
-    def terminate_session(self, session_id: str) -> bool:
-        """Terminate a session.
+    def terminate_instance(self, instance_id: str) -> bool:
+        """Terminate an instance.
 
         This method performs comprehensive cleanup:
-        1. Cancels active requests for the session
-        2. Cascades to children - terminates all child sessions first
-        3. Releases project lock if this session holds one (via JobQueueService)
-        4. Cleans up session state and resources
+        1. Cancels active requests for the instance
+        2. Cascades to children - terminates all child instances first
+        3. Releases project lock if this instance holds one (via JobQueueService)
+        4. Cleans up instance state and resources
 
         Args:
-            session_id: The ID of the session to terminate.
+            instance_id: The ID of the instance to terminate.
 
         Returns:
-            True if termination was successful, False if session was not found.
+            True if termination was successful, False if instance was not found.
         """
-        # Get session metadata BEFORE modifying state (needed for children cascade)
-        # Check if _session_repository exists first (not all configs may have it)
+        # Get instance metadata BEFORE modifying state (needed for children cascade)
+        # Check if _instance_repository exists first (not all configs may have it)
         meta = None
-        if hasattr(self, '_session_repository') and self._session_repository:
-            meta = self._session_repository.get(session_id)
+        if hasattr(self, '_instance_repository') and self._instance_repository:
+            meta = self._instance_repository.get(instance_id)
         
-        # Cascade to children FIRST - terminate all child sessions recursively
+        # Cascade to children FIRST - terminate all child instances recursively
         if meta and meta.children:
             for child_id in list(meta.children):
-                logger.info(f"Cascading terminate to child session: {child_id[:8]}...")
-                self.terminate_session(child_id)
+                logger.info(f"Cascading terminate to child instance: {child_id[:8]}...")
+                self.terminate_instance(child_id)
         
-        # 1. Cancel active requests for this session
-        self._request_registry.cancel_by_session(session_id)
+        # 1. Cancel active requests for this instance
+        self._request_registry.cancel_by_session(instance_id)
         
         # 2. Remove from processing set
-        self._processing.discard(session_id)
+        self._processing.discard(instance_id)
         
         # 3. Clean up event broadcaster
-        self.broadcaster.cleanup_session(session_id)
+        self.broadcaster.cleanup_session(instance_id)
 
-        # 4. Remove from sessions dict
-        if session_id in self.sessions:
-            del self.sessions[session_id]
+        # 4. Remove from instances dict
+        if instance_id in self.instances:
+            del self.instances[instance_id]
         else:
-            # Session not in memory but might still need cleanup (children cascade)
+            # Instance not in memory but might still need cleanup (children cascade)
             if meta is None:
                 return False
 
         # 5. Update DB status to terminated using repository
-        if hasattr(self, '_session_repository') and self._session_repository:
-            self._session_repository.update_status(session_id, "terminated")
+        if hasattr(self, '_instance_repository') and self._instance_repository:
+            self._instance_repository.update_status(instance_id, "terminated")
 
         # 6. Release project lock if JobQueueService is connected
         if self._job_queue_service is not None:
             try:
-                released_projects = self._job_queue_service.release_lock_by_session(session_id)
+                released_projects = self._job_queue_service.release_lock_by_session(instance_id)
                 if released_projects:
                     logger.info(
-                        f"Released {len(released_projects)} project lock(s) for session {session_id[:8]}...: "
+                        f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "
                         f"{released_projects}"
                     )
             except Exception as e:
-                logger.warning(f"Failed to release locks for session {session_id[:8]}...: {e}")
+                logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
 
         return True
 
-    def get_session(self, session_id: str) -> CompiledStateGraph:
-        """Get a session graph instance.
+    def get_instance(self, instance_id: str) -> CompiledStateGraph:
+        """Get an instance graph.
 
-        Uses database as source of truth. If session exists in DB but not in memory,
+        Uses database as source of truth. If instance exists in DB but not in memory,
         it will be restored (lazy loading).
 
         Args:
-            session_id: The ID of the session.
+            instance_id: The ID of the instance.
 
         Returns:
-            The CompiledStateGraph instance for the session.
+            The CompiledStateGraph instance for the instance.
 
         Raises:
-            KeyError: If session_id is not found in database.
+            KeyError: If instance_id is not found in database.
         """
         # Check in-memory cache first
-        if session_id in self.sessions:
-            graph, _ = self.sessions[session_id]
+        if instance_id in self.instances:
+            graph, _ = self.instances[instance_id]
             return graph
 
         # Not in memory - check database and restore if found
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(instance_id)
         if meta is None:
-            raise KeyError(f"Session not found: {session_id}")
+            raise KeyError(f"Instance not found: {instance_id}")
 
-        # Session exists in DB but not in memory - restore it
-        return self._restore_session(session_id, meta)
+        # Instance exists in DB but not in memory - restore it
+        return self._restore_instance(instance_id, meta)
 
-    def _restore_session(self, session_id: str, meta: "Session") -> CompiledStateGraph:
-        """Restore a session from database into memory.
+    def _restore_instance(self, instance_id: str, meta: "Instance") -> CompiledStateGraph:
+        """Restore an instance from database into memory.
 
-        Rebuilds the graph with the same session_id. The checkpointer will
+        Rebuilds the graph with the same instance_id. The checkpointer will
         restore conversation state from LangGraph's checkpoint tables.
 
         Args:
-            session_id: The ID of the session to restore.
-            meta: Session metadata from database.
+            instance_id: The ID of the instance to restore.
+            meta: Instance metadata from database.
 
         Returns:
             The restored CompiledStateGraph instance.
@@ -1961,7 +1961,7 @@ Title:"""
         system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, meta.agent_id)
+        tools = create_instance_tools(self, instance_id, meta.agent_id)
 
         # Build LLM config
         llm_config = {
@@ -1978,7 +1978,7 @@ Title:"""
         }
 
         # Build graph with checkpointer (will restore state from checkpoints)
-        graph = build_session_graph(
+        graph = build_instance_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
@@ -1987,72 +1987,72 @@ Title:"""
         )
 
         # Store in sessions dict
-        self.sessions[session_id] = (graph, meta.agent_dir)
+        self.instances[instance_id] = (graph, meta.agent_dir)
 
         return graph
 
-    def list_sessions(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
-        """List sessions with pagination.
+    def list_instances(self, limit: int = 100, offset: int = 0) -> tuple[list[dict], int]:
+        """List instances with pagination.
 
         Args:
-            limit: Maximum number of sessions to return (default: 100).
-            offset: Number of sessions to skip (default: 0).
+            limit: Maximum number of instances to return (default: 100).
+            offset: Number of instances to skip (default: 0).
 
         Returns:
-            Tuple of (list of session info dictionaries, total count).
+            Tuple of (list of instance info dictionaries, total count).
         """
-        sessions, total = self._session_repository.list(limit=limit, offset=offset)
-        # Convert Session objects to dicts for backward compatibility
-        return [s.to_dict() for s in sessions], total
+        instances, total = self._instance_repository.list(limit=limit, offset=offset)
+        # Convert Instance objects to dicts for backward compatibility
+        return [s.to_dict() for s in instances], total
 
-    def get_session_info(self, session_id: str) -> dict:
-        """Get information about a specific session.
+    def get_instance_info(self, instance_id: str) -> dict:
+        """Get information about a specific instance.
 
         Args:
-            session_id: The ID of the session.
+            instance_id: The ID of the instance.
 
         Returns:
-            Session metadata dictionary from the database.
+            Instance metadata dictionary from the database.
 
         Raises:
-            KeyError: If session is not found.
+            KeyError: If instance is not found.
         """
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(instance_id)
         if meta is None:
-            raise KeyError(f"Session not found: {session_id}")
+            raise KeyError(f"Instance not found: {instance_id}")
         return meta.to_dict()
 
-    async def get_messages(self, session_id: str) -> list[dict]:
-        """Get message history for a session.
+    async def get_messages(self, instance_id: str) -> list[dict]:
+        """Get message history for an instance.
 
         Args:
-            session_id: The ID of the session.
+            instance_id: The ID of the instance.
 
         Returns:
             List of message dictionaries from LangGraph checkpoints.
 
         Raises:
-            KeyError: If session is not found.
+            KeyError: If instance is not found.
         """
-        # Verify session exists
-        self.get_session(session_id)  # raises KeyError if not found
+        # Verify instance exists
+        self.get_instance(instance_id)  # raises KeyError if not found
         
-        return await get_session_messages(self.checkpointer, session_id)
+        return await get_session_messages(self.checkpointer, instance_id)
 
-    def clear_all_sessions(self) -> int:
-        """Clear all sessions from memory and database.
+    def clear_all_instances(self) -> int:
+        """Clear all instances from memory and database.
 
         Returns:
-            Number of sessions deleted from database.
+            Number of instances deleted from database.
         """
         # Clear processing set
         self._processing.clear()
 
-        # Clear in-memory sessions
-        self.sessions.clear()
+        # Clear in-memory instances
+        self.instances.clear()
 
-        # Clear database sessions
-        return self._session_repository.delete_all()
+        # Clear database instances
+        return self._instance_repository.delete_all()
     
     async def start_sources(self) -> None:
         """Start the pluggable message sources system.

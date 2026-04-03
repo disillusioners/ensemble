@@ -1,12 +1,12 @@
 """Source repository module."""
 
 from .repository import SQLModelSourceRepository
-from .models import SourceConfig, SessionMapping, ProcessedMessage, SourceStatus
+from .models import SourceConfig, InstanceMapping, ProcessedMessage, SourceStatus
 
 __all__ = [
     "SQLModelSourceRepository",
     "SourceConfig",
-    "SessionMapping",
+    "InstanceMapping",
     "ProcessedMessage",
     "SourceStatus",
 ]

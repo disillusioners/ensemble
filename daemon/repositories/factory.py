@@ -10,7 +10,7 @@ from sqlalchemy import Engine, event
 from sqlmodel import Session, SQLModel, create_engine
 
 from .project.repository import SQLModelProjectRepository
-from .session.repository import SQLModelSessionRepository
+from .instance.repository import SQLModelInstanceRepository
 from .message_queue.repository import SQLModelMessageQueueRepository
 from .source.repository import SQLModelSourceRepository
 from .job_queue.repository import JobRepository
@@ -69,7 +69,7 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
         
         # Share engine across all repositories
         queue_repo = create_message_queue_repository(engine=engine)
-        session_repo = create_session_repository(engine=engine)
+        instance_repo = create_instance_repository(engine=engine)
     """
     is_sqlite = "sqlite" in config.connection_string.lower()
     
@@ -194,11 +194,11 @@ def run_migrations(engine: Engine) -> None:
         except Exception as e:
             logger.warning(f"Migration check failed for creator_agent_id: {e}")
         
-        # Migration: Add agent_id to sessions
+        # Migration: Add agent_id to instances
         try:
-            _add_agent_id_column(conn, "sessions", logger)
+            _add_agent_id_column(conn, "instances", logger)
         except Exception as e:
-            logger.warning(f"Migration failed for sessions table: {e}")
+            logger.warning(f"Migration failed for instances table: {e}")
         
         # Migration: Add agent_id to session_mappings
         try:
@@ -253,12 +253,12 @@ def create_project_repository(
     return SQLModelProjectRepository(engine)
 
 
-def create_session_repository(
+def create_instance_repository(
     config: DatabaseConfig | None = None,
     engine: Engine | None = None,
     create_tables: bool = True,
-) -> SQLModelSessionRepository:
-    """Create a SessionRepository from configuration or shared engine.
+) -> SQLModelInstanceRepository:
+    """Create an InstanceRepository from configuration or shared engine.
     
     Args:
         config: Database configuration (required if engine not provided).
@@ -266,7 +266,7 @@ def create_session_repository(
         create_tables: If True, create tables if they don't exist.
     
     Returns:
-        Configured SQLModelSessionRepository instance.
+        Configured SQLModelInstanceRepository instance.
     
     Note:
         Either config or engine must be provided. If both are provided,
@@ -284,7 +284,7 @@ def create_session_repository(
     # via run_pending_migrations() in the API startup.
     # Legacy Python migrations (run_migrations) are disabled.
     
-    return SQLModelSessionRepository(engine)
+    return SQLModelInstanceRepository(engine)
 
 
 def create_message_queue_repository(

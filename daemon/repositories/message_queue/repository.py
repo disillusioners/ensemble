@@ -29,7 +29,7 @@ class SQLModelMessageQueueRepository:
 
     def enqueue(
         self,
-        session_id: str,
+        instance_id: str,
         content: str,
         source: str,
         priority: int = 1,
@@ -42,7 +42,7 @@ class SQLModelMessageQueueRepository:
         
         message = MessageQueue(
             message_id=message_id,
-            session_id=session_id,
+            instance_id=instance_id,
             content=content,
             source=source,
             status=MessageStatus.READY.value,
@@ -68,11 +68,11 @@ class SQLModelMessageQueueRepository:
         with Session(self.engine) as session:
             return session.get(MessageQueue, message_id)
 
-    def get_by_session(self, session_id: str) -> list[MessageQueue]:
-        """Get all messages for a session."""
+    def get_by_instance(self, instance_id: str) -> list[MessageQueue]:
+        """Get all messages for an instance."""
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
-                MessageQueue.session_id == session_id
+                MessageQueue.instance_id == instance_id
             ).order_by(col(MessageQueue.enqueued_at).desc())
             return list(session.exec(stmt))
 
@@ -84,12 +84,12 @@ class SQLModelMessageQueueRepository:
     # DEQUEUE (get next ready message)
     # --------------------------------------------------------
 
-    def dequeue(self, session_id: str | None = None) -> MessageQueue | None:
+    def dequeue(self, instance_id: str | None = None) -> MessageQueue | None:
         """Get the next ready message for processing.
         
         Args:
-            session_id: Optional session ID to filter by. If provided, only
-                       messages for this session will be considered.
+            instance_id: Optional instance ID to filter by. If provided, only
+                        messages for this instance will be considered.
         
         Returns the highest priority ready message that is due for processing.
         """
@@ -107,9 +107,9 @@ class SQLModelMessageQueueRepository:
             )
         )
         
-        # Filter by session_id if provided
-        if session_id is not None:
-            stmt = stmt.where(MessageQueue.session_id == session_id)
+        # Filter by instance_id if provided
+        if instance_id is not None:
+            stmt = stmt.where(MessageQueue.instance_id == instance_id)
         
         # Lock the row to prevent race conditions (TOCTOU)
         # SQLite will serialize access to the same row
@@ -249,18 +249,18 @@ class SQLModelMessageQueueRepository:
             
             return message
 
-    def dequeue_by_session(self, session_id: str) -> MessageQueue | None:
-        """Get the next ready message for a specific session.
+    def dequeue_by_instance(self, instance_id: str) -> MessageQueue | None:
+        """Get the next ready message for a specific instance.
         
-        This is a convenience wrapper around dequeue() for session-specific dequeue.
+        This is a convenience wrapper around dequeue() for instance-specific dequeue.
         
         Args:
-            session_id: The session ID to dequeue from.
+            instance_id: The instance ID to dequeue from.
             
         Returns:
-            The next ready message for the session, or None if no messages available.
+            The next ready message for the instance, or None if no messages available.
         """
-        return self.dequeue(session_id=session_id)
+        return self.dequeue(instance_id=instance_id)
 
     # --------------------------------------------------------
     # UPDATE STATUS
@@ -373,15 +373,15 @@ class SQLModelMessageQueueRepository:
                 return None
             return message.status
     
-    def is_empty(self, session_id: str) -> bool:
-        """Check if the queue is empty for a session.
+    def is_empty(self, instance_id: str) -> bool:
+        """Check if the queue is empty for an instance.
         
         Returns True if there are no ready, processing, or retry-ready messages.
         """
         now = datetime.now(timezone.utc)
         with Session(self.engine) as session:
             stmt = select(func.count()).select_from(MessageQueue).where(
-                MessageQueue.session_id == session_id
+                MessageQueue.instance_id == instance_id
             ).where(
                 or_(
                     MessageQueue.status == MessageStatus.READY.value,
@@ -402,7 +402,7 @@ class SQLModelMessageQueueRepository:
     def list(
         self,
         status: str | None = None,
-        session_id: str | None = None,
+        instance_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[MessageQueue]:
@@ -412,8 +412,8 @@ class SQLModelMessageQueueRepository:
             
             if status:
                 stmt = stmt.where(MessageQueue.status == status)
-            if session_id:
-                stmt = stmt.where(MessageQueue.session_id == session_id)
+            if instance_id:
+                stmt = stmt.where(MessageQueue.instance_id == instance_id)
 
             stmt = stmt.order_by(
                 col(MessageQueue.priority).asc(),
@@ -441,7 +441,7 @@ class SQLModelMessageQueueRepository:
             )
             return list(session.exec(stmt))
 
-    def list_pending(self, session_id: str | None = None, limit: int = 100) -> list[MessageQueue]:
+    def list_pending(self, instance_id: str | None = None, limit: int = 100) -> list[MessageQueue]:
         """List pending (ready or processing) messages."""
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
@@ -449,8 +449,8 @@ class SQLModelMessageQueueRepository:
                 | (MessageQueue.status == MessageStatus.PROCESSING.value)
             )
             
-            if session_id:
-                stmt = stmt.where(MessageQueue.session_id == session_id)
+            if instance_id:
+                stmt = stmt.where(MessageQueue.instance_id == instance_id)
 
             stmt = stmt.order_by(
                 col(MessageQueue.priority).asc(),
@@ -506,10 +506,10 @@ class SQLModelMessageQueueRepository:
                 "message_id": message_id,
             }
 
-    def delete_by_session(self, session_id: str) -> int:
-        """Delete all messages for a session."""
+    def delete_by_instance(self, instance_id: str) -> int:
+        """Delete all messages for an instance."""
         with Session(self.engine) as session:
-            stmt = sql_delete(MessageQueue).where(MessageQueue.session_id == session_id)
+            stmt = sql_delete(MessageQueue).where(MessageQueue.instance_id == instance_id)
             result = session.exec(stmt)
             session.commit()
             
@@ -554,8 +554,8 @@ class SQLModelMessageQueueRepository:
             )
             return session.exec(stmt).one()
     
-    def get_stats(self, session_id: str) -> dict[str, Any]:
-        """Get queue statistics for a session.
+    def get_stats(self, instance_id: str) -> dict[str, Any]:
+        """Get queue statistics for an instance.
         
         Returns a dict with:
         - pending_count: Number of ready + retry-ready messages
@@ -567,7 +567,7 @@ class SQLModelMessageQueueRepository:
         with Session(self.engine) as session:
             # Pending count (ready + retrying with next_retry_at <= now)
             pending_stmt = select(func.count()).select_from(MessageQueue).where(
-                MessageQueue.session_id == session_id
+                MessageQueue.instance_id == instance_id
             ).where(
                 or_(
                     MessageQueue.status == MessageStatus.READY.value,
@@ -581,7 +581,7 @@ class SQLModelMessageQueueRepository:
             
             # Processing count
             processing_stmt = select(func.count()).select_from(MessageQueue).where(
-                MessageQueue.session_id == session_id
+                MessageQueue.instance_id == instance_id
             ).where(
                 MessageQueue.status == MessageStatus.PROCESSING.value
             )
@@ -589,7 +589,7 @@ class SQLModelMessageQueueRepository:
             
             # Oldest message age
             oldest_stmt = select(func.min(MessageQueue.enqueued_at)).where(
-                MessageQueue.session_id == session_id
+                MessageQueue.instance_id == instance_id
             ).where(
                 MessageQueue.status.in_([
                     MessageStatus.READY.value,

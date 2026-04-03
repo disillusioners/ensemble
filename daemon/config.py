@@ -60,13 +60,13 @@ class DaemonConfig(BaseSettings):
 
 
 class LimitsConfig(BaseSettings):
-    """Session and rate limits configuration."""
+    """Instance and rate limits configuration."""
 
     model_config = SettingsConfigDict(env_prefix="LIMITS_")
 
-    max_sessions: int = Field(default=100)
-    max_children_per_session: int = Field(default=10)
-    session_timeout_minutes: int = Field(default=60)
+    max_instances: int = Field(default=100)
+    max_children_per_instance: int = Field(default=10)
+    instance_timeout_minutes: int = Field(default=60)
     message_rate_limit: int = Field(default=60)
     graph_recursion_limit: int = Field(default=100)
 

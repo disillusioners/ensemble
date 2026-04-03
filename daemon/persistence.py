@@ -29,15 +29,15 @@ async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     return AsyncSqliteSaver(conn)
 
 
-async def get_session_messages(
+async def get_instance_messages(
     checkpointer: AsyncSqliteSaver,
-    session_id: str
+    instance_id: str
 ) -> list[dict[str, Any]]:
     """Get message history from LangGraph checkpoints.
     
     Args:
         checkpointer: Shared AsyncSqliteSaver instance.
-        session_id: Session identifier to retrieve messages for.
+        instance_id: Instance identifier to retrieve messages for.
         
     Returns:
         List of message dictionaries with role, content, thinking, tool_calls.
@@ -46,7 +46,7 @@ async def get_session_messages(
     import uuid
     
     # Use the PASSED checkpointer instead of creating a new one
-    config = {"configurable": {"thread_id": session_id}}
+    config = {"configurable": {"thread_id": instance_id}}
     
     # Get the current state from async checkpointer
     state = await checkpointer.aget(config)
@@ -122,7 +122,7 @@ async def get_session_messages(
                     })
         
         # Generate a message ID based on content hash (for consistency)
-        msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{session_id}:{role}:{content[:100]}"))
+        msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
         
         result.append({
             "message_id": msg_id,

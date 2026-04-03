@@ -196,14 +196,14 @@ def create_agent_node(llm_with_tools, system_prompt: str):
     return agent_node
 
 
-def build_session_graph(
+def build_instance_graph(
     tools: list,
     checkpointer,
     llm_config: dict,
     system_prompt: str,
     retry_config: dict | None = None,  # NEW: optional retry config
 ):
-    """Build and return a compiled session graph with LLM-level retry."""
+    """Build and return a compiled instance graph with LLM-level retry."""
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
         **llm_config,

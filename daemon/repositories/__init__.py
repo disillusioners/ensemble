@@ -4,9 +4,9 @@
 from .project.repository import SQLModelProjectRepository
 from .project.models import Project, ProjectStatus, ProjectType
 
-# Session repository
-from .session.repository import SQLModelSessionRepository
-from .session.models import Session, SessionHierarchy, SessionStatus
+# Instance repository
+from .instance.repository import SQLModelInstanceRepository
+from .instance.models import Instance, InstanceHierarchy, InstanceStatus
 
 # Message queue repository
 from .message_queue.repository import SQLModelMessageQueueRepository
@@ -14,7 +14,7 @@ from .message_queue.models import MessageQueue, MessageStatus
 
 # Source repository
 from .source.repository import SQLModelSourceRepository
-from .source.models import SourceConfig, SessionMapping, ProcessedMessage, SourceStatus
+from .source.models import SourceConfig, InstanceMapping, ProcessedMessage, SourceStatus
 
 # Job queue repository
 from .job_queue.repository import JobRepository
@@ -25,7 +25,7 @@ from .factory import (
     DatabaseConfig,
     create_engine_from_config,
     create_project_repository,
-    create_session_repository,
+    create_instance_repository,
     create_message_queue_repository,
     create_source_repository,
     create_job_repository,
@@ -38,11 +38,11 @@ __all__ = [
     "Project",
     "ProjectStatus",
     "ProjectType",
-    # Session
-    "SQLModelSessionRepository",
-    "Session",
-    "SessionHierarchy",
-    "SessionStatus",
+    # Instance
+    "SQLModelInstanceRepository",
+    "Instance",
+    "InstanceHierarchy",
+    "InstanceStatus",
     # Message queue
     "SQLModelMessageQueueRepository",
     "MessageQueue",
@@ -50,7 +50,7 @@ __all__ = [
     # Source
     "SQLModelSourceRepository",
     "SourceConfig",
-    "SessionMapping",
+    "InstanceMapping",
     "ProcessedMessage",
     "SourceStatus",
     # Job queue
@@ -62,7 +62,7 @@ __all__ = [
     "DatabaseConfig",
     "create_engine_from_config",
     "create_project_repository",
-    "create_session_repository",
+    "create_instance_repository",
     "create_message_queue_repository",
     "create_source_repository",
     "create_job_repository",

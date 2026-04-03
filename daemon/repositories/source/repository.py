@@ -12,14 +12,14 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
-from .models import SourceConfig, SessionMapping, ProcessedMessage, ScheduleExecution, SourceStatus
+from .models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution, SourceStatus
 
 
 logger = logging.getLogger(__name__)
 
 
 class SQLModelSourceRepository:
-    """SQLModel-based Source repository for source configs, session mappings, and message deduplication."""
+    """SQLModel-based Source repository for source configs, instance mappings, and message deduplication."""
     
     def __init__(self, engine: Engine):
         """Initialize repository with a database engine."""
@@ -191,7 +191,7 @@ class SQLModelSourceRepository:
             
             # Delete all mappings for this source
             session.exec(
-                sql_delete(SessionMapping).where(SessionMapping.source_id == source_id)
+                sql_delete(InstanceMapping).where(InstanceMapping.source_id == source_id)
             )
             
             # Delete processed messages for this source
@@ -215,34 +215,34 @@ class SQLModelSourceRepository:
                 "name": source_config.name
             }
 
-    # ==================== Session Mapping Operations ====================
+    # ==================== Instance Mapping Operations ====================
 
-    def create_session_mapping(
+    def create_instance_mapping(
         self,
         source_id: str,
         external_user_id: str,
-        agent_session_id: str,
+        agent_instance_id: str,
         agent_id: str,
         agent_dir: str,
         metadata: Optional[dict[str, Any]] = None,
         mapping_id: Optional[str] = None,
-    ) -> SessionMapping:
-        """Create or update a session mapping."""
+    ) -> InstanceMapping:
+        """Create or update an instance mapping."""
         with Session(self.engine) as session:
             now = datetime.utcnow().isoformat()
             mapping_id = mapping_id or str(uuid.uuid4())
             
             # Check if mapping exists (upsert logic)
             existing = session.exec(
-                select(SessionMapping).where(
-                    SessionMapping.source_id == source_id,
-                    SessionMapping.external_user_id == external_user_id
+                select(InstanceMapping).where(
+                    InstanceMapping.source_id == source_id,
+                    InstanceMapping.external_user_id == external_user_id
                 )
             ).first()
             
             if existing:
                 # Update existing mapping
-                existing.agent_session_id = agent_session_id
+                existing.agent_instance_id = agent_instance_id
                 existing.agent_id = agent_id
                 existing.agent_dir = agent_dir
                 existing.mapping_metadata = metadata or {}
@@ -250,17 +250,17 @@ class SQLModelSourceRepository:
                 session.commit()
                 session.refresh(existing)
                 logger.info(
-                    f"Updated session mapping: mapping_id={existing.mapping_id}, "
+                    f"Updated instance mapping: mapping_id={existing.mapping_id}, "
                     f"source_id={source_id}, external_user_id={external_user_id}"
                 )
                 return existing
             
             # Create new mapping
-            mapping = SessionMapping(
+            mapping = InstanceMapping(
                 mapping_id=mapping_id,
                 source_id=source_id,
                 external_user_id=external_user_id,
-                agent_session_id=agent_session_id,
+                agent_instance_id=agent_instance_id,
                 agent_id=agent_id,
                 agent_dir=agent_dir,
                 mapping_metadata=metadata or {},
@@ -273,32 +273,32 @@ class SQLModelSourceRepository:
             session.refresh(mapping)
             
             logger.info(
-                f"Created session mapping: mapping_id={mapping_id}, "
+                f"Created instance mapping: mapping_id={mapping_id}, "
                 f"source_id={source_id}, external_user_id={external_user_id}"
             )
             return mapping
 
-    def get_session_mapping(
+    def get_instance_mapping(
         self,
         source_id: str,
         external_user_id: str,
-    ) -> SessionMapping | None:
-        """Get a session mapping by source_id and external_user_id."""
+    ) -> InstanceMapping | None:
+        """Get an instance mapping by source_id and external_user_id."""
         with Session(self.engine) as session:
-            stmt = select(SessionMapping).where(
-                SessionMapping.source_id == source_id,
-                SessionMapping.external_user_id == external_user_id
+            stmt = select(InstanceMapping).where(
+                InstanceMapping.source_id == source_id,
+                InstanceMapping.external_user_id == external_user_id
             )
             return session.exec(stmt).first()
 
-    def get_session_mapping_by_session(
+    def get_instance_mapping_by_instance(
         self,
-        agent_session_id: str,
-    ) -> SessionMapping | None:
-        """Get a session mapping by agent_session_id."""
+        agent_instance_id: str,
+    ) -> InstanceMapping | None:
+        """Get an instance mapping by agent_instance_id."""
         with Session(self.engine) as session:
-            stmt = select(SessionMapping).where(
-                SessionMapping.agent_session_id == agent_session_id
+            stmt = select(InstanceMapping).where(
+                InstanceMapping.agent_instance_id == agent_instance_id
             )
             return session.exec(stmt).first()
 
@@ -307,12 +307,12 @@ class SQLModelSourceRepository:
         source_id: str,
         external_user_id: str,
     ) -> bool:
-        """Update the last_message_at timestamp for a session mapping."""
+        """Update the last_message_at timestamp for an instance mapping."""
         with Session(self.engine) as session:
             mapping = session.exec(
-                select(SessionMapping).where(
-                    SessionMapping.source_id == source_id,
-                    SessionMapping.external_user_id == external_user_id
+                select(InstanceMapping).where(
+                    InstanceMapping.source_id == source_id,
+                    InstanceMapping.external_user_id == external_user_id
                 )
             ).first()
             if mapping is None:
@@ -326,32 +326,32 @@ class SQLModelSourceRepository:
             )
             return True
 
-    def delete_session_mapping(self, mapping_id: str) -> dict[str, Any]:
-        """Delete a session mapping."""
+    def delete_instance_mapping(self, mapping_id: str) -> dict[str, Any]:
+        """Delete an instance mapping."""
         with Session(self.engine) as session:
-            mapping = session.get(SessionMapping, mapping_id)
+            mapping = session.get(InstanceMapping, mapping_id)
             if mapping is None:
-                logger.warning(f"Session mapping not found for deletion: mapping_id={mapping_id}")
+                logger.warning(f"Instance mapping not found for deletion: mapping_id={mapping_id}")
                 return {"deleted": False, "mapping_id": mapping_id, "error": "Not found"}
             
             session.delete(mapping)
             session.commit()
             
-            logger.info(f"Deleted session mapping: mapping_id={mapping_id}")
+            logger.info(f"Deleted instance mapping: mapping_id={mapping_id}")
             return {"deleted": True, "mapping_id": mapping_id}
 
-    def list_session_mappings(
+    def list_instance_mappings(
         self,
         source_id: str,
         limit: int = 100,
         offset: int = 0,
-    ) -> list[SessionMapping]:
-        """List all session mappings for a source."""
+    ) -> list[InstanceMapping]:
+        """List all instance mappings for a source."""
         with Session(self.engine) as session:
             stmt = (
-                select(SessionMapping)
-                .where(SessionMapping.source_id == source_id)
-                .order_by(col(SessionMapping.last_message_at).desc())
+                select(InstanceMapping)
+                .where(InstanceMapping.source_id == source_id)
+                .order_by(col(InstanceMapping.last_message_at).desc())
                 .offset(offset)
                 .limit(limit)
             )
@@ -361,15 +361,15 @@ class SQLModelSourceRepository:
         self,
         max_age_days: int = 30,
     ) -> int:
-        """Clean up inactive session mappings older than max_age_days."""
+        """Clean up inactive instance mappings older than max_age_days."""
         with Session(self.engine) as session:
             cutoff_time = datetime.utcnow() - timedelta(days=max_age_days)
             cutoff_str = cutoff_time.isoformat()
             
             # Find inactive mappings
-            stmt = select(SessionMapping).where(
-                ((SessionMapping.last_message_at == None) & (SessionMapping.created_at < cutoff_str))
-                | ((SessionMapping.last_message_at != None) & (SessionMapping.last_message_at < cutoff_str))
+            stmt = select(InstanceMapping).where(
+                ((InstanceMapping.last_message_at == None) & (InstanceMapping.created_at < cutoff_str))
+                | ((InstanceMapping.last_message_at != None) & (InstanceMapping.last_message_at < cutoff_str))
             )
             inactive_mappings = list(session.exec(stmt))
             
@@ -381,7 +381,7 @@ class SQLModelSourceRepository:
             
             deleted_count = len(inactive_mappings)
             if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} inactive session mappings older than {max_age_days}d")
+                logger.info(f"Cleaned up {deleted_count} inactive instance mappings older than {max_age_days}d")
             
             return deleted_count
 

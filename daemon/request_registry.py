@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class ActiveRequest:
     """Tracks an actively processing message."""
     message_id: str
-    session_id: str
+    instance_id: str
     cancellation_source: CancellationTokenSource
     started_at: datetime
     task: Optional[asyncio.Task] = None
@@ -32,13 +32,13 @@ class ActiveRequestRegistry:
     
     def __init__(self):
         self._requests: dict[str, ActiveRequest] = {}  # message_id -> ActiveRequest
-        self._by_session: dict[str, set[str]] = {}  # session_id -> set of message_ids
+        self._by_instance: dict[str, set[str]] = {}  # instance_id -> set of message_ids
         self._lock = threading.RLock()
     
     def register(
         self,
         message_id: str,
-        session_id: str,
+        instance_id: str,
         task: Optional[asyncio.Task] = None
     ) -> CancellationTokenSource:
         """Register a new active request.
@@ -49,7 +49,7 @@ class ActiveRequestRegistry:
         source = CancellationTokenSource()
         request = ActiveRequest(
             message_id=message_id,
-            session_id=session_id,
+            instance_id=instance_id,
             cancellation_source=source,
             started_at=datetime.now(timezone.utc),
             task=task,
@@ -58,11 +58,11 @@ class ActiveRequestRegistry:
         
         with self._lock:
             self._requests[message_id] = request
-            if session_id not in self._by_session:
-                self._by_session[session_id] = set()
-            self._by_session[session_id].add(message_id)
+            if instance_id not in self._by_instance:
+                self._by_instance[instance_id] = set()
+            self._by_instance[instance_id].add(message_id)
         
-        logger.debug(f"Registered active request {message_id[:8]}... for session {session_id[:8]}...")
+        logger.debug(f"Registered active request {message_id[:8]}... for instance {instance_id[:8]}...")
         return source
     
     def unregister(self, message_id: str) -> None:
@@ -70,11 +70,11 @@ class ActiveRequestRegistry:
         with self._lock:
             request = self._requests.pop(message_id, None)
             if request:
-                session_id = request.session_id
-                if session_id in self._by_session:
-                    self._by_session[session_id].discard(message_id)
-                    if not self._by_session[session_id]:
-                        del self._by_session[session_id]
+                instance_id = request.instance_id
+                if instance_id in self._by_instance:
+                    self._by_instance[instance_id].discard(message_id)
+                    if not self._by_instance[instance_id]:
+                        del self._by_instance[instance_id]
                 logger.debug(f"Unregistered request {message_id[:8]}...")
     
     def cancel(self, message_id: str, reason: CancellationReason) -> bool:
@@ -105,27 +105,27 @@ class ActiveRequestRegistry:
             )
             return True
     
-    def get_active_for_session(self, session_id: str) -> list[str]:
-        """Get list of active message IDs for a session."""
+    def get_active_for_instance(self, instance_id: str) -> list[str]:
+        """Get list of active message IDs for an instance."""
         with self._lock:
-            return list(self._by_session.get(session_id, set()))
+            return list(self._by_instance.get(instance_id, set()))
     
     def get_request(self, message_id: str) -> Optional[ActiveRequest]:
         """Get request info by message ID."""
         with self._lock:
             return self._requests.get(message_id)
     
-    def cancel_by_session(self, session_id: str) -> None:
-        """Cancel all active requests for a session.
+    def cancel_by_instance(self, instance_id: str) -> None:
+        """Cancel all active requests for an instance.
         
         Args:
-            session_id: The session whose requests should be cancelled.
+            instance_id: The instance whose requests should be cancelled.
         """
         with self._lock:
-            message_ids = self._by_session.get(session_id, set()).copy()
+            message_ids = self._by_instance.get(instance_id, set()).copy()
         
         for message_id in message_ids:
-            self.cancel(message_id, CancellationReason.SESSION_TERMINATED)
+            self.cancel(message_id, CancellationReason.INSTANCE_TERMINATED)
         
         if message_ids:
-            logger.info(f"Cancelled {len(message_ids)} request(s) for session {session_id[:8]}...")
+            logger.info(f"Cancelled {len(message_ids)} request(s) for instance {instance_id[:8]}...")
