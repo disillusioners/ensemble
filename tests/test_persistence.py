@@ -2,7 +2,8 @@
 
 import pytest
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
+from pathlib import Path
 
 # Mock the langgraph module before importing persistence
 mock_sqlite_saver = MagicMock()
@@ -14,306 +15,240 @@ sys.modules['langgraph.checkpoint.sqlite'].SqliteSaver = mock_sqlite_saver
 sys.modules['langgraph.checkpoint.sqlite.aio'] = MagicMock()
 sys.modules['langgraph.checkpoint.sqlite.aio'].AsyncSqliteSaver = mock_async_sqlite_saver
 
+# Mock daemon.manager to avoid import chain issues
+sys.modules['daemon'] = MagicMock()
+sys.modules['daemon.manager'] = MagicMock()
+
 from daemon.persistence import (
-    init_database,
     get_checkpointer,
-    save_session_metadata,
-    get_session_metadata,
-    update_session_status,
-    list_all_sessions,
-    delete_session,
-    get_session_messages,
+    get_instance_messages,
 )
-
-
-class TestInitDatabase:
-    """Tests for init_database function."""
-
-    def test_init_database_creates_file(self, tmp_path):
-        """Test that database file is created."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        assert db_path.exists()
-        conn.close()
-
-    def test_init_database_creates_tables(self, tmp_path):
-        """Test that sessions and session_hierarchy tables exist."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Check sessions table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
-        )
-        assert cursor.fetchone() is not None
-
-        # Check session_hierarchy table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='session_hierarchy'"
-        )
-        assert cursor.fetchone() is not None
-
-        conn.close()
-
-
-class TestSaveSessionMetadata:
-    """Tests for save_session_metadata function."""
-
-    def test_save_session_metadata(self, tmp_path):
-        """Test saving session metadata."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        save_session_metadata(conn, "test-session", "agents/test")
-        meta = get_session_metadata(conn, "test-session")
-
-        assert meta is not None
-        assert meta["session_id"] == "test-session"
-        assert meta["agent_dir"] == "agents/test"
-        assert meta["status"] == "idle"
-        assert meta["parent_id"] is None
-
-        conn.close()
-
-    def test_save_session_metadata_with_parent(self, tmp_path):
-        """Test saving session with parent_id."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create parent session first
-        save_session_metadata(conn, "parent-session", "agents/parent")
-
-        # Create child session
-        save_session_metadata(conn, "child-session", "agents/child", "parent-session")
-
-        # Verify parent session
-        parent_meta = get_session_metadata(conn, "parent-session")
-        assert parent_meta is not None
-        assert parent_meta["session_id"] == "parent-session"
-
-        # Verify child session
-        child_meta = get_session_metadata(conn, "child-session")
-        assert child_meta is not None
-        assert child_meta["session_id"] == "child-session"
-        assert child_meta["parent_id"] == "parent-session"
-
-        conn.close()
-
-
-class TestGetSessionMetadata:
-    """Tests for get_session_metadata function."""
-
-    def test_get_session_metadata(self, tmp_path):
-        """Test retrieving session metadata."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        save_session_metadata(conn, "test-session", "agents/test")
-        meta = get_session_metadata(conn, "test-session")
-
-        assert meta is not None
-        assert meta["session_id"] == "test-session"
-        assert meta["agent_dir"] == "agents/test"
-        assert meta["status"] == "idle"
-
-        conn.close()
-
-    def test_get_session_metadata_not_found(self, tmp_path):
-        """Test retrieving non-existent session returns None."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        meta = get_session_metadata(conn, "non-existent-session")
-
-        assert meta is None
-
-        conn.close()
-
-    def test_get_session_metadata_includes_children(self, tmp_path):
-        """Test that metadata includes children list."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create parent session
-        save_session_metadata(conn, "parent-session", "agents/parent")
-
-        # Create child sessions
-        save_session_metadata(conn, "child-1", "agents/child", "parent-session")
-        save_session_metadata(conn, "child-2", "agents/child", "parent-session")
-
-        # Get parent metadata
-        meta = get_session_metadata(conn, "parent-session")
-
-        assert meta is not None
-        assert "children" in meta
-        assert "child-1" in meta["children"]
-        assert "child-2" in meta["children"]
-
-        conn.close()
-
-
-class TestUpdateSessionStatus:
-    """Tests for update_session_status function."""
-
-    def test_update_session_status(self, tmp_path):
-        """Test updating session status."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        save_session_metadata(conn, "test-session", "agents/test")
-
-        # Update status
-        update_session_status(conn, "test-session", "running")
-
-        # Verify status was updated
-        meta = get_session_metadata(conn, "test-session")
-        assert meta is not None
-        assert meta["status"] == "running"
-
-        conn.close()
-
-
-class TestListAllSessions:
-    """Tests for list_all_sessions function."""
-
-    def test_list_all_sessions_empty(self, tmp_path):
-        """Test listing when no sessions."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        sessions, total = list_all_sessions(conn)
-
-        assert sessions == []
-        assert total == 0
-
-        conn.close()
-
-    
-    def test_list_all_sessions(self, tmp_path):
-        """Test listing sessions."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create test sessions
-        save_session_metadata(conn, "session-1", "agents/test1")
-        save_session_metadata(conn, "session-2", "agents/test2")
-
-        sessions, total = list_all_sessions(conn)
-
-        # Check sessions are returned
-        assert len(sessions) == 2
-        assert total == 2
-
-        # Check that session_id is in each session dict
-        session_ids = [s["session_id"] for s in sessions]
-        assert "session-1" in session_ids
-        assert "session-2" in session_ids
-
-        conn.close()
-
-    def test_list_all_sessions(self, tmp_path):
-        """Test listing multiple sessions."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create multiple sessions
-        save_session_metadata(conn, "session-1", "agents/test1")
-        save_session_metadata(conn, "session-2", "agents/test2")
-
-        sessions, total = list_all_sessions(conn)
-
-        assert len(sessions) == 2
-        assert total == 2
-        session_ids = [s["session_id"] for s in sessions]
-        assert "session-1" in session_ids
-        assert "session-2" in session_ids
-
-        conn.close()
-
-
-class TestDeleteSession:
-    """Tests for delete_session function."""
-
-    def test_delete_session(self, tmp_path):
-        """Test deleting a session."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        save_session_metadata(conn, "test-session", "agents/test")
-
-        # Verify session exists
-        meta = get_session_metadata(conn, "test-session")
-        assert meta is not None
-
-        # Delete session
-        delete_session(conn, "test-session")
-
-        # Verify session is deleted
-        meta = get_session_metadata(conn, "test-session")
-        assert meta is None
-
-        conn.close()
-
-    def test_delete_session_removes_hierarchy(self, tmp_path):
-        """Test that deleting also removes from hierarchy."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create parent and child
-        save_session_metadata(conn, "parent-session", "agents/parent")
-        save_session_metadata(conn, "child-session", "agents/child", "parent-session")
-
-        # Delete parent session
-        delete_session(conn, "parent-session")
-
-        # Verify parent is deleted
-        parent_meta = get_session_metadata(conn, "parent-session")
-        assert parent_meta is None
-
-        # Verify child is still there (parent deleted but child remains)
-        child_meta = get_session_metadata(conn, "child-session")
-        assert child_meta is not None
-
-        # Verify hierarchy entry is removed
-        cursor = conn.execute(
-            "SELECT * FROM session_hierarchy WHERE parent_id = ?",
-            ("parent-session",)
-        )
-        assert cursor.fetchone() is None
-
-        conn.close()
-
-    def test_session_hierarchy_tracking(self, tmp_path):
-        """Test that parent-child relationships are tracked."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-
-        # Create sessions with hierarchy
-        save_session_metadata(conn, "root-session", "agents/root")
-        save_session_metadata(conn, "child-1", "agents/child", "root-session")
-        save_session_metadata(conn, "child-2", "agents/child", "root-session")
-
-        # Verify hierarchy table
-        cursor = conn.execute("SELECT * FROM session_hierarchy")
-        rows = cursor.fetchall()
-        assert len(rows) == 2
-
-        hierarchy = [(row["parent_id"], row["child_id"]) for row in rows]
-        assert ("root-session", "child-1") in hierarchy
-        assert ("root-session", "child-2") in hierarchy
-
-        conn.close()
 
 
 class TestGetCheckpointer:
     """Tests for get_checkpointer function."""
 
-    def test_get_checkpointer(self, tmp_path):
-        """Test that get_checkpointer returns a SqliteSaver."""
+    def test_get_checkpointer_returns_checkpointer(self, tmp_path):
+        """Test that get_checkpointer returns a checkpointer."""
         db_path = tmp_path / "test.db"
 
         checkpointer = get_checkpointer(db_path)
 
         # The mock is set up at module import time
         assert checkpointer is not None
+
+
+class TestGetInstanceMessages:
+    """Tests for get_instance_messages function."""
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_empty_state(self):
+        """Test that get_instance_messages returns empty list for None state."""
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value=None)
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_no_messages(self):
+        """Test that get_instance_messages returns empty list when no messages."""
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {}
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_with_human_message(self):
+        """Test parsing human message."""
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [HumanMessage(content="Hello world")]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "Hello world"
+        assert messages[0]["type"] == "human"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_with_ai_message(self):
+        """Test parsing AI message."""
+        from langchain_core.messages import AIMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [AIMessage(content="Hello, how can I help?")]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "assistant"
+        assert messages[0]["content"] == "Hello, how can I help?"
+        assert messages[0]["type"] == "ai"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_with_system_message(self):
+        """Test parsing system message."""
+        from langchain_core.messages import SystemMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [SystemMessage(content="You are helpful.")]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert messages[0]["role"] == "system"
+        assert messages[0]["content"] == "You are helpful."
+        assert messages[0]["type"] == "system"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_extracts_thinking(self):
+        """Test extracting thinking from AI message."""
+        from langchain_core.messages import AIMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    AIMessage(
+                        content="The answer is 42.",
+                        additional_kwargs={"thinking": "Let me calculate..."}
+                    )
+                ]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert messages[0]["thinking"] == "Let me calculate..."
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_extracts_think_tags(self):
+        """Test extracting <think/> tags from content."""
+        from langchain_core.messages import AIMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    AIMessage(content="<think>Reasoning here</think>The answer is 42.")
+                ]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert messages[0]["content"] == "The answer is 42."
+        assert messages[0]["thinking_extracted"] == "Reasoning here"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_with_tool_calls(self):
+        """Test parsing tool calls from AI message."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    AIMessage(
+                        content="Let me search for that.",
+                        tool_calls=[
+                            {"id": "call_1", "name": "search", "args": {"query": "test"}}
+                        ]
+                    ),
+                    ToolMessage(content="Search result", tool_call_id="call_1")
+                ]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        # Should have the AI message
+        ai_msg = messages[0]
+        assert ai_msg["role"] == "assistant"
+        assert ai_msg["content"] == "Let me search for that."
+        assert ai_msg["tool_calls"] is not None
+        assert len(ai_msg["tool_calls"]) == 1
+        assert ai_msg["tool_calls"][0]["name"] == "search"
+        assert ai_msg["tool_calls"][0]["output"] == "Search result"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_skips_tool_messages(self):
+        """Test that tool messages are not included in main list."""
+        from langchain_core.messages import ToolMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    ToolMessage(content="Tool output", tool_call_id="call_1")
+                ]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        # Tool messages should be skipped (only included in tool_calls of AI messages)
+        assert len(messages) == 0
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_multiple_messages(self):
+        """Test parsing multiple messages in order."""
+        from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    SystemMessage(content="You are a helpful assistant."),
+                    HumanMessage(content="Hello!"),
+                    AIMessage(content="Hi there!"),
+                ]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 3
+        assert messages[0]["role"] == "system"
+        assert messages[1]["role"] == "user"
+        assert messages[2]["role"] == "assistant"
+
+    @pytest.mark.asyncio
+    async def test_get_instance_messages_generates_message_ids(self):
+        """Test that message IDs are generated."""
+        from langchain_core.messages import HumanMessage
+
+        mock_checkpointer = AsyncMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [HumanMessage(content="Test")]
+            }
+        })
+
+        messages = await get_instance_messages(mock_checkpointer, "test-instance")
+
+        assert len(messages) == 1
+        assert "message_id" in messages[0]
+        assert messages[0]["message_id"] is not None

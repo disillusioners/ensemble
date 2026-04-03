@@ -1,7 +1,7 @@
 """End-to-end test for inner_soul tool.
 
 This test validates the full flow:
-1. Create new agent session
+1. Create new agent instance
 2. Ask agent to remember something (agent uses inner_soul tool)
 3. Verify memory file was created in memories/
 4. Agent receives response from inner_soul tool
@@ -83,23 +83,23 @@ async def test_inner_soul_remember_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent uses inner_soul to remember something.
     
     Flow:
-    1. Spawn agent session
+    1. Spawn agent instance
     2. Send message asking agent to remember its name
     3. Verify memory file created in memories/
     4. Verify agent received confirmation from inner_soul tool
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     
-    # Create session manager
-    manager = SessionManager(config=integration_config)
+    # Create instance manager
+    manager = InstanceManager(config=integration_config)
     
     # Count memories before
     memories_dir = Path(test_agent_dir) / "memories"
     memories_before = list(memories_dir.glob("*.md"))
     
-    # Spawn session with test agent
-    session_id = manager.spawn_session(agent_id="test_agent")
-    assert session_id, "Should return a session ID"
+    # Spawn instance with test agent
+    instance_id = manager.spawn_instance(agent_id="test_agent")
+    assert instance_id, "Should return a instance ID"
     
     # Send message asking agent to remember something
     # The agent should use inner_soul tool to do this
@@ -107,7 +107,7 @@ async def test_inner_soul_remember_e2e(integration_config, test_agent_dir):
 
 Use the inner_soul tool with intent="remember" to store this information."""
     
-    response = await manager.send_message(session_id, message)
+    response = await manager.send_message(instance_id, message)
     
     # Verify response exists (MessageResult has .content attribute)
     assert response.content, "Should receive a response"
@@ -135,34 +135,34 @@ Use the inner_soul tool with intent="remember" to store this information."""
     assert memory_file.name.endswith(".md"), "Memory file should be .md"
     
     # Clean up
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
 
 
 async def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent uses inner_soul to change workflow.
     
     Flow:
-    1. Spawn agent session
+    1. Spawn agent instance
     2. Send message asking agent to propose a workflow change
     3. Verify workflow.md was updated
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     
-    manager = SessionManager(config=integration_config)
+    manager = InstanceManager(config=integration_config)
     
     # Read workflow before
     workflow_file = Path(test_agent_dir) / "workflow.md"
     workflow_before = workflow_file.read_text()
     
-    # Spawn session
-    session_id = manager.spawn_session(agent_id="test_agent")
+    # Spawn instance
+    instance_id = manager.spawn_instance(agent_id="test_agent")
     
     # Ask agent to change workflow
     message = """Please use the inner_soul tool to add a step to your workflow.
 
 Use: inner_soul(intent="change", target="workflow", content="Step 4: Review response before sending")"""
     
-    response = await manager.send_message(session_id, message)
+    response = await manager.send_message(instance_id, message)
     
     assert response.content, "Should receive a response"
     print(f"\n[INNER_SOUL TEST] Workflow change response: {response.content[:500]}...")
@@ -179,21 +179,21 @@ Use: inner_soul(intent="change", target="workflow", content="Step 4: Review resp
     print(f"\n[INNER_SOUL TEST] Updated workflow:\n{workflow_after[:500]}...")
     
     # Clean up
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
 
 
 async def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agent_dir):
     """End-to-end test: agent proposes soul change (requires approval).
     
     Flow:
-    1. Spawn agent session
+    1. Spawn agent instance
     2. Send message asking agent to propose soul change
     3. Verify proposal file created in history/
     4. Verify soul.md was NOT modified directly
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     
-    manager = SessionManager(config=integration_config)
+    manager = InstanceManager(config=integration_config)
     
     # Read soul before
     soul_file = Path(test_agent_dir) / "soul.md"
@@ -202,15 +202,15 @@ async def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agen
     history_dir = Path(test_agent_dir) / "history"
     history_before = list(history_dir.glob("*.md"))
     
-    # Spawn session
-    session_id = manager.spawn_session(agent_id="test_agent")
+    # Spawn instance
+    instance_id = manager.spawn_instance(agent_id="test_agent")
     
     # Ask agent to propose soul change
     message = """Please use the inner_soul tool to propose a change to your identity.
 
 Use: inner_soul(intent="change", target="soul", content="I value clear communication in all interactions")"""
     
-    response = await manager.send_message(session_id, message)
+    response = await manager.send_message(instance_id, message)
     
     assert response.content, "Should receive a response"
     print(f"\n[INNER_SOUL TEST] Soul proposal response: {response.content[:500]}...")
@@ -234,4 +234,4 @@ Use: inner_soul(intent="change", target="soul", content="I value clear communica
             "Proposal should indicate pending approval"
     
     # Clean up
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)

@@ -1,18 +1,18 @@
 """
-End-to-end test for session title generation feature.
+End-to-end test for instance title generation feature.
 
 This test:
-1. Creates a session using real config
+1. Creates an instance using real config
 2. Sends "hi" as the first message
 3. Waits for processing to complete
 4. Verifies that:
-   - The session has a title set (not None)
+   - The instance has a title set (not None)
    - The title is stored in metadata
    - A `title_updated` SSE event was broadcast
-   - The title appears in `list_sessions()` response
+   - The title appears in `list_instances()` response
 
 Run with:
-    pytest tests/integration/test_session_title_e2e.py -v -s --run-integration
+    pytest tests/integration/test_instance_title_e2e.py -v -s --run-integration
 """
 
 import os
@@ -55,7 +55,7 @@ def integration_config():
 def test_db_path():
     """Return a test database path and cleanup after."""
     project_root = Path(__file__).parent.parent.parent
-    db_path = project_root / "test_e2e_session_title.db"
+    db_path = project_root / "test_e2e_instance_title.db"
     db_path.unlink(missing_ok=True)
     yield db_path
     # Cleanup
@@ -64,42 +64,42 @@ def test_db_path():
 
 
 @pytest.mark.asyncio
-async def test_session_title_generation_e2e(
+async def test_instance_title_generation_e2e(
     integration_config,
     test_db_path
 ):
     """
-    Test that session title is generated after first message.
+    Test that instance title is generated after first message.
     
     Verifies:
-    1. Session has title set after first message
+    1. Instance has title set after first message
     2. Title is stored in metadata
     3. title_updated SSE event is broadcast
-    4. Title appears in list_sessions()
+    4. Title appears in list_instances()
     """
-    from daemon.manager import SessionManager
-    from daemon.persistence import get_session_metadata, list_all_sessions
+    from daemon.manager import InstanceManager
+    from daemon.persistence import get_instance_metadata, list_all_instances
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
     
     # Create manager
-    logger.info("[TEST] Creating SessionManager...")
-    manager = SessionManager(integration_config)
+    logger.info("[TEST] Creating InstanceManager...")
+    manager = InstanceManager(integration_config)
     
     # Ensure main loop is set for event broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
-    # Spawn coder session
+    # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
-    logger.info(f"[TEST] Creating session with agent: {coder_agent_dir}")
+    logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
     
-    session_id = manager.spawn_session(agent_id="coder")
-    logger.info(f"[TEST] Session created: {session_id}")
+    instance_id = manager.spawn_instance(agent_id="coder")
+    logger.info(f"[TEST] Instance created: {instance_id}")
     
     # Verify initial state - no title
-    initial_meta = get_session_metadata(manager.conn, session_id)
+    initial_meta = get_instance_metadata(manager.conn, instance_id)
     assert initial_meta is not None
     assert initial_meta["title"] is None, "Title should be None before first message"
     logger.info(f"[TEST] Initial title: {initial_meta['title']}")
@@ -108,15 +108,15 @@ async def test_session_title_generation_e2e(
     events_received = []
     title_updated_received = False
     
-    async def collect_events(session_id: str):
+    async def collect_events(instance_id: str):
         """Collect events from the broadcaster."""
         nonlocal title_updated_received
-        queue = await manager.broadcaster.get_queue(session_id)
+        queue = await manager.broadcaster.get_queue(instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=60)
                 events_received.append(event)
-                logger.info(f"[SSE] Event: {event.type}, session_id: {event.session_id}")
+                logger.info(f"[SSE] Event: {event.type}, instance_id: {event.instance_id}")
                 
                 if event.type == "title_updated":
                     title_updated_received = True
@@ -131,7 +131,7 @@ async def test_session_title_generation_e2e(
                 break
     
     # Start collecting events
-    collect_task = asyncio.create_task(collect_events(session_id))
+    collect_task = asyncio.create_task(collect_events(instance_id))
     
     # Give the collector time to start
     await asyncio.sleep(0.5)
@@ -147,7 +147,7 @@ async def test_session_title_generation_e2e(
     start_time = time.time()
     
     result = await manager.enqueue_message(
-        session_id=session_id,
+        instance_id=instance_id,
         message="hi",
         source="test"
     )
@@ -167,7 +167,7 @@ async def test_session_title_generation_e2e(
     
     while time.time() - start_time < wait_timeout:
         # Check if message was completed (check queue stats)
-        stats = manager.get_queue_stats(session_id)
+        stats = manager.get_queue_stats(instance_id)
         logger.debug(f"[TEST] Queue stats: pending={stats.pending_count}, processing={stats.processing_count}")
         
         if stats.pending_count == 0 and stats.processing_count == 0:
@@ -196,22 +196,22 @@ async def test_session_title_generation_e2e(
     assert title_updated_received, "title_updated event should be broadcast"
     
     # 2. Check that title is set in metadata
-    final_meta = get_session_metadata(manager.conn, session_id)
+    final_meta = get_instance_metadata(manager.conn, instance_id)
     logger.info(f"[TEST] Final title from metadata: {final_meta['title']}")
     assert final_meta is not None
     assert final_meta["title"] is not None, "Title should be set after first message"
     assert len(final_meta["title"]) > 0, "Title should not be empty"
     
-    # 3. Check that title appears in list_sessions()
-    sessions = list_all_sessions(manager.conn)
-    logger.info(f"[TEST] Total sessions: {len(sessions)}")
+    # 3. Check that title appears in list_instances()
+    instances = list_all_instances(manager.conn)
+    logger.info(f"[TEST] Total instances: {len(instances)}")
     
-    session = next((s for s in sessions if s["session_id"] == session_id), None)
-    assert session is not None, "Session should exist in list"
+    instance = next((s for s in instances if s["instance_id"] == instance_id), None)
+    assert instance is not None, "Instance should exist in list"
     
-    logger.info(f"[TEST] Title from list_sessions: {session['title']}")
-    assert session["title"] is not None, "Title should appear in list_sessions()"
-    assert session["title"] == final_meta["title"], "Title should match between metadata and list"
+    logger.info(f"[TEST] Title from list_instances: {instance['title']}")
+    assert instance["title"] is not None, "Title should appear in list_instances()"
+    assert instance["title"] == final_meta["title"], "Title should match between metadata and list"
     
     # 4. Check events received
     event_types = [e.type for e in events_received]
@@ -226,12 +226,12 @@ async def test_session_title_generation_e2e(
     logger.info("=" * 60)
     
     # Cleanup
-    manager.terminate_session(session_id)
-    logger.info("[TEST] Session terminated")
+    manager.terminate_instance(instance_id)
+    logger.info("[TEST] Instance terminated")
 
 
 @pytest.mark.asyncio
-async def test_session_title_not_regenerated(
+async def test_instance_title_not_regenerated(
     integration_config,
     test_db_path
 ):
@@ -240,34 +240,34 @@ async def test_session_title_not_regenerated(
     
     This tests the logic that skips title generation when title already exists.
     """
-    from daemon.manager import SessionManager
-    from daemon.persistence import get_session_metadata, update_session_title
+    from daemon.manager import InstanceManager
+    from daemon.persistence import get_instance_metadata, update_instance_title
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
     
     # Create manager
-    logger.info("[TEST] Creating SessionManager...")
-    manager = SessionManager(integration_config)
+    logger.info("[TEST] Creating InstanceManager...")
+    manager = InstanceManager(integration_config)
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
-    # Spawn coder session
+    # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
     
-    session_id = manager.spawn_session(agent_id="coder")
+    instance_id = manager.spawn_instance(agent_id="coder")
     
     # Pre-set a title before sending any messages
-    update_session_title(manager.conn, session_id, "Pre-set Title")
+    update_instance_title(manager.conn, instance_id, "Pre-set Title")
     logger.info(f"[TEST] Pre-set title: 'Pre-set Title'")
     
     # Verify title is set
-    meta = get_session_metadata(manager.conn, session_id)
+    meta = get_instance_metadata(manager.conn, instance_id)
     assert meta["title"] == "Pre-set Title"
     
     # Send first message
     result = await manager.enqueue_message(
-        session_id=session_id,
+        instance_id=instance_id,
         message="hi",
         source="test"
     )
@@ -277,14 +277,14 @@ async def test_session_title_not_regenerated(
     wait_timeout = 60
     
     while time.time() - start_time < wait_timeout:
-        stats = manager.get_queue_stats(session_id)
+        stats = manager.get_queue_stats(instance_id)
         if stats.pending_count == 0 and stats.processing_count == 0:
             await asyncio.sleep(1)
             break
         await asyncio.sleep(0.5)
     
     # Verify title is still the pre-set one (not regenerated)
-    final_meta = get_session_metadata(manager.conn, session_id)
+    final_meta = get_instance_metadata(manager.conn, instance_id)
     logger.info(f"[TEST] Final title: {final_meta['title']}")
     
     # The title should NOT have been overwritten by a new generated title
@@ -295,7 +295,7 @@ async def test_session_title_not_regenerated(
     logger.info("[TEST] ✅ PASSED - Title was not regenerated")
     
     # Cleanup
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
 
 
 if __name__ == "__main__":

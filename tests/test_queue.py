@@ -478,7 +478,7 @@ class TestInstanceCircuitBreaker:
         cb = InstanceCircuitBreaker()
         instance_id = "test-instance"
         
-        assert cb.can_execute(session_id) is True
+        assert cb.can_execute(instance_id) is True
 
     def test_opens_after_threshold(self):
         """Test that circuit opens after failure threshold."""
@@ -697,7 +697,7 @@ class TestInstanceWatchdog:
             msg.last_activity_at = old_time
             session.commit()
         
-        # Run check - currently this processes all sessions
+        # Run check - currently this processes all instances
         watchdog._check_stuck_messages()
         
         # Verify message was processed
@@ -706,7 +706,7 @@ class TestInstanceWatchdog:
         assert msg.status == "retrying"
         
         # NOTE: This test documents current behavior but highlights
-        # that the watchdog should ideally only monitor "active" sessions
+        # that the watchdog should ideally only monitor "active" instances
 
     def test_watchdog_start_stop(self, queue_repository):
         """Test watchdog can be started and stopped."""

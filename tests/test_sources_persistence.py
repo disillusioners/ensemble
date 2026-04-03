@@ -36,13 +36,13 @@ def conn():
         )
     """)
     
-    # Create session_mappings table
+    # Create instance_mappings table
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_mappings (
+        CREATE TABLE IF NOT EXISTS instance_mappings (
             mapping_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
-            agent_session_id TEXT NOT NULL,
+            agent_instance_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
             metadata JSON,
             last_message_at TIMESTAMP,
@@ -52,20 +52,20 @@ def conn():
         )
     """)
     
-    # Create index for session_mappings
+    # Create index for instance_mappings
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_source 
-        ON session_mappings(source_id)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_source 
+        ON instance_mappings(source_id)
     """)
     
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_session 
-        ON session_mappings(agent_session_id)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_instance 
+        ON instance_mappings(agent_instance_id)
     """)
     
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_cleanup 
-        ON session_mappings(last_message_at)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_cleanup 
+        ON instance_mappings(last_message_at)
     """)
     
     # Create processed_external_messages table for deduplication
@@ -196,92 +196,92 @@ def test_delete_source_config(conn):
     assert result is False
 
 
-# ==================== Session Mapping Tests ====================
+# ==================== Instance Mapping Tests ====================
 
 
-def test_save_session_mapping(conn):
-    """Test saving a session mapping."""
+def test_save_instance_mapping(conn):
+    """Test saving a instance mapping."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", {"key": "value"}
+        "instance-abc", "/path/to/agent", {"key": "value"}
     )
     
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user123")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     assert mapping is not None
     assert mapping["mapping_id"] == "mapping-1"
     assert mapping["source_id"] == "telegram-main"
     assert mapping["external_user_id"] == "user123"
-    assert mapping["agent_session_id"] == "session-abc"
+    assert mapping["agent_instance_id"] == "instance-abc"
     assert mapping["agent_dir"] == "/path/to/agent"
     assert mapping["metadata"] == {"key": "value"}
 
 
-def test_save_session_mapping_duplicate(conn):
-    """Test that save_session_mapping updates existing mapping (upsert)."""
+def test_save_instance_mapping_duplicate(conn):
+    """Test that save_instance_mapping updates existing mapping (upsert)."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
     # First save
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", {"key": "value1"}
+        "instance-abc", "/path/to/agent", {"key": "value1"}
     )
     
     # Update with same mapping_id
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-xyz", "/new/path", {"key": "value2"}
+        "instance-xyz", "/new/path", {"key": "value2"}
     )
     
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user123")
-    assert mapping["agent_session_id"] == "session-xyz"
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user123")
+    assert mapping["agent_instance_id"] == "instance-xyz"
     assert mapping["agent_dir"] == "/new/path"
     assert mapping["metadata"] == {"key": "value2"}
 
 
-def test_get_session_mapping(conn):
-    """Test getting a session mapping by source_id and external_user_id."""
+def test_get_instance_mapping(conn):
+    """Test getting a instance mapping by source_id and external_user_id."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", None
+        "instance-abc", "/path/to/agent", None
     )
     
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user123")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     assert mapping is not None
     assert mapping["mapping_id"] == "mapping-1"
 
 
-def test_get_session_mapping_not_found(conn):
-    """Test that get_session_mapping returns None for non-existent mapping."""
-    mapping = persistence.get_session_mapping(conn, "non-existent", "user123")
+def test_get_instance_mapping_not_found(conn):
+    """Test that get_instance_mapping returns None for non-existent mapping."""
+    mapping = persistence.get_instance_mapping(conn, "non-existent", "user123")
     assert mapping is None
 
 
-def test_get_session_mapping_by_session(conn):
-    """Test getting a session mapping by agent_session_id."""
+def test_get_instance_mapping_by_instance(conn):
+    """Test getting a instance mapping by agent_instance_id."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", None
+        "instance-abc", "/path/to/agent", None
     )
     
-    mapping = persistence.get_session_mapping_by_session(conn, "session-abc")
+    mapping = persistence.get_instance_mapping_by_instance(conn, "instance-abc")
     assert mapping is not None
     assert mapping["external_user_id"] == "user123"
 
@@ -293,13 +293,13 @@ def test_update_mapping_last_message(conn):
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", None
+        "instance-abc", "/path/to/agent", None
     )
     
     # Get initial last_message_at
-    mapping_before = persistence.get_session_mapping(conn, "telegram-main", "user123")
+    mapping_before = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     initial_time = mapping_before["last_message_at"]
     
     # Wait a bit to ensure time difference (SQLite CURRENT_TIMESTAMP has second precision)
@@ -309,57 +309,57 @@ def test_update_mapping_last_message(conn):
     # Update
     persistence.update_mapping_last_message(conn, "telegram-main", "user123")
     
-    mapping_after = persistence.get_session_mapping(conn, "telegram-main", "user123")
+    mapping_after = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     assert mapping_after["last_message_at"] > initial_time
 
 
-def test_list_session_mappings(conn):
-    """Test listing session mappings by source_id."""
+def test_list_instance_mappings(conn):
+    """Test listing instance mappings by source_id."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user1",
-        "session-1", "/path/1", None
+        "instance-1", "/path/1", None
     )
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-2", "telegram-main", "user2",
-        "session-2", "/path/2", None
+        "instance-2", "/path/2", None
     )
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-3", "other-source", "user3",
-        "session-3", "/path/3", None
+        "instance-3", "/path/3", None
     )
     
-    mappings = persistence.list_session_mappings(conn, "telegram-main")
+    mappings = persistence.list_instance_mappings(conn, "telegram-main")
     assert len(mappings) == 2
     external_ids = [m["external_user_id"] for m in mappings]
     assert "user1" in external_ids
     assert "user2" in external_ids
 
 
-def test_delete_session_mapping(conn):
-    """Test deleting a session mapping by mapping_id."""
+def test_delete_instance_mapping(conn):
+    """Test deleting a instance mapping by mapping_id."""
     persistence.save_source_config(
         conn, "telegram-main", "telegram", "Test Bot",
         {"polling": True}, None, enabled=True
     )
     
-    persistence.save_session_mapping(
+    persistence.save_instance_mapping(
         conn, "mapping-1", "telegram-main", "user123",
-        "session-abc", "/path/to/agent", None
+        "instance-abc", "/path/to/agent", None
     )
     
-    result = persistence.delete_session_mapping(conn, "mapping-1")
+    result = persistence.delete_instance_mapping(conn, "mapping-1")
     assert result is True
     
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user123")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user123")
     assert mapping is None
     
     # Test deleting non-existent mapping
-    result = persistence.delete_session_mapping(conn, "non-existent")
+    result = persistence.delete_instance_mapping(conn, "non-existent")
     assert result is False
 
 
@@ -513,19 +513,19 @@ def test_cleanup_inactive_mappings(conn):
     old_time = datetime.now() - timedelta(days=60)
     conn.execute(
         """
-        INSERT INTO session_mappings (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, last_message_at, created_at)
+        INSERT INTO instance_mappings (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, last_message_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ("mapping-old", "telegram-main", "user-old", "session-old", "/old", old_time, old_time)
+        ("mapping-old", "telegram-main", "user-old", "instance-old", "/old", old_time, old_time)
     )
     
     # Create recent mapping
     conn.execute(
         """
-        INSERT INTO session_mappings (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, last_message_at, created_at)
+        INSERT INTO instance_mappings (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, last_message_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        ("mapping-new", "telegram-main", "user-new", "session-new", "/new", datetime.now(), datetime.now())
+        ("mapping-new", "telegram-main", "user-new", "instance-new", "/new", datetime.now(), datetime.now())
     )
     conn.commit()
     
@@ -535,11 +535,11 @@ def test_cleanup_inactive_mappings(conn):
     assert deleted == 1
     
     # Verify old mapping is deleted
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user-old")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user-old")
     assert mapping is None
     
     # Verify new mapping still exists
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user-new")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user-new")
     assert mapping is not None
 
 
@@ -554,19 +554,19 @@ def test_cleanup_inactive_mappings_with_null_last_message(conn):
     old_time = datetime.now() - timedelta(days=60)
     conn.execute(
         """
-        INSERT INTO session_mappings (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, last_message_at, created_at)
+        INSERT INTO instance_mappings (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, last_message_at, created_at)
         VALUES (?, ?, ?, ?, ?, NULL, ?)
         """,
-        ("mapping-null", "telegram-main", "user-null", "session-null", "/null", old_time)
+        ("mapping-null", "telegram-main", "user-null", "instance-null", "/null", old_time)
     )
     
     # Create recent mapping with NULL last_message_at
     conn.execute(
         """
-        INSERT INTO session_mappings (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, last_message_at, created_at)
+        INSERT INTO instance_mappings (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, last_message_at, created_at)
         VALUES (?, ?, ?, ?, ?, NULL, ?)
         """,
-        ("mapping-null-new", "telegram-main", "user-null-new", "session-null-new", "/null-new", datetime.now())
+        ("mapping-null-new", "telegram-main", "user-null-new", "instance-null-new", "/null-new", datetime.now())
     )
     conn.commit()
     
@@ -576,9 +576,9 @@ def test_cleanup_inactive_mappings_with_null_last_message(conn):
     assert deleted == 1
     
     # Verify old mapping is deleted
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user-null")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user-null")
     assert mapping is None
     
     # Verify new mapping still exists
-    mapping = persistence.get_session_mapping(conn, "telegram-main", "user-null-new")
+    mapping = persistence.get_instance_mapping(conn, "telegram-main", "user-null-new")
     assert mapping is not None

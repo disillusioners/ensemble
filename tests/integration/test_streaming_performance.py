@@ -23,7 +23,7 @@ from daemon.events import EventBroadcaster, Event
 
 @pytest_asyncio.fixture
 async def mock_manager():
-    """Create a mock SessionManager."""
+    """Create a mock InstanceManager."""
     manager = Mock()
     manager.broadcaster = EventBroadcaster()
     
@@ -54,10 +54,10 @@ class TestEventThroughput:
     """Tests for event throughput performance."""
 
     @pytest.mark.asyncio
-    async def test_single_session_throughput(self, mock_manager):
-        """Test throughput for single session with many events."""
+    async def test_single_instance_throughput(self, mock_manager):
+        """Test throughput for single instance with many events."""
         broadcaster = EventBroadcaster(max_queue_size=10000, history_size=10000)
-        session_id = "throughput-test"
+        instance_id = "throughput-test"
         
         num_events = 1000
         start_time = time.perf_counter()
@@ -66,7 +66,7 @@ class TestEventThroughput:
         for i in range(num_events):
             await broadcaster.broadcast(Event(
                 type=f"event{i}",
-                session_id=session_id,
+                instance_id=instance_id,
                 data={"index": i}
             ))
         
@@ -76,39 +76,39 @@ class TestEventThroughput:
         # Calculate throughput
         throughput = num_events / duration
         
-        print(f"\nSingle session throughput: {throughput:.0f} events/sec")
+        print(f"\nSingle instance throughput: {throughput:.0f} events/sec")
         print(f"Duration: {duration:.3f}s for {num_events} events")
         
         # Should handle at least 5000 events/second
         assert throughput > 5000
 
     @pytest.mark.asyncio
-    async def test_multiple_session_throughput(self, mock_manager):
-        """Test throughput across multiple sessions."""
+    async def test_multiple_instance_throughput(self, mock_manager):
+        """Test throughput across multiple instances."""
         broadcaster = EventBroadcaster(max_queue_size=10000, history_size=10000)
         
-        num_sessions = 100
-        num_events_per_session = 100
+        num_instances = 100
+        num_events_per_instance = 100
         
         start_time = time.perf_counter()
         
-        # Distribute events across sessions
-        for session_idx in range(num_sessions):
-            session_id = f"session-{session_idx}"
-            for i in range(num_events_per_session):
+        # Distribute events across instances
+        for instance_idx in range(num_instances):
+            instance_id = f"instance-{instance_idx}"
+            for i in range(num_events_per_instance):
                 await broadcaster.broadcast(Event(
                     type=f"event{i}",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     data={"index": i}
                 ))
         
         end_time = time.perf_counter()
         duration = end_time - start_time
-        total_events = num_sessions * num_events_per_session
+        total_events = num_instances * num_events_per_instance
         throughput = total_events / duration
         
-        print(f"\nMulti-session throughput: {throughput:.0f} events/sec")
-        print(f"Duration: {duration:.3f}s for {total_events} events across {num_sessions} sessions")
+        print(f"\nMulti-instance throughput: {throughput:.0f} events/sec")
+        print(f"Duration: {duration:.3f}s for {total_events} events across {num_instances} instances")
         
         # Should handle at least 3000 events/second
         assert throughput > 3000
@@ -128,7 +128,7 @@ class TestEventThroughput:
             for i in range(events_per_task):
                 await broadcaster.broadcast(Event(
                     type=f"event{i}",
-                    session_id=f"session-{task_id}",
+                    instance_id=f"instance-{task_id}",
                     data={"task": task_id, "index": i}
                 ))
         
@@ -156,16 +156,16 @@ class TestEventLatency:
     async def test_broadcast_to_queue_latency(self, mock_manager):
         """Test latency of broadcast to queue delivery."""
         broadcaster = EventBroadcaster()
-        session_id = "latency-test"
+        instance_id = "latency-test"
         
         # Pre-create the queue
-        queue = await broadcaster.get_queue(session_id)
+        queue = await broadcaster.get_queue(instance_id)
         
         latencies = []
         num_samples = 100
         
         for i in range(num_samples):
-            event = Event(type="test", session_id=session_id, data={"i": i})
+            event = Event(type="test", instance_id=instance_id, data={"i": i})
             
             start = time.perf_counter()
             await broadcaster.broadcast(event)
@@ -197,7 +197,7 @@ class TestEventLatency:
             
             event = Event(
                 type="message",
-                session_id="session-1",
+                instance_id="instance-1",
                 message_id=f"msg-{i}",
                 data={"content": f"test{i}"}
             )
@@ -224,56 +224,56 @@ class TestConcurrentConnections:
     """Tests for handling many concurrent connections."""
 
     @pytest.mark.asyncio
-    async def test_many_concurrent_sessions(self, mock_manager):
-        """Test handling many concurrent session queues."""
+    async def test_many_concurrent_instances(self, mock_manager):
+        """Test handling many concurrent instance queues."""
         broadcaster = EventBroadcaster()
         
-        num_sessions = 500
+        num_instances = 500
         
-        # Create many session queues concurrently
+        # Create many instance queues concurrently
         start_time = time.perf_counter()
         
-        async def create_session(idx):
-            session_id = f"session-{idx}"
-            queue = await broadcaster.get_queue(session_id)
+        async def create_instance(idx):
+            instance_id = f"instance-{idx}"
+            queue = await broadcaster.get_queue(instance_id)
             # Add one event
             await broadcaster.broadcast(Event(
                 type="init",
-                session_id=session_id,
+                instance_id=instance_id,
                 data={"idx": idx}
             ))
             return queue
         
-        queues = await asyncio.gather(*[create_session(i) for i in range(num_sessions)])
+        queues = await asyncio.gather(*[create_instance(i) for i in range(num_instances)])
         
         end_time = time.perf_counter()
         
-        print(f"\nCreated {num_sessions} sessions in {(end_time - start_time)*1000:.1f}ms")
+        print(f"\nCreated {num_instances} instances in {(end_time - start_time)*1000:.1f}ms")
         
-        # All sessions should exist
-        assert len(broadcaster._event_history) == num_sessions
+        # All instances should exist
+        assert len(broadcaster._event_history) == num_instances
 
     @pytest.mark.asyncio
-    async def test_session_cleanup_performance(self, mock_manager):
-        """Test performance of session cleanup."""
+    async def test_instance_cleanup_performance(self, mock_manager):
+        """Test performance of instance cleanup."""
         broadcaster = EventBroadcaster()
         
-        # Create many sessions
-        num_sessions = 100
-        for i in range(num_sessions):
-            session_id = f"session-{i}"
-            await broadcaster.get_queue(session_id)
-            await broadcaster.broadcast(Event(type="e", session_id=session_id))
+        # Create many instances
+        num_instances = 100
+        for i in range(num_instances):
+            instance_id = f"instance-{i}"
+            await broadcaster.get_queue(instance_id)
+            await broadcaster.broadcast(Event(type="e", instance_id=instance_id))
         
         # Cleanup
         start_time = time.perf_counter()
         
-        for i in range(num_sessions):
-            broadcaster.cleanup_session(f"session-{i}")
+        for i in range(num_instances):
+            broadcaster.cleanup_instance(f"instance-{i}")
         
         end_time = time.perf_counter()
         
-        print(f"\nCleaned up {num_sessions} sessions in {(end_time - start_time)*1000:.1f}ms")
+        print(f"\nCleaned up {num_instances} instances in {(end_time - start_time)*1000:.1f}ms")
         
         assert len(broadcaster._event_history) == 0
 
@@ -289,7 +289,7 @@ class TestMemoryEfficiency:
     async def test_history_memory_usage(self, mock_manager):
         """Test memory usage with large history."""
         broadcaster = EventBroadcaster(history_size=1000)
-        session_id = "memory-test"
+        instance_id = "memory-test"
         
         # Add many events
         num_events = 10000
@@ -297,43 +297,43 @@ class TestMemoryEfficiency:
         for i in range(num_events):
             await broadcaster.broadcast(Event(
                 type=f"event{i}",
-                session_id=session_id,
+                instance_id=instance_id,
                 data={"index": i, "payload": "x" * 100}
             ))
         
         # History should be capped
-        history = broadcaster._event_history[session_id]
+        history = broadcaster._event_history[instance_id]
         assert len(history) == 1000
         
         print(f"\nHistory capped at {len(history)} despite {num_events} events")
 
     @pytest.mark.asyncio
-    async def test_many_sessions_memory(self, mock_manager):
-        """Test memory usage with many sessions."""
+    async def test_many_instances_memory(self, mock_manager):
+        """Test memory usage with many instances."""
         broadcaster = EventBroadcaster(history_size=10)
         
-        num_sessions = 100
-        events_per_session = 20
+        num_instances = 100
+        events_per_instance = 20
         
-        for s in range(num_sessions):
-            session_id = f"session-{s}"
-            for e in range(events_per_session):
+        for s in range(num_instances):
+            instance_id = f"instance-{s}"
+            for e in range(events_per_instance):
                 await broadcaster.broadcast(Event(
                     type="e",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     data={"x": e}
                 ))
         
-        # Each session should have limited history
+        # Each instance should have limited history
         total_history = sum(
-            len(broadcaster._event_history.get(f"session-{s}", []))
-            for s in range(num_sessions)
+            len(broadcaster._event_history.get(f"instance-{s}", []))
+            for s in range(num_instances)
         )
         
         print(f"\nTotal events in history: {total_history}")
         
-        # Should be capped at num_sessions * history_size
-        assert total_history <= num_sessions * 10
+        # Should be capped at num_instances * history_size
+        assert total_history <= num_instances * 10
 
 
 # ============================================================================
@@ -351,7 +351,7 @@ class TestStressScenarios:
         duration_seconds = 2  # Run for 2 seconds
         events_per_second = 5000
         
-        session_id = "sustained-load"
+        instance_id = "sustained-load"
         start_time = time.perf_counter()
         event_count = 0
         
@@ -361,7 +361,7 @@ class TestStressScenarios:
             for _ in range(events_per_second // 10):  # Batch of 50
                 tasks.append(broadcaster.broadcast(Event(
                     type="load",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     data={"count": event_count}
                 )))
                 event_count += 1
@@ -390,7 +390,7 @@ class TestStressScenarios:
             tasks = [
                 broadcaster.broadcast(Event(
                     type=f"burst{burst}",
-                    session_id=f"burst-session-{burst % 5}",  # 5 sessions
+                    instance_id=f"burst-instance-{burst % 5}",  # 5 instances
                     data={"burst": burst, "i": i}
                 ))
                 for i in range(events_per_burst)
@@ -403,7 +403,7 @@ class TestStressScenarios:
         # All events should be in history (may be capped by history_size)
         # Check at least some events made it
         total_events = sum(
-            broadcaster._event_counters.get(f"burst-session-{i}", 0)
+            broadcaster._event_counters.get(f"burst-instance-{i}", 0)
             for i in range(5)
         )
         assert total_events >= num_bursts * events_per_burst // 2  # At least 50%
@@ -425,7 +425,7 @@ class TestStressScenarios:
         for i in range(num_events):
             await broadcaster.broadcast(Event(
                 type="broadcast",
-                session_id="session-1",
+                instance_id="instance-1",
                 data={"i": i}
             ))
         
@@ -455,7 +455,7 @@ class TestBenchmarks:
         
         start = time.perf_counter()
         for i in range(num_events):
-            Event(type="test", session_id="s1", data={"i": i})
+            Event(type="test", instance_id="i1", data={"i": i})
         duration = time.perf_counter() - start
         
         print(f"\nEvent creation: {num_events/duration:.0f} events/sec")
@@ -466,7 +466,7 @@ class TestBenchmarks:
         from daemon.events import event_to_sse
         
         events = [
-            Event(type="test", session_id="s1", message_id=f"m{i}", data={"i": i})
+            Event(type="test", instance_id="i1", message_id=f"m{i}", data={"i": i})
             for i in range(1000)
         ]
         
@@ -487,7 +487,7 @@ class TestBenchmarks:
         # Benchmark get_queue
         start = time.perf_counter()
         for i in range(num_ops):
-            await broadcaster.get_queue(f"session-{i % 100}")
+            await broadcaster.get_queue(f"instance-{i % 100}")
         duration = time.perf_counter() - start
         
         print(f"\nQueue get: {num_ops/duration:.0f} ops/sec")

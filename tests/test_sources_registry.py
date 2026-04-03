@@ -60,13 +60,13 @@ def conn():
         )
     """)
     
-    # Create session_mappings table
+    # Create instance_mappings table
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_mappings (
+        CREATE TABLE IF NOT EXISTS instance_mappings (
             mapping_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
-            agent_session_id TEXT NOT NULL,
+            agent_instance_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
             metadata JSON,
             last_message_at TIMESTAMP,
@@ -77,18 +77,18 @@ def conn():
     """)
     
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_source 
-        ON session_mappings(source_id)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_source 
+        ON instance_mappings(source_id)
     """)
     
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_session 
-        ON session_mappings(agent_session_id)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_instance 
+        ON instance_mappings(agent_instance_id)
     """)
     
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_mappings_cleanup 
-        ON session_mappings(last_message_at)
+        CREATE INDEX IF NOT EXISTS idx_instance_mappings_cleanup 
+        ON instance_mappings(last_message_at)
     """)
     
     # Create processed_external_messages table for deduplication
@@ -114,7 +114,7 @@ def conn():
 
 @pytest.fixture
 def mock_manager():
-    """Create a mock SessionManager."""
+    """Create a mock InstanceManager."""
     manager = MagicMock()
     
     # Mock config
@@ -127,8 +127,8 @@ def mock_manager():
     mock_queue.enqueue = MagicMock()
     manager.queue = mock_queue
     
-    # Mock spawn_session
-    manager.spawn_session = MagicMock(return_value="test-session-id")
+    # Mock spawn_instance
+    manager.spawn_instance = MagicMock(return_value="test-instance-id")
     
     return manager
 
@@ -279,12 +279,12 @@ async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
     
     # Mock persistence functions to avoid database operations
     with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.SessionMapper') as MockSessionMapper:
+         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
         
         # Setup mock mapper
         mock_mapper_instance = MagicMock()
-        mock_mapper_instance.get_or_create_session = AsyncMock(return_value="session-123")
-        MockSessionMapper.return_value = mock_mapper_instance
+        mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
+        MockInstanceMapper.return_value = mock_mapper_instance
         
         # Call handle_message
         await registry._handle_message("test-source", msg)
@@ -294,7 +294,7 @@ async def test_handle_message_calls_queue_enqueue(conn, mock_manager):
         
         # Check the call parameters
         call_kwargs = mock_manager.queue.enqueue.call_args.kwargs
-        assert call_kwargs["session_id"] == "session-123"
+        assert call_kwargs["instance_id"] == "instance-123"
         assert call_kwargs["content"] == "Hello world"
         assert call_kwargs["source"] == "test-source:user123"
         assert call_kwargs["priority"] == 1
@@ -328,8 +328,8 @@ async def test_handle_message_checks_duplicate(conn, mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_handle_message_creates_session_for_new_user(conn, mock_manager):
-    """Test that new users get a new session created."""
+async def test_handle_message_creates_instance_for_new_user(conn, mock_manager):
+    """Test that new users get a new instance created."""
     registry = SourceRegistry(conn, mock_manager)
     
     # Create a test message
@@ -342,22 +342,22 @@ async def test_handle_message_creates_session_for_new_user(conn, mock_manager):
     
     # Mock persistence functions
     with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.SessionMapper') as MockSessionMapper:
+         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
         
-        # Setup mock mapper to simulate new user (no existing session)
+        # Setup mock mapper to simulate new user (no existing instance)
         mock_mapper_instance = MagicMock()
-        mock_mapper_instance.get_or_create_session = AsyncMock(return_value="new-session-id")
-        MockSessionMapper.return_value = mock_mapper_instance
+        mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="new-instance-id")
+        MockInstanceMapper.return_value = mock_mapper_instance
         
         # Call handle_message
         await registry._handle_message("test-source", msg)
         
-        # Verify spawn_session was called (through mapper)
-        mock_mapper_instance.get_or_create_session.assert_called_once()
+        # Verify spawn_instance was called (through mapper)
+        mock_mapper_instance.get_or_create_instance.assert_called_once()
         
-        # Verify queue.enqueue was called with the new session
+        # Verify queue.enqueue was called with the new instance
         mock_manager.queue.enqueue.assert_called_once()
-        assert mock_manager.queue.enqueue.call_args.kwargs["session_id"] == "new-session-id"
+        assert mock_manager.queue.enqueue.call_args.kwargs["instance_id"] == "new-instance-id"
 
 
 @pytest.mark.asyncio
@@ -374,16 +374,16 @@ async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
     )
     
     with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.SessionMapper') as MockSessionMapper:
+         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
         
         mock_mapper_instance = MagicMock()
-        mock_mapper_instance.get_or_create_session = AsyncMock(return_value="session-123")
-        MockSessionMapper.return_value = mock_mapper_instance
+        mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
+        MockInstanceMapper.return_value = mock_mapper_instance
         
         await registry._handle_message("test-source", msg)
         
-        # Verify get_or_create_session was called with custom agent_dir
-        mock_mapper_instance.get_or_create_session.assert_called_once_with(
+        # Verify get_or_create_instance was called with custom agent_dir
+        mock_mapper_instance.get_or_create_instance.assert_called_once_with(
             source_id="test-source",
             external_user_id="user123",
             agent_dir="/custom/agents"
@@ -404,16 +404,16 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
     )
     
     with patch('daemon.sources.registry.persistence.is_duplicate_message', return_value=False), \
-         patch('daemon.sources.registry.SessionMapper') as MockSessionMapper:
+         patch('daemon.sources.registry.InstanceMapper') as MockInstanceMapper:
         
         mock_mapper_instance = MagicMock()
-        mock_mapper_instance.get_or_create_session = AsyncMock(return_value="session-123")
-        MockSessionMapper.return_value = mock_mapper_instance
+        mock_mapper_instance.get_or_create_instance = AsyncMock(return_value="instance-123")
+        MockInstanceMapper.return_value = mock_mapper_instance
         
         await registry._handle_message("test-source", msg)
         
-        # Verify get_or_create_session was called with default agent_dir from config
-        mock_mapper_instance.get_or_create_session.assert_called_once_with(
+        # Verify get_or_create_instance was called with default agent_dir from config
+        mock_mapper_instance.get_or_create_instance.assert_called_once_with(
             source_id="test-source",
             external_user_id="user123",
             agent_dir="/default/agents"  # From mock_manager.config.agents.directory

@@ -1,11 +1,11 @@
-"""Tests for scheduler session mode feature (Task 7).
+"""Tests for scheduler instance mode feature (Task 7).
 
 Tests cover:
-1. New session mode - creates fresh session per execution
-2. Reuse session mode - reuses session across runs with run counter
-3. One-time schedules - always force new_session
+1. New instance mode - creates fresh instance per execution
+2. Reuse instance mode - reuses instance across runs with run counter
+3. One-time schedules - always force new_instance
 4. Error recovery - execution callbacks and counter persistence
-5. API validation - invalid session_mode and max_concurrent constraints
+5. API validation - invalid instance_mode and max_concurrent constraints
 """
 
 import pytest
@@ -15,7 +15,7 @@ from unittest.mock import Mock, AsyncMock, MagicMock, patch
 
 from daemon.sources.adapters.scheduler import SchedulerAdapter
 from daemon.sources.base import SourceConfig, IncomingMessage, SourceStatus
-from daemon.models import SchedulerSessionMode
+from daemon.models import SchedulerInstanceMode
 
 
 # ==================== Fixtures ====================
@@ -53,15 +53,15 @@ def make_config(source_id: str, config: dict) -> SourceConfig:
     )
 
 
-# ==================== Session Mode Configuration Tests ====================
+# ==================== Instance Mode Configuration Tests ====================
 
 
-class TestSchedulerSessionModeConfig:
-    """Tests for session mode configuration parsing."""
+class TestSchedulerInstanceModeConfig:
+    """Tests for instance mode configuration parsing."""
 
-    def test_default_session_mode_is_new_session(self, mock_on_message):
-        """Test that default session mode is new_session when not specified."""
-        config = make_config("test-default-session", {
+    def test_default_instance_mode_is_new_instance(self, mock_on_message):
+        """Test that default instance mode is new_instance when not specified."""
+        config = make_config("test-default-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
@@ -69,69 +69,69 @@ class TestSchedulerSessionModeConfig:
         
         adapter = SchedulerAdapter(config, mock_on_message)
         
-        assert adapter._session_mode == SchedulerSessionMode.NEW_SESSION
+        assert adapter._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
 
-    def test_explicit_new_session_mode(self, mock_on_message):
-        """Test explicit new_session mode configuration."""
-        config = make_config("test-new-session", {
+    def test_explicit_new_instance_mode(self, mock_on_message):
+        """Test explicit new_instance mode configuration."""
+        config = make_config("test-new-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
         
-        assert adapter._session_mode == SchedulerSessionMode.NEW_SESSION
+        assert adapter._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
 
-    def test_reuse_session_mode(self, mock_on_message):
-        """Test reuse_session mode configuration."""
-        config = make_config("test-reuse-session", {
+    def test_reuse_instance_mode(self, mock_on_message):
+        """Test reuse_instance mode configuration."""
+        config = make_config("test-reuse-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
         
-        assert adapter._session_mode == SchedulerSessionMode.REUSE_SESSION
+        assert adapter._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE
 
-    def test_invalid_session_mode_raises_error(self, mock_on_message):
-        """Test that invalid session_mode value raises ValueError."""
-        config = make_config("test-invalid-session-mode", {
+    def test_invalid_instance_mode_raises_error(self, mock_on_message):
+        """Test that invalid instance_mode value raises ValueError."""
+        config = make_config("test-invalid-instance-mode", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "invalid_mode",
+            "instance_mode": "invalid_mode",
         })
         
         with pytest.raises(ValueError):
             SchedulerAdapter(config, mock_on_message)
 
-    def test_one_time_schedule_forces_new_session(self, mock_on_message):
-        """Test that run_at (one-time) schedule always forces new_session mode."""
+    def test_one_time_schedule_forces_new_instance(self, mock_on_message):
+        """Test that run_at (one-time) schedule always forces new_instance mode."""
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-force", {
             "run_at": future_time,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",  # This should be ignored
+            "instance_mode": "reuse_instance",  # This should be ignored
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
         
-        # One-time schedules should always use new_session
-        assert adapter._session_mode == SchedulerSessionMode.NEW_SESSION
+        # One-time schedules should always use new_instance
+        assert adapter._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
 
     def test_one_time_schedule_logs_force_notice(self, mock_on_message):
-        """Test that forcing new_session for one-time schedules is logged."""
+        """Test that forcing new_instance for one-time schedules is logged."""
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-log", {
             "run_at": future_time,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         with patch("daemon.sources.adapters.scheduler.logger") as mock_logger:
@@ -139,23 +139,23 @@ class TestSchedulerSessionModeConfig:
             
             # Check that debug log was called with force message
             debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
-            assert any("Force new_session for one-time schedule" in str(c) for c in debug_calls)
+            assert any("Force new_instance for one-time schedule" in str(c) for c in debug_calls)
 
 
-# ==================== New Session Mode Tests ====================
+# ==================== New Instance Mode Tests ====================
 
 
-class TestNewSessionMode:
-    """Tests for new_session mode behavior."""
+class TestNewInstanceMode:
+    """Tests for new_instance mode behavior."""
 
     @pytest.mark.asyncio
-    async def test_new_session_sets_force_new_session_true(self, mock_on_message):
-        """Test that new_session mode sets force_new_session=True in metadata."""
-        config = make_config("test-new-sess-force", {
+    async def test_new_instance_sets_force_new_instance_true(self, mock_on_message):
+        """Test that new_instance mode sets force_new_instance=True in metadata."""
+        config = make_config("test-new-inst-force", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -170,18 +170,18 @@ class TestNewSessionMode:
         incoming_msg = mock_on_message.call_args[0][0]
         
         assert isinstance(incoming_msg, IncomingMessage)
-        assert incoming_msg.metadata["force_new_session"] is True
+        assert incoming_msg.metadata["force_new_instance"] is True
         
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_new_session_no_run_number(self, mock_on_message):
-        """Test that new_session mode has no run_number in metadata."""
-        config = make_config("test-new-sess-no-run", {
+    async def test_new_instance_no_run_number(self, mock_on_message):
+        """Test that new_instance mode has no run_number in metadata."""
+        config = make_config("test-new-inst-no-run", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -196,13 +196,13 @@ class TestNewSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_new_session_uses_original_message(self, mock_on_message):
-        """Test that new_session mode uses the original message without prefix."""
-        config = make_config("test-new-sess-msg", {
+    async def test_new_instance_uses_original_message(self, mock_on_message):
+        """Test that new_instance mode uses the original message without prefix."""
+        config = make_config("test-new-inst-msg", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Original scheduled task",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -217,13 +217,13 @@ class TestNewSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_new_session_session_mode_in_metadata(self, mock_on_message):
-        """Test that session_mode is correctly reported in metadata."""
-        config = make_config("test-new-sess-meta", {
+    async def test_new_instance_instance_mode_in_metadata(self, mock_on_message):
+        """Test that instance_mode is correctly reported in metadata."""
+        config = make_config("test-new-inst-meta", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -233,25 +233,25 @@ class TestNewSessionMode:
         await asyncio.sleep(0.1)
         
         incoming_msg = mock_on_message.call_args[0][0]
-        assert incoming_msg.metadata["scheduler"]["session_mode"] == "new_session"
+        assert incoming_msg.metadata["scheduler"]["instance_mode"] == "new_instance"
         
         await adapter.stop()
 
 
-# ==================== Reuse Session Mode Tests ====================
+# ==================== Reuse Instance Mode Tests ====================
 
 
-class TestReuseSessionMode:
-    """Tests for reuse_session mode behavior."""
+class TestReuseInstanceMode:
+    """Tests for reuse_instance mode behavior."""
 
     @pytest.mark.asyncio
-    async def test_reuse_session_calls_source_repo(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode calls source_repo.increment_scheduler_run_counter."""
+    async def test_reuse_instance_calls_source_repo(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode calls source_repo.increment_scheduler_run_counter."""
         config = make_config("test-reuse-repo", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -266,13 +266,13 @@ class TestReuseSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_sets_force_new_session_false(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode sets force_new_session=False in metadata."""
+    async def test_reuse_instance_sets_force_new_instance_false(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode sets force_new_instance=False in metadata."""
         config = make_config("test-reuse-force", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -282,20 +282,20 @@ class TestReuseSessionMode:
         await asyncio.sleep(0.1)
         
         incoming_msg = mock_on_message.call_args[0][0]
-        assert incoming_msg.metadata["force_new_session"] is False
+        assert incoming_msg.metadata["force_new_instance"] is False
         
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_includes_run_number(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode includes run_number in metadata."""
+    async def test_reuse_instance_includes_run_number(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode includes run_number in metadata."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 5
         
         config = make_config("test-reuse-run-num", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -310,15 +310,15 @@ class TestReuseSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_formats_message_with_prefix(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode formats message with #N prefix."""
+    async def test_reuse_instance_formats_message_with_prefix(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode formats message with #N prefix."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 3
         
         config = make_config("test-reuse-prefix", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Original task content",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -337,15 +337,15 @@ class TestReuseSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_increments_counter_each_run(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode increments counter for each execution."""
+    async def test_reuse_instance_increments_counter_each_run(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode increments counter for each execution."""
         mock_source_repo.increment_scheduler_run_counter.side_effect = [1, 2, 3]
         
         config = make_config("test-reuse-increment", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -365,13 +365,13 @@ class TestReuseSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_no_source_repo_uses_default(self, mock_on_message):
-        """Test that reuse_session without source_repo uses default run_number=1."""
+    async def test_reuse_instance_no_source_repo_uses_default(self, mock_on_message):
+        """Test that reuse_instance without source_repo uses default run_number=1."""
         config = make_config("test-reuse-no-repo", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)  # No source_repo
@@ -386,15 +386,15 @@ class TestReuseSessionMode:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_source_repo_returns_none(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session handles source_repo returning None gracefully."""
+    async def test_reuse_instance_source_repo_returns_none(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance handles source_repo returning None gracefully."""
         mock_source_repo.increment_scheduler_run_counter.return_value = None
         
         config = make_config("test-reuse-none", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -425,7 +425,7 @@ class TestRunCounterPersistence:
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         # First adapter instance
@@ -454,7 +454,7 @@ class TestRunCounterPersistence:
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         mock_on_message = AsyncMock()
@@ -476,7 +476,7 @@ class TestRunCounterPersistence:
 
 
 class TestContinuationMessageFormatting:
-    """Tests for continuation message formatting in reuse_session mode."""
+    """Tests for continuation message formatting in reuse_instance mode."""
 
     def test_format_continuation_message_includes_run_number(self, mock_on_message):
         """Test that _format_continuation_message includes run number."""
@@ -546,18 +546,18 @@ class TestContinuationMessageFormatting:
 # ==================== One-Time Schedule Tests ====================
 
 
-class TestOneTimeScheduleSessionMode:
-    """Tests for session mode behavior in one-time schedules."""
+class TestOneTimeScheduleInstanceMode:
+    """Tests for instance mode behavior in one-time schedules."""
 
     @pytest.mark.asyncio
-    async def test_one_time_always_new_session(self, mock_on_message):
-        """Test that one-time schedules always use new_session regardless of config."""
+    async def test_one_time_always_new_instance(self, mock_on_message):
+        """Test that one-time schedules always use new_instance regardless of config."""
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-new", {
             "run_at": future_time,
             "agent": "./agents/coder",
             "message": "One-time task",
-            "session_mode": "reuse_session",  # Should be ignored
+            "instance_mode": "reuse_instance",  # Should be ignored
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -566,11 +566,11 @@ class TestOneTimeScheduleSessionMode:
         # For one-time schedules, immediately trigger
         await asyncio.sleep(0.1)
         
-        # Check that on_message was called with new_session metadata
+        # Check that on_message was called with new_instance metadata
         if mock_on_message.call_count > 0:
             incoming_msg = mock_on_message.call_args[0][0]
-            assert incoming_msg.metadata["scheduler"]["session_mode"] == "new_session"
-            assert incoming_msg.metadata["force_new_session"] is True
+            assert incoming_msg.metadata["scheduler"]["instance_mode"] == "new_instance"
+        assert incoming_msg.metadata["force_new_instance"] is True
         
         await adapter.stop()
 
@@ -582,7 +582,7 @@ class TestOneTimeScheduleSessionMode:
             "run_at": future_time,
             "agent": "./agents/coder",
             "message": "One-time task",
-            "session_mode": "reuse_session",  # Should be ignored
+            "instance_mode": "reuse_instance",  # Should be ignored
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
@@ -600,17 +600,17 @@ class TestOneTimeScheduleSessionMode:
 # ==================== Execution Callback Tests ====================
 
 
-class TestSessionModeExecutionCallbacks:
-    """Tests for execution callback behavior with session modes."""
+class TestInstanceModeExecutionCallbacks:
+    """Tests for execution callback behavior with instance modes."""
 
     @pytest.mark.asyncio
-    async def test_callback_receives_run_number_new_session(self, mock_on_message, mock_execution_callback):
-        """Test that execution callback receives correct run_number for new_session."""
+    async def test_callback_receives_run_number_new_instance(self, mock_on_message, mock_execution_callback):
+        """Test that execution callback receives correct run_number for new_instance."""
         config = make_config("test-callback-new", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, mock_execution_callback)
@@ -631,7 +631,7 @@ class TestSessionModeExecutionCallbacks:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_callback_receives_run_number_reuse_session(self, mock_on_message, mock_execution_callback, mock_source_repo):
+    async def test_callback_receives_run_number_reuse_instance(self, mock_on_message, mock_execution_callback, mock_source_repo):
         """Test that execution callback can access run_number through message metadata."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 4
         
@@ -639,7 +639,7 @@ class TestSessionModeExecutionCallbacks:
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, mock_execution_callback, source_repo=mock_source_repo)
@@ -656,15 +656,15 @@ class TestSessionModeExecutionCallbacks:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_callback_statuses_for_reuse_session(self, mock_on_message, mock_execution_callback, mock_source_repo):
-        """Test that execution callback receives all expected statuses for reuse_session."""
+    async def test_callback_statuses_for_reuse_instance(self, mock_on_message, mock_execution_callback, mock_source_repo):
+        """Test that execution callback receives all expected statuses for reuse_instance."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 1
         
         config = make_config("test-callback-statuses", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, mock_execution_callback, source_repo=mock_source_repo)
@@ -685,39 +685,39 @@ class TestSessionModeExecutionCallbacks:
 # ==================== Error Recovery Tests ====================
 
 
-class TestSessionModeErrorRecovery:
-    """Tests for error recovery behavior with session modes."""
+class TestInstanceModeErrorRecovery:
+    """Tests for error recovery behavior with instance modes."""
 
     @pytest.mark.asyncio
-    async def test_new_session_after_failure_creates_fresh_session(self, mock_on_message):
-        """Test that new_session mode always creates fresh session even after failure."""
+    async def test_new_instance_after_failure_creates_fresh_instance(self, mock_on_message):
+        """Test that new_instance mode always creates fresh instance even after failure."""
         config = make_config("test-recovery-new", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Recovery test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
         await adapter.start()
         
-        # Trigger twice - both should use new session
+        # Trigger twice - both should use new instance
         await adapter.manual_trigger()
         await asyncio.sleep(0.05)
         await adapter.manual_trigger()
         await asyncio.sleep(0.1)
         
-        # Both messages should have force_new_session=True
+        # Both messages should have force_new_instance=True
         if mock_on_message.call_count >= 2:
             for call in mock_on_message.call_args_list:
                 msg = call[0][0]
-                assert msg.metadata["force_new_session"] is True
+                assert msg.metadata["force_new_instance"] is True
         
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_reuse_session_continues_counter_after_failure(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session continues counter incrementing even after failures."""
+    async def test_reuse_instance_continues_counter_after_failure(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance continues counter incrementing even after failures."""
         # Simulate counter incrementing even when previous runs "failed"
         mock_source_repo.increment_scheduler_run_counter.side_effect = [1, 2, 3]
         
@@ -725,7 +725,7 @@ class TestSessionModeErrorRecovery:
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Recovery test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -744,20 +744,20 @@ class TestSessionModeErrorRecovery:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_run_number_increments_even_when_session_dies(self, mock_on_message, mock_source_repo):
-        """Test that run_number increments even if the session dies between runs."""
+    async def test_run_number_increments_even_when_instance_dies(self, mock_on_message, mock_source_repo):
+        """Test that run_number increments even if the instance dies between runs."""
         mock_source_repo.increment_scheduler_run_counter.side_effect = [1, 2, 3, 4, 5]
         
         config = make_config("test-recovery-dies", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Resilient test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
         
-        # Simulate multiple runs with "dead" sessions between them
+        # Simulate multiple runs with "dead" instances between them
         for expected_run in range(1, 6):
             # Adapter restarts (simulating crash recovery)
             adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -770,32 +770,32 @@ class TestSessionModeErrorRecovery:
         assert mock_source_repo.increment_scheduler_run_counter.call_count == 5
 
 
-# ==================== Max Concurrent with Session Mode Tests ====================
+# ==================== Max Concurrent with Instance Mode Tests ====================
 
 
-class TestSessionModeMaxConcurrent:
-    """Tests for max_concurrent behavior with different session modes."""
+class TestInstanceModeMaxConcurrent:
+    """Tests for max_concurrent behavior with different instance modes."""
 
-    def test_reuse_session_max_concurrent_default(self, mock_on_message):
-        """Test that reuse_session mode has same default max_concurrent=1."""
+    def test_reuse_instance_max_concurrent_default(self, mock_on_message):
+        """Test that reuse_instance mode has same default max_concurrent=1."""
         config = make_config("test-reuse-max-default", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message)
         
         assert adapter._max_concurrent == 1
 
-    def test_new_session_max_concurrent_can_be_higher(self, mock_on_message):
-        """Test that new_session mode can override max_concurrent."""
+    def test_new_instance_max_concurrent_can_be_higher(self, mock_on_message):
+        """Test that new_instance mode can override max_concurrent."""
         config = make_config("test-new-max-custom", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
             "max_concurrent": 5,
         })
         
@@ -804,15 +804,15 @@ class TestSessionModeMaxConcurrent:
         assert adapter._max_concurrent == 5
 
     @pytest.mark.asyncio
-    async def test_reuse_session_semaphore_enforces_max_concurrent(self, mock_on_message, mock_source_repo):
-        """Test that reuse_session mode enforces max_concurrent via semaphore."""
+    async def test_reuse_instance_semaphore_enforces_max_concurrent(self, mock_on_message, mock_source_repo):
+        """Test that reuse_instance mode enforces max_concurrent via semaphore."""
         mock_source_repo.increment_scheduler_run_counter.side_effect = [1, 2]
         
         config = make_config("test-reuse-semaphore", {
             "interval_seconds": 3600,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
             "max_concurrent": 1,  # Only 1 concurrent execution
         })
         
@@ -837,19 +837,19 @@ class TestSessionModeMaxConcurrent:
 # ==================== Integration with Other Features ====================
 
 
-class TestSessionModeWithOtherFeatures:
-    """Tests for session mode interaction with other scheduler features."""
+class TestInstanceModeWithOtherFeatures:
+    """Tests for instance mode interaction with other scheduler features."""
 
     @pytest.mark.asyncio
-    async def test_session_mode_with_interval_schedule(self, mock_on_message, mock_source_repo):
-        """Test that session_mode works correctly with interval schedules."""
+    async def test_instance_mode_with_interval_schedule(self, mock_on_message, mock_source_repo):
+        """Test that instance_mode works correctly with interval schedules."""
         mock_source_repo.increment_scheduler_run_counter.side_effect = [1, 2]
         
-        config = make_config("test-interval-session", {
+        config = make_config("test-interval-instance", {
             "interval_seconds": 3600,  # 1 hour interval
             "agent": "./agents/coder",
             "message": "Interval test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -860,8 +860,8 @@ class TestSessionModeWithOtherFeatures:
         await asyncio.sleep(0.1)
         
         incoming_msg = mock_on_message.call_args[0][0]
-        # session_mode is always present
-        assert incoming_msg.metadata["scheduler"]["session_mode"] == "reuse_session"
+        # instance_mode is always present
+        assert incoming_msg.metadata["scheduler"]["instance_mode"] == "reuse_instance"
         # For manual trigger, interval_seconds is not added (only for automatic triggers)
         # but the schedule_type is still available
         assert incoming_msg.metadata["scheduler"]["trigger_type"] == "manual"
@@ -869,15 +869,15 @@ class TestSessionModeWithOtherFeatures:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_session_mode_with_cron_schedule(self, mock_on_message, mock_source_repo):
-        """Test that session_mode works correctly with cron schedules."""
+    async def test_instance_mode_with_cron_schedule(self, mock_on_message, mock_source_repo):
+        """Test that instance_mode works correctly with cron schedules."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 1
         
-        config = make_config("test-cron-session", {
+        config = make_config("test-cron-instance", {
             "schedule": "0 9 * * *",  # 9 AM daily
             "agent": "./agents/coder",
             "message": "Cron test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -887,23 +887,23 @@ class TestSessionModeWithOtherFeatures:
         await asyncio.sleep(0.1)
         
         incoming_msg = mock_on_message.call_args[0][0]
-        # session_mode is always present for both manual and scheduled triggers
-        assert incoming_msg.metadata["scheduler"]["session_mode"] == "reuse_session"
+        # instance_mode is always present for both manual and scheduled triggers
+        assert incoming_msg.metadata["scheduler"]["instance_mode"] == "reuse_instance"
         # trigger_type is "manual" for manual triggers
         assert incoming_msg.metadata["scheduler"]["trigger_type"] == "manual"
         
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_session_mode_with_timezone(self, mock_on_message, mock_source_repo):
-        """Test that session_mode works correctly with timezone configuration."""
+    async def test_instance_mode_with_timezone(self, mock_on_message, mock_source_repo):
+        """Test that instance_mode works correctly with timezone configuration."""
         mock_source_repo.increment_scheduler_run_counter.return_value = 1
         
-        config = make_config("test-tz-session", {
+        config = make_config("test-tz-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Timezone test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
             "timezone": "Asia/Tokyo",
         })
         
@@ -913,10 +913,10 @@ class TestSessionModeWithOtherFeatures:
         await adapter.manual_trigger()
         await asyncio.sleep(0.1)
         
-        # Should still have correct session mode regardless of timezone
+        # Should still have correct instance mode regardless of timezone
         incoming_msg = mock_on_message.call_args[0][0]
-        assert incoming_msg.metadata["scheduler"]["session_mode"] == "reuse_session"
-        assert incoming_msg.metadata["force_new_session"] is False
+        assert incoming_msg.metadata["scheduler"]["instance_mode"] == "reuse_instance"
+        assert incoming_msg.metadata["force_new_instance"] is False
         
         await adapter.stop()
 
@@ -924,16 +924,16 @@ class TestSessionModeWithOtherFeatures:
 # ==================== Edge Cases ====================
 
 
-class TestSessionModeEdgeCases:
-    """Tests for edge cases in session mode handling."""
+class TestInstanceModeEdgeCases:
+    """Tests for edge cases in instance mode handling."""
 
-    def test_empty_message_with_reuse_session(self, mock_on_message, mock_source_repo):
-        """Test reuse_session mode with empty message content."""
+    def test_empty_message_with_reuse_instance(self, mock_on_message, mock_source_repo):
+        """Test reuse_instance mode with empty message content."""
         config = make_config("test-empty-msg", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "",  # Empty message
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -949,7 +949,7 @@ class TestSessionModeEdgeCases:
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": special_message,
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -960,13 +960,13 @@ class TestSessionModeEdgeCases:
         assert special_message in formatted
 
     @pytest.mark.asyncio
-    async def test_none_agent_with_session_mode(self, mock_on_message, mock_source_repo):
-        """Test session mode handling when agent is not specified."""
+    async def test_none_agent_with_instance_mode(self, mock_on_message, mock_source_repo):
+        """Test instance mode handling when agent is not specified."""
         config = make_config("test-no-agent", {
             "interval_seconds": 60,
             "agent": None,  # No agent
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo)
@@ -978,20 +978,20 @@ class TestSessionModeEdgeCases:
         
         await adapter.stop()
 
-    def test_session_mode_case_sensitive(self, mock_on_message):
-        """Test that session_mode is case-sensitive."""
+    def test_instance_mode_case_sensitive(self, mock_on_message):
+        """Test that instance_mode is case-sensitive."""
         config = make_config("test-case-sensitive", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "NEW_SESSION",  # Uppercase
+            "instance_mode": "NEW_INSTANCE",  # Uppercase
         })
         
         with pytest.raises(ValueError):
             SchedulerAdapter(config, mock_on_message)
 
 
-# ==================== Skip Session Running Tests ====================
+# ==================== Skip Instance Running Tests ====================
 
 
 @pytest.fixture
@@ -1001,195 +1001,195 @@ def mock_session_repo():
     return repo
 
 
-class TestSkipSessionRunning:
-    """Tests for skipping execution when mapped session is still running."""
+class TestSkipInstanceRunning:
+    """Tests for skipping execution when mapped instance is still running."""
 
-    def test_is_session_active_returns_false_for_new_session_mode(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns False for new_session mode."""
-        config = make_config("test-skip-new-session", {
+    def test_is_instance_active_returns_false_for_new_instance_mode(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns False for new_instance mode."""
+        config = make_config("test-skip-new-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
-        # new_session mode should return False regardless of session state
+        # new_instance mode should return False regardless of instance state
         assert is_active is False
-        assert session_id is None
+        assert instance_id is None
         assert status is None
 
-    def test_is_session_active_returns_false_when_no_mapping(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns False when no session mapping exists."""
-        mock_source_repo.get_session_mapping.return_value = None
+    def test_is_instance_active_returns_false_when_no_mapping(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns False when no instance mapping exists."""
+        mock_source_repo.get_instance_mapping.return_value = None
         
         config = make_config("test-skip-no-mapping", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is False
-        assert session_id is None
+        assert instance_id is None
         assert status is None
 
-    def test_is_session_active_returns_false_when_session_idle(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns False when session is idle."""
+    def test_is_instance_active_returns_false_when_instance_idle(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns False when instance is idle."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-123"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-123"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "idle"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-skip-idle-session", {
+        config = make_config("test-skip-idle-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is False
-        assert session_id == "session-123"
+        assert instance_id == "instance-123"
         assert status == "idle"
 
-    def test_is_session_active_returns_true_when_session_running(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns True when session is running."""
+    def test_is_instance_active_returns_true_when_instance_running(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns True when instance is running."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-123"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-123"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "running"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-skip-running-session", {
+        config = make_config("test-skip-running-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is True
-        assert session_id == "session-123"
+        assert instance_id == "instance-123"
         assert status == "running"
 
-    def test_is_session_active_returns_true_when_session_waiting(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns True when session is waiting."""
+    def test_is_instance_active_returns_true_when_instance_waiting(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns True when instance is waiting."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-456"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-456"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "waiting"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-skip-waiting-session", {
+        config = make_config("test-skip-waiting-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is True
-        assert session_id == "session-456"
+        assert instance_id == "instance-456"
         assert status == "waiting"
 
-    def test_is_session_active_returns_false_when_session_error(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns False when session is in error state."""
+    def test_is_instance_active_returns_false_when_instance_error(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns False when instance is in error state."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-789"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-789"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "error"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-skip-error-session", {
+        config = make_config("test-skip-error-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is False
-        assert session_id == "session-789"
+        assert instance_id == "instance-789"
         assert status == "error"
 
-    def test_is_session_active_returns_false_when_session_terminated(self, mock_on_message, mock_source_repo, mock_session_repo):
-        """Test that _is_session_active returns False when session is terminated."""
+    def test_is_instance_active_returns_false_when_instance_terminated(self, mock_on_message, mock_source_repo, mock_session_repo):
+        """Test that _is_instance_active returns False when instance is terminated."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-terminated"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-terminated"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "terminated"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-skip-terminated-session", {
+        config = make_config("test-skip-terminated-instance", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_session_repo)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         assert is_active is False
-        assert session_id == "session-terminated"
+        assert instance_id == "instance-terminated"
         assert status == "terminated"
 
-    def test_is_session_active_handles_missing_session_repo(self, mock_on_message, mock_source_repo):
-        """Test that _is_session_active handles missing session_repo gracefully."""
+    def test_is_instance_active_handles_missing_session_repo(self, mock_on_message, mock_source_repo):
+        """Test that _is_instance_active handles missing session_repo gracefully."""
         config = make_config("test-skip-no-session-repo", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=None)
         
-        is_active, session_id, status = adapter._is_session_active()
+        is_active, instance_id, status = adapter._is_instance_active()
         
         # Should return False when session_repo is not available
         assert is_active is False
-        assert session_id is None
+        assert instance_id is None
         assert status is None
 
     @pytest.mark.asyncio
-    async def test_skip_execution_when_session_running(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
-        """Test that execution is skipped when mapped session is still running."""
+    async def test_skip_execution_when_instance_running(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that execution is skipped when mapped instance is still running."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-running"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-running"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "running"
@@ -1199,7 +1199,7 @@ class TestSkipSessionRunning:
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(
@@ -1223,17 +1223,17 @@ class TestSkipSessionRunning:
             if c.kwargs.get("status") == "skipped"
         ]
         assert len(skipped_calls) == 1
-        assert skipped_calls[0].kwargs.get("session_id") == "session-running"
+        assert skipped_calls[0].kwargs.get("instance_id") == "instance-running"
         assert "still running" in skipped_calls[0].kwargs.get("error_message", "")
         
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_execute_when_session_idle(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
-        """Test that execution proceeds when mapped session is idle."""
+    async def test_execute_when_instance_idle(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that execution proceeds when mapped instance is idle."""
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-idle"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-idle"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "idle"
@@ -1243,7 +1243,7 @@ class TestSkipSessionRunning:
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Execute this",
-            "session_mode": "reuse_session",
+            "instance_mode": "reuse_instance",
         })
         
         adapter = SchedulerAdapter(
@@ -1271,22 +1271,22 @@ class TestSkipSessionRunning:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_new_session_mode_never_skips(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
-        """Test that new_session mode never skips regardless of session state."""
-        # Even if session is "running", new_session should not check session state
+    async def test_new_instance_mode_never_skips(self, mock_on_message, mock_source_repo, mock_session_repo, mock_execution_callback):
+        """Test that new_instance mode never skips regardless of instance state."""
+        # Even if instance is "running", new_instance should not check instance state
         mock_mapping = MagicMock()
-        mock_mapping.agent_session_id = "session-running"
-        mock_source_repo.get_session_mapping.return_value = mock_mapping
+        mock_mapping.agent_instance_id = "instance-running"
+        mock_source_repo.get_instance_mapping.return_value = mock_mapping
         
         mock_session = MagicMock()
         mock_session.status = "running"
         mock_session_repo.get.return_value = mock_session
         
-        config = make_config("test-new-session-never-skips", {
+        config = make_config("test-new-instance-never-skips", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Execute this",
-            "session_mode": "new_session",
+            "instance_mode": "new_instance",
         })
         
         adapter = SchedulerAdapter(
@@ -1301,7 +1301,7 @@ class TestSkipSessionRunning:
         await adapter.manual_trigger()
         await asyncio.sleep(0.1)
         
-        # Should emit message (new_session mode doesn't check session state)
+        # Should emit message (new_instance mode doesn't check instance state)
         assert mock_on_message.call_count == 1
         
         # Should not have any skipped calls

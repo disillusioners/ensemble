@@ -111,12 +111,12 @@ def test_agent_bootstrap_and_hello(integration_config, agent_system_prompt):
     assert len(last_message.content) > 10, "Response seems too short to be meaningful"
 
 
-async def test_agent_bootstrap_with_session_manager(integration_config, agent_system_prompt):
-    """Test using the full SessionManager to bootstrap an agent.
+async def test_agent_bootstrap_with_instance_manager(integration_config, agent_system_prompt):
+    """Test using the full InstanceManager to bootstrap an agent.
     
     This validates the complete flow used by the actual application.
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     from daemon.persistence import PersistenceManager
     from daemon.loader import PromptCache
     
@@ -126,27 +126,27 @@ async def test_agent_bootstrap_with_session_manager(integration_config, agent_sy
     # Create persistence manager with in-memory database
     persistence = PersistenceManager(db_path=":memory:")
     
-    # Create session manager
-    manager = SessionManager(
+    # Create instance manager
+    manager = InstanceManager(
         config=integration_config,
         persistence=persistence,
         prompt_cache=PromptCache()
     )
     
-    # Spawn a session with the coder agent
-    session_id = manager.spawn_session(agent_id="coder")
+    # Spawn an instance with the coder agent
+    instance_id = manager.spawn_instance(agent_id="coder")
     
-    assert session_id, "Should return a session ID"
-    assert session_id in manager.sessions, "Session should be registered"
+    assert instance_id, "Should return an instance ID"
+    assert instance_id in manager.instances, "Instance should be registered"
     
     # Send hello message
-    response = await manager.send_message(session_id, "Hello! Please respond briefly.")
+    response = await manager.send_message(instance_id, "Hello! Please respond briefly.")
     
     # Validate response
     assert response, "Should receive a non-empty response"
     assert len(response) > 10, "Response seems too short"
     
-    print(f"\n[INTEGRATION TEST] SessionManager Response: {response[:200]}...")
+    print(f"\n[INTEGRATION TEST] InstanceManager Response: {response[:200]}...")
     
     # Clean up
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)

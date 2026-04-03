@@ -2,8 +2,8 @@
 End-to-end test for the message queue system with debug logging.
 
 This test:
-1. Uses the SessionManager directly with debug level logging
-2. Creates a coder session
+1. Uses the InstanceManager directly with debug level logging
+2. Creates a coder instance
 3. Sends "hi" message via the async queue
 4. Listens to events to capture all responses
 5. Verifies only ONE LLM call happens (no duplicates)
@@ -149,7 +149,7 @@ async def test_single_message_no_duplicate_llm_calls(
     - Message counts at each step
     - Timing information
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     
     tracker = mock_llm_tracker
     
@@ -158,21 +158,21 @@ async def test_single_message_no_duplicate_llm_calls(
     
     # Create manager
     logger.info("=" * 60)
-    logger.info("[TEST] Creating SessionManager...")
+    logger.info("[TEST] Creating InstanceManager...")
     logger.info("=" * 60)
     
-    manager = SessionManager(integration_config)
+    manager = InstanceManager(integration_config)
     
     # Ensure main loop is set for event broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
-    # Spawn coder session
+    # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
-    logger.info(f"[TEST] Creating session with agent: {coder_agent_dir}")
+    logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
     
-    session_id = manager.spawn_session(agent_id="coder")
-    logger.info(f"[TEST] ✅ Session created: {session_id}")
+    instance_id = manager.spawn_instance(agent_id="coder")
+    logger.info(f"[TEST] ✅ Instance created: {instance_id}")
     
     # Track invocations before sending message
     initial_count = tracker.call_count
@@ -188,7 +188,7 @@ async def test_single_message_no_duplicate_llm_calls(
     start_time = time.time()
     
     result = await manager.enqueue_message(
-        session_id=session_id,
+        instance_id=instance_id,
         message="hi",
         source="test"
     )
@@ -209,7 +209,7 @@ async def test_single_message_no_duplicate_llm_calls(
     
     while time.time() - start_time < wait_timeout:
         # Check if message was completed (check queue stats)
-        stats = manager.get_queue_stats(session_id)
+        stats = manager.get_queue_stats(instance_id)
         logger.debug(f"[TEST] Queue stats: pending={stats.pending_count}, processing={stats.processing_count}")
         
         if stats.pending_count == 0 and stats.processing_count == 0:
@@ -256,13 +256,13 @@ async def test_single_message_no_duplicate_llm_calls(
         
         # Log detailed debugging info
         logger.error("[TEST] Checking queue state...")
-        stats = manager.get_queue_stats(session_id)
+        stats = manager.get_queue_stats(instance_id)
         logger.error(f"[TEST]   Pending: {stats.pending_count}")
         logger.error(f"[TEST]   Processing: {stats.processing_count}")
         logger.error(f"[TEST]   Oldest age: {stats.oldest_message_age_seconds}s")
         
         logger.error("[TEST] Checking processing set...")
-        logger.error(f"[TEST]   Sessions in _processing: {manager._processing}")
+        logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
     
     assert llm_calls == 1, (
         f"Expected exactly 1 LLM call, but got {llm_calls} calls. "
@@ -275,8 +275,8 @@ async def test_single_message_no_duplicate_llm_calls(
     logger.info("=" * 60)
     
     # Cleanup
-    manager.terminate_session(session_id)
-    logger.info("[TEST] Session terminated")
+    manager.terminate_instance(instance_id)
+    logger.info("[TEST] Instance terminated")
 
 
 @pytest.mark.asyncio
@@ -294,7 +294,7 @@ async def test_sse_events_count(
     3. Exactly one completed event
     4. No error events
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     from daemon.events import Event
     
     tracker = mock_llm_tracker
@@ -302,15 +302,15 @@ async def test_sse_events_count(
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
     
-    manager = SessionManager(integration_config)
+    manager = InstanceManager(integration_config)
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
     # Track events
     events_received = []
     
-    async def collect_events(session_id: str):
+    async def collect_events(instance_id: str):
         """Collect events from the broadcaster."""
-        queue = await manager.broadcaster.get_queue(session_id)
+        queue = await manager.broadcaster.get_queue(instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=20)
@@ -327,10 +327,10 @@ async def test_sse_events_count(
     
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
-    session_id = manager.spawn_session(agent_id="coder")
+    instance_id = manager.spawn_instance(agent_id="coder")
     
     # Start collecting events
-    collect_task = asyncio.create_task(collect_events(session_id))
+    collect_task = asyncio.create_task(collect_events(instance_id))
     
     # Give the collector time to start
     await asyncio.sleep(0.5)
@@ -338,7 +338,7 @@ async def test_sse_events_count(
     # Send message
     logger.info("[SSE TEST] Sending message...")
     await manager.enqueue_message(
-        session_id=session_id,
+        instance_id=instance_id,
         message="hi",
         source="test"
     )
@@ -378,7 +378,7 @@ async def test_sse_events_count(
     logger.info("[SSE TEST] ✅ PASSED")
     
     # Cleanup
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
 
 
 if __name__ == "__main__":
@@ -398,7 +398,7 @@ async def test_debug_llm_invocation_count(
     
     This test adds detailed logging to understand the flow.
     """
-    from daemon.manager import SessionManager
+    from daemon.manager import InstanceManager
     import logging
     
     # Enable all daemon logging
@@ -420,18 +420,18 @@ async def test_debug_llm_invocation_count(
     
     try:
         integration_config.persistence.db_path = str(test_db_path)
-        manager = SessionManager(integration_config)
+        manager = InstanceManager(integration_config)
         manager.broadcaster.set_main_loop(asyncio.get_running_loop())
         
         project_root = Path(__file__).parent.parent.parent
         coder_agent_dir = str(project_root / "agents" / "coder")
-        session_id = manager.spawn_session(agent_id="coder")
+        instance_id = manager.spawn_instance(agent_id="coder")
         
-        logger.info(f"[DEBUG] Session: {session_id}")
+        logger.info(f"[DEBUG] Instance: {instance_id}")
         
         # Send message
         result = await manager.enqueue_message(
-            session_id=session_id,
+            instance_id=instance_id,
             message="hi",
             source="test"
         )
@@ -447,7 +447,7 @@ async def test_debug_llm_invocation_count(
             logger.info(f"[DEBUG]   Call #{i+1}: {call['message']}")
         
         # Also check event history for completed events
-        history = manager.broadcaster.get_events_since(session_id, 0)
+        history = manager.broadcaster.get_events_since(instance_id, 0)
         completed_events = [e for e in history if e.type == 'completed']
         logger.info(f"[DEBUG] Completed events in history: {len(completed_events)}")
         
@@ -457,7 +457,7 @@ async def test_debug_llm_invocation_count(
         
         logger.info("[DEBUG] ✅ Test passed - only 1 LLM invocation")
         
-        manager.terminate_session(session_id)
+        manager.terminate_instance(instance_id)
         
     finally:
         logging.getLogger('daemon.graph').removeHandler(handler)

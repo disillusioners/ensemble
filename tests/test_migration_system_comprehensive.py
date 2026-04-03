@@ -31,7 +31,7 @@ from sqlmodel import SQLModel, Session
 # IMPORTANT: Import all SQLModel table classes to register them with SQLModel.metadata
 # Without these imports, SQLModel.metadata.create_all() won't create the tables
 from daemon.repositories.project.models import Project, ProjectTagLink, ProjectShortnameLink  # noqa: F401
-from daemon.repositories.session.models import Session, SessionHierarchy  # noqa: F401
+from daemon.repositories.instance.models import Instance, InstanceHierarchy  # noqa: F401
 from daemon.repositories.source.models import SourceConfig, SessionMapping, ProcessedMessage, ScheduleExecution  # noqa: F401
 from daemon.repositories.job_queue.models import JobItem  # noqa: F401
 
@@ -96,24 +96,24 @@ ALTER TABLE projects ADD COLUMN creator_agent_id TEXT;
 -- DOWN
 -- SQLite does not support DROP COLUMN
 """,
-        "20240103_000003_add_agent_id_sessions.sql": """-- Migration: add agent_id to sessions
+        "20240103_000003_add_agent_id_sessions.sql": """-- Migration: add agent_id to instances
 -- Created: 2024-01-03 (retrospective)
 -- Author: system
--- Description: Add agent_id column to sessions table, populating from agent_dir
+-- Description: Add agent_id column to instances table, populating from agent_dir
 
 -- UP
-ALTER TABLE sessions ADD COLUMN agent_id TEXT;
+ALTER TABLE instances ADD COLUMN agent_id TEXT;
 
 -- DOWN
 -- SQLite does not support DROP COLUMN
 """,
-        "20240104_000004_add_agent_id_session_mappings.sql": """-- Migration: add agent_id to session_mappings
+        "20240104_000004_add_agent_id_session_mappings.sql": """-- Migration: add agent_id to instance_mappings
 -- Created: 2024-01-04 (retrospective)
 -- Author: system
--- Description: Add agent_id column to session_mappings table
+-- Description: Add agent_id column to instance_mappings table
 
 -- UP
-ALTER TABLE session_mappings ADD COLUMN agent_id TEXT;
+ALTER TABLE instance_mappings ADD COLUMN agent_id TEXT;
 
 -- DOWN
 -- SQLite does not support DROP COLUMN
@@ -209,19 +209,19 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
                 description TEXT,
                 project_metadata TEXT DEFAULT '{}',
                 relationships TEXT DEFAULT '{}',
-                creator_session_id TEXT,
+                creator_instance_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
         """))
         
-        # Create sessions table without agent_id
+        # Create instances table without agent_id
         conn.execute(text("""
-            CREATE TABLE sessions (
-                session_id TEXT PRIMARY KEY,
+            CREATE TABLE instances (
+                instance_id TEXT PRIMARY KEY,
                 agent_dir TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'idle',
-                session_metadata TEXT DEFAULT '{}',
+                instance_metadata TEXT DEFAULT '{}',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -229,19 +229,19 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
         
         # Insert test data
         conn.execute(text("""
-            INSERT INTO sessions (session_id, agent_dir, status, created_at, updated_at)
-            VALUES ('old-session-1', './agents/coder', 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
+            INSERT INTO instances (instance_id, agent_dir, status, created_at, updated_at)
+            VALUES ('old-instance-1', './agents/coder', 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
         """))
         
-        # Create session_mappings table without agent_id
+        # Create instance_mappings table without agent_id
         conn.execute(text("""
-            CREATE TABLE session_mappings (
+            CREATE TABLE instance_mappings (
                 mapping_id TEXT PRIMARY KEY,
                 source_id TEXT NOT NULL,
                 external_user_id TEXT NOT NULL,
-                agent_session_id TEXT NOT NULL,
+                agent_instance_id TEXT NOT NULL,
                 agent_dir TEXT NOT NULL,
-                mapping_metadata TEXT DEFAULT '{}',
+                instance_metadata TEXT DEFAULT '{}',
                 last_message_at TEXT,
                 created_at TEXT NOT NULL
             )
@@ -260,7 +260,7 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 completed_at TEXT,
-                session_id TEXT,
+                instance_id TEXT,
                 error_message TEXT,
                 result_summary TEXT,
                 job_metadata TEXT DEFAULT '{}',
@@ -268,9 +268,9 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
             )
         """))
         
-        # Create minimal other tables
+        # Create instance_hierarchy table
         conn.execute(text("""
-            CREATE TABLE session_hierarchy (
+            CREATE TABLE instance_hierarchy (
                 parent_id TEXT NOT NULL,
                 child_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -323,7 +323,7 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
                 execution_id TEXT PRIMARY KEY,
                 schedule_id TEXT NOT NULL,
                 triggered_at TEXT NOT NULL,
-                session_id TEXT,
+                instance_id TEXT,
                 status TEXT DEFAULT 'triggered',
                 error_message TEXT,
                 completed_at TEXT
@@ -333,7 +333,7 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
         conn.execute(text("""
             CREATE TABLE message_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
+                instance_id TEXT NOT NULL,
                 message_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 source TEXT DEFAULT 'api',
@@ -447,7 +447,7 @@ class TestScenario2IdempotentMigration:
         
         # First, verify the columns already exist (from SQLModel)
         with engine.connect() as conn:
-            result = conn.execute(text("PRAGMA table_info(sessions)"))
+            result = conn.execute(text("PRAGMA table_info(instances)"))
             columns = {row[1] for row in result.fetchall()}
         
         assert 'agent_id' in columns, "agent_id should already exist from SQLModel"
@@ -604,7 +604,7 @@ class TestScenario4MigrationFileFormat:
         
         assert migration.version == "20240103_000003", f"Version mismatch: {migration.version}"
         assert migration.name == "add agent id sessions", f"Name mismatch: {migration.name}"
-        assert "ALTER TABLE sessions ADD COLUMN agent_id TEXT" in migration.up_sql, \
+        assert "ALTER TABLE instances ADD COLUMN agent_id TEXT" in migration.up_sql, \
             f"UP SQL mismatch: {migration.up_sql}"
         assert "SQLite does not support DROP COLUMN" in migration.down_sql, \
             f"DOWN SQL mismatch: {migration.down_sql}"
@@ -704,9 +704,9 @@ class TestScenario5IntegrationWithStartup:
             
             # Verify expected tables exist
             expected_tables = [
-                'schema_migrations', 'sessions', 'projects', 'session_hierarchy',
+                'schema_migrations', 'instances', 'projects', 'instance_hierarchy',
                 'project_tags', 'project_shortnames', 'source_configs',
-                'session_mappings', 'processed_external_messages',
+                'instance_mappings', 'processed_external_messages',
                 'schedule_executions', 'job_queue_items', 'message_queue'
             ]
             for table in expected_tables:
@@ -720,11 +720,11 @@ class TestScenario5IntegrationWithStartup:
         
         # Verify test data exists before migration
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT session_id, agent_dir FROM sessions"))
+            result = conn.execute(text("SELECT instance_id, agent_dir FROM instances"))
             rows_before = result.fetchall()
         
-        assert len(rows_before) == 1, "Should have 1 session before migration"
-        assert rows_before[0][0] == "old-session-1", "Session ID should match"
+        assert len(rows_before) == 1, "Should have 1 instance before migration"
+        assert rows_before[0][0] == "old-instance-1", "Instance ID should match"
         
         # Run migrations
         runner = MigrationRunner(engine, migrations_dir)
@@ -732,11 +732,11 @@ class TestScenario5IntegrationWithStartup:
         
         # Verify data still exists after migration
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT session_id, agent_dir, agent_id FROM sessions"))
+            result = conn.execute(text("SELECT instance_id, agent_dir, agent_id FROM instances"))
             rows_after = result.fetchall()
         
-        assert len(rows_after) == 1, "Should still have 1 session after migration"
-        assert rows_after[0][0] == "old-session-1", "Session ID should be preserved"
+        assert len(rows_after) == 1, "Should still have 1 instance after migration"
+        assert rows_after[0][0] == "old-instance-1", "Instance ID should be preserved"
         assert rows_after[0][1] == "./agents/coder", "agent_dir should be preserved"
 
 

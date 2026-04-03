@@ -313,20 +313,20 @@ class TestActiveRequestRegistry:
 
     def test_register_returns_cancellation_source(self, request_registry):
         """Registration works."""
-        source = request_registry.register("msg-1", "session-1")
+        source = request_registry.register("msg-1", "instance-1")
         assert isinstance(source, CancellationTokenSource)
 
     def test_register_creates_active_request(self, request_registry):
         """Request tracked internally."""
-        request_registry.register("msg-1", "session-1")
+        request_registry.register("msg-1", "instance-1")
         request = request_registry.get_request("msg-1")
         assert request is not None
         assert request.message_id == "msg-1"
-        assert request.session_id == "session-1"
+        assert request.instance_id == "instance-1"
 
     def test_unregister_removes_request(self, request_registry):
         """Cleanup works."""
-        request_registry.register("msg-1", "session-1")
+        request_registry.register("msg-1", "instance-1")
         request_registry.unregister("msg-1")
         assert request_registry.get_request("msg-1") is None
 
@@ -337,7 +337,7 @@ class TestActiveRequestRegistry:
 
     def test_cancel_returns_true_when_found(self, request_registry):
         """Cancel works."""
-        request_registry.register("msg-1", "session-1")
+        request_registry.register("msg-1", "instance-1")
         result = request_registry.cancel("msg-1", CancellationReason.WATCHDOG_RETRY)
         assert result is True
 
@@ -348,14 +348,14 @@ class TestActiveRequestRegistry:
 
     def test_cancel_signals_token(self, request_registry):
         """Token is cancelled."""
-        source = request_registry.register("msg-1", "session-1")
+        source = request_registry.register("msg-1", "instance-1")
         request_registry.cancel("msg-1", CancellationReason.WATCHDOG_RETRY)
         assert source.token.is_cancelled is True
         assert source.token.reason == CancellationReason.WATCHDOG_RETRY
 
     def test_cancel_cancels_asyncio_task(self, request_registry, mock_asyncio_task):
         """Task.cancel() called via loop."""
-        request_registry.register("msg-1", "session-1", task=mock_asyncio_task)
+        request_registry.register("msg-1", "instance-1", task=mock_asyncio_task)
         request_registry.cancel("msg-1", CancellationReason.WATCHDOG_RETRY)
 
         mock_asyncio_task.get_loop.return_value.call_soon_threadsafe.assert_called_once()
@@ -365,49 +365,49 @@ class TestActiveRequestRegistry:
         done_task = MagicMock(spec=asyncio.Task)
         done_task.done.return_value = True
 
-        request_registry.register("msg-1", "session-1", task=done_task)
+        request_registry.register("msg-1", "instance-1", task=done_task)
         result = request_registry.cancel("msg-1", CancellationReason.WATCHDOG_RETRY)
 
         assert result is True
         # Token should still be cancelled
         assert request_registry.get_request("msg-1").cancellation_source.token.is_cancelled
 
-    def test_get_active_for_session(self, request_registry):
-        """Session filtering works."""
-        request_registry.register("msg-1", "session-1")
-        request_registry.register("msg-2", "session-1")
-        request_registry.register("msg-3", "session-2")
+    def test_get_active_for_instance(self, request_registry):
+        """Instance filtering works."""
+        request_registry.register("msg-1", "instance-1")
+        request_registry.register("msg-2", "instance-1")
+        request_registry.register("msg-3", "instance-2")
 
-        active = request_registry.get_active_for_session("session-1")
+        active = request_registry.get_active_for_instance("instance-1")
         assert set(active) == {"msg-1", "msg-2"}
 
-    def test_get_active_for_empty_session(self, request_registry):
-        """Empty session returns empty list."""
-        active = request_registry.get_active_for_session("nonexistent")
+    def test_get_active_for_empty_instance(self, request_registry):
+        """Empty instance returns empty list."""
+        active = request_registry.get_active_for_instance("nonexistent")
         assert active == []
 
-    def test_by_session_index_updated(self, request_registry):
-        """Session index maintained."""
-        request_registry.register("msg-1", "session-1")
-        request_registry.register("msg-2", "session-2")
+    def test_by_instance_index_updated(self, request_registry):
+        """Instance index maintained."""
+        request_registry.register("msg-1", "instance-1")
+        request_registry.register("msg-2", "instance-2")
 
-        assert set(request_registry.get_active_for_session("session-1")) == {"msg-1"}
-        assert set(request_registry.get_active_for_session("session-2")) == {"msg-2"}
+        assert set(request_registry.get_active_for_instance("instance-1")) == {"msg-1"}
+        assert set(request_registry.get_active_for_instance("instance-2")) == {"msg-2"}
 
         request_registry.unregister("msg-1")
 
-        assert request_registry.get_active_for_session("session-1") == []
-        assert set(request_registry.get_active_for_session("session-2")) == {"msg-2"}
+        assert request_registry.get_active_for_instance("instance-1") == []
+        assert set(request_registry.get_active_for_instance("instance-2")) == {"msg-2"}
 
     def test_register_with_task(self, request_registry, mock_asyncio_task):
         """Task is stored."""
-        request_registry.register("msg-1", "session-1", task=mock_asyncio_task)
+        request_registry.register("msg-1", "instance-1", task=mock_asyncio_task)
         request = request_registry.get_request("msg-1")
         assert request.task is mock_asyncio_task
 
     def test_thread_id_recorded(self, request_registry):
         """Thread ID captured."""
-        request_registry.register("msg-1", "session-1")
+        request_registry.register("msg-1", "instance-1")
         request = request_registry.get_request("msg-1")
         assert request.thread_id == threading.current_thread().ident
 
@@ -416,7 +416,7 @@ class TestActiveRequestRegistry:
         registered_ids = []
 
         def register_msg(msg_id):
-            source = request_registry.register(msg_id, "session-1")
+            source = request_registry.register(msg_id, "instance-1")
             registered_ids.append(msg_id)
 
         threads = [
@@ -436,7 +436,7 @@ class TestActiveRequestRegistry:
 
     def test_concurrent_cancel(self, request_registry):
         """Thread-safe cancellation."""
-        request_registry.register("msg-1", "session-1")
+        request_registry.register("msg-1", "instance-1")
         results = []
 
         def cancel_msg():
@@ -465,12 +465,12 @@ class TestActiveRequest:
         source = CancellationTokenSource()
         request = ActiveRequest(
             message_id="msg-1",
-            session_id="session-1",
+            instance_id="instance-1",
             cancellation_source=source,
             started_at=datetime.now(timezone.utc),
         )
         assert request.message_id == "msg-1"
-        assert request.session_id == "session-1"
+        assert request.instance_id == "instance-1"
         assert request.cancellation_source is source
         assert request.task is None
         assert request.thread_id is None
@@ -481,7 +481,7 @@ class TestActiveRequest:
         task = MagicMock(spec=asyncio.Task)
         request = ActiveRequest(
             message_id="msg-1",
-            session_id="session-1",
+            instance_id="instance-1",
             cancellation_source=source,
             started_at=datetime.now(timezone.utc),
             task=task,
@@ -516,7 +516,7 @@ class TestCancellationIntegration:
     def test_registry_cancel_flow(self, request_registry):
         """Registry cancellation flow."""
         # Register
-        source = request_registry.register("msg-1", "session-1")
+        source = request_registry.register("msg-1", "instance-1")
 
         # Verify registered
         assert request_registry.get_request("msg-1") is not None
@@ -533,7 +533,7 @@ class TestCancellationIntegration:
 
     def test_callback_with_registry_cancel(self, request_registry):
         """Callback fires when registry cancels."""
-        source = request_registry.register("msg-1", "session-1")
+        source = request_registry.register("msg-1", "instance-1")
         callback = MagicMock()
         source.register_callback(callback)
 
@@ -545,7 +545,7 @@ class TestCancellationIntegration:
     async def test_async_context_cancellation(self, request_registry):
         """Async context cancellation works."""
         async def long_running(msg_id):
-            source = request_registry.register(msg_id, "session-1")
+            source = request_registry.register(msg_id, "instance-1")
             try:
                 await asyncio.sleep(10)
                 return "completed"

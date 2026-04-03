@@ -53,7 +53,7 @@ class TestCreate:
             description="A test project",
             tags=["python", "fastapi"],
             metadata={"framework": "FastAPI"},
-            creator_session_id="session-123",
+            creator_instance_id="instance-123",
             creator_agent_id="coder",
         )
         
@@ -119,32 +119,32 @@ class TestGet:
         assert result is None
 
 
-class TestGetBySession:
-    """Tests for get_by_session() method."""
+class TestGetByInstance:
+    """Tests for get_by_instance() method."""
 
-    def test_get_by_session_creator(self, store):
-        """Test getting projects created by a session."""
-        store.create(name="Project 1", creator_session_id="session-1")
-        store.create(name="Project 2", creator_session_id="session-1")
-        store.create(name="Project 3", creator_session_id="session-2")
+    def test_get_by_instance_creator(self, store):
+        """Test getting projects created by an instance."""
+        store.create(name="Project 1", creator_instance_id="instance-1")
+        store.create(name="Project 2", creator_instance_id="instance-1")
+        store.create(name="Project 3", creator_instance_id="instance-2")
         
-        results = store.get_by_session("session-1")
+        results = store.get_by_instance("instance-1")
         
         assert len(results) == 2
 
-    def test_get_by_session_relationship(self, store):
+    def test_get_by_instance_relationship(self, store):
         """Test getting projects linked via relationships."""
         project = store.create(name="Related Project")
-        store.add_relationship(project.project_id, "sessions", "session-xyz")
+        store.add_relationship(project.project_id, "instances", "instance-xyz")
         
-        results = store.get_by_session("session-xyz")
+        results = store.get_by_instance("instance-xyz")
         
         assert len(results) == 1
         assert results[0].name == "Related Project"
 
-    def test_get_by_session_empty(self, store):
-        """Test getting projects for session with none."""
-        results = store.get_by_session("no-projects-session")
+    def test_get_by_instance_empty(self, store):
+        """Test getting projects for instance with none."""
+        results = store.get_by_instance("no-projects-instance")
         
         assert results == []
 
@@ -550,45 +550,45 @@ class TestRelationships:
         """Test adding a relationship."""
         project = store.create(name="Test")
         
-        updated = store.add_relationship(project.project_id, "sessions", "session-123")
+        updated = store.add_relationship(project.project_id, "instances", "instance-123")
         
-        assert "session-123" in updated.relationships["sessions"]
+        assert "instance-123" in updated.relationships["instances"]
 
     def test_add_relationship_duplicate_noop(self, store):
         """Test adding duplicate relationship is no-op."""
         project = store.create(name="Test")
-        store.add_relationship(project.project_id, "sessions", "session-123")
+        store.add_relationship(project.project_id, "instances", "instance-123")
         
-        updated = store.add_relationship(project.project_id, "sessions", "session-123")
+        updated = store.add_relationship(project.project_id, "instances", "instance-123")
         
-        assert updated.relationships["sessions"].count("session-123") == 1
+        assert updated.relationships["instances"].count("instance-123") == 1
 
     def test_remove_relationship(self, store):
         """Test removing a relationship."""
         project = store.create(name="Test")
-        store.add_relationship(project.project_id, "sessions", "session-123")
+        store.add_relationship(project.project_id, "instances", "instance-123")
         
-        updated = store.remove_relationship(project.project_id, "sessions", "session-123")
+        updated = store.remove_relationship(project.project_id, "instances", "instance-123")
         
-        assert "session-123" not in updated.relationships.get("sessions", [])
+        assert "instance-123" not in updated.relationships.get("instances", [])
 
     def test_remove_relationship_not_found_noop(self, store):
         """Test removing non-existent relationship is no-op."""
         project = store.create(name="Test")
         
-        updated = store.remove_relationship(project.project_id, "sessions", "nonexistent")
+        updated = store.remove_relationship(project.project_id, "instances", "nonexistent")
         
-        assert "sessions" not in updated.relationships
+        assert "instances" not in updated.relationships
 
     def test_add_relationship_not_found(self, store):
         """Test adding relationship to non-existent project returns None."""
-        result = store.add_relationship("non-existent-id", "sessions", "s1")
+        result = store.add_relationship("non-existent-id", "instances", "i1")
         
         assert result is None
 
     def test_remove_relationship_not_found(self, store):
         """Test removing relationship from non-existent project returns None."""
-        result = store.remove_relationship("non-existent-id", "sessions", "s1")
+        result = store.remove_relationship("non-existent-id", "instances", "i1")
         
         assert result is None
 

@@ -98,7 +98,7 @@ async def test_handle_completed_event_routes_to_adapter(dispatcher, mock_registr
     # Create and handle event directly (bypassing queue)
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -132,7 +132,7 @@ async def test_ignore_non_completed_events(dispatcher, mock_registry):
     # Create and handle a non-completed event
     event = Event(
         type="message_queued",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -160,7 +160,7 @@ async def test_handle_event_missing_source(dispatcher, mock_registry):
     # Create event with missing source
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello"
@@ -188,7 +188,7 @@ async def test_handle_event_invalid_source_format(dispatcher, mock_registry):
     # Create event with invalid source format (missing colon)
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -215,7 +215,7 @@ async def test_handle_event_invalid_source_id_format(dispatcher, mock_registry):
     # Create event with invalid source_id (special characters)
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -241,7 +241,7 @@ async def test_handle_event_no_adapter_found(dispatcher, mock_registry):
     
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -377,7 +377,7 @@ async def test_graceful_stop_timeout(dispatcher, mock_registry):
     # Start the event loop and send some events
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -441,7 +441,7 @@ async def test_handle_event_with_metadata(dispatcher, mock_registry):
     
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -477,7 +477,7 @@ async def test_external_user_id_too_long(dispatcher, mock_registry):
     long_user_id = "a" * 300  # Exceeds 256 limit
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",
@@ -506,7 +506,7 @@ async def test_event_loop_handles_exceptions(dispatcher, mock_registry):
     for i in range(3):
         event = Event(
             type="completed",
-            session_id="test-session",
+            instance_id="test-instance",
             message_id=f"msg-{i}",
             data={
                 "content": f"Hello {i}",
@@ -537,7 +537,7 @@ async def test_adapter_send_failure_logged(dispatcher, mock_registry, caplog):
     
     event = Event(
         type="completed",
-        session_id="test-session",
+        instance_id="test-instance",
         message_id="msg-1",
         data={
             "content": "Hello",

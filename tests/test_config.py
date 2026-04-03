@@ -83,7 +83,7 @@ class TestLoadConfig:
             assert config.llm.model == "gpt-4"
             assert config.daemon.host == "0.0.0.0"
             assert config.daemon.port == 8079
-            assert config.limits.max_sessions == 100
+            assert config.limits.max_instances == 100
         finally:
             # Cleanup
             if config_file.exists():
@@ -205,20 +205,20 @@ class TestConfigValidation:
         assert config.llm.model == "gpt-4"
         assert config.daemon.host == "0.0.0.0"
         assert config.daemon.port == 8079
-        assert config.limits.max_sessions == 100
+        assert config.limits.max_instances == 100
 
     def test_config_with_custom_values(self):
         """Test Config with custom values."""
         config = Config(
             llm={"api_key": "custom-key", "model": "gpt-3.5-turbo"},
             daemon={"port": 9000},
-            limits={"max_sessions": 50},
+            limits={"max_instances": 50},
         )
         
         assert config.llm.api_key == "custom-key"
         assert config.llm.model == "gpt-3.5-turbo"
         assert config.daemon.port == 9000
-        assert config.limits.max_sessions == 50
+        assert config.limits.max_instances == 50
 
     def test_config_serialization(self, sample_config_yaml, tmp_path):
         """Test Config model serialization."""
@@ -273,9 +273,9 @@ class TestLimitsConfig:
         
         config = LimitsConfig()
         
-        assert config.max_sessions == 100
-        assert config.max_children_per_session == 10
-        assert config.session_timeout_minutes == 60
+        assert config.max_instances == 100
+        assert config.max_children_per_instance == 10
+        assert config.instance_timeout_minutes == 60
         assert config.message_rate_limit == 60
 
 
@@ -288,7 +288,7 @@ class TestPersistenceConfig:
         
         config = PersistenceConfig()
         
-        assert config.db_path == "./data/sessions.db"
+        assert config.db_path == "./data/instances.db"
         assert config.checkpoint_interval == 1
         assert config.checkpoint_ttl_hours == 168
         assert config.checkpoint_cleanup_interval == 24

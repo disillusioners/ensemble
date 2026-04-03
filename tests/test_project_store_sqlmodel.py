@@ -52,7 +52,7 @@ class TestCreate:
             description="A test project",
             tags=["python", "fastapi"],
             metadata={"framework": "FastAPI"},
-            creator_session_id="session-123",
+            creator_instance_id="instance-123",
             creator_agent_id="coder",
         )
         
@@ -118,32 +118,32 @@ class TestGet:
         assert result is None
 
 
-class TestGetBySession:
-    """Tests for get_by_session() method."""
+class TestGetByInstance:
+    """Tests for get_by_instance() method."""
 
-    def test_get_by_session_creator(self, store):
-        """Test getting projects created by a session."""
-        store.create(name="Project 1", creator_session_id="session-1")
-        store.create(name="Project 2", creator_session_id="session-1")
-        store.create(name="Project 3", creator_session_id="session-2")
+    def test_get_by_instance_creator(self, store):
+        """Test getting projects created by an instance."""
+        store.create(name="Project 1", creator_instance_id="instance-1")
+        store.create(name="Project 2", creator_instance_id="instance-1")
+        store.create(name="Project 3", creator_instance_id="instance-2")
         
-        results = store.get_by_session("session-1")
+        results = store.get_by_instance("instance-1")
         
         assert len(results) == 2
 
-    def test_get_by_session_relationship(self, store):
+    def test_get_by_instance_relationship(self, store):
         """Test getting projects linked via relationships."""
         project = store.create(name="Related Project")
-        store.add_relationship(project.project_id, "sessions", "session-xyz")
+        store.add_relationship(project.project_id, "instances", "instance-xyz")
         
-        results = store.get_by_session("session-xyz")
+        results = store.get_by_instance("instance-xyz")
         
         assert len(results) == 1
         assert results[0].name == "Related Project"
 
-    def test_get_by_session_empty(self, store):
-        """Test getting projects for session with none."""
-        results = store.get_by_session("no-projects-session")
+    def test_get_by_instance_empty(self, store):
+        """Test getting projects for instance with none."""
+        results = store.get_by_instance("no-projects-instance")
         
         assert results == []
 
@@ -553,18 +553,18 @@ class TestRelationships:
         """Test adding a relationship."""
         project = store.create(name="Test")
         
-        updated = store.add_relationship(project.project_id, "sessions", "session-123")
+        updated = store.add_relationship(project.project_id, "instances", "instance-123")
         
-        assert "session-123" in updated.relationships["sessions"]
+        assert "instance-123" in updated.relationships["instances"]
 
     def test_remove_relationship(self, store):
         """Test removing a relationship."""
         project = store.create(name="Test")
-        store.add_relationship(project.project_id, "sessions", "session-123")
+        store.add_relationship(project.project_id, "instances", "instance-123")
         
-        updated = store.remove_relationship(project.project_id, "sessions", "session-123")
+        updated = store.remove_relationship(project.project_id, "instances", "instance-123")
         
-        assert "session-123" not in updated.relationships.get("sessions", [])
+        assert "instance-123" not in updated.relationships.get("instances", [])
 
 
 class TestDelete:
@@ -621,8 +621,8 @@ class TestToDict:
             tags=["ai"],
             shortnames=["fdt"],
             metadata={"version": "1.0"},
-            relationships={"sessions": ["s1"]},
-            creator_session_id="session-1",
+            relationships={"instances": ["i1"]},
+            creator_instance_id="instance-1",
             creator_agent_id="agent-1",
         )
         
@@ -631,7 +631,7 @@ class TestToDict:
         expected_keys = [
             "project_id", "name", "project_type", "status", "main_directory",
             "related_directories", "description", "tags", "shortnames",
-            "metadata", "relationships", "creator_session_id", "creator_agent_id",
+            "metadata", "relationships", "creator_instance_id", "creator_agent_id",
             "created_at", "updated_at"
         ]
         for key in expected_keys:

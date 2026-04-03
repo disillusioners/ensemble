@@ -79,13 +79,13 @@ daemon:
   port: 8079
 
 limits:
-  max_sessions: 100
-  max_children_per_session: 10
-  session_timeout_minutes: 60
+  max_instances: 100
+  max_children_per_instance: 10
+  instance_timeout_minutes: 60
   message_rate_limit: 60
 
 persistence:
-  db_path: "./data/sessions.db"
+  db_path: "./data/instances.db"
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
@@ -110,15 +110,15 @@ daemon:
   port: ${DAEMON_PORT:-8079}
 
 limits:
-  max_sessions: ${MAX_SESSIONS:-100}
+  max_instances: ${MAX_INSTANCES:-100}
 """
 
 
 @pytest.fixture
-def sample_session_info_data():
-    """Sample SessionInfo data for testing."""
+def sample_instance_info_data():
+    """Sample InstanceInfo data for testing."""
     return {
-        "session_id": "test-session-123",
+        "instance_id": "test-instance-123",
         "agent_id": "coder",
         "agent_dir": "/path/to/agent",
         "status": "running",
@@ -171,19 +171,19 @@ def sample_health_response_data():
 
 
 @pytest.fixture
-def sample_session_create_data():
-    """Sample SessionCreate data for testing."""
+def sample_instance_create_data():
+    """Sample InstanceCreate data for testing."""
     return {
         "agent_id": "coder",
     }
 
 
 @pytest.fixture
-def sample_session_create_with_session_id():
-    """Sample SessionCreate data with custom session_id."""
+def sample_instance_create_with_instance_id():
+    """Sample InstanceCreate data with custom instance_id."""
     return {
         "agent_id": "coder",
-        "session_id": "custom-session-123",
+        "instance_id": "custom-instance-123",
     }
 
 

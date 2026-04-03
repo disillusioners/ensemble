@@ -2,7 +2,7 @@
 End-to-end test for sub-agent completion reporting.
 
 This test:
-1. Creates a Leader session
+1. Creates a Leader instance
 2. Sends a message asking Leader to spawn Coder and say "hi"
 3. Waits for Coder to complete and send report back to Leader
 4. Verifies Leader receives the completion report
@@ -75,49 +75,49 @@ async def test_leader_spawns_coder_and_receives_report(
     End-to-end test: Leader spawns Coder, Coder completes, report sent back.
     
     Flow:
-    1. Create Leader session
+    1. Create Leader instance
     2. Send message: "Spawn a Coder agent and tell it to say 'hi'"
-    3. Leader spawns Coder (child session)
+    3. Leader spawns Coder (child instance)
     4. Leader sends "hi" to Coder via send_message
     5. Coder processes message and queue becomes empty
     6. Coder's completion triggers _send_completion_report()
     7. Leader receives report in its queue: "Coder has done: ..."
     8. Leader processes the report message
     """
-    from daemon.manager import SessionManager
-    from daemon.persistence import get_session_metadata
+    from daemon.manager import InstanceManager
+    from daemon.persistence import get_instance_metadata
     
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(test_db_path)
     
     # Create manager
     logger.info("=" * 70)
-    logger.info("[TEST] Creating SessionManager...")
+    logger.info("[TEST] Creating InstanceManager...")
     logger.info("=" * 70)
     
-    manager = SessionManager(integration_config)
+    manager = InstanceManager(integration_config)
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
     project_root = Path(__file__).parent.parent.parent
     
-    # Spawn Leader session
+    # Spawn Leader instance
     leader_agent_dir = str(project_root / "agents" / "leader")
-    logger.info(f"[TEST] Creating Leader session with agent: {leader_agent_dir}")
+    logger.info(f"[TEST] Creating Leader instance with agent: {leader_agent_dir}")
     
-    leader_session_id = manager.spawn_session(agent_id="leader")
-    logger.info(f"[TEST] ✅ Leader session created: {leader_session_id[:8]}...")
+    leader_instance_id = manager.spawn_instance(agent_id="leader")
+    logger.info(f"[TEST] ✅ Leader instance created: {leader_instance_id[:8]}...")
     
     # Track all events
     events_received = []
     
-    async def collect_events(session_id: str, stop_event: asyncio.Event):
+    async def collect_events(instance_id: str, stop_event: asyncio.Event):
         """Collect events from the broadcaster."""
-        queue = await manager.broadcaster.get_queue(session_id)
+        queue = await manager.broadcaster.get_queue(instance_id)
         while not stop_event.is_set():
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=2)
                 events_received.append(event)
-                logger.info(f"[EVENT] {event.type} | session: {event.session_id[:8]}... | msg: {event.message_id[:8] if event.message_id else 'N/A'}...")
+                logger.info(f"[EVENT] {event.type} | instance: {event.instance_id[:8]}... | msg: {event.message_id[:8] if event.message_id else 'N/A'}...")
                 
                 if event.data:
                     # Log key data
@@ -130,7 +130,7 @@ async def test_leader_spawns_coder_and_receives_report(
     
     # Start event collector for Leader
     stop_event = asyncio.Event()
-    collect_task = asyncio.create_task(collect_events(leader_session_id, stop_event))
+    collect_task = asyncio.create_task(collect_events(leader_instance_id, stop_event))
     
     # Give the collector time to start
     await asyncio.sleep(0.5)
@@ -149,7 +149,7 @@ Wait for it to respond. Do not use any other tools."""
     start_time = time.time()
     
     result = await manager.enqueue_message(
-        session_id=leader_session_id,
+        instance_id=leader_instance_id,
         message=task_message,
         source="test"
     )
@@ -170,7 +170,7 @@ Wait for it to respond. Do not use any other tools."""
     while time.time() - start_time < max_wait:
         # Check for completion report in Leader's queue
         # The report is enqueued as a regular message
-        stats = manager.get_queue_stats(leader_session_id)
+        stats = manager.get_queue_stats(leader_instance_id)
         
         # Check if we received a completion report event
         for event in events_received:
@@ -185,7 +185,7 @@ Wait for it to respond. Do not use any other tools."""
             break
         
         # Also check Leader's messages for report content
-        messages = manager.get_messages(leader_session_id)
+        messages = manager.get_messages(leader_instance_id)
         for msg in messages:
             content = msg.get("content", "")
             if "has done:" in content.lower() or "coder" in content.lower():
@@ -215,12 +215,12 @@ Wait for it to respond. Do not use any other tools."""
     logger.info("=" * 70)
     
     # Check Leader's metadata for children
-    leader_meta = get_session_metadata(manager.conn, leader_session_id)
-    logger.info(f"[TEST] Leader has {len(leader_meta.get('children', []))} child session(s)")
+    leader_meta = get_instance_metadata(manager.conn, leader_instance_id)
+    logger.info(f"[TEST] Leader has {len(leader_meta.get('children', []))} child instance(s)")
     
     if leader_meta.get('children'):
         for child_id in leader_meta['children']:
-            child_meta = get_session_metadata(manager.conn, child_id)
+            child_meta = get_instance_metadata(manager.conn, child_id)
             logger.info(f"[TEST]   Child: {child_meta.get('agent_name')} ({child_id[:8]}...)")
     
     # Log all events
@@ -248,7 +248,7 @@ Wait for it to respond. Do not use any other tools."""
             logger.info(f"[TEST]   📋 Summary: {event.data.get('summary')}")
     
     # Check Leader's message history for report
-    leader_messages = manager.get_messages(leader_session_id)
+    leader_messages = manager.get_messages(leader_instance_id)
     logger.info(f"[TEST] Leader has {len(leader_messages)} messages")
     
     report_in_messages = False
@@ -267,8 +267,8 @@ Wait for it to respond. Do not use any other tools."""
     logger.info("=" * 70)
     
     # 1. Leader should have spawned at least one child
-    assert leader_meta.get('children'), "Leader should have spawned child sessions"
-    logger.info("[TEST] ✅ Leader spawned child session(s)")
+    assert leader_meta.get('children'), "Leader should have spawned child instances"
+    logger.info("[TEST] ✅ Leader spawned child instance(s)")
     
     # 2. Completion report should be received
     assert completion_report_received or report_in_messages or len(report_events) > 0, \
@@ -288,15 +288,15 @@ Wait for it to respond. Do not use any other tools."""
     logger.info("=" * 70)
     
     # Cleanup
-    manager.terminate_session(leader_session_id)
-    # Also terminate any child sessions
+    manager.terminate_instance(leader_instance_id)
+    # Also terminate any child instances
     if leader_meta.get('children'):
         for child_id in leader_meta['children']:
             try:
-                manager.terminate_session(child_id)
+                manager.terminate_instance(child_id)
             except Exception as e:
                 logger.warning(f"[TEST] Could not terminate child {child_id[:8]}...: {e}")
-    logger.info("[TEST] Sessions terminated")
+    logger.info("[TEST] Instances terminated")
 
 
 @pytest.mark.asyncio
@@ -310,33 +310,33 @@ async def test_completion_report_message_format(
     This test directly spawns a Coder as a child of Leader, sends a message,
     and verifies the report format when Coder completes.
     """
-    from daemon.manager import SessionManager
-    from daemon.persistence import get_session_metadata
+    from daemon.manager import InstanceManager
+    from daemon.persistence import get_instance_metadata
     
     integration_config.persistence.db_path = str(test_db_path)
     
-    manager = SessionManager(integration_config)
+    manager = InstanceManager(integration_config)
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
     project_root = Path(__file__).parent.parent.parent
     
     # Create Leader (parent)
     leader_agent_dir = str(project_root / "agents" / "leader")
-    leader_session_id = manager.spawn_session(agent_id="leader")
+    leader_instance_id = manager.spawn_instance(agent_id="leader")
     
     # Create Coder as child of Leader
     coder_agent_dir = str(project_root / "agents" / "coder")
-    coder_session_id = manager.spawn_session(
+    coder_instance_id = manager.spawn_instance(
         agent_id="coder",
-        parent_id=leader_session_id
+        parent_id=leader_instance_id
     )
     
-    logger.info(f"[TEST] Leader: {leader_session_id[:8]}...")
-    logger.info(f"[TEST] Coder (child): {coder_session_id[:8]}...")
+    logger.info(f"[TEST] Leader: {leader_instance_id[:8]}...")
+    logger.info(f"[TEST] Coder (child): {coder_instance_id[:8]}...")
     
     # Verify parent-child relationship
-    coder_meta = get_session_metadata(manager.conn, coder_session_id)
-    assert coder_meta['parent_id'] == leader_session_id, "Coder should have Leader as parent"
+    coder_meta = get_instance_metadata(manager.conn, coder_instance_id)
+    assert coder_meta['parent_id'] == leader_instance_id, "Coder should have Leader as parent"
     assert coder_meta['agent_name'] == 'Coder', "Agent name should be 'Coder'"
     logger.info("[TEST] ✅ Parent-child relationship verified")
     
@@ -346,7 +346,7 @@ async def test_completion_report_message_format(
     
     async def wait_for_report():
         """Wait for completion report event."""
-        queue = await manager.broadcaster.get_queue(leader_session_id)
+        queue = await manager.broadcaster.get_queue(leader_instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=60)
@@ -368,7 +368,7 @@ async def test_completion_report_message_format(
     # Send message to Coder
     logger.info("[TEST] Sending message to Coder...")
     await manager.enqueue_message(
-        session_id=coder_session_id,
+        instance_id=coder_instance_id,
         message="Say hello and tell me what you can do.",
         source="test"
     )
@@ -379,7 +379,7 @@ async def test_completion_report_message_format(
     # Wait for queue to be empty (indicates completion)
     start_time = time.time()
     while time.time() - start_time < 60:
-        stats = manager.get_queue_stats(coder_session_id)
+        stats = manager.get_queue_stats(coder_instance_id)
         if stats.pending_count == 0 and stats.processing_count == 0:
             logger.info("[TEST] Coder queue is empty")
             # Give time for report to be sent
@@ -394,13 +394,13 @@ async def test_completion_report_message_format(
         pass
     
     # Check Leader's queue for report message
-    leader_stats = manager.get_queue_stats(leader_session_id)
+    leader_stats = manager.get_queue_stats(leader_instance_id)
     logger.info(f"[TEST] Leader queue stats: pending={leader_stats.pending_count}, processing={leader_stats.processing_count}")
     
     # Check for report in Leader's queue (direct DB query)
     cursor = manager.conn.execute(
-        "SELECT content, source, metadata FROM message_queue WHERE session_id = ? AND source LIKE 'report:%'",
-        (leader_session_id,)
+        "SELECT content, source, metadata FROM message_queue WHERE instance_id = ? AND source LIKE 'report:%'",
+        (leader_instance_id,)
     )
     report_rows = cursor.fetchall()
     
@@ -425,8 +425,8 @@ async def test_completion_report_message_format(
         logger.info("[TEST] ✅ Event report format verified")
     
     # Cleanup
-    manager.terminate_session(coder_session_id)
-    manager.terminate_session(leader_session_id)
+    manager.terminate_instance(coder_instance_id)
+    manager.terminate_instance(leader_instance_id)
     logger.info("[TEST] ✅ Test completed")
 
 

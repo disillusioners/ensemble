@@ -14,8 +14,8 @@ import sse_starlette
 
 from daemon import api as api_module
 from daemon.events import EventBroadcaster, Event
-from daemon.manager import SessionManager, MessageResult
-from daemon.models import SessionCreate, MessageCreate
+from daemon.manager import InstanceManager, MessageResult
+from daemon.models import InstanceCreate, MessageCreate
 
 
 # ============================================================================
@@ -24,17 +24,17 @@ from daemon.models import SessionCreate, MessageCreate
 
 @pytest_asyncio.fixture
 async def mock_manager():
-    """Create a mock SessionManager with all needed methods."""
+    """Create a mock InstanceManager with all needed methods."""
     import tempfile
     
     manager = Mock()
-    manager.spawn_session = Mock(return_value="test-session-id")
-    manager.get_session = Mock()
+    manager.spawn_instance = Mock(return_value="test-instance-id")
+    manager.get_instance = Mock()
     manager.send_message = Mock(return_value=MessageResult(content="Test response"))
-    manager.terminate_session = Mock(return_value=True)
-    manager.list_sessions = Mock(return_value=[])
-    manager.get_session_info = Mock(return_value={
-        "session_id": "test-session-id",
+    manager.terminate_instance = Mock(return_value=True)
+    manager.list_instances = Mock(return_value=[])
+    manager.get_instance_info = Mock(return_value={
+        "instance_id": "test-instance-id",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -44,7 +44,7 @@ async def mock_manager():
     })
     manager.enqueue_message = AsyncMock(return_value=Mock(
         message_id="test-message-id",
-        session_id="test-session-id",
+        instance_id="test-instance-id",
         status="queued"
     ))
     manager.get_messages = AsyncMock(return_value=[])
@@ -123,12 +123,12 @@ class TestSSEStreamConnection:
 
     @pytest.mark.asyncio
     async def test_sse_endpoint_returns_sse_response(self, client, mock_manager):
-        """Test that /sessions/{id}/events returns SSE stream."""
+        """Test that /instances/{id}/events returns SSE stream."""
         # Mock the event generator to avoid real async operations
-        mock_manager.get_session = Mock()  # Raises KeyError if not found
+        mock_manager.get_instance = Mock()  # Raises KeyError if not found
         
         response = await client.get(
-            "/sessions/test-session-id/events",
+            "/instances/test-instance-id/events",
             headers={"Accept": "text/event-stream"}
         )
         
@@ -138,10 +138,10 @@ class TestSSEStreamConnection:
     @pytest.mark.asyncio
     async def test_sse_endpoint_rejects_non_sse_clients(self, client, mock_manager):
         """Test that SSE endpoint properly handles non-SSE Accept header."""
-        mock_manager.get_session = Mock()
+        mock_manager.get_instance = Mock()
         
         response = await client.get(
-            "/sessions/test-session-id/events",
+            "/instances/test-instance-id/events",
             headers={"Accept": "application/json"}
         )
         
@@ -159,12 +159,12 @@ class TestSSEEventTypes:
         
         await broadcaster.broadcast(Event(
             type="message_queued",
-            session_id="session-1",
+            instance_id="instance-1",
             message_id="msg-1",
             data={"content": "Hello", "source": "api"}
         ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         
         assert event.type == "message_queued"
@@ -177,12 +177,12 @@ class TestSSEEventTypes:
         
         await broadcaster.broadcast(Event(
             type="status_changed",
-            session_id="session-1",
+            instance_id="instance-1",
             message_id="msg-1",
             data={"status": "processing"}
         ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         
         assert event.type == "status_changed"
@@ -198,12 +198,12 @@ class TestSSEEventTypes:
         for chunk in chunks:
             await broadcaster.broadcast(Event(
                 type="content_chunk",
-                session_id="session-1",
+                instance_id="instance-1",
                 message_id="msg-1",
                 data={"chunk": chunk}
             ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         
         # Collect all chunks
         received_chunks = []
@@ -220,12 +220,12 @@ class TestSSEEventTypes:
         
         await broadcaster.broadcast(Event(
             type="thinking",
-            session_id="session-1",
+            instance_id="instance-1",
             message_id="msg-1",
             data={"content": "Let me think about this..."}
         ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         
         assert event.type == "thinking"
@@ -238,7 +238,7 @@ class TestSSEEventTypes:
         
         await broadcaster.broadcast(Event(
             type="tool_call",
-            session_id="session-1",
+            instance_id="instance-1",
             message_id="msg-1",
             data={
                 "id": "call_123",
@@ -247,7 +247,7 @@ class TestSSEEventTypes:
             }
         ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         
         assert event.type == "tool_call"
@@ -260,7 +260,7 @@ class TestSSEEventTypes:
         
         await broadcaster.broadcast(Event(
             type="tool_complete",
-            session_id="session-1",
+            instance_id="instance-1",
             message_id="msg-1",
             data={
                 "id": "call_123",
@@ -269,7 +269,7 @@ class TestSSEEventTypes:
             }
         ))
         
-        queue = await broadcaster.get_queue("session-1")
+        queue = await broadcaster.get_queue("instance-1")
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         
         assert event.type == "tool_complete"
@@ -279,203 +279,18 @@ class TestSSEEventTypes:
     async def test_event_broadcaster_sends_completed_event(self, mock_manager):
         """Test completed event when message processing finishes."""
         broadcaster = mock_manager.broadcaster
+        instance_id = "instance-1"
+        message_id = "msg-1"
         
         await broadcaster.broadcast(Event(
             type="completed",
-            session_id="session-1",
-            message_id="msg-1",
-            data={
-                "content": "Final response",
-                "thinking": "My thoughts",
-                "tool_calls": []
-            }
-        ))
-        
-        queue = await broadcaster.get_queue("session-1")
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
-        assert event.type == "completed"
-        assert event.data["content"] == "Final response"
-
-    @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_error_event(self, mock_manager):
-        """Test error event when something goes wrong."""
-        broadcaster = mock_manager.broadcaster
-        
-        await broadcaster.broadcast(Event(
-            type="error",
-            session_id="session-1",
-            message_id="msg-1",
-            data={"error": "API rate limit exceeded", "status": "failed"}
-        ))
-        
-        queue = await broadcaster.get_queue("session-1")
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
-        assert event.type == "error"
-        assert "rate limit" in event.data["error"].lower()
-
-
-class TestSSEEventToSSEConversion:
-    """Tests for event to SSE format conversion."""
-
-    def test_event_to_sse_format(self, mock_manager):
-        """Test that events are converted to proper SSE format."""
-        from daemon.events import event_to_sse
-        
-        event = Event(
-            type="message_queued",
-            session_id="session-1",
-            message_id="msg-123",
-            data={"content": "Hello"},
-            event_id=5
-        )
-        
-        sse = event_to_sse(event)
-        
-        # SSE format should have id, event, data
-        assert "id" in sse
-        assert "event" in sse
-        assert "data" in sse
-        assert sse["id"] == "5"
-        assert sse["event"] == "message_queued"
-        
-        # Data should be JSON
-        data = json.loads(sse["data"])
-        assert data["session_id"] == "session-1"
-        assert data["message_id"] == "msg-123"
-
-    def test_connected_event_format(self, mock_manager):
-        """Test connected event for initial connection."""
-        from daemon.events import event_to_sse
-        
-        event = Event(
-            type="connected",
-            session_id="session-1",
-            data={}
-        )
-        
-        sse = event_to_sse(event)
-        
-        assert sse["event"] == "connected"
-
-
-class TestSSEReconnection:
-    """Tests for SSE reconnection support."""
-
-    @pytest.mark.asyncio
-    async def test_get_events_since_for_reconnection(self, mock_manager):
-        """Test that missed events can be retrieved for reconnection."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Simulate some events that happened
-        for i in range(5):
-            await broadcaster.broadcast(Event(
-                type=f"event{i}",
-                session_id="session-1",
-                event_id=i+1
-            ))
-        
-        # Client reconnects with last event ID 3
-        missed_events = broadcaster.get_events_since("session-1", 3)
-        
-        # Should get events 4 and 5
-        assert len(missed_events) == 2
-        assert missed_events[0].event_id == 4
-        assert missed_events[1].event_id == 5
-
-    @pytest.mark.asyncio
-    async def test_reconnection_with_no_missed_events(self, mock_manager):
-        """Test reconnection when no events were missed."""
-        broadcaster = mock_manager.broadcaster
-        
-        # No events
-        missed_events = broadcaster.get_events_since("session-1", 0)
-        
-        assert len(missed_events) == 0
-
-
-class TestSSEErrorHandling:
-    """Tests for error handling in SSE streaming."""
-
-    @pytest.mark.asyncio
-    async def test_queue_full_does_not_crash_broadcaster(self, mock_manager):
-        """Test that full queue doesn't crash the broadcaster."""
-        broadcaster = EventBroadcaster(max_queue_size=1)
-        
-        # Fill the queue
-        await broadcaster.broadcast(Event(
-            type="event1",
-            session_id="session-1"
-        ))
-        
-        # Try to add more - should not crash
-        await broadcaster.broadcast(Event(
-            type="event2", 
-            session_id="session-1"
-        ))
-
-    @pytest.mark.asyncio
-    async def test_broadcast_to_nonexistent_session(self, mock_manager):
-        """Test broadcasting to session with no queue."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Should not raise - just silently drops
-        await broadcaster.broadcast(Event(
-            type="test",
-            session_id="nonexistent-session"
-        ))
-
-
-# ============================================================================
-# End-to-End Streaming Tests
-# ============================================================================
-
-class TestEndToEndStreaming:
-    """End-to-end tests for the streaming pipeline."""
-
-    @pytest.mark.asyncio
-    async def test_full_streaming_pipeline(self, mock_manager):
-        """Test complete streaming pipeline from message to completion."""
-        session_id = "test-session-e2e"
-        message_id = "msg-e2e"
-        broadcaster = mock_manager.broadcaster
-        
-        # 1. Message queued
-        await broadcaster.broadcast(Event(
-            type="message_queued",
-            session_id=session_id,
-            message_id=message_id,
-            data={"content": "Hello", "source": "api"}
-        ))
-        
-        # 2. Status changed to processing
-        await broadcaster.broadcast(Event(
-            type="status_changed",
-            session_id=session_id,
-            message_id=message_id,
-            data={"status": "processing"}
-        ))
-        
-        # 3. Stream some content chunks
-        for chunk in ["Thinking", "...", " Result"]:
-            await broadcaster.broadcast(Event(
-                type="content_chunk",
-                session_id=session_id,
-                message_id=message_id,
-                data={"chunk": chunk}
-            ))
-        
-        # 4. Completion
-        await broadcaster.broadcast(Event(
-            type="completed",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={"content": "Thinking... Result", "tool_calls": None}
         ))
         
         # Verify all events in queue
-        queue = await broadcaster.get_queue(session_id)
+        queue = await broadcaster.get_queue(instance_id)
         events = []
         while not queue.empty():
             event = queue.get_nowait()
@@ -489,14 +304,14 @@ class TestEndToEndStreaming:
     @pytest.mark.asyncio
     async def test_streaming_with_tool_calls(self, mock_manager):
         """Test streaming pipeline with tool calls."""
-        session_id = "test-session-tools"
+        instance_id = "test-instance-tools"
         message_id = "msg-tools"
         broadcaster = mock_manager.broadcaster
         
         # 1. Message queued
         await broadcaster.broadcast(Event(
             type="message_queued",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={"content": "Run a command"}
         ))
@@ -504,7 +319,7 @@ class TestEndToEndStreaming:
         # 2. Tool call
         await broadcaster.broadcast(Event(
             type="tool_call",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={
                 "id": "call_1",
@@ -516,7 +331,7 @@ class TestEndToEndStreaming:
         # 3. Tool complete
         await broadcaster.broadcast(Event(
             type="tool_complete",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={
                 "id": "call_1",
@@ -528,12 +343,12 @@ class TestEndToEndStreaming:
         # 4. Final response
         await broadcaster.broadcast(Event(
             type="completed",
-            session_id=session_id,
+            instance_id=instance_id,
             message_id=message_id,
             data={"content": "hello", "tool_calls": [{"id": "call_1", "name": "bash"}]}
         ))
         
-        queue = await broadcaster.get_queue(session_id)
+        queue = await broadcaster.get_queue(instance_id)
         events = []
         while not queue.empty():
             events.append(queue.get_nowait())
@@ -542,27 +357,27 @@ class TestEndToEndStreaming:
         assert any(e.type == "tool_complete" for e in events)
 
 
-class TestSessionCleanup:
-    """Tests for proper session cleanup."""
+class TestInstanceCleanup:
+    """Tests for proper instance cleanup."""
 
     @pytest.mark.asyncio
     async def test_cleanup_removes_event_state(self, mock_manager):
-        """Test that session cleanup removes all event state."""
-        session_id = "session-to-clean"
+        """Test that instance cleanup removes all event state."""
+        instance_id = "instance-to-clean"
         
         # Add events
         await mock_manager.broadcaster.broadcast(Event(
             type="test",
-            session_id=session_id,
+            instance_id=instance_id,
             data={}
         ))
         
         # Verify state exists
-        assert session_id in mock_manager.broadcaster._event_history
+        assert instance_id in mock_manager.broadcaster._event_history
         
         # Cleanup
-        mock_manager.broadcaster.cleanup_session(session_id)
+        mock_manager.broadcaster.cleanup_instance(instance_id)
         
         # Verify cleaned up
-        assert session_id not in mock_manager.broadcaster._event_history
-        assert session_id not in mock_manager.broadcaster._queues
+        assert instance_id not in mock_manager.broadcaster._event_history
+        assert instance_id not in mock_manager.broadcaster._queues

@@ -20,7 +20,7 @@ class TestJobQueueServiceEnqueue:
         result = await job_queue_service.enqueue(**sample_job_data_no_project_service)
         
         assert result.status == JobStatus.PROCESSING.value
-        assert result.session_id is not None
+        assert result.instance_id is not None
         assert result.started_at is not None
 
     @pytest.mark.asyncio
@@ -31,7 +31,7 @@ class TestJobQueueServiceEnqueue:
         result = await job_queue_service.enqueue(**sample_job_data_service)
         
         assert result.status == JobStatus.PROCESSING.value
-        assert result.session_id is not None
+        assert result.instance_id is not None
 
     @pytest.mark.asyncio
     async def test_enqueue_with_held_lock_queues(
@@ -45,7 +45,7 @@ class TestJobQueueServiceEnqueue:
         # Second job should be queued (PENDING)
         second = await job_queue_service.enqueue(**sample_job_data_service)
         assert second.status == JobStatus.PENDING.value
-        assert second.session_id is None
+        assert second.instance_id is None
 
     @pytest.mark.asyncio
     async def test_enqueue_with_priority(
@@ -82,7 +82,7 @@ class TestJobQueueServiceEnqueue:
         
         assert job1.status == JobStatus.PROCESSING.value
         assert job2.status == JobStatus.PROCESSING.value
-        assert job1.session_id != job2.session_id
+        assert job1.instance_id != job2.instance_id
 
     @pytest.mark.asyncio
     async def test_enqueue_generates_unique_job_ids(
@@ -368,26 +368,26 @@ class TestJobQueueServiceTriggerNextJob:
         assert result.message == "high priority"
 
 
-class TestJobQueueServiceReleaseLockBySession:
-    """Tests for session-based lock release."""
+class TestJobQueueServiceReleaseLockByInstance:
+    """Tests for instance-based lock release."""
 
     @pytest.mark.asyncio
-    async def test_release_lock_by_session(self, job_queue_service, sample_job_data_service):
-        """Test releasing locks by session ID."""
+    async def test_release_lock_by_instance(self, job_queue_service, sample_job_data_service):
+        """Test releasing locks by instance ID."""
         # Enqueue job (acquires lock)
         job = await job_queue_service.enqueue(**sample_job_data_service)
-        session_id = job.session_id
+        instance_id = job.instance_id
         
-        # Release by session
-        released = await job_queue_service.release_lock_by_session(session_id)
+        # Release by instance
+        released = await job_queue_service.release_lock_by_instance(instance_id)
         
         assert "test-project" in released
         assert await job_queue_service._lock_manager.is_locked("test-project") is False
 
     @pytest.mark.asyncio
-    async def test_release_lock_by_nonexistent_session(self, job_queue_service):
-        """Test releasing locks for non-existent session."""
-        released = await job_queue_service.release_lock_by_session("nonexistent")
+    async def test_release_lock_by_nonexistent_instance(self, job_queue_service):
+        """Test releasing locks for non-existent instance."""
+        released = await job_queue_service.release_lock_by_instance("nonexistent")
         assert released == []
 
 
@@ -443,7 +443,7 @@ class TestJobQueueServiceWithLockManager:
         # Lock info should match job
         lock_info = await job_queue_service._lock_manager.get_lock_info("test-project")
         assert lock_info.job_id == job.job_id
-        assert lock_info.session_id == job.session_id
+        assert lock_info.instance_id == job.instance_id
 
     @pytest.mark.asyncio
     async def test_multiple_jobs_same_project_serialized(
@@ -541,7 +541,7 @@ class TestJobQueueServiceFullWorkflow:
         # Enqueue
         job = await job_queue_service.enqueue(**sample_job_data_service)
         assert job.status == JobStatus.PROCESSING.value
-        assert job.session_id is not None
+        assert job.instance_id is not None
         
         # Process (simulated)
         processed_job = await job_queue_service.get_job(job.job_id)

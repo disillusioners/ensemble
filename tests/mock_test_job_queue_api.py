@@ -117,7 +117,7 @@ def create_mock_job(
     priority=5,
     agent_dir="/agents/coder",
     project_id="test-project",
-    session_id=None,
+    instance_id=None,
     created_at=None,
     started_at=None,
     completed_at=None,
@@ -132,7 +132,7 @@ def create_mock_job(
     job.priority = priority
     job.agent_dir = agent_dir
     job.project_id = project_id
-    job.session_id = session_id
+    job.instance_id = instance_id
     job.created_at = created_at or datetime.utcnow().isoformat()
     job.started_at = started_at
     job.completed_at = completed_at
@@ -159,7 +159,7 @@ class TestJobSubmission:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "processing"
-        assert data["session_id"] is not None
+        assert data["instance_id"] is not None
         assert data["message"] == "Job started immediately"
     
     def test_submit_job_queued_with_project(self, client, job_queue_service):

@@ -1,5 +1,5 @@
 """
-Database operations for source configs, session mappings, and deduplication.
+Database operations for source configs, instance mappings, and deduplication.
 """
 
 import json
@@ -103,7 +103,7 @@ def delete_source_config(conn: sqlite3.Connection, source_id: str) -> bool:
     """
     # First delete all mappings for this source (cascade)
     conn.execute(
-        "DELETE FROM session_mappings WHERE source_id = ?",
+        "DELETE FROM instance_mappings WHERE source_id = ?",
         (source_id,),
     )
     
@@ -120,53 +120,53 @@ def delete_source_config(conn: sqlite3.Connection, source_id: str) -> bool:
     return False
 
 
-# ==================== Session Mapping Operations ====================
+# ==================== Instance Mapping Operations ====================
 
 
-def save_session_mapping(
+def save_instance_mapping(
     conn: sqlite3.Connection,
     mapping_id: str,
     source_id: str,
     external_user_id: str,
-    agent_session_id: str,
+    agent_instance_id: str,
     agent_dir: str,
     metadata: dict | None = None,
 ) -> None:
-    """Save or update a session mapping."""
+    """Save or update an instance mapping."""
     metadata_json = json.dumps(metadata) if metadata else None
     cursor = conn.execute(
         """
-        INSERT INTO session_mappings 
-        (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, metadata, last_message_at)
+        INSERT INTO instance_mappings 
+        (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, metadata, last_message_at)
         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(mapping_id) DO UPDATE SET
             source_id = excluded.source_id,
             external_user_id = excluded.external_user_id,
-            agent_session_id = excluded.agent_session_id,
+            agent_instance_id = excluded.agent_instance_id,
             agent_dir = excluded.agent_dir,
             metadata = excluded.metadata,
             last_message_at = CURRENT_TIMESTAMP
         """,
-        (mapping_id, source_id, external_user_id, agent_session_id, agent_dir, metadata_json),
+        (mapping_id, source_id, external_user_id, agent_instance_id, agent_dir, metadata_json),
     )
     conn.commit()
     logger.info(
-        f"Saved session mapping: mapping_id={mapping_id}, "
+        f"Saved instance mapping: mapping_id={mapping_id}, "
         f"source_id={source_id}, external_user_id={external_user_id}"
     )
 
 
-def get_session_mapping(
+def get_instance_mapping(
     conn: sqlite3.Connection,
     source_id: str,
     external_user_id: str,
 ) -> dict | None:
-    """Get a session mapping by source_id and external_user_id."""
+    """Get an instance mapping by source_id and external_user_id."""
     cursor = conn.execute(
         """
-        SELECT mapping_id, source_id, external_user_id, agent_session_id, agent_dir,
+        SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
                metadata, last_message_at, created_at
-        FROM session_mappings 
+        FROM instance_mappings 
         WHERE source_id = ? AND external_user_id = ?
         """,
         (source_id, external_user_id),
@@ -178,19 +178,19 @@ def get_session_mapping(
     return _row_to_dict(cursor, row)
 
 
-def get_session_mapping_by_session(
+def get_instance_mapping_by_instance(
     conn: sqlite3.Connection,
-    agent_session_id: str,
+    agent_instance_id: str,
 ) -> dict | None:
-    """Get a session mapping by agent_session_id."""
+    """Get an instance mapping by agent_instance_id."""
     cursor = conn.execute(
         """
-        SELECT mapping_id, source_id, external_user_id, agent_session_id, agent_dir,
+        SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
                metadata, last_message_at, created_at
-        FROM session_mappings 
-        WHERE agent_session_id = ?
+        FROM instance_mappings 
+        WHERE agent_instance_id = ?
         """,
-        (agent_session_id,),
+        (agent_instance_id,),
     )
     row = cursor.fetchone()
     if row is None:
@@ -204,10 +204,10 @@ def update_mapping_last_message(
     source_id: str,
     external_user_id: str,
 ) -> None:
-    """Update the last_message_at timestamp for a session mapping."""
+    """Update the last_message_at timestamp for an instance mapping."""
     cursor = conn.execute(
         """
-        UPDATE session_mappings 
+        UPDATE instance_mappings 
         SET last_message_at = CURRENT_TIMESTAMP
         WHERE source_id = ? AND external_user_id = ?
         """,
@@ -220,30 +220,30 @@ def update_mapping_last_message(
         )
 
 
-def delete_session_mapping(conn: sqlite3.Connection, mapping_id: str) -> bool:
-    """Delete a session mapping. Returns True if deleted, False if not found."""
+def delete_instance_mapping(conn: sqlite3.Connection, mapping_id: str) -> bool:
+    """Delete an instance mapping. Returns True if deleted, False if not found."""
     cursor = conn.execute(
-        "DELETE FROM session_mappings WHERE mapping_id = ?",
+        "DELETE FROM instance_mappings WHERE mapping_id = ?",
         (mapping_id,),
     )
     conn.commit()
     if cursor.rowcount > 0:
-        logger.info(f"Deleted session mapping: mapping_id={mapping_id}")
+        logger.info(f"Deleted instance mapping: mapping_id={mapping_id}")
         return True
-    logger.warning(f"Session mapping not found for deletion: mapping_id={mapping_id}")
+    logger.warning(f"Instance mapping not found for deletion: mapping_id={mapping_id}")
     return False
 
 
-def list_session_mappings(
+def list_instance_mappings(
     conn: sqlite3.Connection,
     source_id: str,
 ) -> list[dict]:
-    """List all session mappings for a source."""
+    """List all instance mappings for a source."""
     cursor = conn.execute(
         """
-        SELECT mapping_id, source_id, external_user_id, agent_session_id, agent_dir,
+        SELECT mapping_id, source_id, external_user_id, agent_instance_id, agent_dir,
                metadata, last_message_at, created_at
-        FROM session_mappings 
+        FROM instance_mappings 
         WHERE source_id = ?
         ORDER BY last_message_at DESC
         """,
@@ -317,11 +317,11 @@ def cleanup_inactive_mappings(
     conn: sqlite3.Connection,
     max_age_days: int = 30,
 ) -> int:
-    """Clean up inactive session mappings older than max_age_days. Returns count of deleted rows."""
+    """Clean up inactive instance mappings older than max_age_days. Returns count of deleted rows."""
     cutoff_time = datetime.now() - timedelta(days=max_age_days)
     cursor = conn.execute(
         """
-        DELETE FROM session_mappings 
+        DELETE FROM instance_mappings 
         WHERE (last_message_at IS NULL AND created_at < ?)
            OR (last_message_at IS NOT NULL AND last_message_at < ?)
         """,
@@ -330,7 +330,7 @@ def cleanup_inactive_mappings(
     conn.commit()
     deleted_count = cursor.rowcount
     if deleted_count > 0:
-        logger.info(f"Cleaned up {deleted_count} inactive session mappings older than {max_age_days}d")
+        logger.info(f"Cleaned up {deleted_count} inactive instance mappings older than {max_age_days}d")
     return deleted_count
 
 

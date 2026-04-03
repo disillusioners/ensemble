@@ -36,7 +36,7 @@ def tools(store):
     """Create project tools with injected ProjectStore."""
     return create_project_tools(
         store, 
-        current_session_id="test-session", 
+        current_instance_id="test-instance", 
         agent_dir="test"
     )
 
@@ -216,15 +216,15 @@ class TestProjectSearch:
         assert result == []
 
 
-class TestProjectGetBySession:
-    """Tests for project_get_by_session tool."""
+class TestProjectGetByInstance:
+    """Tests for project_get_by_instance tool."""
 
-    def test_get_by_session(self, tool_map):
-        """Test getting projects by session."""
-        tool_map["project_create"].invoke({"name": "Session Project"})
+    def test_get_by_instance(self, tool_map):
+        """Test getting projects by instance."""
+        tool_map["project_create"].invoke({"name": "Instance Project"})
         
-        result = tool_map["project_get_by_session"].invoke({
-            "session_id": "test-session"
+        result = tool_map["project_get_by_instance"].invoke({
+            "instance_id": "test-instance"
         })
         
         assert len(result) == 1
@@ -549,18 +549,18 @@ class TestProjectLink:
         
         result = tool_map["project_link"].invoke({
             "project_id": project["project_id"],
-            "entity_type": "sessions",
-            "entity_id": "session-123"
+            "entity_type": "instances",
+            "entity_id": "instance-123"
         })
         
-        assert "session-123" in result["relationships"]["sessions"]
+        assert "instance-123" in result["relationships"]["instances"]
 
     def test_link_not_found(self, tool_map):
         """Test linking non-existent project returns None."""
         result = tool_map["project_link"].invoke({
             "project_id": "nonexistent-id",
-            "entity_type": "sessions",
-            "entity_id": "s1"
+            "entity_type": "instances",
+            "entity_id": "i1"
         })
         
         assert result is None
@@ -574,24 +574,24 @@ class TestProjectUnlink:
         project = tool_map["project_create"].invoke({"name": "Test"})
         tool_map["project_link"].invoke({
             "project_id": project["project_id"],
-            "entity_type": "sessions",
-            "entity_id": "session-123"
+            "entity_type": "instances",
+            "entity_id": "instance-123"
         })
         
         result = tool_map["project_unlink"].invoke({
             "project_id": project["project_id"],
-            "entity_type": "sessions",
-            "entity_id": "session-123"
+            "entity_type": "instances",
+            "entity_id": "instance-123"
         })
         
-        assert "session-123" not in result["relationships"].get("sessions", [])
+        assert "instance-123" not in result["relationships"].get("instances", [])
 
     def test_unlink_not_found(self, tool_map):
         """Test unlinking non-existent project returns None."""
         result = tool_map["project_unlink"].invoke({
             "project_id": "nonexistent-id",
-            "entity_type": "sessions",
-            "entity_id": "s1"
+            "entity_type": "instances",
+            "entity_id": "i1"
         })
         
         assert result is None
@@ -632,7 +632,7 @@ class TestToolCount:
             "project_get",
             "project_list",
             "project_search",
-            "project_get_by_session",
+            "project_get_by_instance",
             "project_get_by_directory",
             "project_update",
             "project_set_status",

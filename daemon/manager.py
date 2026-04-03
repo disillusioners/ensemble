@@ -40,7 +40,7 @@ from .registry import get_registry
 from .queue import InputMessageQueue, InstanceWatchdog, InstanceCircuitBreaker, QueuedMessage
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance
-from .tools import create_session_tools
+from .tools import create_instance_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .cancellation import (

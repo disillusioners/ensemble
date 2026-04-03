@@ -93,19 +93,19 @@ class TestRepositoryRead:
         result = repository.get("nonexistent-id")
         assert result is None
 
-    def test_get_by_session_existing(self, repository, sample_job_data):
-        """Test getting job by session ID."""
+    def test_get_by_instance_existing(self, repository, sample_job_data):
+        """Test getting job by instance ID."""
         created = repository.create(**sample_job_data)
-        started = repository.start_job(created.job_id, "test-session")
+        started = repository.start_job(created.job_id, "test-instance")
         
-        retrieved = repository.get_by_session("test-session")
+        retrieved = repository.get_by_session("test-instance")
         
         assert retrieved is not None
         assert retrieved.job_id == created.job_id
 
-    def test_get_by_session_nonexistent(self, repository):
-        """Test getting by non-existent session returns None."""
-        result = repository.get_by_session("nonexistent-session")
+    def test_get_by_instance_nonexistent(self, repository):
+        """Test getting by non-existent instance returns None."""
+        result = repository.get_by_session("nonexistent-instance")
         assert result is None
 
 
@@ -129,7 +129,7 @@ class TestRepositoryList:
         job2 = repository.create(**sample_job_data)
         
         # Start job1
-        repository.start_job(job1.job_id, "session-1")
+        repository.start_job(job1.job_id, "instance-1")
         
         pending_jobs, total = repository.list(status=JobStatus.PENDING.value)
         processing_jobs, _ = repository.list(status=JobStatus.PROCESSING.value)
@@ -229,7 +229,7 @@ class TestRepositoryList:
         )
         
         # Start job1
-        repository.start_job(job1.job_id, "session-1")
+        repository.start_job(job1.job_id, "instance-1")
         
         pending = repository.list_all_pending()
         
@@ -286,20 +286,20 @@ class TestRepositoryJobLifecycle:
         """Test starting a pending job."""
         job = repository.create(**sample_job_data)
         
-        started = repository.start_job(job.job_id, "session-1")
+        started = repository.start_job(job.job_id, "instance-1")
         
         assert started is not None
         assert started.status == JobStatus.PROCESSING.value
-        assert started.session_id == "session-1"
+        assert started.instance_id == "instance-1"
         assert started.started_at is not None
 
     def test_start_already_started_job_raises(self, repository, sample_job_data):
         """Test starting an already started job raises ValueError."""
         job = repository.create(**sample_job_data)
-        repository.start_job(job.job_id, "session-1")
+        repository.start_job(job.job_id, "instance-1")
         
         with pytest.raises(ValueError) as exc_info:
-            repository.start_job(job.job_id, "session-2")
+            repository.start_job(job.job_id, "instance-2")
         
         assert "Cannot start job" in str(exc_info.value)
         assert "processing" in str(exc_info.value)
@@ -307,11 +307,11 @@ class TestRepositoryJobLifecycle:
     def test_start_completed_job_raises(self, repository, sample_job_data):
         """Test starting a completed job raises ValueError."""
         job = repository.create(**sample_job_data)
-        started = repository.start_job(job.job_id, "session-1")
+        started = repository.start_job(job.job_id, "instance-1")
         repository.complete_job(started.job_id)
         
         with pytest.raises(ValueError) as exc_info:
-            repository.start_job(job.job_id, "session-2")
+            repository.start_job(job.job_id, "instance-2")
         
         assert "Cannot start job" in str(exc_info.value)
         assert "completed" in str(exc_info.value)
@@ -319,7 +319,7 @@ class TestRepositoryJobLifecycle:
     def test_complete_processing_job(self, repository, sample_job_data):
         """Test completing a processing job."""
         job = repository.create(**sample_job_data)
-        started = repository.start_job(job.job_id, "session-1")
+        started = repository.start_job(job.job_id, "instance-1")
         
         completed = repository.complete_job(
             started.job_id,
@@ -344,7 +344,7 @@ class TestRepositoryJobLifecycle:
     def test_fail_processing_job(self, repository, sample_job_data):
         """Test failing a processing job."""
         job = repository.create(**sample_job_data)
-        started = repository.start_job(job.job_id, "session-1")
+        started = repository.start_job(job.job_id, "instance-1")
         
         failed = repository.fail_job(
             started.job_id,
@@ -379,7 +379,7 @@ class TestRepositoryJobLifecycle:
     def test_cancel_processing_job_raises(self, repository, sample_job_data):
         """Test cancelling a processing job raises ValueError."""
         job = repository.create(**sample_job_data)
-        repository.start_job(job.job_id, "session-1")
+        repository.start_job(job.job_id, "instance-1")
         
         with pytest.raises(ValueError) as exc_info:
             repository.cancel_job(job.job_id)
@@ -417,8 +417,8 @@ class TestRepositoryDelete:
         job2 = repository.create(**sample_job_data)
         job3 = repository.create(**sample_job_data)
         
-        repository.start_job(job1.job_id, "s1")
-        repository.start_job(job2.job_id, "s2")
+        repository.start_job(job1.job_id, "i1")
+        repository.start_job(job2.job_id, "i2")
         repository.complete_job(job1.job_id)
         repository.complete_job(job2.job_id)
         # job3 remains pending
@@ -480,14 +480,14 @@ class TestRepositoryEdgeCases:
         
         assert job.job_metadata == metadata
 
-    def test_start_job_with_empty_session(self, repository, sample_job_data):
-        """Test starting job with empty session ID."""
+    def test_start_job_with_empty_instance(self, repository, sample_job_data):
+        """Test starting job with empty instance ID."""
         job = repository.create(**sample_job_data)
         
         # Empty string should be allowed
         started = repository.start_job(job.job_id, "")
         assert started is not None
-        assert started.session_id == ""
+        assert started.instance_id == ""
 
     def test_update_job_metadata(self, repository, sample_job_data):
         """Test updating job metadata."""
@@ -506,7 +506,7 @@ class TestRepositoryEdgeCases:
         job1 = repository.create(**sample_job_data)
         repository.create(**{**sample_job_data, "project_id": "other"})
         
-        repository.start_job(job1.job_id, "session-1")
+        repository.start_job(job1.job_id, "instance-1")
         
         # Filter by both status and project
         jobs, total = repository.list(
@@ -528,7 +528,7 @@ class TestRepositoryEdgeCases:
 
     def test_start_nonexistent_job(self, repository):
         """Test starting non-existent job returns None."""
-        result = repository.start_job("nonexistent-id", "session")
+        result = repository.start_job("nonexistent-id", "instance")
         assert result is None
 
     def test_complete_nonexistent_job(self, repository):
@@ -567,7 +567,7 @@ class TestRepositoryConcurrency:
         assert job.status == JobStatus.PENDING.value
         
         # Start job
-        started = repository.start_job(job.job_id, "session-1")
+        started = repository.start_job(job.job_id, "instance-1")
         assert started.status == JobStatus.PROCESSING.value
         
         # Complete job

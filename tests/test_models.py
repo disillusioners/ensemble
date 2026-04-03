@@ -3,91 +3,91 @@
 import pytest
 from datetime import datetime
 from daemon.models import (
-    SessionCreate,
-    SessionInfo,
+    InstanceCreate,
+    InstanceInfo,
     MessageCreate,
     MessageResponse,
     ErrorResponse,
     HealthResponse,
-    SessionListResponse,
-    SessionStatus,
+    InstanceListResponse,
+    InstanceStatus,
     ErrorCodes,
 )
 
 
-class TestSessionCreate:
-    """Tests for SessionCreate model."""
+class TestInstanceCreate:
+    """Tests for InstanceCreate model."""
 
-    def test_session_create_required(self, sample_session_create_data):
-        """Test SessionCreate with only required fields."""
-        session = SessionCreate(**sample_session_create_data)
+    def test_instance_create_required(self, sample_instance_create_data):
+        """Test InstanceCreate with only required fields."""
+        instance = InstanceCreate(**sample_instance_create_data)
         
-        assert session.agent_id == "coder"
-        assert session.session_id is None
+        assert instance.agent_id == "coder"
+        assert instance.instance_id is None
 
-    def test_session_create_optional(self, sample_session_create_with_session_id):
-        """Test SessionCreate with optional session_id."""
-        session = SessionCreate(**sample_session_create_with_session_id)
+    def test_instance_create_optional(self, sample_instance_create_with_instance_id):
+        """Test InstanceCreate with optional instance_id."""
+        instance = InstanceCreate(**sample_instance_create_with_instance_id)
         
-        assert session.agent_id == "coder"
-        assert session.session_id == "custom-session-123"
+        assert instance.agent_id == "coder"
+        assert instance.instance_id == "custom-instance-123"
 
-    def test_session_create_serialization(self, sample_session_create_data):
-        """Test SessionCreate model_dump for serialization."""
-        session = SessionCreate(**sample_session_create_data)
-        data = session.model_dump()
+    def test_instance_create_serialization(self, sample_instance_create_data):
+        """Test InstanceCreate model_dump for serialization."""
+        instance = InstanceCreate(**sample_instance_create_data)
+        data = instance.model_dump()
         
         assert data["agent_id"] == "coder"
-        assert data["session_id"] is None
+        assert data["instance_id"] is None
 
-    def test_session_create_validation_missing_agent_dir(self):
-        """Test SessionCreate validation requires agent_dir."""
+    def test_instance_create_validation_missing_agent_dir(self):
+        """Test InstanceCreate validation requires agent_dir."""
         with pytest.raises(ValueError):
-            SessionCreate()
+            InstanceCreate()
 
 
-class TestSessionInfo:
-    """Tests for SessionInfo model."""
+class TestInstanceInfo:
+    """Tests for InstanceInfo model."""
 
-    def test_session_info_model(self, sample_session_info_data):
-        """Test SessionInfo serialization."""
-        session = SessionInfo(**sample_session_info_data)
+    def test_instance_info_model(self, sample_instance_info_data):
+        """Test InstanceInfo serialization."""
+        instance = InstanceInfo(**sample_instance_info_data)
         
-        assert session.session_id == "test-session-123"
-        assert session.agent_dir == "/path/to/agent"
-        assert session.status == SessionStatus.running
-        assert session.parent_id is None
-        assert session.children == []
-        assert session.created_at == datetime(2024, 1, 1, 0, 0, 0)
-        assert session.updated_at == datetime(2024, 1, 1, 0, 1, 0)
+        assert instance.instance_id == "test-instance-123"
+        assert instance.agent_dir == "/path/to/agent"
+        assert instance.status == InstanceStatus.running
+        assert instance.parent_id is None
+        assert instance.children == []
+        assert instance.created_at == datetime(2024, 1, 1, 0, 0, 0)
+        assert instance.updated_at == datetime(2024, 1, 1, 0, 1, 0)
 
-    def test_session_info_serialization(self, sample_session_info_data):
-        """Test SessionInfo model_dump for serialization."""
-        session = SessionInfo(**sample_session_info_data)
-        data = session.model_dump()
+    def test_instance_info_serialization(self, sample_instance_info_data):
+        """Test InstanceInfo model_dump for serialization."""
+        instance = InstanceInfo(**sample_instance_info_data)
+        data = instance.model_dump()
         
-        assert data["session_id"] == "test-session-123"
+        assert data["instance_id"] == "test-instance-123"
         assert data["status"] == "running"
 
-    def test_session_info_with_parent(self):
-        """Test SessionInfo with parent_id."""
+    def test_instance_info_with_parent(self):
+        """Test InstanceInfo with parent_id."""
         data = {
-            "session_id": "child-session",
+            "instance_id": "child-instance",
             "agent_id": "coder",
             "agent_dir": "/path/to/agent",
             "status": "running",
-            "parent_id": "parent-session",
+            "parent_id": "parent-instance",
             "children": [],
             "created_at": datetime(2024, 1, 1, 0, 0, 0),
         }
         
-        session = SessionInfo(**data)
-        assert session.parent_id == "parent-session"
+        instance = InstanceInfo(**data)
+        assert instance.parent_id == "parent-instance"
 
-    def test_session_info_with_children(self):
-        """Test SessionInfo with children."""
+    def test_instance_info_with_children(self):
+        """Test InstanceInfo with children."""
         data = {
-            "session_id": "parent-session",
+            "instance_id": "parent-instance",
             "agent_id": "coder",
             "agent_dir": "/path/to/agent",
             "status": "running",
@@ -96,8 +96,8 @@ class TestSessionInfo:
             "created_at": datetime(2024, 1, 1, 0, 0, 0),
         }
         
-        session = SessionInfo(**data)
-        assert session.children == ["child-1", "child-2"]
+        instance = InstanceInfo(**data)
+        assert instance.children == ["child-1", "child-2"]
 
 
 class TestMessageCreate:
@@ -203,8 +203,8 @@ class TestErrorResponse:
     def test_error_response_without_details(self):
         """Test ErrorResponse without optional details."""
         error = ErrorResponse(
-            code=ErrorCodes.SESSION_NOT_FOUND,
-            message="Session not found"
+            code=ErrorCodes.INSTANCE_NOT_FOUND,
+            message="Instance not found"
         )
         
         assert error.details is None
@@ -237,25 +237,25 @@ class TestHealthResponse:
         assert data["version"] == "1.0.0"
 
 
-class TestSessionStatus:
-    """Tests for SessionStatus enum."""
+class TestInstanceStatus:
+    """Tests for InstanceStatus enum."""
 
-    def test_session_status_enum(self):
-        """Test all SessionStatus values."""
-        assert SessionStatus.idle.value == "idle"
-        assert SessionStatus.running.value == "running"
-        assert SessionStatus.waiting.value == "waiting"
-        assert SessionStatus.error.value == "error"
-        assert SessionStatus.terminated.value == "terminated"
+    def test_instance_status_enum(self):
+        """Test all InstanceStatus values."""
+        assert InstanceStatus.idle.value == "idle"
+        assert InstanceStatus.running.value == "running"
+        assert InstanceStatus.waiting.value == "waiting"
+        assert InstanceStatus.error.value == "error"
+        assert InstanceStatus.terminated.value == "terminated"
 
-    def test_session_status_from_string(self):
-        """Test SessionStatus creation from string."""
-        status = SessionStatus("running")
-        assert status == SessionStatus.running
+    def test_instance_status_from_string(self):
+        """Test InstanceStatus creation from string."""
+        status = InstanceStatus("running")
+        assert status == InstanceStatus.running
 
-    def test_session_status_values(self):
-        """Test SessionStatus has correct number of values."""
-        values = [s.value for s in SessionStatus]
+    def test_instance_status_values(self):
+        """Test InstanceStatus has correct number of values."""
+        values = [s.value for s in InstanceStatus]
         assert len(values) == 5
         assert "idle" in values
         assert "running" in values
@@ -270,17 +270,17 @@ class TestErrorCodes:
     def test_error_codes_enum(self):
         """Test all ErrorCodes values."""
         assert ErrorCodes.INVALID_REQUEST.value == "INVALID_REQUEST"
-        assert ErrorCodes.SESSION_NOT_FOUND.value == "SESSION_NOT_FOUND"
-        assert ErrorCodes.SESSION_TERMINATED.value == "SESSION_TERMINATED"
+        assert ErrorCodes.INSTANCE_NOT_FOUND.value == "INSTANCE_NOT_FOUND"
+        assert ErrorCodes.INSTANCE_TERMINATED.value == "INSTANCE_TERMINATED"
         assert ErrorCodes.RATE_LIMITED.value == "RATE_LIMITED"
-        assert ErrorCodes.MAX_SESSIONS_EXCEEDED.value == "MAX_SESSIONS_EXCEEDED"
+        assert ErrorCodes.MAX_INSTANCES_EXCEEDED.value == "MAX_INSTANCES_EXCEEDED"
         assert ErrorCodes.LLM_ERROR.value == "LLM_ERROR"
         assert ErrorCodes.INTERNAL_ERROR.value == "INTERNAL_ERROR"
 
     def test_error_codes_from_string(self):
         """Test ErrorCodes creation from string."""
-        code = ErrorCodes("SESSION_NOT_FOUND")
-        assert code == ErrorCodes.SESSION_NOT_FOUND
+        code = ErrorCodes("INSTANCE_NOT_FOUND")
+        assert code == ErrorCodes.INSTANCE_NOT_FOUND
 
     def test_error_codes_values(self):
         """Test ErrorCodes has correct number of values."""
@@ -288,10 +288,10 @@ class TestErrorCodes:
         # Should have all expected error codes
         expected_codes = [
             "INVALID_REQUEST",
-            "SESSION_NOT_FOUND",
-            "SESSION_TERMINATED",
+            "INSTANCE_NOT_FOUND",
+            "INSTANCE_TERMINATED",
             "RATE_LIMITED",
-            "MAX_SESSIONS_EXCEEDED",
+            "MAX_INSTANCES_EXCEEDED",
             "LLM_ERROR",
             "INTERNAL_ERROR",
             "SOURCE_NOT_FOUND",
@@ -308,66 +308,66 @@ class TestErrorCodes:
             assert code in values
 
 
-class TestSessionListResponse:
-    """Tests for SessionListResponse model."""
+class TestInstanceListResponse:
+    """Tests for InstanceListResponse model."""
 
-    def test_session_list_response(self):
-        """Test SessionListResponse."""
-        sessions = [
-            SessionInfo(
-                session_id="session-1",
+    def test_instance_list_response(self):
+        """Test InstanceListResponse."""
+        instances = [
+            InstanceInfo(
+                instance_id="instance-1",
                 agent_id="coder",
                 agent_dir="/path/to/agent1",
-                status=SessionStatus.running,
+                status=InstanceStatus.running,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
-            SessionInfo(
-                session_id="session-2",
+            InstanceInfo(
+                instance_id="instance-2",
                 agent_id="coder",
                 agent_dir="/path/to/agent2",
-                status=SessionStatus.idle,
+                status=InstanceStatus.idle,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
         
-        response = SessionListResponse(
-            sessions=sessions,
+        response = InstanceListResponse(
+            instances=instances,
             total=2,
             limit=100,
             offset=0,
             has_more=False,
         )
         
-        assert len(response.sessions) == 2
-        assert response.sessions[0].session_id == "session-1"
-        assert response.sessions[1].session_id == "session-2"
+        assert len(response.instances) == 2
+        assert response.instances[0].instance_id == "instance-1"
+        assert response.instances[1].instance_id == "instance-2"
 
-    def test_session_list_response_empty(self):
-        """Test SessionListResponse with empty list."""
-        response = SessionListResponse(
-            sessions=[],
+    def test_instance_list_response_empty(self):
+        """Test InstanceListResponse with empty list."""
+        response = InstanceListResponse(
+            instances=[],
             total=0,
             limit=100,
             offset=0,
             has_more=False,
         )
         
-        assert len(response.sessions) == 0
+        assert len(response.instances) == 0
 
-    def test_session_list_response_serialization(self):
-        """Test SessionListResponse model_dump for serialization."""
-        sessions = [
-            SessionInfo(
-                session_id="session-1",
+    def test_instance_list_response_serialization(self):
+        """Test InstanceListResponse model_dump for serialization."""
+        instances = [
+            InstanceInfo(
+                instance_id="instance-1",
                 agent_id="coder",
                 agent_dir="/path/to/agent",
-                status=SessionStatus.running,
+                status=InstanceStatus.running,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
         
-        response = SessionListResponse(
-            sessions=sessions,
+        response = InstanceListResponse(
+            instances=instances,
             total=1,
             limit=100,
             offset=0,
@@ -375,9 +375,9 @@ class TestSessionListResponse:
         )
         data = response.model_dump()
         
-        assert len(data["sessions"]) == 1
-        assert data["sessions"][0]["session_id"] == "session-1"
-        assert data["sessions"][0]["agent_id"] == "coder"
+        assert len(data["instances"]) == 1
+        assert data["instances"][0]["instance_id"] == "instance-1"
+        assert data["instances"][0]["agent_id"] == "coder"
 
 
 class TestModelValidation:
@@ -387,17 +387,17 @@ class TestModelValidation:
         """Test model_validate for parsing validated data."""
         data = {
             "agent_id": "coder",
-            "session_id": "test-session",
+            "instance_id": "test-instance",
         }
         
-        session = SessionCreate.model_validate(data)
-        assert session.agent_id == "coder"
-        assert session.session_id == "test-session"
+        instance = InstanceCreate.model_validate(data)
+        assert instance.agent_id == "coder"
+        assert instance.instance_id == "test-instance"
 
     def test_model_dump_json(self):
         """Test model_dump_json for JSON serialization."""
-        session = SessionCreate(agent_id="coder")
-        json_str = session.model_dump_json()
+        instance = InstanceCreate(agent_id="coder")
+        json_str = instance.model_dump_json()
         
         assert "agent_id" in json_str
         assert "coder" in json_str

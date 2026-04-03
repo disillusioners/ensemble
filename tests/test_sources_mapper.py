@@ -1,17 +1,16 @@
 """Tests for daemon/sources/mapper.py"""
 
 import pytest
-import sqlite3
-import tempfile
-import os
 import uuid
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from daemon.sources.mapper import (
     validate_external_user_id,
     ValidationError,
-    SessionMapper,
+    InstanceMapper,
     MAX_USER_ID_LENGTH,
 )
 
@@ -19,78 +18,113 @@ from daemon.sources.mapper import (
 # ==================== Fixtures ====================
 
 
+@dataclass
+class MockAgentMeta:
+    """Mock agent metadata returned by registry."""
+    path: Path = field(default_factory=lambda: Path("/agents/test"))
+
+
+@dataclass
+class MockMapping:
+    """Mock mapping object returned by source_repo."""
+    mapping_id: str
+    source_id: str
+    external_user_id: str
+    agent_instance_id: str
+    agent_id: str
+    agent_dir: str
+    mapping_metadata: dict = field(default_factory=dict)
+    last_message_at: datetime = None
+    created_at: datetime = None
+
+
+class MockSourceRepository:
+    """Mock source repository with required methods."""
+    
+    def __init__(self):
+        self.mappings: dict[tuple[str, str], MockMapping] = {}
+        self.processed_messages: set[tuple[str, str]] = set()
+        self.mapping_id_counter = 0
+    
+    def get_instance_mapping(self, source_id: str, external_user_id: str) -> MockMapping | None:
+        """Get mapping by source and external user ID."""
+        return self.mappings.get((source_id, external_user_id))
+    
+    def update_mapping_last_message(self, source_id: str, external_user_id: str) -> None:
+        """Update the last_message_at timestamp for a mapping."""
+        mapping = self.mappings.get((source_id, external_user_id))
+        if mapping:
+            mapping.last_message_at = datetime.now(timezone.utc)
+    
+    def check_and_mark_processed(self, source_id: str, external_message_id: str) -> bool:
+        """Check if message is duplicate and mark as processed if new."""
+        key = (source_id, external_message_id)
+        if key in self.processed_messages:
+            return True
+        self.processed_messages.add(key)
+        return False
+    
+    def delete_instance_mapping(self, mapping_id: str) -> None:
+        """Delete mapping by mapping_id."""
+        for key, mapping in list(self.mappings.items()):
+            if mapping.mapping_id == mapping_id:
+                del self.mappings[key]
+                break
+    
+    def create_instance_mapping(
+        self,
+        source_id: str,
+        external_user_id: str,
+        agent_instance_id: str,
+        agent_id: str,
+        agent_dir: str,
+        metadata: dict,
+        mapping_id: str,
+    ) -> None:
+        """Create a new instance mapping."""
+        mapping = MockMapping(
+            mapping_id=mapping_id,
+            source_id=source_id,
+            external_user_id=external_user_id,
+            agent_instance_id=agent_instance_id,
+            agent_id=agent_id,
+            agent_dir=agent_dir,
+            mapping_metadata=metadata,
+            last_message_at=datetime.now(timezone.utc),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.mappings[(source_id, external_user_id)] = mapping
+
+
 @pytest.fixture
-def temp_db():
-    """Create a temporary SQLite database with required tables."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    
-    # Enable WAL mode
-    conn.execute("PRAGMA journal_mode=WAL")
-    
-    # Create tables
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS source_configs (
-            source_id TEXT PRIMARY KEY,
-            source_type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            config JSON NOT NULL,
-            credentials TEXT,
-            enabled BOOLEAN DEFAULT TRUE,
-            status TEXT DEFAULT 'stopped',
-            error_message TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_mappings (
-            mapping_id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL,
-            external_user_id TEXT NOT NULL,
-            agent_session_id TEXT NOT NULL,
-            agent_dir TEXT NOT NULL,
-            metadata JSON,
-            last_message_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(source_id, external_user_id)
-        )
-    """)
-    
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS processed_external_messages (
-            source_id TEXT,
-            external_message_id TEXT,
-            processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (source_id, external_message_id)
-        )
-    """)
-    
-    conn.commit()
-    
-    yield conn
-    
-    conn.close()
-    os.unlink(db_path)
+def mock_registry():
+    """Create a mock agent registry."""
+    mock_reg = MagicMock()
+    mock_reg.resolve_to_id.return_value = None
+    mock_reg.get.return_value = MockAgentMeta()
+    return mock_reg
+
+
+@pytest.fixture
+def mock_source_repo():
+    """Create a mock source repository with required methods."""
+    return MockSourceRepository()
 
 
 @pytest.fixture
 def mock_manager():
-    """Create a mock SessionManager."""
+    """Create a mock InstanceManager."""
     manager = MagicMock()
     # Create a simple spawn that returns a UUID
-    manager.spawn_session = MagicMock(return_value=str(uuid.uuid4()))
+    manager.spawn_instance = MagicMock(return_value=str(uuid.uuid4()))
     return manager
 
 
 @pytest.fixture
-def session_mapper(temp_db, mock_manager):
-    """Create a SessionMapper with temp database and mock manager."""
-    return SessionMapper(conn=temp_db, manager=mock_manager)
+def instance_mapper(mock_source_repo, mock_manager, mock_registry):
+    """Create an InstanceMapper with mock source_repo and mock manager."""
+    with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+        yield InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
 
 
 # ==================== Input Validation Tests ====================
@@ -173,133 +207,133 @@ class TestValidateExternalUserId:
         assert validate_external_user_id("telegram", "1" * MAX_USER_ID_LENGTH) == "1" * MAX_USER_ID_LENGTH
 
 
-# ==================== SessionMapper Tests ====================
+# ==================== InstanceMapper Tests ====================
 
 
-class TestSessionMapper:
-    """Tests for SessionMapper class."""
+class TestInstanceMapper:
+    """Tests for InstanceMapper class."""
     
     @pytest.mark.asyncio
-    async def test_get_or_create_session_new_user(self, temp_db, session_mapper):
-        """Creating session for new user should create mapping."""
+    async def test_get_or_create_instance_new_user(self, mock_source_repo, instance_mapper):
+        """Creating instance for new user should create mapping."""
         source_id = "test_source"
         external_user_id = "12345"
-        agent_dir = "/agents/test_agent"
+        agent_id = "test_agent"
         
-        # Get or create session
-        agent_session_id = await session_mapper.get_or_create_session(
+        # Get or create instance
+        agent_instance_id = await instance_mapper.get_or_create_instance(
             source_id=source_id,
             external_user_id=external_user_id,
-            agent_dir=agent_dir
+            agent_id=agent_id
         )
         
-        # Should return a valid session ID
-        assert agent_session_id is not None
-        assert len(agent_session_id) > 0
+        # Should return a valid instance ID
+        assert agent_instance_id is not None
+        assert len(agent_instance_id) > 0
         
         # Should have created a mapping in the database
-        mapping = session_mapper.get_mapping(source_id, external_user_id)
+        mapping = instance_mapper.get_mapping(source_id, external_user_id)
         assert mapping is not None
         assert mapping["source_id"] == source_id
         assert mapping["external_user_id"] == external_user_id
-        assert mapping["agent_session_id"] == agent_session_id
-        assert mapping["agent_dir"] == agent_dir
+        assert mapping["agent_instance_id"] == agent_instance_id
     
     @pytest.mark.asyncio
-    async def test_get_or_create_session_existing_user(self, temp_db, session_mapper):
-        """Existing user should return existing session."""
+    async def test_get_or_create_instance_existing_user(self, mock_source_repo, instance_mapper):
+        """Existing user should return existing instance."""
         source_id = "test_source"
         external_user_id = "12345"
-        agent_dir = "/agents/test_agent"
+        agent_id = "test_agent"
         
-        # Create first session
-        session_id_1 = await session_mapper.get_or_create_session(
+        # Create first instance
+        instance_id_1 = await instance_mapper.get_or_create_instance(
             source_id=source_id,
             external_user_id=external_user_id,
-            agent_dir=agent_dir
+            agent_id=agent_id
         )
         
-        # Get or create again - should return same session
-        session_id_2 = await session_mapper.get_or_create_session(
+        # Get or create again - should return same instance
+        instance_id_2 = await instance_mapper.get_or_create_instance(
             source_id=source_id,
             external_user_id=external_user_id,
-            agent_dir=agent_dir
+            agent_id=agent_id
         )
         
-        # Should return same session ID
-        assert session_id_1 == session_id_2
+        # Should return same instance ID
+        assert instance_id_1 == instance_id_2
     
     @pytest.mark.asyncio
-    async def test_get_or_create_session_spawns_agent(self, temp_db, mock_manager):
-        """Should call manager.spawn_session to create new agent."""
+    async def test_get_or_create_instance_spawns_agent(self, mock_source_repo, mock_manager, mock_registry):
+        """Should call manager.spawn_instance to create new agent."""
         # Reset the mock to track calls
-        mock_manager.spawn_session.reset_mock()
+        mock_manager.spawn_instance.reset_mock()
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        session_id = await mapper.get_or_create_session(
-            source_id="test_source",
-            external_user_id="user123",
-            agent_dir="/agents/test"
-        )
-        
-        # Should have called spawn_session
-        mock_manager.spawn_session.assert_called_once_with("/agents/test")
-        
-        # Should return the spawned session ID
-        assert session_id == mock_manager.spawn_session.return_value
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            instance_id = await mapper.get_or_create_instance(
+                source_id="test_source",
+                external_user_id="user123",
+                agent_id="test"
+            )
+            
+            # Should have called spawn_instance
+            mock_manager.spawn_instance.assert_called_once()
+            
+            # Should return the spawned instance ID
+            assert instance_id == mock_manager.spawn_instance.return_value
     
     @pytest.mark.asyncio
-    async def test_get_mapping_returns_mapping(self, temp_db, session_mapper):
+    async def test_get_mapping_returns_mapping(self, mock_source_repo, instance_mapper):
         """Get mapping should return existing mapping."""
         source_id = "test_source"
         external_user_id = "12345"
         
-        # First create a session to have a mapping
-        await session_mapper.get_or_create_session(
+        # First create an instance to have a mapping
+        await instance_mapper.get_or_create_instance(
             source_id=source_id,
             external_user_id=external_user_id,
-            agent_dir="/agents/test"
+            agent_id="test"
         )
         
         # Get mapping should return it
-        mapping = session_mapper.get_mapping(source_id, external_user_id)
+        mapping = instance_mapper.get_mapping(source_id, external_user_id)
         assert mapping is not None
         assert mapping["external_user_id"] == external_user_id
         assert mapping["source_id"] == source_id
     
-    def test_get_mapping_not_found(self, temp_db, session_mapper):
+    def test_get_mapping_not_found(self, mock_source_repo, instance_mapper):
         """Get mapping should return None for non-existent mapping."""
-        mapping = session_mapper.get_mapping("nonexistent_source", "nonexistent_user")
+        mapping = instance_mapper.get_mapping("nonexistent_source", "nonexistent_user")
         assert mapping is None
     
     @pytest.mark.asyncio
-    async def test_update_last_message(self, temp_db, session_mapper):
+    async def test_update_last_message(self, mock_source_repo, instance_mapper):
         """Update last message should update timestamp."""
         import time
         
         source_id = "test_source"
         external_user_id = "12345"
         
-        # Create session first
-        await session_mapper.get_or_create_session(
+        # Create instance first
+        await instance_mapper.get_or_create_instance(
             source_id=source_id,
             external_user_id=external_user_id,
-            agent_dir="/agents/test"
+            agent_id="test"
         )
         
         # Get initial mapping
-        initial_mapping = session_mapper.get_mapping(source_id, external_user_id)
+        initial_mapping = instance_mapper.get_mapping(source_id, external_user_id)
         initial_timestamp = initial_mapping["last_message_at"]
         
         # Wait a bit to ensure timestamp would change
         time.sleep(0.01)
         
         # Update last message
-        session_mapper.update_last_message(source_id, external_user_id)
+        instance_mapper.update_last_message(source_id, external_user_id)
         
         # Get updated mapping
-        updated_mapping = session_mapper.get_mapping(source_id, external_user_id)
+        updated_mapping = instance_mapper.get_mapping(source_id, external_user_id)
         
         # The timestamp should have been updated
         assert updated_mapping["last_message_at"] is not None
@@ -311,45 +345,45 @@ class TestSessionMapper:
 class TestDeduplication:
     """Tests for message deduplication."""
     
-    def test_is_duplicate_new_message(self, temp_db, session_mapper):
+    def test_is_duplicate_new_message(self, mock_source_repo, instance_mapper):
         """New message should return False."""
         source_id = "test_source"
         message_id = "msg_001"
         
-        is_dup = session_mapper.is_duplicate(source_id, message_id)
+        is_dup = instance_mapper.is_duplicate(source_id, message_id)
         
         assert is_dup is False
     
-    def test_is_duplicate_duplicate_message(self, temp_db, session_mapper):
+    def test_is_duplicate_duplicate_message(self, mock_source_repo, instance_mapper):
         """Duplicate message should return True."""
         source_id = "test_source"
         message_id = "msg_001"
         
         # First message - not a duplicate
-        is_dup_1 = session_mapper.is_duplicate(source_id, message_id)
+        is_dup_1 = instance_mapper.is_duplicate(source_id, message_id)
         assert is_dup_1 is False
         
         # Second message with same ID - should be duplicate
-        is_dup_2 = session_mapper.is_duplicate(source_id, message_id)
+        is_dup_2 = instance_mapper.is_duplicate(source_id, message_id)
         assert is_dup_2 is True
     
-    def test_is_duplicate_different_sources(self, temp_db, session_mapper):
+    def test_is_duplicate_different_sources(self, mock_source_repo, instance_mapper):
         """Same message ID from different sources should not be duplicates."""
         message_id = "msg_001"
         
-        is_dup_source1 = session_mapper.is_duplicate("source_1", message_id)
-        is_dup_source2 = session_mapper.is_duplicate("source_2", message_id)
+        is_dup_source1 = instance_mapper.is_duplicate("source_1", message_id)
+        is_dup_source2 = instance_mapper.is_duplicate("source_2", message_id)
         
         assert is_dup_source1 is False
         assert is_dup_source2 is False
     
-    def test_is_duplicate_different_messages_same_source(self, temp_db, session_mapper):
+    def test_is_duplicate_different_messages_same_source(self, mock_source_repo, instance_mapper):
         """Different messages from same source should not be duplicates."""
         source_id = "test_source"
         
-        is_dup_1 = session_mapper.is_duplicate(source_id, "msg_001")
-        is_dup_2 = session_mapper.is_duplicate(source_id, "msg_002")
-        is_dup_3 = session_mapper.is_duplicate(source_id, "msg_003")
+        is_dup_1 = instance_mapper.is_duplicate(source_id, "msg_001")
+        is_dup_2 = instance_mapper.is_duplicate(source_id, "msg_002")
+        is_dup_3 = instance_mapper.is_duplicate(source_id, "msg_003")
         
         assert is_dup_1 is False
         assert is_dup_2 is False
@@ -363,193 +397,200 @@ class TestHandleIncomingMessage:
     """Tests for handle_incoming_message full flow."""
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_creates_session(self, temp_db, mock_manager):
-        """Full flow: incoming message should create session if new user."""
+    async def test_handle_incoming_message_creates_instance(self, mock_source_repo, mock_manager, mock_registry):
+        """Full flow: incoming message should create instance if new user."""
         from daemon.sources.base import IncomingMessage
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="12345",
-            content="Hello",
-            source_id="telegram_source",
-            metadata={
-                "source_type": "telegram",
-                "message_id": "msg_001",
-                "agent_dir": "/agents/test"
-            }
-        )
-        
-        agent_session_id, source_id = await mapper.handle_incoming_message(
-            msg=msg,
-            default_agent_dir="/agents/default"
-        )
-        
-        # Should return a session ID
-        assert agent_session_id is not None
-        assert len(agent_session_id) > 0
-        
-        # Should return the correct source_id
-        assert source_id == "telegram_source"
-        
-        # Should have created mapping in DB
-        mapping = mapper.get_mapping("telegram_source", "12345")
-        assert mapping is not None
-        assert mapping["agent_session_id"] == agent_session_id
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="12345",
+                content="Hello",
+                source_id="telegram_source",
+                metadata={
+                    "source_type": "telegram",
+                    "message_id": "msg_001",
+                    "agent_id": "test"
+                }
+            )
+            
+            agent_instance_id, source_id = await mapper.handle_incoming_message(
+                msg=msg,
+                default_agent_id="default"
+            )
+            
+            # Should return an instance ID
+            assert agent_instance_id is not None
+            assert len(agent_instance_id) > 0
+            
+            # Should return the correct source_id
+            assert source_id == "telegram_source"
+            
+            # Should have created mapping in DB
+            mapping = mapper.get_mapping("telegram_source", "12345")
+            assert mapping is not None
+            assert mapping["agent_instance_id"] == agent_instance_id
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_rejects_duplicate(self, temp_db, mock_manager):
+    async def test_handle_incoming_message_rejects_duplicate(self, mock_source_repo, mock_manager, mock_registry):
         """Full flow: duplicate message should raise ValueError."""
         from daemon.sources.base import IncomingMessage
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="12345",
-            content="Hello",
-            source_id="telegram_source",
-            metadata={
-                "source_type": "telegram",
-                "message_id": "msg_duplicate",
-                "agent_dir": "/agents/test"
-            }
-        )
-        
-        # First message should succeed
-        agent_session_id, source_id = await mapper.handle_incoming_message(
-            msg=msg,
-            default_agent_dir="/agents/default"
-        )
-        assert agent_session_id is not None
-        
-        # Second message with same ID should raise ValueError
-        with pytest.raises(ValueError, match="Duplicate message"):
-            await mapper.handle_incoming_message(
-                msg=msg,
-                default_agent_dir="/agents/default"
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="12345",
+                content="Hello",
+                source_id="telegram_source",
+                metadata={
+                    "source_type": "telegram",
+                    "message_id": "msg_duplicate",
+                    "agent_id": "test"
+                }
             )
+            
+            # First message should succeed
+            agent_instance_id, source_id = await mapper.handle_incoming_message(
+                msg=msg,
+                default_agent_id="default"
+            )
+            assert agent_instance_id is not None
+            
+            # Second message with same ID should raise ValueError
+            with pytest.raises(ValueError, match="Duplicate message"):
+                await mapper.handle_incoming_message(
+                    msg=msg,
+                    default_agent_id="default"
+                )
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_updates_last_message(self, temp_db, mock_manager):
+    async def test_handle_incoming_message_updates_last_message(self, mock_source_repo, mock_manager, mock_registry):
         """Full flow: should update last_message_at timestamp."""
         from daemon.sources.base import IncomingMessage
         import time
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="12345",
-            content="Hello",
-            source_id="webhook_source",
-            metadata={
-                "source_type": "webhook",
-                "message_id": "msg_001",
-                "agent_dir": "/agents/test"
-            }
-        )
-        
-        await mapper.handle_incoming_message(
-            msg=msg,
-            default_agent_dir="/agents/default"
-        )
-        
-        # Get mapping and check timestamp
-        mapping = mapper.get_mapping("webhook_source", "12345")
-        assert mapping["last_message_at"] is not None
-        
-        # Wait a bit
-        time.sleep(0.01)
-        
-        # Send another message
-        msg2 = IncomingMessage(
-            external_user_id="12345",
-            content="Hello again",
-            source_id="webhook_source",
-            metadata={
-                "source_type": "webhook",
-                "message_id": "msg_002",
-            }
-        )
-        
-        await mapper.handle_incoming_message(
-            msg=msg2,
-            default_agent_dir="/agents/default"
-        )
-        
-        # Timestamp should still be updated
-        mapping2 = mapper.get_mapping("webhook_source", "12345")
-        assert mapping2["last_message_at"] is not None
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="12345",
+                content="Hello",
+                source_id="webhook_source",
+                metadata={
+                    "source_type": "webhook",
+                    "message_id": "msg_001",
+                    "agent_id": "test"
+                }
+            )
+            
+            await mapper.handle_incoming_message(
+                msg=msg,
+                default_agent_id="default"
+            )
+            
+            # Get mapping and check timestamp
+            mapping = mapper.get_mapping("webhook_source", "12345")
+            assert mapping["last_message_at"] is not None
+            
+            # Wait a bit
+            time.sleep(0.01)
+            
+            # Send another message
+            msg2 = IncomingMessage(
+                external_user_id="12345",
+                content="Hello again",
+                source_id="webhook_source",
+                metadata={
+                    "source_type": "webhook",
+                    "message_id": "msg_002",
+                }
+            )
+            
+            await mapper.handle_incoming_message(
+                msg=msg2,
+                default_agent_id="default"
+            )
+            
+            # Timestamp should still be updated
+            mapping2 = mapper.get_mapping("webhook_source", "12345")
+            assert mapping2["last_message_at"] is not None
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_without_message_id(self, temp_db, mock_manager):
+    async def test_handle_incoming_message_without_message_id(self, mock_source_repo, mock_manager, mock_registry):
         """Should work without message_id in metadata (no deduplication)."""
         from daemon.sources.base import IncomingMessage
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="12345",
-            content="Hello",
-            source_id="webhook_source",
-            metadata={
-                "source_type": "webhook",
-                # No message_id - no deduplication
-            }
-        )
-        
-        # Should work fine without message_id
-        agent_session_id, source_id = await mapper.handle_incoming_message(
-            msg=msg,
-            default_agent_dir="/agents/default"
-        )
-        
-        assert agent_session_id is not None
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="12345",
+                content="Hello",
+                source_id="webhook_source",
+                metadata={
+                    "source_type": "webhook",
+                    # No message_id - no deduplication
+                }
+            )
+            
+            # Should work fine without message_id
+            agent_instance_id, source_id = await mapper.handle_incoming_message(
+                msg=msg,
+                default_agent_id="default"
+            )
+            
+            assert agent_instance_id is not None
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_invalid_user_id(self, temp_db, mock_manager):
+    async def test_handle_incoming_message_invalid_user_id(self, mock_source_repo, mock_manager, mock_registry):
         """Should raise ValidationError for invalid user ID."""
         from daemon.sources.base import IncomingMessage
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="invalid_id_with_spaces 123",
-            content="Hello",
-            source_id="telegram_source",
-            metadata={
-                "source_type": "telegram",
-                "agent_dir": "/agents/test"
-            }
-        )
-        
-        with pytest.raises(ValidationError, match="Invalid Telegram ID"):
-            await mapper.handle_incoming_message(
-                msg=msg,
-                default_agent_dir="/agents/default"
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="invalid_id_with_spaces 123",
+                content="Hello",
+                source_id="telegram_source",
+                metadata={
+                    "source_type": "telegram",
+                    "agent_id": "test"
+                }
             )
+            
+            with pytest.raises(ValidationError, match="Invalid Telegram ID"):
+                await mapper.handle_incoming_message(
+                    msg=msg,
+                    default_agent_id="default"
+                )
     
     @pytest.mark.asyncio
-    async def test_handle_incoming_message_uses_default_agent_dir(self, temp_db, mock_manager):
-        """Should use default_agent_dir when not specified in metadata."""
+    async def test_handle_incoming_message_uses_default_agent_id(self, mock_source_repo, mock_manager, mock_registry):
+        """Should use default_agent_id when not specified in metadata."""
         from daemon.sources.base import IncomingMessage
         
-        mapper = SessionMapper(conn=temp_db, manager=mock_manager)
-        
-        msg = IncomingMessage(
-            external_user_id="12345",
-            content="Hello",
-            source_id="webhook_source",
-            metadata={
-                "source_type": "webhook",
-                # No agent_dir in metadata
-            }
-        )
-        
-        await mapper.handle_incoming_message(
-            msg=msg,
-            default_agent_dir="/agents/default_agent"
-        )
-        
-        # Should have used the default agent dir
-        mapping = mapper.get_mapping("webhook_source", "12345")
-        assert mapping["agent_dir"] == "/agents/default_agent"
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+            
+            msg = IncomingMessage(
+                external_user_id="12345",
+                content="Hello",
+                source_id="webhook_source",
+                metadata={
+                    "source_type": "webhook",
+                    # No agent_id in metadata
+                }
+            )
+            
+            await mapper.handle_incoming_message(
+                msg=msg,
+                default_agent_id="default_agent"
+            )
+            
+            # Should have created mapping with default agent
+            mapping = mapper.get_mapping("webhook_source", "12345")
+            assert mapping is not None
+            assert mapping["agent_id"] == "default_agent"

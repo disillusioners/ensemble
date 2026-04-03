@@ -34,7 +34,7 @@ sys.path.insert(0, str(project_root))
 
 # Now import daemon modules (after env is loaded)
 from daemon.config import load_config
-from daemon.manager import SessionManager
+from daemon.manager import InstanceManager
 
 
 def create_test_agent(tmp_dir: Path) -> str:
@@ -103,13 +103,13 @@ async def test_inner_soul_remember():
     memories_before = list(memories_dir.glob("*.md"))
     print(f"Memories before: {len(memories_before)}")
     
-    # Create session manager
-    manager = SessionManager(config=config)
+    # Create instance manager
+    manager = InstanceManager(config=config)
     
-    # Spawn session
-    print(f"Spawning session with agent: {agent_dir}")
-    session_id = manager.spawn_session(agent_id="test_agent")
-    print(f"Session ID: {session_id}")
+    # Spawn instance
+    print(f"Spawning instance with agent: {agent_dir}")
+    instance_id = manager.spawn_instance(agent_id="test_agent")
+    print(f"Instance ID: {instance_id}")
     
     # Send message asking agent to remember
     message = """Please use the inner_soul tool to remember: "My name is TestAgent"
@@ -117,7 +117,7 @@ async def test_inner_soul_remember():
 Call inner_soul with intent="remember" and the content above."""
     
     print(f"\nSending message: {message[:100]}...")
-    response = await manager.send_message(session_id, message)
+    response = await manager.send_message(instance_id, message)
     
     print(f"\nAgent response:\n{response.content[:500]}...")
     if response.tool_calls:
@@ -136,7 +136,7 @@ Call inner_soul with intent="remember" and the content above."""
         print(f"Content:\n{memory_file.read_text()[:500]}...")
     
     # Cleanup
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
     shutil.rmtree(tmp_dir)
     
     # Assert
@@ -167,20 +167,20 @@ async def test_inner_soul_workflow_change():
     workflow_file = Path(agent_dir) / "workflow.md"
     workflow_before = workflow_file.read_text()
     
-    manager = SessionManager(config=config)
-    session_id = manager.spawn_session(agent_id="test_agent")
+    manager = InstanceManager(config=config)
+    instance_id = manager.spawn_instance(agent_id="test_agent")
     
     message = """Use the inner_soul tool to add a workflow step.
 
 Call: inner_soul(intent="change", target="workflow", content="Step 4: Review before responding")"""
     
     print(f"Sending message...")
-    response = await manager.send_message(session_id, message)
+    response = await manager.send_message(instance_id, message)
     print(f"Response: {response.content[:300]}...")
     
     workflow_after = workflow_file.read_text()
     
-    manager.terminate_session(session_id)
+    manager.terminate_instance(instance_id)
     shutil.rmtree(tmp_dir)
     
     if len(workflow_after) > len(workflow_before):

@@ -14,19 +14,19 @@ from daemon import api as api_module
 
 @pytest_asyncio.fixture
 async def mock_manager():
-    """Create a mock SessionManager with proper cleanup."""
+    """Create a mock InstanceManager with proper cleanup."""
     import sqlite3
     import tempfile
     import os
     
     manager = Mock()
-    manager.spawn_session = Mock(return_value="test-session-id")
-    manager.get_session = Mock()
+    manager.spawn_instance = Mock(return_value="test-instance-id")
+    manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
-    manager.terminate_session = Mock(return_value=True)
-    manager.list_sessions = Mock(return_value=([
+    manager.terminate_instance = Mock(return_value=True)
+    manager.list_instances = Mock(return_value=([
         {
-            "session_id": "session-1",
+            "instance_id": "instance-1",
             "agent_id": "coder",
             "agent_dir": "/path/to/agent1",
             "status": "running",
@@ -36,8 +36,8 @@ async def mock_manager():
             "updated_at": "2024-01-01T00:00:00"
         }
     ], 1))
-    manager.get_session_info = Mock(return_value={
-        "session_id": "test-session-id",
+    manager.get_instance_info = Mock(return_value={
+        "instance_id": "test-instance-id",
         "agent_id": "coder",
         "agent_dir": "/path/to/agent",
         "status": "running",
@@ -49,7 +49,7 @@ async def mock_manager():
     # Mock async enqueue_message
     manager.enqueue_message = AsyncMock(return_value=Mock(
         message_id="test-message-id",
-        session_id="test-session-id",
+        instance_id="test-instance-id",
         status="queued"
     ))
     # Mock get_messages for message history (now async)
@@ -75,11 +75,11 @@ async def mock_manager():
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_mappings (
+        CREATE TABLE IF NOT EXISTS instance_mappings (
             mapping_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
-            agent_session_id TEXT NOT NULL,
+            agent_instance_id TEXT NOT NULL,
             agent_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
             metadata TEXT,
@@ -137,36 +137,36 @@ async def test_health_check(client):
 
 
 @pytest.mark.asyncio
-async def test_create_session_success(client, mock_manager):
-    """Test POST /sessions."""
+async def test_create_instance_success(client, mock_manager):
+    """Test POST /instances."""
     response = await client.post(
-        "/sessions",
+        "/instances",
         json={
             "agent_id": "coder",
-            "session_id": "550e8400-e29b-41d4-a716-446655440000"
+            "instance_id": "550e8400-e29b-41d4-a716-446655440000"
         }
     )
     
     assert response.status_code == 201
     data = response.json()
-    assert data["session_id"] == "test-session-id"
+    assert data["instance_id"] == "test-instance-id"
     assert data["agent_id"] == "coder"
-    mock_manager.spawn_session.assert_called_once_with(
+    mock_manager.spawn_instance.assert_called_once_with(
         agent_id="coder",
-        session_id="550e8400-e29b-41d4-a716-446655440000"
+        instance_id="550e8400-e29b-41d4-a716-446655440000"
     )
 
 
 @pytest.mark.asyncio
-async def test_create_session_max_limit(client, mock_manager):
-    """Test POST /sessions with max sessions exceeded."""
+async def test_create_instance_max_limit(client, mock_manager):
+    """Test POST /instances with max instances exceeded."""
     # Configure mock to raise ValueError (as the real manager does)
-    mock_manager.spawn_session.side_effect = ValueError(
-        "Max sessions limit reached: 5"
+    mock_manager.spawn_instance.side_effect = ValueError(
+        "Max instances limit reached: 5"
     )
     
     response = await client.post(
-        "/sessions",
+        "/instances",
         json={
             "agent_id": "coder"
         }
@@ -175,77 +175,77 @@ async def test_create_session_max_limit(client, mock_manager):
     assert response.status_code == 429
     data = response.json()
     assert "detail" in data
-    assert data["detail"]["code"] == "MAX_SESSIONS_EXCEEDED"
+    assert data["detail"]["code"] == "MAX_INSTANCES_EXCEEDED"
 
 
 @pytest.mark.asyncio
-async def test_list_sessions(client, mock_manager):
-    """Test GET /sessions."""
-    response = await client.get("/sessions")
+async def test_list_instances(client, mock_manager):
+    """Test GET /instances."""
+    response = await client.get("/instances")
     
     assert response.status_code == 200
     data = response.json()
-    assert "sessions" in data
-    assert len(data["sessions"]) == 1
-    assert data["sessions"][0]["session_id"] == "session-1"
-    mock_manager.list_sessions.assert_called_once()
+    assert "instances" in data
+    assert len(data["instances"]) == 1
+    assert data["instances"][0]["instance_id"] == "instance-1"
+    mock_manager.list_instances.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_session_success(client, mock_manager):
-    """Test GET /sessions/{id}."""
-    response = await client.get("/sessions/test-session-id")
+async def test_get_instance_success(client, mock_manager):
+    """Test GET /instances/{id}."""
+    response = await client.get("/instances/test-instance-id")
     
     assert response.status_code == 200
     data = response.json()
-    assert data["session_id"] == "test-session-id"
-    mock_manager.get_session_info.assert_called_once_with("test-session-id")
+    assert data["instance_id"] == "test-instance-id"
+    mock_manager.get_instance_info.assert_called_once_with("test-instance-id")
 
 
 @pytest.mark.asyncio
-async def test_get_session_not_found(client, mock_manager):
-    """Test GET /sessions/{id} with invalid id."""
-    mock_manager.get_session_info.side_effect = KeyError("Session not found: invalid-id")
+async def test_get_instance_not_found(client, mock_manager):
+    """Test GET /instances/{id} with invalid id."""
+    mock_manager.get_instance_info.side_effect = KeyError("Instance not found: invalid-id")
     
-    response = await client.get("/sessions/invalid-id")
+    response = await client.get("/instances/invalid-id")
     
     assert response.status_code == 404
     data = response.json()
     assert "detail" in data
-    assert data["detail"]["code"] == "SESSION_NOT_FOUND"
+    assert data["detail"]["code"] == "INSTANCE_NOT_FOUND"
 
 
 @pytest.mark.asyncio
-async def test_terminate_session_success(client, mock_manager):
-    """Test DELETE /sessions/{id}."""
-    mock_manager.get_session.return_value = Mock()  # Session exists
+async def test_terminate_instance_success(client, mock_manager):
+    """Test DELETE /instances/{id}."""
+    mock_manager.get_instance.return_value = Mock()  # Instance exists
     
-    response = await client.delete("/sessions/test-session-id")
+    response = await client.delete("/instances/test-instance-id")
     
     assert response.status_code == 200
     data = response.json()
     assert data["terminated"] is True
-    mock_manager.terminate_session.assert_called_once_with("test-session-id")
+    mock_manager.terminate_instance.assert_called_once_with("test-instance-id")
 
 
 @pytest.mark.asyncio
-async def test_terminate_session_not_found(client, mock_manager):
-    """Test DELETE /sessions/{id} with invalid id."""
-    mock_manager.get_session.side_effect = KeyError("Session not found: invalid-id")
+async def test_terminate_instance_not_found(client, mock_manager):
+    """Test DELETE /instances/{id} with invalid id."""
+    mock_manager.get_instance.side_effect = KeyError("Instance not found: invalid-id")
     
-    response = await client.delete("/sessions/invalid-id")
+    response = await client.delete("/instances/invalid-id")
     
     assert response.status_code == 404
     data = response.json()
     assert "detail" in data
-    assert data["detail"]["code"] == "SESSION_NOT_FOUND"
+    assert data["detail"]["code"] == "INSTANCE_NOT_FOUND"
 
 
 @pytest.mark.asyncio
 async def test_send_message_success(client, mock_manager):
-    """Test POST /sessions/{id}/messages."""
+    """Test POST /instances/{id}/messages."""
     response = await client.post(
-        "/sessions/test-session-id/messages",
+        "/instances/test-instance-id/messages",
         json={
             "content": "Hello, agent!"
         }
@@ -257,19 +257,19 @@ async def test_send_message_success(client, mock_manager):
     assert data["role"] == "assistant"
     assert data["content"] == ""  # Response comes async via SSE
     mock_manager.enqueue_message.assert_called_once_with(
-        session_id="test-session-id",
+        instance_id="test-instance-id",
         message="Hello, agent!",
         source="api"
     )
 
 
 @pytest.mark.asyncio
-async def test_send_message_session_not_found(client, mock_manager):
-    """Test POST /sessions/{id}/messages with invalid id."""
-    mock_manager.get_session.side_effect = KeyError("Session not found: invalid-id")
+async def test_send_message_instance_not_found(client, mock_manager):
+    """Test POST /instances/{id}/messages with invalid id."""
+    mock_manager.get_instance.side_effect = KeyError("Instance not found: invalid-id")
     
     response = await client.post(
-        "/sessions/invalid-id/messages",
+        "/instances/invalid-id/messages",
         json={
             "content": "Hello!"
         }
@@ -278,14 +278,14 @@ async def test_send_message_session_not_found(client, mock_manager):
     assert response.status_code == 404
     data = response.json()
     assert "detail" in data
-    assert data["detail"]["code"] == "SESSION_NOT_FOUND"
+    assert data["detail"]["code"] == "INSTANCE_NOT_FOUND"
 
 
 @pytest.mark.asyncio
 async def test_get_messages(client, mock_manager):
-    """Test GET /sessions/{id}/messages."""
+    """Test GET /instances/{id}/messages."""
     # Message history now returns empty list (TODO: implement from LangGraph checkpoints)
-    response = await client.get("/sessions/test-session-id/messages")
+    response = await client.get("/instances/test-instance-id/messages")
     
     assert response.status_code == 200
     data = response.json()
@@ -296,11 +296,11 @@ async def test_get_messages(client, mock_manager):
 async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
     # Make enqueue_message raise an unexpected exception
-    mock_manager.get_session.return_value = Mock()
+    mock_manager.get_instance.return_value = Mock()
     mock_manager.enqueue_message.side_effect = RuntimeError("Unexpected error")
     
     response = await client.post(
-        "/sessions/test-session-id/messages",
+        "/instances/test-instance-id/messages",
         json={
             "content": "Hello!"
         }
@@ -495,7 +495,7 @@ async def test_create_source_invalid_id(client, mock_manager):
 @pytest.mark.asyncio
 async def test_delete_source_cascades_to_mappings(client, mock_manager):
     """Test DELETE /sources/{source_id} also deletes associated mappings."""
-    from daemon.sources.persistence import save_session_mapping
+    from daemon.sources.persistence import save_instance_mapping
     
     # Create a source
     await client.post(
@@ -510,13 +510,13 @@ async def test_delete_source_cascades_to_mappings(client, mock_manager):
         }
     )
     
-    # Create a mapping directly in DB (since endpoint requires session spawning)
-    save_session_mapping(
+    # Create a mapping directly in DB (since endpoint requires instance spawning)
+    save_instance_mapping(
         conn=mock_manager.conn,
         mapping_id="telegram-test:123456",
         source_id="telegram-test",
         external_user_id="123456",
-        agent_session_id="session-abc",
+        agent_instance_id="instance-abc",
         agent_dir="./agents/coder",
     )
     

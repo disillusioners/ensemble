@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Mock Test Script - Tests the ensemble daemon with a mock LLM server.
-Flow: Start mock server → Start daemon with mock upstream → Create session → Send message → Wait for response.
+Flow: Start mock server → Start daemon with mock upstream → Create instance → Send message → Wait for response.
 """
 
 import subprocess
@@ -108,32 +108,32 @@ class MockTestRunner:
         self.log(f"Ensemble Daemon running at {self.daemon_base_url}")
         self.log(f"Upstream URL overridden to: {self.mock_base_url}")
 
-    def create_session(self, agent_dir: str = "default", title: str = "Mock Test Session") -> dict:
-        """Create a new session."""
-        self.log(f"Creating session: agent={agent_dir}, title={title}")
+    def create_instance(self, agent_dir: str = "default", title: str = "Mock Test Instance") -> dict:
+        """Create a new instance."""
+        self.log(f"Creating instance: agent={agent_dir}, title={title}")
         client = httpx.Client(timeout=10, verify=False)
         try:
             resp = client.post(
-                f"{self.daemon_base_url}/sessions",
+                f"{self.daemon_base_url}/instances",
                 json={
                     "agent_dir": agent_dir,
                     "title": title,
                 },
             )
             resp.raise_for_status()
-            session = resp.json()
-            self.log(f"Session created: {session['session_id']}")
-            return session
+            instance = resp.json()
+            self.log(f"Instance created: {instance['instance_id']}")
+            return instance
         finally:
             client.close()
 
-    def send_message(self, session_id: str, content: str) -> dict:
-        """Send a message to a session."""
-        self.log(f"Sending message to session {session_id}: {content[:50]}...")
+    def send_message(self, instance_id: str, content: str) -> dict:
+        """Send a message to an instance."""
+        self.log(f"Sending message to instance {instance_id}: {content[:50]}...")
         client = httpx.Client(timeout=10, verify=False)
         try:
             resp = client.post(
-                f"{self.daemon_base_url}/sessions/{session_id}/messages",
+                f"{self.daemon_base_url}/instances/{instance_id}/messages",
                 json={"content": content},
             )
             resp.raise_for_status()
@@ -143,12 +143,12 @@ class MockTestRunner:
         finally:
             client.close()
 
-    def stream_events(self, session_id: str, timeout: int = 30) -> Generator[dict, None, None]:
-        """Stream SSE events from a session."""
-        self.log(f"Streaming events for session {session_id}...")
+    def stream_events(self, instance_id: str, timeout: int = 30) -> Generator[dict, None, None]:
+        """Stream SSE events from an instance."""
+        self.log(f"Streaming events for instance {instance_id}...")
         with httpx.stream(
             "GET",
-            f"{self.daemon_base_url}/sessions/{session_id}/events",
+            f"{self.daemon_base_url}/instances/{instance_id}/events",
             timeout=timeout,
             verify=False,
         ) as resp:
@@ -172,13 +172,13 @@ class MockTestRunner:
                     event_type = None
                     data_buffer = ""
 
-    def wait_for_completion(self, session_id: str, timeout: int = 60) -> list[dict]:
+    def wait_for_completion(self, instance_id: str, timeout: int = 60) -> list[dict]:
         """Wait for the message to be processed and return all events."""
         events = []
         start = time.time()
 
         try:
-            for raw_event in self.stream_events(session_id, timeout):
+            for raw_event in self.stream_events(instance_id, timeout):
                 event_type = raw_event.get("type", "unknown")
                 data = raw_event.get("data", {})
                 self.log(f"Event: {event_type} - {data}", "DEBUG")
@@ -200,11 +200,11 @@ class MockTestRunner:
 
         return events
 
-    def get_messages(self, session_id: str) -> list[dict]:
-        """Get all messages for a session."""
+    def get_messages(self, instance_id: str) -> list[dict]:
+        """Get all messages for an instance."""
         client = httpx.Client(timeout=10, verify=False)
         try:
-            resp = client.get(f"{self.daemon_base_url}/sessions/{session_id}/messages")
+            resp = client.get(f"{self.daemon_base_url}/instances/{instance_id}/messages")
             resp.raise_for_status()
             return resp.json()
         finally:
@@ -231,26 +231,26 @@ class MockTestRunner:
             # Print mock stats before
             self.log("Mock server stats (before): " + str(self.get_mock_stats()))
 
-            # Create session
-            session = self.create_session(title="Mock LLM Test Session")
-            session_id = session["session_id"]
+            # Create instance
+            instance = self.create_instance(title="Mock LLM Test Instance")
+            instance_id = instance["instance_id"]
 
             # Send message
-            self.send_message(session_id, test_message)
+            self.send_message(instance_id, test_message)
 
             # Wait for completion
             self.log("Waiting for message processing...")
-            events = self.wait_for_completion(session_id, timeout=60)
+            events = self.wait_for_completion(instance_id, timeout=60)
 
             # Get final messages
-            messages = self.get_messages(session_id)
+            messages = self.get_messages(instance_id)
             self.log(f"Final message count: {len(messages)}")
 
             # Print results
             self.log("\n" + "=" * 60)
             self.log("TEST RESULTS")
             self.log("=" * 60)
-            self.log(f"Session ID: {session_id}")
+            self.log(f"Instance ID: {instance_id}")
             self.log(f"Events received: {len(events)}")
 
             for msg in messages:

@@ -67,7 +67,7 @@ class TestIntegrationBasicWorkflow:
         
         assert job is not None
         assert job.status == JobStatus.PROCESSING.value
-        assert job.session_id is not None
+        assert job.instance_id is not None
         
         # Step 2: Verify job is in database
         retrieved = await integration_service.get_job(job.job_id)
@@ -103,7 +103,7 @@ class TestIntegrationBasicWorkflow:
         
         # Should be processing immediately
         assert job.status == JobStatus.PROCESSING.value
-        assert job.session_id is not None
+        assert job.instance_id is not None
         
         # Complete the job
         completed = await integration_service.complete_job(job.job_id)
@@ -440,7 +440,7 @@ class TestIntegrationCrashRecovery:
         )
         
         # Simulate crash: clear lock but leave job in PROCESSING
-        await integration_service._lock_manager.release_by_session(job.session_id)
+        await integration_service._lock_manager.release_by_instance(job.instance_id)
         
         # Job is still in PROCESSING state
         assert job.status == JobStatus.PROCESSING.value
@@ -453,7 +453,7 @@ class TestIntegrationCrashRecovery:
         updated = integration_service._repository.update(
             job.job_id,
             status=JobStatus.PENDING.value,
-            session_id=None  # Clear session
+            instance_id=None  # Clear instance
         )
         assert updated is not None
         assert updated.status == JobStatus.PENDING.value
@@ -492,7 +492,7 @@ class TestIntegrationCrashRecovery:
         )
         
         # Simulate crash during job1 processing
-        await integration_service._lock_manager.release_by_session(job1.session_id)
+        await integration_service._lock_manager.release_by_instance(job1.instance_id)
         
         # Cancel the orphaned job1
         await integration_service.cancel_job(job1.job_id)
@@ -609,15 +609,15 @@ class TestIntegrationConcurrentOperations:
         )
 
 
-class TestIntegrationSessionManagement:
-    """Tests for session-based lock management."""
+class TestIntegrationInstanceManagement:
+    """Tests for instance-based lock management."""
 
     @pytest.mark.asyncio
-    async def test_release_locks_by_session(
+    async def test_release_locks_by_instance(
         self, integration_service
     ):
-        """Test that releasing by session releases all locks for that session."""
-        # Create jobs for different projects (each gets own session)
+        """Test that releasing by instance releases all locks for that instance."""
+        # Create jobs for different projects (each gets own instance)
         job1 = await integration_service.enqueue(
             agent_dir="/test/agent",
             message="Job 1",
@@ -641,8 +641,8 @@ class TestIntegrationSessionManagement:
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
-        # Release all locks for job1's session (only project-1)
-        released = await integration_service.release_lock_by_session(job1.session_id)
+        # Release all locks for job1's instance (only project-1)
+        released = await integration_service.release_lock_by_instance(job1.instance_id)
         assert "project-1" in released
         
         # Only project-1 lock should be released
@@ -650,12 +650,12 @@ class TestIntegrationSessionManagement:
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
-        # Release job2's session
-        released = await integration_service.release_lock_by_session(job2.session_id)
+        # Release job2's instance
+        released = await integration_service.release_lock_by_instance(job2.instance_id)
         assert "project-2" in released
         
-        # Release job3's session
-        released = await integration_service.release_lock_by_session(job3.session_id)
+        # Release job3's instance
+        released = await integration_service.release_lock_by_instance(job3.instance_id)
         assert "project-3" in released
         
         # All locks should be released
@@ -664,10 +664,10 @@ class TestIntegrationSessionManagement:
         assert await integration_service._lock_manager.is_locked("project-3") is False
 
     @pytest.mark.asyncio
-    async def test_session_cleanup_releases_project_lock(
+    async def test_instance_cleanup_releases_project_lock(
         self, integration_service
     ):
-        """Test that session cleanup releases project lock."""
+        """Test that instance cleanup releases project lock."""
         job = await integration_service.enqueue(
             agent_dir="/test/agent",
             message="Job",
@@ -676,8 +676,8 @@ class TestIntegrationSessionManagement:
         
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
-        # Cleanup by session
-        released = await integration_service.release_lock_by_session(job.session_id)
+        # Cleanup by instance
+        released = await integration_service.release_lock_by_instance(job.instance_id)
         
         assert "project-1" in released
         assert await integration_service._lock_manager.is_locked("project-1") is False

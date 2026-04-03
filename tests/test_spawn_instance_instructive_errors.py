@@ -1,4 +1,4 @@
-"""Tests for instructive error messages in spawn_session validation.
+"""Tests for instructive error messages in spawn_instance validation.
 
 Tests the error messages produced when invalid agent IDs are provided,
 including skill detection, typo suggestions, and path traversal protection.
@@ -217,16 +217,16 @@ class TestValidAgentId:
             mock_registry.get.assert_called_once_with("coder")
 
 
-class TestManagerSpawnSessionErrors:
-    """Test 7: Manager spawn_session raises ValueError with instructive messages.
+class TestManagerSpawnInstanceErrors:
+    """Test 7: Manager spawn_instance raises ValueError with instructive messages.
     
-    These tests verify that the error message construction logic in SessionManager.spawn_session
+    These tests verify that the error message construction logic in InstanceManager.spawn_instance
     produces the same instructive error messages as validate_agent_id.
     """
 
     def test_manager_skill_not_agent_raises_value_error(self) -> None:
-        """spawn_session should raise ValueError with skill info when agent is a skill."""
-        from daemon.manager import SessionManager
+        """spawn_instance should raise ValueError with skill info when agent is a skill."""
+        from daemon.manager import InstanceManager
         from daemon.config import Config
 
         # Create minimal config - use plain MagicMock without spec
@@ -238,8 +238,8 @@ class TestManagerSpawnSessionErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_sessions = 10
-        config.limits.max_children_per_session = 5
+        config.limits.max_instances = 10
+        config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
@@ -256,15 +256,15 @@ class TestManagerSpawnSessionErrors:
         ]
 
         with patch("daemon.manager.get_registry", return_value=mock_registry):
-            with patch("daemon.manager.SessionManager.__init__", lambda self, cfg: None):
-                manager = SessionManager(config)
+            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
+                manager = InstanceManager(config)
                 manager.config = config
-                manager.sessions = {}  # No active sessions
+                manager.instances = {}  # No active instances
                 manager._checkpointer = None
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_session("opencode")
+                    manager.spawn_instance("opencode")
 
                 message = str(exc_info.value)
 
@@ -280,8 +280,8 @@ class TestManagerSpawnSessionErrors:
                 assert "Available agents:" in message
 
     def test_manager_unknown_agent_raises_value_error(self) -> None:
-        """spawn_session should raise ValueError with 'Agent not found' for unknown agents."""
-        from daemon.manager import SessionManager
+        """spawn_instance should raise ValueError with 'Agent not found' for unknown agents."""
+        from daemon.manager import InstanceManager
         from daemon.config import Config
 
         config = MagicMock()
@@ -292,8 +292,8 @@ class TestManagerSpawnSessionErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_sessions = 10
-        config.limits.max_children_per_session = 5
+        config.limits.max_instances = 10
+        config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
@@ -308,15 +308,15 @@ class TestManagerSpawnSessionErrors:
         ]
 
         with patch("daemon.manager.get_registry", return_value=mock_registry):
-            with patch("daemon.manager.SessionManager.__init__", lambda self, cfg: None):
-                manager = SessionManager(config)
+            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
+                manager = InstanceManager(config)
                 manager.config = config
-                manager.sessions = {}
+                manager.instances = {}
                 manager._checkpointer = None
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_session("database")
+                    manager.spawn_instance("database")
 
                 message = str(exc_info.value)
 
@@ -328,8 +328,8 @@ class TestManagerSpawnSessionErrors:
                 assert "is a skill" not in message
 
     def test_manager_typo_suggests_correction(self) -> None:
-        """spawn_session should suggest close match for typos."""
-        from daemon.manager import SessionManager
+        """spawn_instance should suggest close match for typos."""
+        from daemon.manager import InstanceManager
         from daemon.config import Config
 
         config = MagicMock()
@@ -340,8 +340,8 @@ class TestManagerSpawnSessionErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_sessions = 10
-        config.limits.max_children_per_session = 5
+        config.limits.max_instances = 10
+        config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
@@ -356,15 +356,15 @@ class TestManagerSpawnSessionErrors:
         ]
 
         with patch("daemon.manager.get_registry", return_value=mock_registry):
-            with patch("daemon.manager.SessionManager.__init__", lambda self, cfg: None):
-                manager = SessionManager(config)
+            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
+                manager = InstanceManager(config)
                 manager.config = config
-                manager.sessions = {}
+                manager.instances = {}
                 manager._checkpointer = None
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_session("code")  # Typo for coder
+                    manager.spawn_instance("code")  # Typo for coder
 
                 message = str(exc_info.value)
 
@@ -372,8 +372,8 @@ class TestManagerSpawnSessionErrors:
                 assert "Did you mean 'coder'?" in message
 
     def test_manager_empty_registry_value_error(self) -> None:
-        """spawn_session with empty registry should show appropriate message."""
-        from daemon.manager import SessionManager
+        """spawn_instance with empty registry should show appropriate message."""
+        from daemon.manager import InstanceManager
         from daemon.config import Config
 
         config = MagicMock()
@@ -384,8 +384,8 @@ class TestManagerSpawnSessionErrors:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_sessions = 10
-        config.limits.max_children_per_session = 5
+        config.limits.max_instances = 10
+        config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
@@ -398,15 +398,15 @@ class TestManagerSpawnSessionErrors:
         mock_registry.list_all.return_value = []  # Empty registry
 
         with patch("daemon.manager.get_registry", return_value=mock_registry):
-            with patch("daemon.manager.SessionManager.__init__", lambda self, cfg: None):
-                manager = SessionManager(config)
+            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
+                manager = InstanceManager(config)
                 manager.config = config
-                manager.sessions = {}
+                manager.instances = {}
                 manager._checkpointer = None
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_session("nonexistent")
+                    manager.spawn_instance("nonexistent")
 
                 message = str(exc_info.value)
 
@@ -418,7 +418,7 @@ class TestManagerSpawnSessionErrors:
 
 
 class TestErrorMessageConsistency:
-    """Additional tests to ensure consistency between api.validate_agent_id and manager.spawn_session."""
+    """Additional tests to ensure consistency between api.validate_agent_id and manager.spawn_instance."""
 
     def test_api_and_manager_skill_error_consistency(self) -> None:
         """API and manager should produce similar skill error messages."""
@@ -438,7 +438,7 @@ class TestErrorMessageConsistency:
                 api_message = e.detail["message"]
 
         # Get error from Manager
-        from daemon.manager import SessionManager
+        from daemon.manager import InstanceManager
         from daemon.config import Config
 
         config = MagicMock()
@@ -449,8 +449,8 @@ class TestErrorMessageConsistency:
         config.llm.model = "test-model"
         config.llm.temperature = 0.7
         config.llm.request_timeout = 60
-        config.limits.max_sessions = 10
-        config.limits.max_children_per_session = 5
+        config.limits.max_instances = 10
+        config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
         config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
@@ -466,15 +466,15 @@ class TestErrorMessageConsistency:
         ]
 
         with patch("daemon.manager.get_registry", return_value=mock_registry2):
-            with patch("daemon.manager.SessionManager.__init__", lambda self, cfg: None):
-                manager = SessionManager(config)
+            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
+                manager = InstanceManager(config)
                 manager.config = config
-                manager.sessions = {}
+                manager.instances = {}
                 manager._checkpointer = None
                 manager._loop = None
 
                 try:
-                    manager.spawn_session("some_skill")
+                    manager.spawn_instance("some_skill")
                 except ValueError as e:
                     manager_message = str(e)
 

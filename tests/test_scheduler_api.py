@@ -20,16 +20,16 @@ from daemon import api as api_module
 
 @pytest_asyncio.fixture
 async def mock_manager():
-    """Create a mock SessionManager with scheduler support."""
+    """Create a mock InstanceManager with scheduler support."""
     manager = Mock()
     
-    # Basic session manager mocks
-    manager.spawn_session = Mock(return_value="test-session-id")
-    manager.get_session = Mock()
+    # Basic instance manager mocks
+    manager.spawn_instance = Mock(return_value="test-instance-id")
+    manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
-    manager.terminate_session = Mock(return_value=True)
-    manager.list_sessions = Mock(return_value=([], 0))
-    manager.get_session_info = Mock()
+    manager.terminate_instance = Mock(return_value=True)
+    manager.list_instances = Mock(return_value=([], 0))
+    manager.get_instance_info = Mock()
     manager.enqueue_message = AsyncMock()
     manager.get_messages = AsyncMock(return_value=[])
     
@@ -55,11 +55,11 @@ async def mock_manager():
         )
     """)
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_mappings (
+        CREATE TABLE IF NOT EXISTS instance_mappings (
             mapping_id TEXT PRIMARY KEY,
             source_id TEXT NOT NULL,
             external_user_id TEXT NOT NULL,
-            agent_session_id TEXT NOT NULL,
+            agent_instance_id TEXT NOT NULL,
             agent_dir TEXT NOT NULL,
             metadata TEXT,
             last_message_at TIMESTAMP,
@@ -72,7 +72,7 @@ async def mock_manager():
             execution_id TEXT PRIMARY KEY,
             schedule_id TEXT NOT NULL,
             triggered_at TEXT NOT NULL,
-            session_id TEXT,
+            instance_id TEXT,
             status TEXT NOT NULL,
             error_message TEXT,
             completed_at TEXT,
@@ -150,7 +150,7 @@ def create_execution(execution_id: str, schedule_id: str, status: str = "complet
     execution.execution_id = execution_id
     execution.schedule_id = schedule_id
     execution.triggered_at = "2024-01-01T09:00:00+00:00"
-    execution.session_id = "session-123"
+    execution.instance_id = "instance-123"
     execution.status = status
     execution.error_message = None
     execution.completed_at = "2024-01-01T09:00:05+00:00"
@@ -585,7 +585,7 @@ class TestGetScheduleExecutions:
         
         # Create executions with different statuses
         triggered_exec = create_execution("exec-triggered", "scheduler-1", "triggered")
-        triggered_exec.session_id = None
+        triggered_exec.instance_id = None
         triggered_exec.completed_at = None
         
         completed_exec = create_execution("exec-completed", "scheduler-1", "completed")
