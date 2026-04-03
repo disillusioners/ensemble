@@ -5,8 +5,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class SessionStatus(str, Enum):
-    """Status of a daemon session."""
+class InstanceStatus(str, Enum):
+    """Status of a daemon instance."""
 
     idle = "idle"
     running = "running"
@@ -15,21 +15,21 @@ class SessionStatus(str, Enum):
     terminated = "terminated"
 
 
-class SchedulerSessionMode(str, Enum):
-    """Session mode for scheduler executions."""
+class SchedulerInstanceMode(str, Enum):
+    """Instance mode for scheduler executions."""
 
-    NEW_SESSION = "new_session"
-    REUSE_SESSION = "reuse_session"
+    NEW_INSTANCE = "new_instance"
+    REUSE_INSTANCE = "reuse_instance"
 
 
 class ErrorCodes(str, Enum):
     """Error codes for API responses."""
 
     INVALID_REQUEST = "INVALID_REQUEST"
-    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
-    SESSION_TERMINATED = "SESSION_TERMINATED"
+    INSTANCE_NOT_FOUND = "INSTANCE_NOT_FOUND"
+    INSTANCE_TERMINATED = "INSTANCE_TERMINATED"
     RATE_LIMITED = "RATE_LIMITED"
-    MAX_SESSIONS_EXCEEDED = "MAX_SESSIONS_EXCEEDED"
+    MAX_INSTANCES_EXCEEDED = "MAX_INSTANCES_EXCEEDED"
     LLM_ERROR = "LLM_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND"
@@ -60,11 +60,11 @@ class ErrorResponse(BaseModel):
     )
 
 
-class SessionCreate(BaseModel):
-    """Request for spawning a new session."""
+class InstanceCreate(BaseModel):
+    """Request for spawning a new instance."""
 
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
-    session_id: str | None = Field(default=None, description="Optional session ID")
+    instance_id: str | None = Field(default=None, description="Optional instance ID")
 
     @model_validator(mode='after')
     def validate_agent(self):
@@ -76,29 +76,29 @@ class SessionCreate(BaseModel):
         json_schema_extra={
             "example": {
                 "agent_id": "coder",
-                "session_id": "session-123"
+                "instance_id": "instance-123"
             }
         }
     )
 
 
-class SessionInfo(BaseModel):
-    """Response for session information."""
+class InstanceInfo(BaseModel):
+    """Response for instance information."""
 
-    session_id: str = Field(..., description="Unique session identifier")
+    instance_id: str = Field(..., description="Unique instance identifier")
     agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
-    status: SessionStatus = Field(..., description="Current session status")
-    title: str | None = Field(default=None, description="Auto-generated session title from first message")
-    parent_id: str | None = Field(default=None, description="Parent session ID if this is a child session")
-    children: list[str] = Field(default_factory=list, description="List of child session IDs")
-    created_at: datetime = Field(..., description="Session creation timestamp")
+    status: InstanceStatus = Field(..., description="Current instance status")
+    title: str | None = Field(default=None, description="Auto-generated instance title from first message")
+    parent_id: str | None = Field(default=None, description="Parent instance ID if this is a child instance")
+    children: list[str] = Field(default_factory=list, description="List of child instance IDs")
+    created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "session_id": "session-123",
+                "instance_id": "instance-123",
                 "agent_id": "coder",
                 "agent_dir": "./agents/coder",
                 "status": "running",
@@ -113,7 +113,7 @@ class SessionInfo(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    """Request for sending a message to a session."""
+    """Request for sending a message to an instance."""
 
     content: str = Field(..., description="Message content to send to the agent")
 
@@ -170,21 +170,21 @@ class HealthResponse(BaseModel):
     )
 
 
-class SessionListResponse(BaseModel):
-    """Response for listing sessions."""
+class InstanceListResponse(BaseModel):
+    """Response for listing instances."""
 
-    sessions: list[SessionInfo] = Field(..., description="List of active sessions")
-    total: int = Field(..., description="Total number of sessions available")
-    limit: int = Field(..., description="Maximum number of sessions returned")
-    offset: int = Field(..., description="Number of sessions skipped")
-    has_more: bool = Field(..., description="Whether more sessions are available")
+    instances: list[InstanceInfo] = Field(..., description="List of active instances")
+    total: int = Field(..., description="Total number of instances available")
+    limit: int = Field(..., description="Maximum number of instances returned")
+    offset: int = Field(..., description="Number of instances skipped")
+    has_more: bool = Field(..., description="Whether more instances are available")
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "sessions": [
+                "instances": [
                     {
-                        "session_id": "session-123",
+                        "instance_id": "instance-123",
                         "agent_dir": "/path/to/agent",
                         "status": "running",
                         "parent_id": None,
@@ -448,7 +448,7 @@ class ScheduleExecutionInfo(BaseModel):
     execution_id: str = Field(..., description="Unique execution identifier")
     schedule_id: str = Field(..., description="Schedule that triggered this execution")
     triggered_at: datetime = Field(..., description="When the execution was triggered")
-    session_id: str | None = Field(default=None, description="Session that was triggered")
+    instance_id: str | None = Field(default=None, description="Instance that was triggered")
     status: str = Field(..., description="Execution status (triggered, completed, failed)")
     error_message: str | None = Field(default=None, description="Error message if failed")
     completed_at: datetime | None = Field(default=None, description="When execution completed")
@@ -459,7 +459,7 @@ class ScheduleExecutionInfo(BaseModel):
                 "execution_id": "exec-123",
                 "schedule_id": "morning-briefing",
                 "triggered_at": "2024-01-01T08:00:00Z",
-                "session_id": "session-456",
+                "instance_id": "instance-456",
                 "status": "completed",
                 "error_message": None,
                 "completed_at": "2024-01-01T08:00:05Z"
@@ -541,9 +541,9 @@ class ScheduleUpdate(BaseModel):
 
     name: str | None = Field(default=None, description="Display name for the schedule", min_length=1, max_length=128)
     config: dict[str, Any] | None = Field(default=None, description="Schedule configuration (partial updates)")
-    session_mode: str | None = Field(
+    instance_mode: str | None = Field(
         default=None,
-        description="Session mode: 'new_session' (default) creates new session per execution, 'reuse_session' reuses existing session. Note: For one_time schedules, session_mode is always forced to 'new_session'."
+        description="Instance mode: 'new_instance' (default) creates new instance per execution, 'reuse_instance' reuses existing instance. Note: For one_time schedules, instance_mode is always forced to 'new_instance'."
     )
 
     model_config = ConfigDict(
@@ -551,7 +551,7 @@ class ScheduleUpdate(BaseModel):
             "example": {
                 "name": "Updated Schedule Name",
                 "config": {"interval_seconds": 600},
-                "session_mode": "new_session"
+                "instance_mode": "new_instance"
             }
         }
     )
@@ -598,11 +598,11 @@ class SourceActionResponse(BaseModel):
     )
 
 
-# ==================== Session Mapping Models ====================
+# ==================== Instance Mapping Models ====================
 
 
-class SessionMappingCreate(BaseModel):
-    """Request for creating a session mapping."""
+class InstanceMappingCreate(BaseModel):
+    """Request for creating an instance mapping."""
 
     external_user_id: str = Field(..., description="External user ID (e.g., Telegram chat_id)", min_length=1, max_length=256)
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
@@ -619,13 +619,13 @@ class SessionMappingCreate(BaseModel):
     )
 
 
-class SessionMappingInfo(BaseModel):
-    """Response for session mapping information."""
+class InstanceMappingInfo(BaseModel):
+    """Response for instance mapping information."""
 
     mapping_id: str = Field(..., description="Unique mapping identifier")
     source_id: str = Field(..., description="Source this mapping belongs to")
     external_user_id: str = Field(..., description="External user ID")
-    agent_session_id: str = Field(..., description="Agent session handling this user")
+    agent_instance_id: str = Field(..., description="Agent instance handling this user")
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
     metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
@@ -638,7 +638,7 @@ class SessionMappingInfo(BaseModel):
                 "mapping_id": "telegram-main:123456789",
                 "source_id": "telegram-main",
                 "external_user_id": "123456789",
-                "agent_session_id": "session-abc",
+                "agent_instance_id": "instance-abc",
                 "agent_id": "coder",
                 "agent_dir": "./agents/coder",
                 "metadata": {"username": "john_doe"},
@@ -649,10 +649,10 @@ class SessionMappingInfo(BaseModel):
     )
 
 
-class SessionMappingListResponse(BaseModel):
-    """Response for listing session mappings."""
+class InstanceMappingListResponse(BaseModel):
+    """Response for listing instance mappings."""
 
-    mappings: list[SessionMappingInfo] = Field(..., description="List of session mappings")
+    mappings: list[InstanceMappingInfo] = Field(..., description="List of instance mappings")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -662,7 +662,7 @@ class SessionMappingListResponse(BaseModel):
                         "mapping_id": "telegram-main:123456789",
                         "source_id": "telegram-main",
                         "external_user_id": "123456789",
-                        "agent_session_id": "session-abc",
+                        "agent_instance_id": "instance-abc",
                         "agent_dir": "./agents/coder",
                         "metadata": None,
                         "last_message_at": "2024-01-01T00:01:00Z",

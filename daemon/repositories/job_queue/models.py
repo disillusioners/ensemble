@@ -40,7 +40,7 @@ class JobItem(SQLModel, table=True):
     __tablename__ = "job_queue_items"
     __table_args__ = (
         Index("idx_job_queue_status", "status"),
-        Index("idx_job_queue_session", "session_id"),
+        Index("idx_job_queue_instance", "instance_id"),
         Index("idx_job_queue_project", "project_id"),
     )
 
@@ -69,7 +69,7 @@ class JobItem(SQLModel, table=True):
     completed_at: Optional[str] = None
 
     # Result (filled on completion)
-    session_id: Optional[str] = Field(default=None)
+    instance_id: Optional[str] = Field(default=None)
     error_message: Optional[str] = None
     result_summary: Optional[str] = None
 
@@ -96,7 +96,7 @@ class JobItem(SQLModel, table=True):
             "created_at": self.created_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
-            "session_id": self.session_id,
+            "instance_id": self.instance_id,
             "error_message": self.error_message,
             "result_summary": self.result_summary,
             "metadata": dict(self.job_metadata) if self.job_metadata else {},
@@ -107,10 +107,10 @@ class JobItem(SQLModel, table=True):
 class JobLockInfo(BaseModel):
     """In-memory lock tracking for active jobs.
     
-    Tracks which session is currently processing a job for a project.
+    Tracks which instance is currently processing a job for a project.
     This is not persisted - only used during runtime.
     """
     job_id: str
     project_id: str
-    session_id: str
+    instance_id: str
     locked_at: datetime

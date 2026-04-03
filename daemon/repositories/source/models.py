@@ -1,7 +1,7 @@
 """Source-related database models (tables).
 
 This module contains the SQLModel table definitions for SourceConfig,
-SessionMapping, and ProcessedMessage entities.
+InstanceMapping, and ProcessedMessage entities.
 """
 
 from __future__ import annotations
@@ -65,14 +65,14 @@ class SourceConfig(SQLModel, table=True):
         }
 
 
-class SessionMapping(SQLModel, table=True):
-    """SQLModel SessionMapping table - internal ORM representation."""
-    __tablename__ = "session_mappings"
+class InstanceMapping(SQLModel, table=True):
+    """SQLModel InstanceMapping table - internal ORM representation."""
+    __tablename__ = "instance_mappings"
 
     mapping_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     source_id: str = Field(foreign_key="source_configs.source_id", index=True)
     external_user_id: str = Field(index=True)
-    agent_session_id: str = Field(index=True)
+    agent_instance_id: str = Field(index=True)
     agent_id: str
     agent_dir: str
     
@@ -90,7 +90,7 @@ class SessionMapping(SQLModel, table=True):
             "mapping_id": self.mapping_id,
             "source_id": self.source_id,
             "external_user_id": self.external_user_id,
-            "agent_session_id": self.agent_session_id,
+            "agent_instance_id": self.agent_instance_id,
             "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "metadata": dict(self.mapping_metadata),
@@ -123,7 +123,7 @@ class ScheduleExecution(SQLModel, table=True):
     execution_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     schedule_id: str = Field(foreign_key="source_configs.source_id", index=True)
     triggered_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    session_id: Optional[str] = Field(default=None, index=True)
+    instance_id: Optional[str] = Field(default=None, index=True)
     status: str = Field(default="triggered")  # 'triggered', 'completed', 'failed'
     error_message: Optional[str] = None
     completed_at: Optional[str] = None
@@ -134,7 +134,7 @@ class ScheduleExecution(SQLModel, table=True):
             "execution_id": self.execution_id,
             "schedule_id": self.schedule_id,
             "triggered_at": self.triggered_at,
-            "session_id": self.session_id,
+            "instance_id": self.instance_id,
             "status": self.status,
             "error_message": self.error_message,
             "completed_at": self.completed_at,

@@ -33,7 +33,7 @@ class MessageQueue(SQLModel, table=True):
     __tablename__ = "message_queue"
 
     message_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    session_id: str = Field(index=True)
+    instance_id: str = Field(index=True)
     content: str
     source: str
     status: str = Field(default=MessageStatus.READY.value, index=True)
@@ -58,7 +58,7 @@ class MessageQueue(SQLModel, table=True):
         """Convert to dictionary for serialization."""
         return {
             "message_id": self.message_id,
-            "session_id": self.session_id,
+            "instance_id": self.instance_id,
             "content": self.content,
             "source": self.source,
             "status": self.status,

@@ -88,7 +88,7 @@ class Project(SQLModel, table=True):
         sa_column=Column(JSON)
     )
     
-    creator_session_id: Optional[str] = None
+    creator_instance_id: Optional[str] = None
     creator_agent_id: Optional[str] = None
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -129,7 +129,7 @@ class Project(SQLModel, table=True):
             "shortnames": list(self._shortnames),
             "metadata": dict(self.project_metadata),
             "relationships": dict(self.relationships),
-            "creator_session_id": self.creator_session_id,
+            "creator_instance_id": self.creator_instance_id,
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
