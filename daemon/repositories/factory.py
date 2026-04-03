@@ -123,7 +123,7 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
         return  # Column already exists
     
     # Determine PK column per table
-    pk_column = "session_id"
+    pk_column = "instance_id"
     if table_name == "session_mappings":
         pk_column = "mapping_id"
     elif table_name in ("job_queue_items", "jobqueue"):

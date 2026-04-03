@@ -31,16 +31,16 @@ from .repositories import (
     DatabaseConfig,
     create_engine_from_config,
     create_project_repository,
-    create_session_repository,
+    create_instance_repository,
     create_source_repository,
     create_message_queue_repository,
 )
 from .registry import get_registry
 
 from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
-from .repositories.session.repository import get_agent_name
-from .repositories.session.models import Instance
-from .tools import create_instance_tools
+from .repositories.instance.repository import get_agent_name
+from .repositories.instance.models import Instance
+from .tools import create_session_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .cancellation import (
@@ -390,7 +390,7 @@ class InstanceManager:
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
-        self._instance_repository = create_session_repository(engine=self._engine, create_tables=False)
+        self._instance_repository = create_instance_repository(engine=self._engine, create_tables=False)
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
