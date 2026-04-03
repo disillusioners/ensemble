@@ -13,7 +13,7 @@ from .base import (
     SourceConfig,
     SourceStatus,
 )
-from .mapper import SessionMapper
+from .mapper import InstanceMapper
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -36,19 +36,19 @@ class SourceRegistry:
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
     
-    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None, session_repo=None):
+    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None, instance_repo=None):
         """Initialize the source registry.
         
         Args:
             source_repo: SQLModelSourceRepository for database operations.
-            manager: SessionManager reference for handling messages.
+            manager: InstanceManager reference for handling messages.
             job_queue_service: Optional JobQueueService for scheduler queue routing.
-            session_repo: Optional SessionRepository for scheduler session mode.
+            instance_repo: Optional InstanceRepository for scheduler instance mode.
         """
         self._source_repo = source_repo
         self._manager = manager
         self._job_queue_service = job_queue_service
-        self._session_repo = session_repo
+        self._instance_repo = instance_repo
         self._adapters: dict[str, MessageSourceAdapter] = {}
         self._supervisor_tasks: dict[str, asyncio.Task] = {}
         self._running: dict[str, bool] = {}  # Track running state for each adapter
@@ -277,7 +277,7 @@ class SourceRegistry:
                 execution_id: str,
                 schedule_id: str,
                 status: str,
-                session_id: Optional[str] = None,
+                instance_id: Optional[str] = None,
                 error_message: Optional[str] = None,
             ):
                 """Thread-safe wrapper for execution callback."""
@@ -285,7 +285,7 @@ class SourceRegistry:
                     if status == "triggered":
                         repo.record_execution_start(
                             schedule_id=schedule_id,
-                            session_id=session_id,
+                            instance_id=instance_id,
                             execution_id=execution_id,
                         )
                     elif status in ("completed", "failed", "skipped", "queued"):
@@ -301,7 +301,7 @@ class SourceRegistry:
                 execution_id: str,
                 schedule_id: str,
                 status: str,
-                session_id: Optional[str] = None,
+                instance_id: Optional[str] = None,
                 error_message: Optional[str] = None,
             ):
                 """Sync callback - run in thread pool to avoid blocking."""
@@ -310,7 +310,7 @@ class SourceRegistry:
                     _executor,
                     _safe_sync_callback,
                     self._source_repo,
-                    execution_id, schedule_id, status, session_id, error_message
+                    execution_id, schedule_id, status, instance_id, error_message
                 )
             
             def on_complete_callback(source_id: str, completed: bool):
@@ -327,7 +327,7 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
             
-            # Pass JobQueueService, SourceRepository, and SessionRepository for queue routing and session mode (Tasks 5.4 & 6)
+            # Pass JobQueueService, SourceRepository, and InstanceRepository for queue routing and instance mode (Tasks 5.4 & 6)
             adapter = SchedulerAdapter(
                 config,
                 on_message,
@@ -335,7 +335,7 @@ class SourceRegistry:
                 on_complete_callback=on_complete_callback,
                 job_queue_service=self._job_queue_service,
                 source_repo=self._source_repo,
-                session_repo=self._session_repo,
+                instance_repo=self._instance_repo,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
@@ -612,8 +612,8 @@ class SourceRegistry:
                     )
                     return
             
-            # Get or create session via SessionMapper
-            mapper = SessionMapper(self._source_repo, self._manager)
+            # Get or create instance via InstanceMapper
+            mapper = InstanceMapper(self._source_repo, self._manager)
             
             # Determine agent_dir from metadata or use default
             agent_dir = msg.metadata.get("agent_dir") if msg.metadata else None
@@ -632,41 +632,41 @@ class SourceRegistry:
             else:
                 logger.debug(f"Using explicit agent_dir: {agent_dir}")
             
-            # Check for force_new_session flag (e.g., /new command)
-            force_new = msg.metadata.get("force_new_session", False) if msg.metadata else False
+            # Check for force_new_instance flag (e.g., /new command)
+            force_new = msg.metadata.get("force_new_instance", False) if msg.metadata else False
             command = msg.metadata.get("command") if msg.metadata else None
             
             if force_new:
                 # Delete existing mapping if exists
-                existing_mapping = self._source_repo.get_session_mapping(
+                existing_mapping = self._source_repo.get_instance_mapping(
                     source_id, msg.external_user_id
                 )
                 if existing_mapping:
                     mapping_id = existing_mapping.mapping_id
-                    old_session_id = existing_mapping.agent_session_id
-                    self._source_repo.delete_session_mapping(mapping_id)
+                    old_instance_id = existing_mapping.agent_instance_id
+                    self._source_repo.delete_instance_mapping(mapping_id)
                     logger.info(
                         f"🗑️ Deleted existing mapping for /new: "
-                        f"user={msg.external_user_id}, old_session={old_session_id}"
+                        f"user={msg.external_user_id}, old_instance={old_instance_id}"
                     )
-                    # Also terminate the old session
+                    # Also terminate the old instance
                     try:
-                        self._manager.terminate_session(old_session_id)
-                        logger.debug(f"Terminated old session: {old_session_id}")
+                        self._manager.terminate_instance(old_instance_id)
+                        logger.debug(f"Terminated old instance: {old_instance_id}")
                     except Exception as e:
-                        logger.warning(f"Could not terminate old session {old_session_id}: {e}")
+                        logger.warning(f"Could not terminate old instance {old_instance_id}: {e}")
             
-            logger.debug(f"Getting or creating session: agent_dir={agent_dir}")
+            logger.debug(f"Getting or creating instance: agent_dir={agent_dir}")
             
-            # Get or create the session
-            session_id = await mapper.get_or_create_session(
+            # Get or create the instance
+            instance_id = await mapper.get_or_create_instance(
                 source_id=source_id,
                 external_user_id=msg.external_user_id,
                 agent_id=agent_dir,
                 force_new=force_new,
             )
             
-            logger.debug(f"Got session_id={session_id}")
+            logger.debug(f"Got instance_id={instance_id}")
             
             # Handle special commands that don't need agent processing
             if command == "/new":
@@ -688,7 +688,7 @@ class SourceRegistry:
             
             # Queue the message for processing with correct parameters
             self._manager.queue.enqueue(
-                session_id=session_id,
+                instance_id=instance_id,
                 content=msg.content,
                 source=source,
                 priority=1,
@@ -696,7 +696,7 @@ class SourceRegistry:
             )
             logger.info(
                 f"✅ Queued message: source_id={source_id}, "
-                f"user={msg.external_user_id}, session={session_id}, "
+                f"user={msg.external_user_id}, instance={instance_id}, "
                 f"content={msg.content[:50] if msg.content else None}..."
             )
             
@@ -709,8 +709,8 @@ class SourceRegistry:
                 logger.debug(f"Started typing indicator for chat {reply_chat_id}")
             
             # Trigger queue processing (safe to call even if already processing)
-            asyncio.create_task(self._manager._process_queue(session_id))
-            logger.debug(f"Triggered queue processing for session {session_id}")
+            asyncio.create_task(self._manager._process_queue(instance_id))
+            logger.debug(f"Triggered queue processing for instance {instance_id}")
             
         except Exception as e:
             logger.error(f"❌ Error in _handle_message: {e}", exc_info=True)

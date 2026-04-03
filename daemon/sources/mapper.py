@@ -1,7 +1,7 @@
 """
-Session mapping and deduplication for message sources.
+Instance mapping and deduplication for message sources.
 
-Provides utilities for mapping external user identities to agent sessions,
+Provides utilities for mapping external user identities to agent instances,
 validating input, and preventing duplicate message processing.
 """
 
@@ -14,7 +14,7 @@ from .base import IncomingMessage
 from ..registry import get_registry
 
 if TYPE_CHECKING:
-    from .manager import SessionManager
+    from .manager import InstanceManager
     from ..repositories.source.repository import SQLModelSourceRepository
 
 logger = logging.getLogger(__name__)
@@ -82,22 +82,22 @@ def validate_external_user_id(source_type: str, user_id: str) -> str:
         return user_id
 
 
-class SessionMapper:
-    """Maps external user identities to agent sessions.
+class InstanceMapper:
+    """Maps external user identities to agent instances.
     
     This class handles:
-    - Looking up existing session mappings
-    - Creating new sessions when needed
+    - Looking up existing instance mappings
+    - Creating new instances when needed
     - Deduplicating incoming messages
     - Tracking last message activity
     """
     
-    def __init__(self, source_repo: "SQLModelSourceRepository", manager: "SessionManager"):
-        """Initialize the session mapper.
+    def __init__(self, source_repo: "SQLModelSourceRepository", manager: "InstanceManager"):
+        """Initialize the instance mapper.
         
         Args:
             source_repo: SQLModelSourceRepository instance for database operations.
-            manager: SessionManager instance for spawning new sessions.
+            manager: InstanceManager instance for spawning new instances.
         """
         self.source_repo = source_repo
         self.manager = manager
@@ -107,7 +107,7 @@ class SessionMapper:
         source_id: str, 
         external_user_id: str
     ) -> dict | None:
-        """Get session mapping for a source and external user.
+        """Get instance mapping for a source and external user.
         
         Args:
             source_id: The source identifier.
@@ -116,13 +116,13 @@ class SessionMapper:
         Returns:
             Mapping dictionary if exists, None otherwise.
         """
-        mapping = self.source_repo.get_session_mapping(source_id, external_user_id)
+        mapping = self.source_repo.get_instance_mapping(source_id, external_user_id)
         if mapping:
             return {
                 "mapping_id": mapping.mapping_id,
                 "source_id": mapping.source_id,
                 "external_user_id": mapping.external_user_id,
-                "agent_session_id": mapping.agent_session_id,
+                "agent_instance_id": mapping.agent_instance_id,
                 "agent_id": mapping.agent_id,
                 "agent_dir": mapping.agent_dir,
                 "metadata": mapping.mapping_metadata,
@@ -166,30 +166,30 @@ class SessionMapper:
             external_message_id
         )
     
-    async def get_or_create_session(
+    async def get_or_create_instance(
         self,
         source_id: str,
         external_user_id: str,
         agent_id: str,
         force_new: bool = False,
     ) -> str:
-        """Get existing session or create a new one.
+        """Get existing instance or create a new one.
         
         Looks up the mapping for the source and external user. If found,
-        returns the existing agent_session_id. If not found, spawns a new
-        session and creates the mapping.
+        returns the existing agent_instance_id. If not found, spawns a new
+        instance and creates the mapping.
         
         Args:
             source_id: The source identifier.
             external_user_id: The external user ID.
             agent_id: The agent identifier.
-            force_new: If True, delete any existing mapping and create a fresh session.
+            force_new: If True, delete any existing mapping and create a fresh instance.
             
         Returns:
-            The agent_session_id (UUID string).
+            The agent_instance_id (UUID string).
             
         Raises:
-            Exception: If session creation fails.
+            Exception: If instance creation fails.
         """
         # Resolve agent_id to canonical form
         registry = get_registry()
@@ -207,30 +207,30 @@ class SessionMapper:
         
         if mapping is not None:
             if force_new:
-                # Delete existing mapping to force new session creation
+                # Delete existing mapping to force new instance creation
                 logger.info(
                     f"force_new=True: Deleting existing mapping: source_id={source_id}, "
                     f"external_user_id={external_user_id}, "
-                    f"old_agent_session_id={mapping['agent_session_id']}"
+                    f"old_agent_instance_id={mapping['agent_instance_id']}"
                 )
-                self.source_repo.delete_session_mapping(mapping["mapping_id"])
+                self.source_repo.delete_instance_mapping(mapping["mapping_id"])
             else:
                 logger.debug(
-                    f"Found existing session: source_id={source_id}, "
+                    f"Found existing instance: source_id={source_id}, "
                     f"external_user_id={external_user_id}, "
-                    f"agent_session_id={mapping['agent_session_id']}"
+                    f"agent_instance_id={mapping['agent_instance_id']}"
                 )
-                return mapping["agent_session_id"]
+                return mapping["agent_instance_id"]
         
-        # No mapping exists - create new session
+        # No mapping exists - create new instance
         logger.info(
-            f"Creating new session: source_id={source_id}, "
+            f"Creating new instance: source_id={source_id}, "
             f"external_user_id={external_user_id}, agent_id={effective_agent_id}"
         )
         
         try:
-            # Spawn new session via SessionManager
-            agent_session_id = self.manager.spawn_session(
+            # Spawn new instance via InstanceManager
+            agent_instance_id = self.manager.spawn_instance(
                 agent_id=effective_agent_id,
             )
             
@@ -241,10 +241,10 @@ class SessionMapper:
                 "external_user_id": external_user_id,
             }
             
-            self.source_repo.create_session_mapping(
+            self.source_repo.create_instance_mapping(
                 source_id=source_id,
                 external_user_id=external_user_id,
-                agent_session_id=agent_session_id,
+                agent_instance_id=agent_instance_id,
                 agent_id=effective_agent_id,
                 agent_dir=effective_agent_dir,
                 metadata=metadata,
@@ -252,15 +252,15 @@ class SessionMapper:
             )
             
             logger.info(
-                f"Created session mapping: mapping_id={mapping_id}, "
-                f"agent_session_id={agent_session_id}"
+                f"Created instance mapping: mapping_id={mapping_id}, "
+                f"agent_instance_id={agent_instance_id}"
             )
             
-            return agent_session_id
+            return agent_instance_id
             
         except Exception as e:
             logger.error(
-                f"Failed to create session: source_id={source_id}, "
+                f"Failed to create instance: source_id={source_id}, "
                 f"external_user_id={external_user_id}, error={e}"
             )
             raise
@@ -270,14 +270,14 @@ class SessionMapper:
         msg: IncomingMessage,
         default_agent_id: str,
     ) -> tuple[str, str]:
-        """Process an incoming message: validate, check duplicate, get/create session.
+        """Process an incoming message: validate, check duplicate, get/create instance.
         
         Args:
             msg: The incoming message to handle.
-            default_agent_id: Default agent identifier for new sessions.
+            default_agent_id: Default agent identifier for new instances.
             
         Returns:
-            Tuple of (agent_session_id, source_id).
+            Tuple of (agent_instance_id, source_id).
             
         Raises:
             ValidationError: If message validation fails.
@@ -312,15 +312,15 @@ class SessionMapper:
         if agent_id is None:
             agent_id = default_agent_id
         
-        # Get or create session
+        # Get or create instance
         try:
-            agent_session_id = await self.get_or_create_session(
+            agent_instance_id = await self.get_or_create_instance(
                 source_id=msg.source_id,
                 external_user_id=validated_user_id,
                 agent_id=agent_id
             )
         except Exception as e:
-            logger.error(f"Failed to get/create session: {e}")
+            logger.error(f"Failed to get/create instance: {e}")
             raise
         
         # Update last message timestamp
@@ -329,7 +329,7 @@ class SessionMapper:
         logger.debug(
             f"Handled incoming message: source_id={msg.source_id}, "
             f"external_user_id={validated_user_id}, "
-            f"agent_session_id={agent_session_id}"
+            f"agent_instance_id={agent_instance_id}"
         )
         
-        return agent_session_id, msg.source_id
+        return agent_instance_id, msg.source_id

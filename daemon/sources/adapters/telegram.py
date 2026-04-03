@@ -534,7 +534,7 @@ class TelegramAdapter(MessageSourceAdapter):
         
         # Handle special commands
         if command == "/new":
-            metadata["force_new_session"] = True
+            metadata["force_new_instance"] = True
             metadata["command"] = command
         
         # Create incoming message

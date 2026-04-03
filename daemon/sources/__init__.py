@@ -6,7 +6,7 @@ This module provides components for managing message sources including:
 - Rate limiting for message sources
 - Credential management
 - Persistence layer
-- Session mapping
+- Instance mapping
 - Source registry
 - Response dispatching
 - Cleanup utilities
@@ -37,8 +37,8 @@ from daemon.sources.credentials import CredentialManager
 # Persistence layer - import all functions
 from daemon.sources import persistence
 
-# Session mapping
-from daemon.sources.mapper import SessionMapper, validate_external_user_id
+# Instance mapping
+from daemon.sources.mapper import InstanceMapper, validate_external_user_id
 
 # Source registry
 from daemon.sources.registry import SourceRegistry
@@ -69,7 +69,7 @@ __all__ = [
     # Persistence module (functions require conn parameter)
     "persistence",
     # Mapper
-    "SessionMapper",
+    "InstanceMapper",
     "validate_external_user_id",
     # Registry
     "SourceRegistry",

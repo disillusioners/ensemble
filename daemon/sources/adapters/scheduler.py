@@ -16,7 +16,7 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
-from daemon.models import SchedulerSessionMode, SessionStatus
+from daemon.models import SchedulerInstanceMode, InstanceStatus
 from daemon.registry import get_registry
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         on_complete_callback: Optional[Callable[[str, bool], None]] = None,
         job_queue_service: Optional["JobQueueService"] = None,
         source_repo: Optional["SourceRepositoryType"] = None,
-        session_repo: Optional["SQLModelSessionRepository"] = None,
+        instance_repo: Optional["SQLModelSessionRepository"] = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -57,33 +57,33 @@ class SchedulerAdapter(MessageSourceAdapter):
             config: Source configuration containing schedule parameters
             on_message: Callback for incoming messages
             execution_callback: Optional callback for execution status updates.
-                Called with: (execution_id, schedule_id, status, session_id, error_message)
+                Called with: (execution_id, schedule_id, status, instance_id, error_message)
             on_complete_callback: Optional callback to notify adapter completion.
                 Called with: (source_id, completed=True) when one-time schedule finishes.
             job_queue_service: Optional JobQueueService for routing jobs through queue.
                 If provided and project_id is configured, jobs will be queued instead of
                 immediate execution.
-            source_repo: Optional SourceRepository for session mode run counter tracking.
-            session_repo: Optional SessionRepository for checking session status in reuse_session mode.
+            source_repo: Optional SourceRepository for instance mode run counter tracking.
+            instance_repo: Optional InstanceRepository for checking instance status in reuse_instance mode.
         """
         super().__init__(config, on_message)
         self._execution_callback = execution_callback
         self._on_complete_callback = on_complete_callback  # NEW
         self._job_queue_service = job_queue_service
         self._source_repo = source_repo
-        self._session_repo = session_repo
+        self._instance_repo = instance_repo
         
         # Extract scheduler-specific config
         scheduler_config = config.config
         
-        # Session mode configuration (Task 6)
-        session_mode_str = scheduler_config.get("session_mode", "new_session")
-        # Force new_session for one-time schedules
+        # Instance mode configuration (Task 6)
+        instance_mode_str = scheduler_config.get("instance_mode", "new_instance")
+        # Force new_instance for one-time schedules
         if scheduler_config.get("run_at"):
-            self._session_mode = SchedulerSessionMode.NEW_SESSION
-            logger.debug(f"Force new_session for one-time schedule: {self.source_id}")
+            self._instance_mode = SchedulerInstanceMode.NEW_INSTANCE
+            logger.debug(f"Force new_instance for one-time schedule: {self.source_id}")
         else:
-            self._session_mode = SchedulerSessionMode(session_mode_str)
+            self._instance_mode = SchedulerInstanceMode(instance_mode_str)
         
         # Schedule configuration
         self._schedule_type: Optional[str] = None
@@ -133,7 +133,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
             f"source_id={self.source_id}, timezone={timezone_str}, "
-            f"session_mode={self._session_mode.value}"
+            f"instance_mode={self._instance_mode.value}"
         )
     
     def _validate_priority(self, priority: int) -> int:
@@ -485,7 +485,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         return None
     
     def _format_continuation_message(self, original_message: str, run_number: int) -> str:
-        """Format a continuation message with #N prefix for reuse_session mode.
+        """Format a continuation message with #N prefix for reuse_instance mode.
         
         Args:
             original_message: The original scheduled message content.
@@ -511,63 +511,63 @@ Original scheduled task:
 """
         return continuation_template
     
-    def _is_session_active(self) -> tuple[bool, str | None, str | None]:
-        """Check if the mapped session is currently active (running or waiting).
+    def _is_instance_active(self) -> tuple[bool, str | None, str | None]:
+        """Check if the mapped instance is currently active (running or waiting).
         
-        For reuse_session mode, checks if the mapped session exists and is active.
-        If the session is running or waiting, execution should be skipped.
+        For reuse_instance mode, checks if the mapped instance exists and is active.
+        If the instance is running or waiting, execution should be skipped.
         
         Returns:
-            Tuple of (is_active, session_id, session_status).
-            - is_active: True if session exists and status is running/waiting.
-            - session_id: The session ID if mapping exists, None otherwise.
-            - session_status: The session status string if mapping exists, None otherwise.
+            Tuple of (is_active, instance_id, instance_status).
+            - is_active: True if instance exists and status is running/waiting.
+            - instance_id: The instance ID if mapping exists, None otherwise.
+            - instance_status: The instance status string if mapping exists, None otherwise.
         """
-        # Only applicable for reuse_session mode
-        if self._session_mode != SchedulerSessionMode.REUSE_SESSION:
+        # Only applicable for reuse_instance mode
+        if self._instance_mode != SchedulerInstanceMode.REUSE_INSTANCE:
             return False, None, None
         
         # Check if we have the required dependencies
-        if not self._source_repo or not self._session_repo:
+        if not self._source_repo or not self._instance_repo:
             logger.debug(
-                f"Cannot check session status: source_repo={self._source_repo is not None}, "
-                f"session_repo={self._session_repo is not None}"
+                f"Cannot check instance status: source_repo={self._source_repo is not None}, "
+                f"instance_repo={self._instance_repo is not None}"
             )
             return False, None, None
         
-        # Get session mapping (source_id is used as external_user_id for scheduler)
+        # Get instance mapping (source_id is used as external_user_id for scheduler)
         try:
-            mapping = self._source_repo.get_session_mapping(
+            mapping = self._source_repo.get_instance_mapping(
                 self.source_id, 
                 self.source_id
             )
         except Exception as e:
-            logger.warning(f"Failed to get session mapping: {e}")
+            logger.warning(f"Failed to get instance mapping: {e}")
             return False, None, None
         
         if not mapping:
-            logger.debug(f"No session mapping found for {self.source_id}")
+            logger.debug(f"No instance mapping found for {self.source_id}")
             return False, None, None
         
-        # Get session status
+        # Get instance status
         try:
-            session = self._session_repo.get(mapping.agent_session_id)
+            instance = self._instance_repo.get(mapping.agent_instance_id)
         except Exception as e:
-            logger.warning(f"Failed to get session: {e}")
+            logger.warning(f"Failed to get instance: {e}")
             return False, None, None
         
-        if not session:
-            logger.debug(f"Session not found: {mapping.agent_session_id}")
+        if not instance:
+            logger.debug(f"Instance not found: {mapping.agent_instance_id}")
             return False, None, None
         
-        # Check if session is active (running or waiting)
-        # Note: session.status is a string, compare with enum values
-        is_active = session.status in (
-            SessionStatus.running.value,
-            SessionStatus.waiting.value,
+        # Check if instance is active (running or waiting)
+        # Note: instance.status is a string, compare with enum values
+        is_active = instance.status in (
+            InstanceStatus.running.value,
+            InstanceStatus.waiting.value,
         )
         
-        return is_active, mapping.agent_session_id, session.status
+        return is_active, mapping.agent_instance_id, instance.status
     
     async def _emit_scheduled_message(self) -> None:
         """Emit the scheduled message to the message handler.
@@ -599,20 +599,20 @@ Original scheduled task:
                         execution_id=execution_id,
                         schedule_id=self.source_id,
                         status="skipped",
-                        session_id=None,
+                        instance_id=None,
                         error_message="Max concurrent executions reached",
                     )
                 except Exception as e:
                     logger.warning(f"Execution callback error: {e}")
             return
         
-        # Check if mapped session is still active (for reuse_session mode)
-        if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
-            is_active, session_id, session_status = self._is_session_active()
-            if is_active and session_id:
+        # Check if mapped instance is still active (for reuse_instance mode)
+        if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+            is_active, instance_id, instance_status = self._is_instance_active()
+            if is_active and instance_id:
                 logger.info(
-                    f"Skipping scheduled execution {execution_id}: session {session_id} "
-                    f"is still {session_status} (reuse_session mode)"
+                    f"Skipping scheduled execution {execution_id}: instance {instance_id} "
+                    f"is still {instance_status} (reuse_instance mode)"
                 )
                 if self._execution_callback:
                     try:
@@ -620,8 +620,8 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="skipped",
-                            session_id=session_id,
-                            error_message=f"Session still {session_status}",
+                            instance_id=instance_id,
+                            error_message=f"Instance still {instance_status}",
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
@@ -642,16 +642,16 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="triggered",
-                            session_id=None,
+                            instance_id=None,
                             error_message=None,
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
                 
-                # Determine session mode and run number (Task 6)
+                # Determine instance mode and run number (Task 6)
                 run_number: int | None = None
-                if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
-                    # Increment run counter for reuse_session mode
+                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+                    # Increment run counter for reuse_instance mode
                     if self._source_repo:
                         run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
                         if run_number is None:
@@ -665,31 +665,31 @@ Original scheduled task:
                         )
                         run_number = 1
                     logger.info(
-                        f"reuse_session mode: run_number={run_number} for {self.source_id}"
+                        f"reuse_instance mode: run_number={run_number} for {self.source_id}"
                     )
                 
                 # Format message based on session mode (Task 6)
-                if self._session_mode == SchedulerSessionMode.REUSE_SESSION and run_number:
+                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE and run_number:
                     formatted_message = self._format_continuation_message(
                         self._message_content, run_number
                     )
                 else:
                     formatted_message = self._message_content
                 
-                # Determine force_new_session flag (Task 6)
-                force_new_session = self._session_mode == SchedulerSessionMode.NEW_SESSION
+                # Determine force_new_instance flag (Task 6)
+                force_new_instance = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
                 
-                # Build metadata with session mode info (Task 6)
+                # Build metadata with instance mode info (Task 6)
                 metadata = {
                     "scheduler": {
                         "execution_id": execution_id,
                         "schedule_type": self._schedule_type,
                         "trigger_time": datetime.now(self._timezone).isoformat(),
-                        "session_mode": self._session_mode.value,
+                        "instance_mode": self._instance_mode.value,
                         "run_number": run_number,
                     },
                     "agent": self._agent,
-                    "force_new_session": force_new_session,
+                    "force_new_instance": force_new_instance,
                 }
                 
                 # Add schedule details to metadata
@@ -745,7 +745,7 @@ Original scheduled task:
                                     execution_id=execution_id,
                                     schedule_id=self.source_id,
                                     status="queued",
-                                    session_id=job_item.session_id,
+                                    instance_id=job_item.instance_id,
                                     error_message=None,
                                 )
                             except Exception as e:
@@ -762,7 +762,7 @@ Original scheduled task:
                                     execution_id=execution_id,
                                     schedule_id=self.source_id,
                                     status="failed",
-                                    session_id=None,
+                                    instance_id=None,
                                     error_message=str(e),
                                 )
                             except Exception as cb_error:
@@ -792,7 +792,7 @@ Original scheduled task:
                                 execution_id=execution_id,
                                 schedule_id=self.source_id,
                                 status="completed",
-                                session_id=self.source_id,
+                                instance_id=self.source_id,
                                 error_message=None,
                             )
                         except Exception as e:
@@ -811,7 +811,7 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="failed",
-                            session_id=None,
+                            instance_id=None,
                             error_message=str(e),
                         )
                     except Exception as cb_error:
@@ -848,18 +848,18 @@ Original scheduled task:
                     execution_id=execution_id,
                     schedule_id=self.source_id,
                     status="failed",
-                    session_id=None,
+                    instance_id=None,
                     error_message="Max concurrent executions reached",
                 )
             return
         
-        # Check if mapped session is still active (for reuse_session mode)
-        if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
-            is_active, session_id, session_status = self._is_session_active()
-            if is_active and session_id:
+        # Check if mapped instance is still active (for reuse_instance mode)
+        if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+            is_active, instance_id, instance_status = self._is_instance_active()
+            if is_active and instance_id:
                 logger.info(
-                    f"Skipping manual trigger {execution_id}: session {session_id} "
-                    f"is still {session_status} (reuse_session mode)"
+                    f"Skipping manual trigger {execution_id}: instance {instance_id} "
+                    f"is still {instance_status} (reuse_instance mode)"
                 )
                 if self._execution_callback:
                     try:
@@ -867,8 +867,8 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="skipped",
-                            session_id=session_id,
-                            error_message=f"Session still {session_status}",
+                            instance_id=instance_id,
+                            error_message=f"Instance still {instance_status}",
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
@@ -889,16 +889,16 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="triggered",
-                            session_id=None,
+                            instance_id=None,
                             error_message=None,
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
                 
-                # Determine session mode and run number for manual trigger (Task 6)
+                # Determine instance mode and run number for manual trigger (Task 6)
                 run_number: int | None = None
-                if self._session_mode == SchedulerSessionMode.REUSE_SESSION:
-                    # Increment run counter for reuse_session mode
+                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+                    # Increment run counter for reuse_instance mode
                     if self._source_repo:
                         run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
                         if run_number is None:
@@ -907,27 +907,27 @@ Original scheduled task:
                         run_number = 1
                 
                 # Format message based on session mode (Task 6)
-                if self._session_mode == SchedulerSessionMode.REUSE_SESSION and run_number:
+                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE and run_number:
                     formatted_message = self._format_continuation_message(
                         self._message_content, run_number
                     )
                 else:
                     formatted_message = self._message_content
                 
-                # Determine force_new_session flag (Task 6)
-                force_new_session = self._session_mode == SchedulerSessionMode.NEW_SESSION
+                # Determine force_new_instance flag (Task 6)
+                force_new_instance = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
                 
-                # Build the incoming message with session mode metadata
+                # Build the incoming message with instance mode metadata
                 metadata = {
                     "scheduler": {
                         "execution_id": execution_id,
                         "trigger_type": "manual",
                         "trigger_time": datetime.now(self._timezone).isoformat(),
-                        "session_mode": self._session_mode.value,
+                        "instance_mode": self._instance_mode.value,
                         "run_number": run_number,
                     },
                     "agent": self._agent,
-                    "force_new_session": force_new_session,
+                    "force_new_instance": force_new_instance,
                 }
                 
                 incoming = IncomingMessage(
@@ -953,7 +953,7 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="completed",
-                            session_id=self.source_id,
+                            instance_id=self.source_id,
                             error_message=None,
                         )
                     except Exception as e:
@@ -972,7 +972,7 @@ Original scheduled task:
                             execution_id=execution_id,
                             schedule_id=self.source_id,
                             status="failed",
-                            session_id=None,
+                            instance_id=None,
                             error_message=str(e),
                         )
                     except Exception as cb_error:
