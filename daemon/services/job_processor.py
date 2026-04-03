@@ -6,7 +6,7 @@ from typing import Optional
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
-from daemon.manager import SessionManager
+from daemon.manager import InstanceManager
 from daemon.repositories import SQLModelProjectRepository
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ class JobProcessor:
     
     Attributes:
         _queue_service: JobQueueService instance for job operations.
-        _session_manager: SessionManager instance for spawning sessions.
+        _instance_manager: InstanceManager instance for spawning instances.
         _project_repo: SQLModelProjectRepository for checking project pause state.
         _poll_interval: Time in seconds between poll cycles.
         _running: Flag to control the processing loop.
@@ -30,7 +30,7 @@ class JobProcessor:
     def __init__(
         self,
         queue_service: JobQueueService,
-        session_manager: SessionManager,
+        instance_manager: InstanceManager,
         project_repo: SQLModelProjectRepository,
         poll_interval: float = 2.0,
     ):
@@ -38,12 +38,12 @@ class JobProcessor:
         
         Args:
             queue_service: JobQueueService for job operations.
-            session_manager: SessionManager for spawning sessions.
+            instance_manager: InstanceManager for spawning instances.
             project_repo: SQLModelProjectRepository for checking project pause state.
             poll_interval: Seconds between poll cycles (default: 2.0).
         """
         self._queue_service = queue_service
-        self._session_manager = session_manager
+        self._instance_manager = instance_manager
         self._project_repo = project_repo
         self._poll_interval = poll_interval
         self._running = False
@@ -113,21 +113,21 @@ class JobProcessor:
                 logger.warning(f"Could not start job {job.job_id} - may be cancelled or lock held")
                 return
             
-            # Spawn session for this job
+            # Spawn instance for this job
             try:
-                session_id = self._session_manager.spawn_session(
+                instance_id = self._instance_manager.spawn_instance(
                     agent_id=job.agent_id,
-                    session_id=started_job.session_id,
+                    instance_id=started_job.instance_id,
                 )
             except Exception as e:
-                logger.error(f"Failed to spawn session for job {job.job_id}: {e}")
+                logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
                 await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
                 return
             
-            # Send the job message to the session
+            # Send the job message to the instance
             try:
-                await self._session_manager.enqueue_message(
-                    session_id=session_id,
+                await self._instance_manager.enqueue_message(
+                    instance_id=instance_id,
                     message=job.message,
                     source=job.source,
                 )
@@ -136,13 +136,13 @@ class JobProcessor:
                 await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
                 return
             
-            # Mark job as being processed (not yet complete - session does the work)
+            # Mark job as being processed (not yet complete - instance does the work)
             await self._queue_service.update_job(
                 job.job_id,
                 status="processing",
                 result_summary="Job enqueued for processing"
             )
-            logger.info(f"Job {job.job_id} queued successfully for session {session_id}")
+            logger.info(f"Job {job.job_id} queued successfully for instance {instance_id}")
             
             # Trigger next job for this project (if any)
             if job.project_id:

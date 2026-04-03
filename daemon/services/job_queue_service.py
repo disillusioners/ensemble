@@ -66,7 +66,7 @@ class JobQueueService:
             metadata: Optional metadata dictionary.
             
         Returns:
-            JobItem with status and (if immediate) session_id.
+            JobItem with status and (if immediate) instance_id.
         """
         # Derive agent_dir from agent_id using registry
         registry = get_registry()
@@ -88,22 +88,22 @@ class JobQueueService:
         
         # If no project_id, execute immediately without locking
         if project_id is None:
-            session_id = str(uuid.uuid4())
-            started_job = self._repository.start_job(job.job_id, session_id)
+            instance_id = str(uuid.uuid4())
+            started_job = self._repository.start_job(job.job_id, instance_id)
             assert started_job is not None, f"Failed to start job {job.job_id}"
             return started_job
         
         # Try to acquire lock for this project
-        session_id = str(uuid.uuid4())
+        instance_id = str(uuid.uuid4())
         acquired = await self._lock_manager.acquire(
             project_id=project_id,
             job_id=job.job_id,
-            session_id=session_id,
+            instance_id=instance_id,
         )
         
         if acquired:
             try:
-                started_job = self._repository.start_job(job.job_id, session_id)
+                started_job = self._repository.start_job(job.job_id, instance_id)
                 assert started_job is not None, f"Failed to start job {job.job_id}"
                 return started_job
             except Exception:
@@ -158,9 +158,9 @@ class JobQueueService:
         
         # Can abort PROCESSING jobs (release lock)
         if job.status == JobStatus.PROCESSING.value:
-            # Release the lock held by this job's session
-            if job.session_id:
-                await self._lock_manager.release_by_session(job.session_id)
+            # Release the lock held by this job's instance
+            if job.instance_id:
+                await self._lock_manager.release_by_instance(job.instance_id)
             # Use update() instead of cancel_job() since PROCESSING jobs
             # can't be cancelled via cancel_job() (raises ValueError)
             self._repository.update(
@@ -246,21 +246,21 @@ class JobQueueService:
         """
         if job.project_id is None:
             # No project, can start immediately
-            session_id = str(uuid.uuid4())
-            self._repository.start_job(job.job_id, session_id)
+            instance_id = str(uuid.uuid4())
+            self._repository.start_job(job.job_id, instance_id)
             return True
         
         # Try to acquire lock
-        session_id = str(uuid.uuid4())
+        instance_id = str(uuid.uuid4())
         # Use synchronous acquire since we're in a sync context
         acquired = self._lock_manager.acquire_sync(
             project_id=job.project_id,
             job_id=job.job_id,
-            session_id=session_id,
+            instance_id=instance_id,
         )
         
         if acquired:
-            self._repository.start_job(job.job_id, session_id)
+            self._repository.start_job(job.job_id, instance_id)
             return True
         
         return False
@@ -273,7 +273,7 @@ class JobQueueService:
             result_summary: Optional summary of the job result.
         """
         # Release the lock first
-        if job.project_id and job.session_id:
+        if job.project_id and job.instance_id:
             self._lock_manager.release_sync(job.project_id, job.job_id)
         
         # Mark job as completed
@@ -287,7 +287,7 @@ class JobQueueService:
             error_message: Error message describing the failure.
         """
         # Release the lock first
-        if job.project_id and job.session_id:
+        if job.project_id and job.instance_id:
             self._lock_manager.release_sync(job.project_id, job.job_id)
         
         # Mark job as failed
@@ -371,13 +371,13 @@ class JobQueueService:
         if job.status != JobStatus.PENDING.value:
             return None
         
-        # Generate new session ID for this job
-        session_id = str(uuid.uuid4())
+        # Generate new instance ID for this job
+        instance_id = str(uuid.uuid4())
         
         # If no project_id, start immediately without locking
         if job.project_id is None:
             try:
-                return self._repository.start_job(job_id, session_id)
+                return self._repository.start_job(job_id, instance_id)
             except ValueError:
                 return None
         
@@ -385,7 +385,7 @@ class JobQueueService:
         acquired = await self._lock_manager.acquire(
             project_id=job.project_id,
             job_id=job_id,
-            session_id=session_id,
+            instance_id=instance_id,
         )
         
         if not acquired:
@@ -393,7 +393,7 @@ class JobQueueService:
             return None
         
         try:
-            return self._repository.start_job(job_id, session_id)
+            return self._repository.start_job(job_id, instance_id)
         except ValueError:
             # Job state changed between check and start
             await self._lock_manager.release(job.project_id, job_id)
@@ -452,16 +452,16 @@ class JobQueueService:
         
         return await self.start_job(next_job.job_id)
     
-    async def release_lock_by_session(self, session_id: str) -> list[str]:
-        """Release any locks held by a session.
+    async def release_lock_by_instance(self, instance_id: str) -> list[str]:
+        """Release any locks held by an instance.
         
-        This method is called during session termination to clean up
-        any project locks that the session's jobs were holding.
+        This method is called during instance termination to clean up
+        any project locks that the instance's jobs were holding.
         
         Args:
-            session_id: The session to release locks for.
+            instance_id: The instance to release locks for.
             
         Returns:
             List of project_ids that were released.
         """
-        return await self._lock_manager.release_by_session(session_id)
+        return await self._lock_manager.release_by_instance(instance_id)

@@ -21,19 +21,19 @@ class LockInfo:
     """
     job_id: str
     project_id: str
-    session_id: str
+    instance_id: str
     locked_at: datetime
     
     def __init__(
         self,
         job_id: str,
         project_id: str,
-        session_id: str,
+        instance_id: str,
         locked_at: datetime | None = None
     ) -> None:
         self.job_id = job_id
         self.project_id = project_id
-        self.session_id = session_id
+        self.instance_id = instance_id
         self.locked_at = locked_at or datetime.utcnow()
     
     def to_lock_info(self) -> JobLockInfo:
@@ -41,7 +41,7 @@ class LockInfo:
         return JobLockInfo(
             job_id=self.job_id,
             project_id=self.project_id,
-            session_id=self.session_id,
+            instance_id=self.instance_id,
             locked_at=self.locked_at
         )
 
@@ -77,14 +77,14 @@ class JobLockManager:
         self,
         project_id: str,
         job_id: str,
-        session_id: str
+        instance_id: str
     ) -> bool:
         """Try to acquire lock for project.
         
         Args:
             project_id: The project to lock
             job_id: The job acquiring the lock
-            session_id: The session running the job
+            instance_id: The instance running the job
             
         Returns:
             True if lock acquired, False if already held
@@ -96,7 +96,7 @@ class JobLockManager:
             self._locks[project_id] = LockInfo(
                 job_id=job_id,
                 project_id=project_id,
-                session_id=session_id,
+                instance_id=instance_id,
                 locked_at=datetime.now(UTC)
             )
             return True
@@ -105,7 +105,7 @@ class JobLockManager:
         self,
         project_id: str,
         job_id: str,
-        session_id: str
+        instance_id: str
     ) -> bool:
         """Synchronous version of acquire for non-async contexts.
         
@@ -118,7 +118,7 @@ class JobLockManager:
         self._locks[project_id] = LockInfo(
             job_id=job_id,
             project_id=project_id,
-            session_id=session_id,
+            instance_id=instance_id,
             locked_at=datetime.now(UTC)
         )
         return True
@@ -163,11 +163,11 @@ class JobLockManager:
         # This should be called in async context
         return True
     
-    async def release_by_session(self, session_id: str) -> list[str]:
-        """Release any locks held by a session.
+    async def release_by_instance(self, instance_id: str) -> list[str]:
+        """Release any locks held by an instance.
         
         Args:
-            session_id: The session to release locks for
+            instance_id: The instance to release locks for
             
         Returns:
             List of project_ids that were released
@@ -175,7 +175,7 @@ class JobLockManager:
         async with self._lock:
             released = []
             for project_id, info in list(self._locks.items()):
-                if info.session_id == session_id:
+                if info.instance_id == instance_id:
                     del self._locks[project_id]
                     released.append(project_id)
         
@@ -185,14 +185,14 @@ class JobLockManager:
         
         return released
     
-    def release_by_session_sync(self, session_id: str) -> list[str]:
-        """Synchronous version of release_by_session.
+    def release_by_instance_sync(self, instance_id: str) -> list[str]:
+        """Synchronous version of release_by_instance.
         
-        Note: Not thread-safe. Use async release_by_session() in async contexts.
+        Note: Not thread-safe. Use async release_by_instance() in async contexts.
         """
         released = []
         for project_id, info in list(self._locks.items()):
-            if info.session_id == session_id:
+            if info.instance_id == instance_id:
                 del self._locks[project_id]
                 released.append(project_id)
         
@@ -239,7 +239,7 @@ class JobLockManager:
         self,
         project_id: str,
         job_id: str,
-        session_id: str,
+        instance_id: str,
         timeout: Optional[float] = None
     ) -> bool:
         """Wait for lock to become available and acquire it.
@@ -250,7 +250,7 @@ class JobLockManager:
         Args:
             project_id: The project to lock
             job_id: The job that will acquire the lock
-            session_id: The session running the job
+            instance_id: The instance running the job
             timeout: Maximum time to wait in seconds. None means wait forever.
             
         Returns:
@@ -266,7 +266,7 @@ class JobLockManager:
                 self._locks[project_id] = LockInfo(
                     job_id=job_id,
                     project_id=project_id,
-                    session_id=session_id,
+                    instance_id=instance_id,
                     locked_at=datetime.now(UTC)
                 )
                 return True
@@ -310,7 +310,7 @@ class JobLockManager:
                 self._locks[project_id] = LockInfo(
                     job_id=job_id,
                     project_id=project_id,
-                    session_id=session_id,
+                    instance_id=instance_id,
                     locked_at=datetime.now(UTC)
                 )
                 return True
@@ -360,7 +360,7 @@ class JobLockManager:
         self,
         project_id: str,
         job_id: str,
-        session_id: str,
+        instance_id: str,
         timeout: Optional[float] = None
     ):
         """Context manager for automatic lock acquisition and release.
@@ -368,19 +368,19 @@ class JobLockManager:
         Args:
             project_id: The project to lock
             job_id: The job acquiring the lock
-            session_id: The session running the job
+            instance_id: The instance running the job
             timeout: Maximum time to wait for lock
             
         Yields:
             True if lock acquired, False if not (timeout or failed)
             
         Example:
-            async with manager.lock_context(project_id, job_id, session_id) as acquired:
+            async with manager.lock_context(project_id, job_id, instance_id) as acquired:
                 if acquired:
                     # Do work
                     pass
         """
-        acquired = await self.wait_for_lock(project_id, job_id, session_id, timeout)
+        acquired = await self.wait_for_lock(project_id, job_id, instance_id, timeout)
         try:
             yield acquired
         finally:
