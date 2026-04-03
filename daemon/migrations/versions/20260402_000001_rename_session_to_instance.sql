@@ -23,6 +23,10 @@
 -- PHASE 1: Rename tables
 -- ============================================================================
 
+-- Drop instance_hierarchy if it exists (created by create_all() with new models)
+-- This is safe because session_hierarchy has the actual data we'll rename
+DROP TABLE IF EXISTS instance_hierarchy;
+
 -- Rename session_hierarchy to instance_hierarchy (no column changes needed)
 ALTER TABLE session_hierarchy RENAME TO instance_hierarchy;
 
@@ -30,6 +34,9 @@ ALTER TABLE session_hierarchy RENAME TO instance_hierarchy;
 -- Note: We need to rename columns session_id→instance_id and session_metadata→instance_metadata
 -- SQLite doesn't support RENAME COLUMN, so we use the temp table pattern
 PRAGMA foreign_keys=off;
+
+-- Drop instances if it exists (created by create_all() with new models)
+DROP TABLE IF EXISTS instances;
 
 CREATE TABLE instances (
     instance_id TEXT PRIMARY KEY,
@@ -54,6 +61,9 @@ PRAGMA foreign_keys=on;
 -- Rename session_mappings to instance_mappings
 -- Note: We need to rename column agent_session_id→agent_instance_id
 PRAGMA foreign_keys=off;
+
+-- Drop instance_mappings if it exists (created by create_all() with new models)
+DROP TABLE IF EXISTS instance_mappings;
 
 CREATE TABLE instance_mappings (
     mapping_id TEXT PRIMARY KEY,
@@ -117,7 +127,7 @@ CREATE TABLE projects_new (
     related_directories TEXT DEFAULT '[]',
     description TEXT,
     job_queue_paused INTEGER DEFAULT 0,
-    project_metadata TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
     relationships TEXT DEFAULT '{}',
     creator_instance_id TEXT,
     creator_agent_id TEXT,
@@ -128,7 +138,7 @@ CREATE TABLE projects_new (
 INSERT INTO projects_new
 SELECT project_id, name, project_type, status, main_directory,
        related_directories, description, job_queue_paused,
-       project_metadata, relationships, 
+       metadata, relationships, 
        creator_session_id, creator_agent_id,
        created_at, updated_at
 FROM projects;
@@ -156,14 +166,14 @@ CREATE TABLE job_queue_items_new (
     instance_id TEXT,
     error_message TEXT,
     result_summary TEXT,
-    job_metadata TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
     cancelled_at TEXT
 );
 
 INSERT INTO job_queue_items_new
 SELECT job_id, agent_id, agent_dir, message, source, project_id,
        priority, status, created_at, started_at, completed_at,
-       session_id, error_message, result_summary, job_metadata,
+       session_id, error_message, result_summary, metadata,
        cancelled_at
 FROM job_queue_items;
 
@@ -185,7 +195,7 @@ CREATE TABLE message_queue_new (
     retry_count INTEGER DEFAULT 0,
     max_retries INTEGER DEFAULT 5,
     error_message TEXT,
-    message_metadata TEXT DEFAULT '{}',
+    metadata TEXT DEFAULT '{}',
     enqueued_at TEXT NOT NULL,
     processing_started_at TEXT,
     last_activity_at TEXT,
@@ -195,7 +205,7 @@ CREATE TABLE message_queue_new (
 
 INSERT INTO message_queue_new
 SELECT message_id, session_id, content, source, status, priority,
-       retry_count, max_retries, error_message, message_metadata,
+       retry_count, max_retries, error_message, metadata,
        enqueued_at, processing_started_at, last_activity_at,
        completed_at, next_retry_at
 FROM message_queue;
