@@ -563,13 +563,20 @@ class TestOneTimeScheduleInstanceMode:
         adapter = SchedulerAdapter(config, mock_on_message)
         await adapter.start()
         
-        # For one-time schedules, immediately trigger
+        # For one-time schedules with future time, the scheduler doesn't trigger immediately
+        # It only schedules for the future time, so we can't test this without manual_trigger
+        # But we can verify the adapter is configured correctly
+        
+        # Verify instance_mode is set to NEW_INSTANCE (forced for one-time schedules)
+        assert adapter._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
+        
+        # Manual trigger should use new_instance mode
+        await adapter.manual_trigger()
         await asyncio.sleep(0.1)
         
-        # Check that on_message was called with new_instance metadata
-        if mock_on_message.call_count > 0:
-            incoming_msg = mock_on_message.call_args[0][0]
-            assert incoming_msg.metadata["scheduler"]["instance_mode"] == "new_instance"
+        assert mock_on_message.call_count > 0, "Expected on_message to be called"
+        incoming_msg = mock_on_message.call_args[0][0]
+        assert incoming_msg.metadata["scheduler"]["instance_mode"] == "new_instance"
         assert incoming_msg.metadata["force_new_instance"] is True
         
         await adapter.stop()
@@ -1013,7 +1020,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "new_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1033,7 +1040,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1058,7 +1065,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1083,7 +1090,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1108,7 +1115,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1133,7 +1140,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1158,7 +1165,7 @@ class TestSkipInstanceRunning:
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=mock_instance_repo)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=mock_instance_repo)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
@@ -1166,20 +1173,20 @@ class TestSkipInstanceRunning:
         assert instance_id == "instance-terminated"
         assert status == "terminated"
 
-    def test_is_instance_active_handles_missing_session_repo(self, mock_on_message, mock_source_repo):
-        """Test that _is_instance_active handles missing session_repo gracefully."""
-        config = make_config("test-skip-no-session-repo", {
+    def test_is_instance_active_handles_missing_instance_repo(self, mock_on_message, mock_source_repo):
+        """Test that _is_instance_active handles missing instance_repo gracefully."""
+        config = make_config("test-skip-no-instance-repo", {
             "interval_seconds": 60,
             "agent": "./agents/coder",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
         
-        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, session_repo=None)
+        adapter = SchedulerAdapter(config, mock_on_message, source_repo=mock_source_repo, instance_repo=None)
         
         is_active, instance_id, status = adapter._is_instance_active()
         
-        # Should return False when session_repo is not available
+        # Should return False when instance_repo is not available
         assert is_active is False
         assert instance_id is None
         assert status is None
@@ -1207,7 +1214,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_instance_repo
+            instance_repo=mock_instance_repo
         )
         await adapter.start()
         
@@ -1251,7 +1258,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_instance_repo
+            instance_repo=mock_instance_repo
         )
         await adapter.start()
         
@@ -1294,7 +1301,7 @@ class TestSkipInstanceRunning:
             mock_on_message, 
             execution_callback=mock_execution_callback,
             source_repo=mock_source_repo, 
-            session_repo=mock_instance_repo
+            instance_repo=mock_instance_repo
         )
         await adapter.start()
         

@@ -19,16 +19,9 @@ def engine():
 
 
 @pytest.fixture
-def session(engine):
-    """Create SQLModel Session for testing."""
-    with Session(engine) as session:
-        yield session
-
-
-@pytest.fixture
-def store(session):
-    """Create ProjectStore instance with SQLModel Session."""
-    return ProjectStore(session)
+def store(engine):
+    """Create ProjectStore instance with SQLModel engine."""
+    return ProjectStore(engine)
 
 
 @pytest.fixture
@@ -37,7 +30,7 @@ def tools(store):
     return create_project_tools(
         store, 
         current_instance_id="test-instance", 
-        agent_dir="test"
+        agent_id="test"
     )
 
 
@@ -77,7 +70,8 @@ class TestProjectCreate:
         assert result["main_directory"] == "/path/to/project"
         assert result["related_directories"] == ["/path/to/docs"]
         assert result["description"] == "A test project"
-        assert result["tags"] == ["python", "fastapi"]
+        # Tags order may vary
+        assert set(result["tags"]) == {"python", "fastapi"}
         assert result["metadata"] == {"framework": "FastAPI"}
 
     def test_create_duplicate_name_error(self, tool_map):
@@ -124,12 +118,13 @@ class TestProjectGet:
         assert result["name"] == "By Name"
 
     def test_get_not_found(self, tool_map):
-        """Test getting non-existent project returns None."""
+        """Test getting non-existent project returns error dict."""
         result = tool_map["project_get"].invoke({
             "project_id": "nonexistent-id"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
     def test_get_requires_id_or_name(self, tool_map):
         """Test that either project_id or name is required."""
@@ -235,16 +230,26 @@ class TestProjectGetByDirectory:
 
     def test_get_by_main_directory(self, tool_map):
         """Test getting projects by main directory."""
+        # Use a path that doesn't get resolved differently on macOS
+        dir_path = "/Users/Shared/test_project_dir_12345"
         tool_map["project_create"].invoke({
             "name": "Main Dir Project",
-            "main_directory": "/home/user/project"
+            "main_directory": dir_path
         })
         
         result = tool_map["project_get_by_directory"].invoke({
-            "directory": "/home/user/project"
+            "directory": dir_path
         })
         
         assert len(result) == 1
+
+    def test_get_by_directory_not_found(self, tool_map):
+        """Test getting non-existent directory returns empty list."""
+        result = tool_map["project_get_by_directory"].invoke({
+            "directory": "/nonexistent"
+        })
+        
+        assert result == []
 
 
 class TestProjectUpdate:
@@ -286,13 +291,14 @@ class TestProjectUpdate:
         assert "already exists" in result["error"]
 
     def test_update_not_found(self, tool_map):
-        """Test updating non-existent project returns None."""
+        """Test updating non-existent project returns error."""
         result = tool_map["project_update"].invoke({
             "project_id": "nonexistent-id",
             "name": "Test"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectSetStatus:
@@ -322,13 +328,14 @@ class TestProjectSetStatus:
         assert "Invalid status" in result["error"]
 
     def test_set_status_not_found(self, tool_map):
-        """Test setting status on non-existent project returns None."""
+        """Test setting status on non-existent project returns error."""
         result = tool_map["project_set_status"].invoke({
             "project_id": "nonexistent-id",
             "status": "active"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectAddDirectory:
@@ -358,13 +365,14 @@ class TestProjectAddDirectory:
         assert result["main_directory"] == "/main/dir"
 
     def test_add_directory_not_found(self, tool_map):
-        """Test adding directory to non-existent project returns None."""
+        """Test adding directory to non-existent project returns error."""
         result = tool_map["project_add_directory"].invoke({
             "project_id": "nonexistent-id",
             "directory": "/dir"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectRemoveDirectory:
@@ -385,13 +393,14 @@ class TestProjectRemoveDirectory:
         assert "/remove" not in result["related_directories"]
 
     def test_remove_directory_not_found(self, tool_map):
-        """Test removing directory from non-existent project returns None."""
+        """Test removing directory from non-existent project returns error."""
         result = tool_map["project_remove_directory"].invoke({
             "project_id": "nonexistent-id",
             "directory": "/dir"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectSetTags:
@@ -412,13 +421,14 @@ class TestProjectSetTags:
         assert result["tags"] == ["new1", "new2"]
 
     def test_set_tags_not_found(self, tool_map):
-        """Test setting tags on non-existent project returns None."""
+        """Test setting tags on non-existent project returns error."""
         result = tool_map["project_set_tags"].invoke({
             "project_id": "nonexistent-id",
             "tags": ["tag"]
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectAddTag:
@@ -439,13 +449,14 @@ class TestProjectAddTag:
         assert "new" in result["tags"]
 
     def test_add_tag_not_found(self, tool_map):
-        """Test adding tag to non-existent project returns None."""
+        """Test adding tag to non-existent project returns error."""
         result = tool_map["project_add_tag"].invoke({
             "project_id": "nonexistent-id",
             "tag": "tag"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectRemoveTag:
@@ -466,13 +477,14 @@ class TestProjectRemoveTag:
         assert "remove" not in result["tags"]
 
     def test_remove_tag_not_found(self, tool_map):
-        """Test removing tag from non-existent project returns None."""
+        """Test removing tag from non-existent project returns error."""
         result = tool_map["project_remove_tag"].invoke({
             "project_id": "nonexistent-id",
             "tag": "tag"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectSetMetadata:
@@ -503,14 +515,15 @@ class TestProjectSetMetadata:
         assert result["metadata"]["tech_stack"] == ["Python", "FastAPI", "React"]
 
     def test_set_metadata_not_found(self, tool_map):
-        """Test setting metadata on non-existent project returns None."""
+        """Test setting metadata on non-existent project returns error."""
         result = tool_map["project_set_metadata"].invoke({
             "project_id": "nonexistent-id",
             "key": "key",
             "value": "value"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectDeleteMetadata:
@@ -531,13 +544,14 @@ class TestProjectDeleteMetadata:
         assert "delete" not in result["metadata"]
 
     def test_delete_metadata_not_found(self, tool_map):
-        """Test deleting metadata from non-existent project returns None."""
+        """Test deleting metadata from non-existent project returns error."""
         result = tool_map["project_delete_metadata"].invoke({
             "project_id": "nonexistent-id",
             "key": "key"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectLink:
@@ -556,14 +570,15 @@ class TestProjectLink:
         assert "instance-123" in result["relationships"]["instances"]
 
     def test_link_not_found(self, tool_map):
-        """Test linking non-existent project returns None."""
+        """Test linking non-existent project returns error."""
         result = tool_map["project_link"].invoke({
             "project_id": "nonexistent-id",
             "entity_type": "instances",
             "entity_id": "i1"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectUnlink:
@@ -587,14 +602,15 @@ class TestProjectUnlink:
         assert "instance-123" not in result["relationships"].get("instances", [])
 
     def test_unlink_not_found(self, tool_map):
-        """Test unlinking non-existent project returns None."""
+        """Test unlinking non-existent project returns error."""
         result = tool_map["project_unlink"].invoke({
             "project_id": "nonexistent-id",
             "entity_type": "instances",
             "entity_id": "i1"
         })
         
-        assert result is None
+        assert "error" in result
+        assert "not found" in result["error"].lower()
 
 
 class TestProjectDelete:
@@ -660,20 +676,21 @@ class TestReturnTypeConsistency:
     """Test that tools follow the dict | None pattern."""
 
     def test_get_returns_dict_or_none(self, tool_map):
-        """Test project_get returns dict or None."""
+        """Test project_get returns dict or error dict for non-existent."""
         # Create a project first
         created = tool_map["project_create"].invoke({"name": "Test"})
         
         # Should return dict
         result = tool_map["project_get"].invoke({"project_id": created["project_id"]})
         assert isinstance(result, dict)
+        assert "error" not in result
         
-        # Non-existent should return None
+        # Non-existent should return error dict
         result = tool_map["project_get"].invoke({"project_id": "nonexistent"})
-        assert result is None
+        assert "error" in result
 
     def test_update_returns_dict_or_none(self, tool_map):
-        """Test project_update returns dict or None."""
+        """Test project_update returns dict or error dict for non-existent."""
         project = tool_map["project_create"].invoke({"name": "Test"})
         
         # Should return dict
@@ -682,16 +699,17 @@ class TestReturnTypeConsistency:
             "name": "Updated"
         })
         assert isinstance(result, dict)
+        assert "error" not in result
         
-        # Non-existent should return None
+        # Non-existent should return error dict
         result = tool_map["project_update"].invoke({
             "project_id": "nonexistent",
             "name": "Test"
         })
-        assert result is None
+        assert "error" in result
 
     def test_status_returns_dict_or_none(self, tool_map):
-        """Test project_set_status returns dict or None."""
+        """Test project_set_status returns dict or error dict for non-existent."""
         project = tool_map["project_create"].invoke({"name": "Test"})
         
         # Should return dict
@@ -700,13 +718,14 @@ class TestReturnTypeConsistency:
             "status": "completed"
         })
         assert isinstance(result, dict)
+        assert "error" not in result
         
-        # Non-existent should return None
+        # Non-existent should return error dict
         result = tool_map["project_set_status"].invoke({
             "project_id": "nonexistent",
             "status": "active"
         })
-        assert result is None
+        assert "error" in result
 
 
 class TestErrorHandling:

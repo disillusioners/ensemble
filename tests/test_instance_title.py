@@ -1,204 +1,193 @@
-"""Tests for instance title persistence functions in daemon/persistence.py"""
+"""Tests for instance title persistence functions in daemon/repositories/instance."""
 
 import pytest
 import sys
 import json
-from unittest.mock import patch, MagicMock
 from pathlib import Path
 
-# Mock the langgraph module before importing persistence
-mock_sqlite_saver = MagicMock()
-mock_async_sqlite_saver = MagicMock()
-sys.modules['langgraph'] = MagicMock()
-sys.modules['langgraph.checkpoint'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite'].SqliteSaver = mock_sqlite_saver
-sys.modules['langgraph.checkpoint.sqlite.aio'] = MagicMock()
-sys.modules['langgraph.checkpoint.sqlite.aio'].AsyncSqliteSaver = mock_async_sqlite_saver
+from sqlmodel import SQLModel, create_engine
 
-from daemon.persistence import (
-    init_database,
-    save_instance_metadata,
-    get_instance_metadata,
-    update_instance_title,
-    list_all_instances,
-)
+from daemon.repositories.instance import SQLModelInstanceRepository
+
+
+@pytest.fixture
+def engine(tmp_path):
+    """Create an in-memory SQLite engine for testing."""
+    engine = create_engine("sqlite:///:memory:", echo=False)
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def repo(engine):
+    """Create SQLModelInstanceRepository for testing."""
+    return SQLModelInstanceRepository(engine)
 
 
 class TestUpdateInstanceTitle:
-    """Tests for update_instance_title function."""
+    """Tests for update_title method on SQLModelInstanceRepository."""
 
-    def test_update_title_for_existing_instance(self, tmp_path):
+    def test_update_title_for_existing_instance(self, repo):
         """Test updating title for existing instance."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
         # Create instance first
-        save_instance_metadata(conn, "test-instance", "agents/test")
+        instance = repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
         
         # Update title
-        update_instance_title(conn, "test-instance", "My Test Instance")
+        updated = repo.update_title("test-instance", "My Test Instance")
         
         # Verify title was updated
-        meta = get_instance_metadata(conn, "test-instance")
-        assert meta is not None
-        assert meta["title"] == "My Test Instance"
+        assert updated is not None
+        assert updated.instance_metadata.get("title") == "My Test Instance"
         
-        conn.close()
+        # Verify via get
+        fetched = repo.get("test-instance")
+        assert fetched is not None
+        assert fetched.instance_metadata.get("title") == "My Test Instance"
 
-    def test_update_title_with_no_prior_metadata(self, tmp_path):
+    def test_update_title_with_no_prior_metadata(self, repo):
         """Test updating title when instance has no prior metadata."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
         # Create instance with no additional metadata
-        save_instance_metadata(conn, "test-instance", "agents/test")
+        instance = repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
         
         # Update title
-        update_instance_title(conn, "test-instance", "New Instance Title")
+        updated = repo.update_title("test-instance", "New Instance Title")
         
         # Verify title was set
-        meta = get_instance_metadata(conn, "test-instance")
-        assert meta is not None
-        assert meta["title"] == "New Instance Title"
-        
-        conn.close()
+        assert updated is not None
+        assert updated.instance_metadata.get("title") == "New Instance Title"
 
-    def test_update_title_overwrites_existing(self, tmp_path):
+    def test_update_title_overwrites_existing(self, repo):
         """Test that updating title overwrites existing title."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
         # Create instance with initial title
-        save_instance_metadata(conn, "test-instance", "agents/test")
-        update_instance_title(conn, "test-instance", "Initial Title")
+        repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
+        repo.update_title("test-instance", "Initial Title")
         
         # Verify initial title
-        meta = get_instance_metadata(conn, "test-instance")
-        assert meta is not None
-        assert meta["title"] == "Initial Title"
+        instance = repo.get("test-instance")
+        assert instance is not None
+        assert instance.instance_metadata.get("title") == "Initial Title"
         
         # Update to new title
-        update_instance_title(conn, "test-instance", "Updated Title")
+        repo.update_title("test-instance", "Updated Title")
         
         # Verify title was overwritten
-        meta = get_instance_metadata(conn, "test-instance")
-        assert meta is not None
-        assert meta["title"] == "Updated Title"
-        
-        conn.close()
+        instance = repo.get("test-instance")
+        assert instance is not None
+        assert instance.instance_metadata.get("title") == "Updated Title"
 
-    def test_update_title_for_nonexistent_instance(self, tmp_path, caplog):
-        """Test updating title for non-existent instance logs warning but doesn't crash."""
-        import logging
+    def test_update_title_for_nonexistent_instance(self, repo):
+        """Test updating title for non-existent instance returns None."""
+        # Update title for non-existent instance - should return None
+        result = repo.update_title("nonexistent-instance", "Some Title")
         
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
+        # Should return None
+        assert result is None
         
-        # Update title for non-existent instance - should not raise
-        with caplog.at_level(logging.WARNING):
-            update_instance_title(conn, "nonexistent-instance", "Some Title")
-        
-        # Should log warning
-        assert "not found" in caplog.text.lower() or "nonexistent" in caplog.text.lower()
-        
-        # Should not crash - conn should still be usable
-        instances, total = list_all_instances(conn)
+        # List should be empty
+        instances, total = repo.list()
         assert total == 0
-        
-        conn.close()
 
 
-class TestGetInstanceMetadataWithTitle:
-    """Tests for get_instance_metadata returning title correctly."""
+class TestGetInstanceWithTitle:
+    """Tests for get returning title correctly in instance_metadata."""
 
-    def test_get_instance_metadata_returns_title(self, tmp_path):
-        """Test that get_instance_metadata returns title."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
+    def test_get_instance_returns_title(self, repo):
+        """Test that get returns title in instance_metadata."""
         # Create instance with title
-        save_instance_metadata(conn, "test-instance", "agents/test")
-        update_instance_title(conn, "test-instance", "Test Title")
+        repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
+        repo.update_title("test-instance", "Test Title")
         
-        # Get metadata
-        meta = get_instance_metadata(conn, "test-instance")
+        # Get instance
+        instance = repo.get("test-instance")
         
-        assert meta is not None
-        assert "title" in meta
-        assert meta["title"] == "Test Title"
-        
-        conn.close()
+        assert instance is not None
+        assert "title" in instance.instance_metadata
+        assert instance.instance_metadata["title"] == "Test Title"
 
-    def test_get_instance_metadata_title_none_when_not_set(self, tmp_path):
+    def test_get_instance_title_none_when_not_set(self, repo):
         """Test that title is None when not set."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
         # Create instance without title
-        save_instance_metadata(conn, "test-instance", "agents/test")
+        repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
         
-        # Get metadata
-        meta = get_instance_metadata(conn, "test-instance")
+        # Get instance
+        instance = repo.get("test-instance")
         
-        assert meta is not None
-        assert "title" in meta
-        assert meta["title"] is None
-        
-        conn.close()
+        assert instance is not None
+        # Title key may not exist if never set, or may be None
+        # Either is acceptable for "not set"
+        title = instance.instance_metadata.get("title")
+        assert title is None
 
 
 class TestListAllInstancesWithTitle:
-    """Tests for list_all_instances including title in response."""
+    """Tests for list including title in response."""
 
-    def test_list_all_instances_includes_title(self, tmp_path):
-        """Test that list_all_instances includes title in response."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
+    def test_list_all_instances_includes_title(self, repo):
+        """Test that list includes title in instance_metadata."""
         # Create instances with titles
-        save_instance_metadata(conn, "instance-1", "agents/test1")
-        update_instance_title(conn, "instance-1", "First Instance")
+        repo.create(
+            instance_id="instance-1",
+            agent_id="test1",
+            agent_dir="agents/test1"
+        )
+        repo.update_title("instance-1", "First Instance")
         
-        save_instance_metadata(conn, "instance-2", "agents/test2")
+        repo.create(
+            instance_id="instance-2",
+            agent_id="test2",
+            agent_dir="agents/test2"
+        )
         # instance-2 has no title
         
         # List all instances
-        instances, total = list_all_instances(conn)
+        instances, total = repo.list()
         
         assert total == 2
         
         # Find instance-1 and verify title
-        s1 = next(s for s in instances if s["instance_id"] == "instance-1")
-        assert s1["title"] == "First Instance"
+        s1 = next(s for s in instances if s.instance_id == "instance-1")
+        assert s1.instance_metadata.get("title") == "First Instance"
         
         # Find instance-2 and verify no title
-        s2 = next(s for s in instances if s["instance_id"] == "instance-2")
-        assert s2["title"] is None
-        
-        conn.close()
+        s2 = next(s for s in instances if s.instance_id == "instance-2")
+        assert s2.instance_metadata.get("title") is None
 
-    def test_list_all_instances_title_in_metadata_json(self, tmp_path):
+    def test_list_all_instances_title_in_metadata_json(self, repo):
         """Test that title is also available in metadata JSON."""
-        db_path = tmp_path / "test.db"
-        conn = init_database(db_path)
-        
         # Create instance with title
-        save_instance_metadata(conn, "test-instance", "agents/test")
-        update_instance_title(conn, "test-instance", "Metadata Test")
+        repo.create(
+            instance_id="test-instance",
+            agent_id="test",
+            agent_dir="agents/test"
+        )
+        repo.update_title("test-instance", "Metadata Test")
         
         # List instances
-        instances, total = list_all_instances(conn)
+        instances, total = repo.list()
         
         assert total == 1
         instance = instances[0]
         
-        # Title should be at top level
-        assert instance["title"] == "Metadata Test"
-        
-        # Title should also be in metadata dict
-        assert "metadata" in instance
-        assert isinstance(instance["metadata"], dict)
-        assert instance["metadata"].get("title") == "Metadata Test"
-        
-        conn.close()
+        # Title should be in metadata dict
+        assert instance.instance_metadata.get("title") == "Metadata Test"
