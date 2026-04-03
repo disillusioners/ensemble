@@ -13,14 +13,19 @@ from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 
 
-def _validate_directory(path: str | None) -> str | None:
-    """Validate and sanitize a directory path."""
+def _validate_directory(path: str | None) -> tuple[str | None, str | None]:
+    """Validate and sanitize a directory path.
+    
+    Returns:
+        Tuple of (validated_path_or_none, error_message_or_none).
+        If error_message is not None, validation failed.
+    """
     if path is None:
-        return None
+        return None, None
     
     # Check for null bytes
     if '\x00' in path:
-        raise ValueError("Invalid path: null bytes not allowed")
+        return None, "Invalid path: null bytes not allowed"
     
     # Resolve to absolute path and check for traversal
     try:
@@ -29,11 +34,11 @@ def _validate_directory(path: str | None) -> str | None:
         
         # Block obvious path traversal attempts
         if '..' in path:
-            raise ValueError("Invalid path: path traversal not allowed")
+            return None, "Invalid path: path traversal not allowed"
         
-        return str(resolved)
+        return str(resolved), None
     except Exception as e:
-        raise ValueError(f"Invalid path: {e}")
+        return None, f"Invalid path: {e}"
 
 
 # Full documentation strings for each tool
@@ -335,18 +340,17 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
             }
         
         # Validate and sanitize paths
-        try:
-            main_directory = _validate_directory(main_directory)
-        except ValueError as e:
-            return {"error": str(e)}
+        main_directory, main_dir_error = _validate_directory(main_directory)
+        if main_dir_error:
+            return {"error": main_dir_error}
         
         related_directories_validated = []
         if related_directories:
             for d in related_directories:
-                try:
-                    related_directories_validated.append(_validate_directory(d))
-                except ValueError as e:
-                    return {"error": str(e)}
+                validated, error = _validate_directory(d)
+                if error:
+                    return {"error": error}
+                related_directories_validated.append(validated)
         
         try:
             project = store.create(
@@ -448,19 +452,19 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         
         # Validate main_directory if provided
         if main_directory is not None:
-            try:
-                updates["main_directory"] = _validate_directory(main_directory)
-            except ValueError as e:
-                return {"error": str(e)}
+            validated, error = _validate_directory(main_directory)
+            if error:
+                return {"error": error}
+            updates["main_directory"] = validated
         
         # Validate related_directories if provided
         if related_directories is not None:
             validated_dirs = []
             for d in related_directories:
-                try:
-                    validated_dirs.append(_validate_directory(d))
-                except ValueError as e:
-                    return {"error": str(e)}
+                validated, error = _validate_directory(d)
+                if error:
+                    return {"error": error}
+                validated_dirs.append(validated)
             updates["related_directories"] = validated_dirs
         
         if tags is not None:
@@ -508,12 +512,11 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         as_main: bool = False
     ) -> dict | None:
         """Add a directory to a project. Use tool_help("project_add_directory") for details."""
-        try:
-            validated_dir: str = _validate_directory(directory)  # type: ignore[assignment]
-            if validated_dir is None:
-                return {"error": "Invalid directory path"}
-        except ValueError as e:
-            return {"error": str(e)}
+        validated_dir, error = _validate_directory(directory)
+        if error:
+            return {"error": error}
+        if validated_dir is None:
+            return {"error": "Invalid directory path"}
         
         if as_main:
             project = store.update(project_id, main_directory=validated_dir)

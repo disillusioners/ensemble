@@ -103,12 +103,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             # Try to find a near match
             near_match = manager.find_near_instance(instance_id, max_distance=2)
             if near_match:
-                raise ValueError(
-                    f"instance not found, are you intent to use following '{near_match}'?"
+                return (
+                    f"ERROR: instance not found, are you intent to use following '{near_match}'?\n"
+                    f"If yes, please retry with the corrected instance_id."
                 )
             else:
-                raise ValueError(
-                    f"'{instance_id}' not found, please re-plan, spawn new instance for your task"
+                return (
+                    f"ERROR: '{instance_id}' not found, please re-plan, spawn new instance for your task"
                 )
         
         # Enqueue the message (fast ~1-5ms DB write)
