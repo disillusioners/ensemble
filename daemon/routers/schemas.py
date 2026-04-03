@@ -49,7 +49,7 @@ class JobResponse(BaseModel):
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
     project_id: Optional[str] = Field(default=None, description="Project ID if job is serialized")
-    session_id: Optional[str] = Field(default=None, description="Session ID if job is processing/processed")
+    instance_id: Optional[str] = Field(default=None, description="Instance ID if job is processing/processed")
     created_at: str = Field(..., description="Job creation timestamp")
     started_at: Optional[str] = Field(default=None, description="Job start timestamp")
     completed_at: Optional[str] = Field(default=None, description="Job completion timestamp")
@@ -67,7 +67,7 @@ class JobResponse(BaseModel):
                 "agent_id": "coder",
                 "agent_dir": "/agents/coder",
                 "project_id": "project-uuid",
-                "session_id": "session-uuid",
+                "instance_id": "session-uuid",
                 "created_at": "2025-03-15T10:00:00Z",
                 "started_at": "2025-03-15T10:00:01Z",
                 "completed_at": "2025-03-15T10:05:00Z",
@@ -166,7 +166,7 @@ class ProjectResponse(BaseModel):
     shortnames: list[str] = Field(default_factory=list, description="Project shortnames")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Project metadata")
     relationships: dict[str, list[str]] = Field(default_factory=dict, description="Project relationships")
-    creator_session_id: Optional[str] = Field(default=None, description="Creator session ID")
+    creator_instance_id: Optional[str] = Field(default=None, description="Creator instance ID")
     creator_agent_id: Optional[str] = Field(default=None, description="Creator agent ID")
     created_at: str = Field(..., description="Project creation timestamp")
     updated_at: str = Field(..., description="Project update timestamp")
@@ -186,7 +186,7 @@ class ProjectResponse(BaseModel):
                 "shortnames": ["myproj"],
                 "metadata": {},
                 "relationships": {},
-                "creator_session_id": "session-uuid",
+                "creator_instance_id": "session-uuid",
                 "creator_agent_id": "coder",
                 "created_at": "2025-03-15T10:00:00",
                 "updated_at": "2025-03-15T10:00:00"

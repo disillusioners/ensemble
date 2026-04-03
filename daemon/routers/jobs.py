@@ -73,7 +73,7 @@ def _job_to_response(
         agent_id=job.agent_id,
         agent_dir=job.agent_dir,
         project_id=job.project_id,
-        session_id=job.session_id,
+            instance_id=job.instance_id,
         created_at=job.created_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
@@ -157,7 +157,7 @@ async def create_job(
             agent_id=job.agent_id,
             agent_dir=job.agent_dir,
             project_id=job.project_id,
-            session_id=job.session_id,
+        instance_id=job.instance_id,
             created_at=job.created_at,
             started_at=job.started_at,
             message="Job started immediately",
@@ -478,7 +478,7 @@ async def stream_job_events(
                 "data": json.dumps({
                     "job_id": job_id,
                     "status": job.status,
-                    "session_id": job.session_id,
+                    "instance_id": job.instance_id,
                 })
             }
             logger.info(f"SSE connected to job {job_id}, initial status: {job.status}")
@@ -526,7 +526,7 @@ async def stream_job_events(
                         "data": json.dumps({
                             "job_id": job_id,
                             "status": current_job.status,
-                            "session_id": current_job.session_id,
+                            "instance_id": current_job.instance_id,
                             "previous_status": previous_status,
                         })
                     }

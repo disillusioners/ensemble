@@ -53,7 +53,7 @@ def _project_to_response(project) -> ProjectResponse:
         shortnames=project.shortnames,
         metadata=project.project_metadata,
         relationships=project.relationships,
-        creator_session_id=project.creator_session_id,
+        creator_instance_id=project.creator_instance_id,
         creator_agent_id=project.creator_agent_id,
         created_at=project.created_at,
         updated_at=project.updated_at,
