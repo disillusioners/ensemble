@@ -16,15 +16,15 @@ daemon:
 
 # Session Limits
 limits:
-  max_sessions: 100
-  max_children_per_session: 50
-  session_timeout_minutes: 60
+  max_instances: 100
+  max_children_per_instance: 50
+  instance_timeout_minutes: 60
   message_rate_limit: 60
   graph_recursion_limit: 200
 
 # Persistence Settings
 persistence:
-  db_path: ./data/sessions.db
+  db_path: ./data/instances.db
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24

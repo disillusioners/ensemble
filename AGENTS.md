@@ -190,8 +190,8 @@ daemon:
   port: 8079
 
 limits:
-  max_concurrent_sessions: 10
-  session_timeout_minutes: 60
+  max_concurrent_instances: 10
+  instance_timeout_minutes: 60
 
 persistence:
   database: data/ensemble.db

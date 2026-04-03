@@ -113,8 +113,8 @@ daemon:
   port: 8079
 
 limits:
-  max_sessions: 100
-  max_children_per_session: 10
+  max_instances: 100
+  max_children_per_instance: 10
 ```
 
 ### Environment Variables

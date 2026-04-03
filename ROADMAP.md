@@ -253,13 +253,13 @@ daemon:
   port: 8079
   
 limits:
-  max_sessions: 100
-  max_children_per_session: 10
-  session_timeout_minutes: 60
+  max_instances: 100
+  max_children_per_instance: 10
+  instance_timeout_minutes: 60
   message_rate_limit: 60  # per minute per session
   
 persistence:
-  db_path: "./data/sessions.db"
+  db_path: "./data/instances.db"
   checkpoint_interval: 1  # every message
   checkpoint_ttl_hours: 168        # 7 days, then eligible for cleanup
   checkpoint_cleanup_interval: 24  # hours between cleanup runs
@@ -299,7 +299,7 @@ ensemble/
 │   └── reviewer/
 │       └── ...
 ├── data/
-│   └── sessions.db         # SQLite database
+│   └── instances.db         # SQLite database
 ├── config.yaml
 ├── pyproject.toml
 ├── ROADMAP.md
