@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import SQLModel, create_engine
 
 from daemon.repositories import SQLModelProjectRepository as ProjectStore, ProjectStatus, ProjectType, Project
 
@@ -18,16 +18,9 @@ def engine():
 
 
 @pytest.fixture
-def session(engine):
-    """Create SQLModel Session for testing."""
-    with Session(engine) as session:
-        yield session
-
-
-@pytest.fixture
-def store(session):
-    """Create ProjectStore instance with SQLModel Session."""
-    return ProjectStore(session)
+def store(engine):
+    """Create ProjectStore instance with engine (mirrors production pattern)."""
+    return ProjectStore(engine)
 
 
 class TestCreate:
@@ -73,11 +66,10 @@ class TestCreate:
         with pytest.raises(ValueError, match="Invalid project_type"):
             store.create(name="Test", project_type="")
 
-    def test_create_custom_type(self, store):
-        """Test that custom types are allowed."""
-        project = store.create(name="Custom Type", project_type="my-custom-type")
-        
-        assert project.project_type == "my-custom-type"
+    def test_create_invalid_type_error(self, store):
+        """Test that invalid type raises error."""
+        with pytest.raises(ValueError, match="Invalid project_type"):
+            store.create(name="Test", project_type="invalid-type")
 
     def test_create_with_custom_id(self, store):
         """Test creating with custom project ID."""
@@ -631,8 +623,13 @@ class TestProjectEnums:
     def test_project_type_is_valid(self):
         """Test ProjectType.is_valid()."""
         from daemon.repositories import ProjectType
+        # Test valid enum values
         assert ProjectType.is_valid("software") is True
         assert ProjectType.is_valid("documentation") is True
-        assert ProjectType.is_valid("custom") is True
+        assert ProjectType.is_valid("research") is True
+        assert ProjectType.is_valid("task") is True
+        assert ProjectType.is_valid("general") is True
+        # Test invalid values
         assert ProjectType.is_valid("") is False
         assert ProjectType.is_valid("   ") is False
+        assert ProjectType.is_valid("invalid") is False
