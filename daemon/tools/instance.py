@@ -84,7 +84,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """
         new_instance_id = manager.spawn_instance(
             agent_id=agent_id,
-            session_id=None,
+            instance_id=None,
             parent_id=current_instance_id,
             project_id=project_id,
         )
@@ -98,7 +98,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
         # Enqueue the message (fast ~1-5ms DB write)
         message_id = manager.queue.enqueue(
-            session_id=instance_id,
+            instance_id=instance_id,
             content=message,
             source=f"agent:{current_instance_id}"
         )
