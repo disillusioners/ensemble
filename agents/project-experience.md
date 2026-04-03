@@ -3,7 +3,7 @@
 ## Purpose
 
 The `.agents/` directory at the project root stores **agent knowledge about that specific project**.
-It persists across sessions and is shared between agents — enabling continuity and collaboration.
+It persists across working sessions and is shared between agents — enabling continuity and collaboration.
 
 ---
 
@@ -70,11 +70,11 @@ Use descriptive titles so future you (and other agents) can find relevant memori
 
 ## Guidelines
 
-1. **First session on a project**: Explore `.agents/{your-id}/memories/` to recall what you already know about this project.
+1. **First work session on a project**: Explore `.agents/{your-id}/memories/` to recall what you already know about this project.
 2. **Learn something new**: Create a new memory file in `.agents/{your-id}/memories/`.
 3. **Create a plan**: Write to `.agents/shared/planning/{feature}/`.
 4. **Coordinate**: Update `.agents/shared/context.md` when project state changes.
-5. **Keep it relevant**: Only store knowledge that helps future sessions be more effective.
+5. **Keep it relevant**: Only store knowledge that helps future work sessions be more effective.
 6. **Descriptive filenames**: `2026-04-01-api-rate-limiting.md` not `memory1.md`.
 
 ---

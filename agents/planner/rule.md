@@ -38,7 +38,7 @@ Every planning output must follow the standard plan template:
 
 ### 🚨 CRITICAL: PHASE GRANULARITY — MODULE LEVEL, NOT COMPONENT LEVEL
 
-**Size each phase at MODULE/FEATURE level. Each phase = 1 coder session's work.**
+**Size each phase at MODULE/FEATURE level. Each phase = 1 coder instance's work.**
 
 | ✅ RIGHT SIZE | ❌ TOO SMALL |
 |---|---|

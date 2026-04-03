@@ -27,8 +27,8 @@ I plan → opencode analyzes → I aggregate → I report
 
 1. **Plan**: Generate review plan before starting
 2. **Scope**: Define what gets reviewed and how
-3. **Spawn**: Create opencode sessions with specific instructions
-4. **Coordinate**: Track sessions, collect results
+3. **Spawn**: Create opencode instances with specific instructions
+4. **Coordinate**: Track instances, collect results
 5. **Aggregate**: Combine findings into report
 6. **Report**: Deliver structured review output
 
@@ -82,7 +82,7 @@ Create new memory files for each insight: `{date}-{descriptive-title}.md`
 | ... | ... | ... | P0/P1 |
 
 ### Approach
-[How sessions will run]
+[How instances will run]
 ```
 
 ### Review Summary (Final Output)

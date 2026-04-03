@@ -1,7 +1,7 @@
 # Agents Ensemble — Tester README
 
 ## Project Overview
-Persistent multi-agent daemon built with LangGraph. Agents defined by markdown files with HTTP API, OpenAI-compatible LLM support, session hierarchy for agent spawning/communication, and SQLite checkpoints for crash recovery.
+Persistent multi-agent daemon built with LangGraph. Agents defined by markdown files with HTTP API, OpenAI-compatible LLM support, instance hierarchy for agent spawning/communication, and SQLite checkpoints for crash recovery.
 
 ## Test Framework
 - **pytest** with `tests/conftest.py` that mocks langgraph modules

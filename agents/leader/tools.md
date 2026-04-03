@@ -4,7 +4,7 @@
 
 ---
 
-## Session Management — Leader Behavior
+## Instance Management — Leader Behavior
 
 ### `send_message` is FIRE AND FORGET
 - Send the message → **DONE**
