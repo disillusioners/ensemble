@@ -20,7 +20,7 @@ from .config import Config
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
-    get_session_messages,
+    get_instance_messages,
     get_checkpointer,
 )
 from .repositories import (
@@ -471,17 +471,17 @@ class InstanceManager:
 
         Args:
             agent_id: Agent ID (e.g., "coder").
-            instance_id: Optional session ID. Auto-generated if not provided or invalid.
-            parent_id: Optional parent session ID for hierarchical sessions.
+            instance_id: Optional instance ID. Auto-generated if not provided or invalid.
+            parent_id: Optional parent instance ID for hierarchical instances.
             project_id: Optional project ID for project context. Use `None` to explicitly
-                indicate no project context is needed. If provided, stored in session
-                metadata so child sessions don't rely on text extraction.
+                indicate no project context is needed. If provided, stored in instance
+                metadata so child instances don't rely on text extraction.
 
         Returns:
-            The instance_id of the newly created session.
+            The instance_id of the newly created instance.
 
         Raises:
-            ValueError: If max_sessions or max_children_per_session limit is exceeded,
+            ValueError: If max_instances or max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
         # Resolve agent
@@ -522,26 +522,26 @@ class InstanceManager:
             if instance_id is not None:
                 logger.warning(
                     f"Invalid instance_id format '{instance_id}', auto-generating UUID. "
-                    "Session IDs must be valid UUIDs like '550e8400-e29b-41d4-a716-446655440000'"
+                    "Instance IDs must be valid UUIDs like '550e8400-e29b-41d4-a716-446655440000'"
                 )
             instance_id = str(uuid.uuid4())
 
-        # Check max_sessions limit
+        # Check max_instances limit
         current_instance_count = len(self.instances)
-        if current_instance_count >= self.config.limits.max_sessions:
+        if current_instance_count >= self.config.limits.max_instances:
             raise ValueError(
-                f"Max instances limit reached: {self.config.limits.max_sessions}"
+                f"Max instances limit reached: {self.config.limits.max_instances}"
             )
 
-        # Check max_children_per_session limit if parent_id is provided
+        # Check max_children_per_instance limit if parent_id is provided
         if parent_id is not None:
             parent_meta = self._instance_repository.get(parent_id)
             if parent_meta and parent_meta.children:
                 child_count = len(parent_meta.children)
-                if child_count >= self.config.limits.max_children_per_session:
+                if child_count >= self.config.limits.max_children_per_instance:
                     raise ValueError(
                         f"Max children per instance limit reached: "
-                        f"{self.config.limits.max_children_per_session}"
+                        f"{self.config.limits.max_children_per_instance}"
                     )
 
         # Load and cache prompt using resolved path
@@ -549,7 +549,7 @@ class InstanceManager:
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, instance_id, resolved_agent_id)
+        tools = create_instance_tools(self, instance_id, resolved_agent_id)
 
         # Build LLM config
         llm_config = {
@@ -574,9 +574,9 @@ class InstanceManager:
             retry_config=retry_config,
         )
 
-        # Save metadata to DB using session repository
-        # Include project_id in metadata so child sessions don't rely on text extraction
-        session_metadata = {}
+        # Save metadata to DB using instance repository
+        # Include project_id in metadata so child instances don't rely on text extraction
+        instance_metadata = {}
         if project_id is not None:
             # Validate project exists before storing (P1)
             project = self._project_repository.get(project_id)
@@ -585,17 +585,17 @@ class InstanceManager:
                     f"Project '{project_id}' not found. "
                     f"Use None if no project context is needed."
                 )
-            session_metadata["project_id"] = project_id
+            instance_metadata["project_id"] = project_id
         
         self._instance_repository.create(
             instance_id=instance_id,
             agent_id=resolved_agent_id,
             agent_dir=resolved_agent_dir,
             parent_id=parent_id,
-            metadata=session_metadata if session_metadata else None,
+            metadata=instance_metadata if instance_metadata else None,
         )
 
-        # Store in sessions dict
+        # Store in instances dict
         self.instances[instance_id] = (graph, resolved_agent_dir)
 
         return instance_id
@@ -604,7 +604,7 @@ class InstanceManager:
         """Send a message to an instance and get the response.
 
         Args:
-            instance_id: The ID of the session to send the message to.
+            instance_id: The ID of the instance to send the message to.
             message: The message content to send.
 
         Returns:
@@ -613,7 +613,7 @@ class InstanceManager:
         Raises:
             KeyError: If instance_id is not found.
         """
-        # Get session graph (will lazy-load from DB if needed)
+        # Get instance graph (will lazy-load from DB if needed)
         graph = self.get_instance(instance_id)
 
         # Invoke with message
@@ -724,7 +724,7 @@ class InstanceManager:
         """Enqueue a message for an instance (non-blocking).
         
         Args:
-            instance_id: The ID of the target session.
+            instance_id: The ID of the target instance.
             message: The message content.
             source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
@@ -732,16 +732,16 @@ class InstanceManager:
         Returns:
             AsyncMessageResult with message_id and status.
         """
-        # Check session exists
+        # Check instance exists
         self.get_instance(instance_id)  # raises KeyError if not found
         
-        # Check if this is the first message for this session
-        # If so, store the source as root_source in session metadata
-        # This preserves the original external source for child sessions that inherit it
-        session_meta = self._instance_repository.get(instance_id)
-        if session_meta and session_meta.session_metadata is not None:
-            if "root_source" not in session_meta.session_metadata:
-                # First message for this session - store the source as root_source
+        # Check if this is the first message for this instance
+        # If so, store the source as root_source in instance metadata
+        # This preserves the original external source for child instances that inherit it
+        instance_meta = self._instance_repository.get(instance_id)
+        if instance_meta and instance_meta.instance_metadata is not None:
+            if "root_source" not in instance_meta.instance_metadata:
+                # First message for this instance - store the source as root_source
                 # Skip storing for internal agent sources (they start with "agent:")
                 if not source.startswith("agent:"):
                     self._instance_repository.set_metadata(
@@ -751,14 +751,14 @@ class InstanceManager:
                     )
                     logger.debug(f"Stored root_source='{source}' for instance {instance_id[:8]}...")
                 else:
-                    # For child sessions spawned via agent tools, propagate root_source from parent
-                    # The parent session's metadata should have root_source if it was from external source
+                    # For child instances spawned via agent tools, propagate root_source from parent
+                    # The parent instance's metadata should have root_source if it was from external source
                     parent_meta = None
-                    if session_meta.parent_id:
-                        parent_meta = self._instance_repository.get(session_meta.parent_id)
+                    if instance_meta.parent_id:
+                        parent_meta = self._instance_repository.get(instance_meta.parent_id)
                     
-                    if parent_meta and parent_meta.session_metadata:
-                        parent_root = parent_meta.session_metadata.get("root_source")
+                    if parent_meta and parent_meta.instance_metadata:
+                        parent_root = parent_meta.instance_metadata.get("root_source")
                         if parent_root:
                             self._instance_repository.set_metadata(
                                 instance_id=instance_id,
@@ -831,7 +831,7 @@ class InstanceManager:
         try:
             if not self.circuit_breaker.can_execute(instance_id):
                 logger.warning(f"Circuit breaker open for instance {instance_id[:8]}...")
-                # Notify parent if this is a child session with pending messages
+                # Notify parent if this is a child instance with pending messages
                 meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
                     # Get pending messages (single query, use count from result)
@@ -856,7 +856,7 @@ class InstanceManager:
                 
                 # Check if this is the first message and generate title
                 # Get message count before processing this message
-                existing_messages = await get_session_messages(self.checkpointer, instance_id)
+                existing_messages = await get_instance_messages(self.checkpointer, instance_id)
                 is_first_message = len(existing_messages) == 0
                 
                 # Check retry_count instead of metadata flag (more reliable)
@@ -881,11 +881,11 @@ class InstanceManager:
                     # Project context injection on first message (BEFORE processing)
                     message_content = msg.content
                     if is_first_message:
-                        # PRIORITY 1: Use explicit project_id from session metadata
-                        session_meta = self._instance_repository.get(instance_id)
+                        # PRIORITY 1: Use explicit project_id from instance metadata
+                        instance_meta = self._instance_repository.get(instance_id)
                         explicit_project_id = (
-                            session_meta.session_metadata.get("project_id") 
-                            if session_meta and session_meta.session_metadata 
+                            instance_meta.instance_metadata.get("project_id") 
+                            if instance_meta and instance_meta.instance_metadata 
                             else None
                         )
                         
@@ -899,7 +899,7 @@ class InstanceManager:
                             else:
                                 logger.warning(
                                     f"Project '{explicit_project_id}' not found for instance {instance_id[:8]}... "
-                                    f"(may have been deleted after session creation)"
+                                    f"(may have been deleted after instance creation)"
                                 )
                         else:
                             # FALLBACK: Text extraction only if no explicit project_id
@@ -932,29 +932,29 @@ class InstanceManager:
                         )
                     
                     # Determine the source for the completed event
-                    # Root source inheritance: child sessions don't broadcast completed events
-                    # Only the root session (parentless) broadcasts with the original external source
+                    # Root source inheritance: child instances don't broadcast completed events
+                    # Only the root instance (parentless) broadcasts with the original external source
                     meta = self._instance_repository.get(instance_id)
                     
-                    # Skip broadcast entirely if this is a child session
+                    # Skip broadcast entirely if this is a child instance
                     if meta and meta.parent_id:
-                        # Child session - internal completion only, no broadcast
-                        # The parent session will handle the response
+                        # Child instance - internal completion only, no broadcast
+                        # The parent instance will handle the response
                         logger.debug(
                             f"Child instance {instance_id[:8]}... completed internally "
                             f"(parent={meta.parent_id[:8]}...), skipping broadcast"
                         )
                     else:
-                        # Root session - broadcast completed event
+                        # Root instance - broadcast completed event
                         # Use root_source from metadata if available, otherwise fallback to msg.source
-                        session_metadata = meta.session_metadata if meta else None
-                        root_source = session_metadata.get("root_source") if session_metadata else None
+                        instance_metadata = meta.instance_metadata if meta else None
+                        root_source = instance_metadata.get("root_source") if instance_metadata else None
                         
                         if root_source is None:
-                            # Fallback to msg.source (shouldn't happen for properly initialized sessions)
+                            # Fallback to msg.source (shouldn't happen for properly initialized instances)
                             root_source = msg.source
                             logger.warning(
-                                f"Session {instance_id[:8]}... missing root_source in metadata, "
+                                f"Instance {instance_id[:8]}... missing root_source in metadata, "
                                 f"falling back to msg.source='{root_source}'"
                             )
                         
@@ -1036,11 +1036,11 @@ class InstanceManager:
                     # Always unregister the request
                     self._request_registry.unregister(msg.message_id)
             
-            # Queue is empty - check if this is a child session and send completion report
+            # Queue is empty - check if this is a child instance and send completion report
             if self._queue_repository.is_empty(instance_id):
                 meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
-                    # This is a child session that has completed - send report to parent
+                    # This is a child instance that has completed - send report to parent
                     await self._send_completion_report(instance_id)
         finally:
             async with self._processing_lock:
@@ -1065,7 +1065,7 @@ class InstanceManager:
         to prevent duplicate execution.
         
         Args:
-            instance_id: The session ID.
+            instance_id: The instance ID.
             message: The message content.
             message_id: The queue message ID.
             cancellation_token: Optional token to check for cancellation.
@@ -1448,7 +1448,7 @@ class InstanceManager:
         """Summarize instance messages using LLM.
         
         Args:
-            instance_id: The session ID to summarize.
+            instance_id: The instance ID to summarize.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
@@ -1457,8 +1457,8 @@ class InstanceManager:
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_openai import ChatOpenAI
         
-        # Get session messages
-        messages = await get_session_messages(self.checkpointer, instance_id)
+        # Get instance messages
+        messages = await get_instance_messages(self.checkpointer, instance_id)
         
         if not messages:
             return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
@@ -1527,14 +1527,14 @@ Provide a concise summary:"""
     async def _send_completion_report(self, instance_id: str, use_llm_summary: bool = False) -> None:
         """Send completion report to parent instance when child is done.
         
-        Called when a child session's queue becomes empty.
+        Called when a child instance's queue becomes empty.
         Sends the child's last assistant message (or LLM summary) to the parent.
         
         Args:
-            instance_id: The child session ID that has completed.
+            instance_id: The child instance ID that has completed.
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
-        # Get session metadata
+        # Get instance metadata
         meta = self._instance_repository.get(instance_id)
         if not meta:
             logger.warning(f"Cannot send completion report: instance {instance_id} not found")
@@ -1542,12 +1542,12 @@ Provide a concise summary:"""
         
         parent_id = meta.parent_id
         if not parent_id:
-            logger.debug(f"Session {instance_id} has no parent, skipping completion report")
+            logger.debug(f"Instance {instance_id} has no parent, skipping completion report")
             return
         
         agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
         
-        logger.info(f"Session {instance_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
+        logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
         
         # Get report content - either last message or LLM summary
         if use_llm_summary:
@@ -1592,14 +1592,14 @@ Provide a concise summary:"""
     ) -> None:
         """Send error report to parent instance when child fails permanently.
         
-        Called when a child session encounters an unrecoverable error:
+        Called when a child instance encounters an unrecoverable error:
         - Max retries exceeded
         - Watchdog timeout
         - Circuit breaker opened
         - Unhandled exception
         
         Args:
-            instance_id: The child session ID that has failed.
+            instance_id: The child instance ID that has failed.
             error: The error message describing what went wrong.
             error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
             message_id: Optional message ID that triggered the error.
@@ -1620,7 +1620,7 @@ Provide a concise summary:"""
                             logger.debug(f"Error report already queued for instance {instance_id[:8]}..., skipping duplicate")
                             return
             
-            # Get session metadata
+            # Get instance metadata
             meta = self._instance_repository.get(instance_id)
             if not meta:
                 logger.warning(f"Cannot send error report: instance {instance_id} not found")
@@ -1628,12 +1628,12 @@ Provide a concise summary:"""
             
             parent_id = meta.parent_id
             if not parent_id:
-                logger.debug(f"Session {instance_id} has no parent, skipping error report")
+                logger.debug(f"Instance {instance_id} has no parent, skipping error report")
                 return
             
             agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
             
-            logger.info(f"Session {instance_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
+            logger.info(f"Instance {instance_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
             
             # Truncate error to prevent massive messages
             truncated_error = error[:2000] if len(error) > 2000 else error
@@ -1696,13 +1696,13 @@ Provide a concise summary:"""
         pass the agent's last response to the parent.
         
         Args:
-            instance_id: The session ID to get message from.
+            instance_id: The instance ID to get message from.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_session_messages(self.checkpointer, instance_id)
+        messages = await get_instance_messages(self.checkpointer, instance_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1724,10 +1724,10 @@ Provide a concise summary:"""
         """Generate an instance title from the first user message.
         
         Uses LLM to generate a concise, descriptive title based on the first message.
-        The title is stored in the session metadata.
+        The title is stored in the instance metadata.
         
         Args:
-            instance_id: The session ID to generate title for.
+            instance_id: The instance ID to generate title for.
             first_message: The first user message content.
             
         Returns:
@@ -1739,7 +1739,7 @@ Provide a concise summary:"""
         
         # Check if title already exists
         meta = self._instance_repository.get(instance_id)
-        if meta and meta.session_metadata.get("title"):
+        if meta and meta.instance_metadata.get("title"):
             # Title already exists, skip
             logger.debug(f"Title already exists for instance {instance_id}, skipping generation")
             return None
@@ -1771,7 +1771,7 @@ Title:"""
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     llm.invoke,
-                    [SystemMessage(content="You are a helpful assistant that generates concise session titles."),
+                    [SystemMessage(content="You are a helpful assistant that generates concise instance titles."),
                      HumanMessage(content=title_prompt)]
                 ),
                 timeout=30.0
@@ -1798,7 +1798,7 @@ Title:"""
             if len(title) > 100:
                 title = title[:97] + "..."
             
-            # Store title in session metadata
+            # Store title in instance metadata
             self._instance_repository.update_title(instance_id, title)
             logger.info(f"Generated title for instance {instance_id}: {title}")
             return title
@@ -1816,7 +1816,7 @@ Title:"""
         Errors are logged but not retried - title generation is best-effort.
         
         Args:
-            instance_id: The session to generate title for
+            instance_id: The instance to generate title for
             message_content: The message content to base the title on
         """
         try:
@@ -1840,7 +1840,7 @@ Title:"""
         """Check if a checkpoint exists for this instance.
         
         Args:
-            instance_id: The session ID to check.
+            instance_id: The instance ID to check.
             
         Returns:
             True if checkpoint exists, False otherwise.
@@ -2037,7 +2037,7 @@ Title:"""
         # Verify instance exists
         self.get_instance(instance_id)  # raises KeyError if not found
         
-        return await get_session_messages(self.checkpointer, instance_id)
+        return await get_instance_messages(self.checkpointer, instance_id)
 
     def clear_all_instances(self) -> int:
         """Clear all instances from memory and database.

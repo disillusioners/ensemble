@@ -16,7 +16,7 @@ async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     Note: This creates the aiosqlite connection directly which will be
     kept alive for the entire application lifetime. The checkpointer will
     be cleaned up when the application shuts down via the cleanup_checkpointer()
-    method on the SessionManager class.
+    method on the InstanceManager class.
     
     Args:
         db_path: Path to the SQLite database file.

@@ -27,7 +27,7 @@ class ActiveRequestRegistry:
     """Thread-safe registry for tracking and cancelling active requests.
     
     This is the bridge between the Watchdog (sync thread) and the
-    SessionManager (async event loop).
+    InstanceManager (async event loop).
     """
     
     def __init__(self):
