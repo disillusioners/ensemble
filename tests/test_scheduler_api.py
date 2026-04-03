@@ -172,8 +172,8 @@ class TestListSchedules:
         
         assert response.status_code == 200
         data = response.json()
-        assert "sources" in data
-        assert data["sources"] == []
+        assert "schedules" in data
+        assert data["schedules"] == []
 
     @pytest.mark.asyncio
     async def test_list_schedules_returns_only_schedulers(self, client, mock_manager):
@@ -205,9 +205,8 @@ class TestListSchedules:
         
         assert response.status_code == 200
         data = response.json()
-        assert len(data["sources"]) == 1
-        assert data["sources"][0]["source_id"] == "scheduler-1"
-        assert data["sources"][0]["source_type"] == "scheduler"
+        assert len(data["schedules"]) == 1
+        assert data["schedules"][0]["id"] == "scheduler-1"
 
     @pytest.mark.asyncio
     async def test_list_schedules_multiple_schedulers(self, client, mock_manager):
@@ -236,12 +235,12 @@ class TestListSchedules:
         
         assert response.status_code == 200
         data = response.json()
-        assert len(data["sources"]) == 3
+        assert len(data["schedules"]) == 3
         
-        source_ids = [s["source_id"] for s in data["sources"]]
-        assert "cron-schedule" in source_ids
-        assert "interval-schedule" in source_ids
-        assert "onetime-schedule" in source_ids
+        schedule_ids = [s["id"] for s in data["schedules"]]
+        assert "cron-schedule" in schedule_ids
+        assert "interval-schedule" in schedule_ids
+        assert "onetime-schedule" in schedule_ids
 
 
 # ==================== POST /schedules/{id}/trigger Tests ====================
