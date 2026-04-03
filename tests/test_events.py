@@ -17,13 +17,13 @@ class TestEvent:
         """Test basic event creation."""
         event = Event(
             type="message_queued",
-            session_id="test-session-123",
+            instance_id="test-session-123",
             message_id="msg-456",
             data={"content": "Hello"}
         )
         
         assert event.type == "message_queued"
-        assert event.session_id == "test-session-123"
+        assert event.instance_id == "test-session-123"
         assert event.message_id == "msg-456"
         assert event.data == {"content": "Hello"}
         assert event.event_id == 0  # Default
@@ -32,7 +32,7 @@ class TestEvent:
         """Test event with custom event_id."""
         event = Event(
             type="completed",
-            session_id="session-1",
+            instance_id="session-1",
             event_id=42
         )
         
@@ -40,7 +40,7 @@ class TestEvent:
 
     def test_event_data_defaults_to_empty_dict(self):
         """Test that data defaults to empty dict."""
-        event = Event(type="test", session_id="s1")
+        event = Event(type="test", instance_id="s1")
         assert event.data == {}
 
 
@@ -76,7 +76,7 @@ class TestEventBroadcaster:
         """Test that broadcast pushes event to session queue."""
         event = Event(
             type="message_queued",
-            session_id="session-1",
+            instance_id="session-1",
             message_id="msg-1",
             data={"content": "test"}
         )
@@ -93,7 +93,7 @@ class TestEventBroadcaster:
     @pytest.mark.asyncio
     async def test_broadcast_stores_in_history(self, broadcaster):
         """Test that broadcast stores event in history."""
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         
         await broadcaster.broadcast(event)
         
@@ -104,8 +104,8 @@ class TestEventBroadcaster:
     @pytest.mark.asyncio
     async def test_broadcast_tracks_event_counter(self, broadcaster):
         """Test that broadcast increments event counter."""
-        event1 = Event(type="event1", session_id="session-1")
-        event2 = Event(type="event2", session_id="session-1")
+        event1 = Event(type="event1", instance_id="session-1")
+        event2 = Event(type="event2", instance_id="session-1")
         
         await broadcaster.broadcast(event1)
         await broadcaster.broadcast(event2)
@@ -121,8 +121,8 @@ class TestEventBroadcaster:
         queue1 = await broadcaster.get_queue("session-1")
         queue2 = await broadcaster.get_queue("session-2")
         
-        event1 = Event(type="msg", session_id="session-1")
-        event2 = Event(type="msg", session_id="session-2")
+        event1 = Event(type="msg", instance_id="session-1")
+        event2 = Event(type="msg", instance_id="session-2")
         
         await broadcaster.broadcast(event1)
         await broadcaster.broadcast(event2)
@@ -137,7 +137,7 @@ class TestEventBroadcaster:
         from collections import deque
         broadcaster._event_history["session-1"] = deque(maxlen=50)
         for i in range(3):
-            event = Event(type=f"event{i}", session_id="session-1", event_id=i+1)
+            event = Event(type=f"event{i}", instance_id="session-1", event_id=i+1)
             broadcaster._event_history["session-1"].append(event)
         broadcaster._event_counters["session-1"] = 3
         
@@ -155,15 +155,15 @@ class TestEventBroadcaster:
         assert missed == []
 
     @pytest.mark.asyncio
-    async def test_cleanup_session_removes_all_state(self, broadcaster):
+    async def test_cleanup_instance_removes_all_state(self, broadcaster):
         """Test cleanup removes queue and history for session."""
         # Add some state
         await broadcaster.get_queue("session-1")
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         await broadcaster.broadcast(event)
         
         # Cleanup
-        broadcaster.cleanup_session("session-1")
+        broadcaster.cleanup_instance("session-1")
         
         # Verify cleaned up
         assert "session-1" not in broadcaster._queues
@@ -175,7 +175,7 @@ class TestEventBroadcaster:
         # Add events
         await broadcaster.get_queue("session-1")
         for i in range(3):
-            event = Event(type=f"event{i}", session_id="session-1")
+            event = Event(type=f"event{i}", instance_id="session-1")
             await broadcaster.broadcast(event)
         
         stats = broadcaster.get_stats("session-1")
@@ -206,7 +206,7 @@ class TestEventBroadcasterGlobalSubscribers:
         """Test that broadcast pushes to global subscribers."""
         subscriber_queue = await broadcaster.subscribe_all("test-sub")
         
-        event = Event(type="test", session_id="session-1", data={"key": "value"})
+        event = Event(type="test", instance_id="session-1", data={"key": "value"})
         await broadcaster.broadcast(event)
         
         # Subscriber should receive event
@@ -219,7 +219,7 @@ class TestEventBroadcasterGlobalSubscribers:
         await broadcaster.subscribe_all("test-sub")
         broadcaster.unsubscribe_all("test-sub")
         
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         await broadcaster.broadcast(event)
         
         # Subscriber queue should be empty (or subscriber removed)
@@ -237,7 +237,7 @@ class TestEventBroadcasterThreadSafety:
 
     def test_broadcast_sync_requires_main_loop(self, broadcaster):
         """Test that broadcast_sync requires main loop to be set."""
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         
         # Should log error and drop event if main loop not set
         broadcaster.broadcast_sync(event)
@@ -256,7 +256,7 @@ class TestEventBroadcasterThreadSafety:
         mock_future.add_done_callback = Mock()
         mock_threadsafe.return_value = mock_future
         
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         broadcaster.broadcast_sync(event)
         
         # Verify run_coroutine_threadsafe was called
@@ -268,7 +268,7 @@ class TestEventBroadcasterThreadSafety:
         mock_loop.is_closed.return_value = True
         broadcaster.set_main_loop(mock_loop)
         
-        event = Event(type="test", session_id="session-1")
+        event = Event(type="test", instance_id="session-1")
         # Should not raise, just drop the event
         broadcaster.broadcast_sync(event)
 
@@ -280,7 +280,7 @@ class TestEventToSSE:
         """Test basic event to SSE conversion."""
         event = Event(
             type="message_queued",
-            session_id="session-1",
+            instance_id="session-1",
             message_id="msg-123",
             data={"content": "Hello"},
             event_id=5
@@ -292,7 +292,7 @@ class TestEventToSSE:
         assert sse["event"] == "message_queued"
         
         data = json.loads(sse["data"])
-        assert data["session_id"] == "session-1"
+        assert data["instance_id"] == "session-1"
         assert data["message_id"] == "msg-123"
         assert data["content"] == "Hello"
 
@@ -300,14 +300,14 @@ class TestEventToSSE:
         """Test that data fields are merged in SSE output."""
         event = Event(
             type="completed",
-            session_id="s1",
+            instance_id="s1",
             data={"status": "done", "extra": "value"}
         )
         
         sse = event_to_sse(event)
         data = json.loads(sse["data"])
         
-        assert "session_id" in data
+        assert "instance_id" in data
         assert data["status"] == "done"
         assert data["extra"] == "value"
 
@@ -315,7 +315,7 @@ class TestEventToSSE:
         """Test conversion handles None message_id."""
         event = Event(
             type="connected",
-            session_id="s1",
+            instance_id="s1",
             message_id=None,
             data={}
         )
@@ -337,32 +337,32 @@ class TestEventBroadcasterQueueOverflow:
     @pytest.mark.asyncio
     async def test_queue_full_drops_oldest(self, small_queue_broadcaster):
         """Test that when queue is full, oldest events are dropped."""
-        session_id = "session-overflow"
+        instance_id = "session-overflow"
         
         # Get queue first
-        queue = await small_queue_broadcaster.get_queue(session_id)
+        queue = await small_queue_broadcaster.get_queue(instance_id)
         
         # Fill the queue - broadcaster drops when full
         for i in range(3):
-            event = Event(type=f"event{i}", session_id=session_id)
+            event = Event(type=f"event{i}", instance_id=instance_id)
             await small_queue_broadcaster.broadcast(event)
         
         # Queue may have 2 or 3 depending on timing of get_queue
         # But history should have all 3 events
-        history = small_queue_broadcaster._event_history[session_id]
+        history = small_queue_broadcaster._event_history[instance_id]
         assert len(history) == 3  # History doesn't drop
 
     @pytest.mark.asyncio
     async def test_broadcast_non_blocking_when_full(self, small_queue_broadcaster):
         """Test that broadcast doesn't block when queue is full."""
-        session_id = "session-block"
+        instance_id = "session-block"
         
         # Fill queue
         for i in range(2):
-            event = Event(type=f"event{i}", session_id=session_id)
+            event = Event(type=f"event{i}", instance_id=instance_id)
             await small_queue_broadcaster.broadcast(event)
         
         # This should not block - just warn and drop
-        extra_event = Event(type="extra", session_id=session_id)
+        extra_event = Event(type="extra", instance_id=instance_id)
         # Should complete without raising
         await small_queue_broadcaster.broadcast(extra_event)

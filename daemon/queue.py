@@ -43,7 +43,7 @@ class MessageStatus(IntEnum):
 class QueuedMessage:
     """Represents a queued message."""
     message_id: str
-    session_id: str
+    instance_id: str
     content: str
     source: str
     priority: int = 1
@@ -65,7 +65,7 @@ class QueueStats:
 
 
 class InputMessageQueue:
-    """Message queue with per-session locking.
+    """Message queue with per-instance locking.
     
     Delegates database operations to SQLModelMessageQueueRepository.
     """
@@ -77,42 +77,42 @@ class InputMessageQueue:
         self._conditions: dict[str, threading.Condition] = {}
         self._lock_guard = threading.Lock()
 
-    def _get_lock(self, session_id: str) -> threading.Lock:
-        """Get or create a lock for a session."""
+    def _get_lock(self, instance_id: str) -> threading.Lock:
+        """Get or create a lock for an instance."""
         with self._lock_guard:
-            if session_id not in self._locks:
-                self._locks[session_id] = threading.Lock()
-                self._conditions[session_id] = threading.Condition(self._locks[session_id])
-            return self._locks[session_id]
+            if instance_id not in self._locks:
+                self._locks[instance_id] = threading.Lock()
+                self._conditions[instance_id] = threading.Condition(self._locks[instance_id])
+            return self._locks[instance_id]
 
-    def _get_condition(self, session_id: str) -> threading.Condition:
-        """Get or create a condition for a session."""
+    def _get_condition(self, instance_id: str) -> threading.Condition:
+        """Get or create a condition for an instance."""
         with self._lock_guard:
-            if session_id not in self._conditions:
-                lock = self._locks.get(session_id) or threading.Lock()
-                self._locks[session_id] = lock
-                self._conditions[session_id] = threading.Condition(lock)
-            return self._conditions[session_id]
+            if instance_id not in self._conditions:
+                lock = self._locks.get(instance_id) or threading.Lock()
+                self._locks[instance_id] = lock
+                self._conditions[instance_id] = threading.Condition(lock)
+            return self._conditions[instance_id]
 
     def enqueue(
         self,
-        session_id: str,
+        instance_id: str,
         content: str,
         source: str,
         priority: int = 1,
         metadata: Optional[dict] = None
     ) -> str:
         """Add a message to the queue. Returns the message_id."""
-        with self._get_lock(session_id):
+        with self._get_lock(instance_id):
             # Check queue size using repository
-            stats = self._repository.get_stats(session_id)
+            stats = self._repository.get_stats(instance_id)
             current_count = stats["pending_count"] + stats["processing_count"]
 
             if current_count >= MAX_QUEUE_SIZE:
                 # Drop oldest ready message (priority >= 1) - FIFO by enqueued_at
                 # Get all ready messages and sort by enqueued_at ascending to find oldest
                 ready_messages = self._repository.list(
-                    session_id=session_id,
+                    instance_id=instance_id,
                     status="ready",
                     limit=100
                 )
@@ -126,11 +126,11 @@ class InputMessageQueue:
                         break
                 if oldest_msg:
                     self._repository.delete(oldest_msg.message_id)
-                    logger.warning(f"Queue full for session {session_id}, dropped oldest message")
+                    logger.warning(f"Queue full for instance {instance_id}, dropped oldest message")
 
             # Use repository to enqueue
             msg = self._repository.enqueue(
-                session_id=session_id,
+                instance_id=instance_id,
                 content=content,
                 source=source,
                 priority=priority,
@@ -139,22 +139,22 @@ class InputMessageQueue:
             message_id = msg.message_id
 
         # Notify any waiting dequeue calls
-        condition = self._get_condition(session_id)
+        condition = self._get_condition(instance_id)
         with condition:
             condition.notify()
 
-        logger.info(f"📥 Enqueued message {message_id[:8]}... to session {session_id[:8]}...")
+        logger.info(f"📥 Enqueued message {message_id[:8]}... to instance {instance_id[:8]}...")
         return message_id
 
-    def dequeue(self, session_id: str, timeout: float = 0) -> Optional[QueuedMessage]:
+    def dequeue(self, instance_id: str, timeout: float = 0) -> Optional[QueuedMessage]:
         """Atomically claim the next message for processing."""
-        condition = self._get_condition(session_id)
+        condition = self._get_condition(instance_id)
         
         with condition:
             # Wait for a message to be available
             if timeout > 0:
                 start_time = time.monotonic()
-                while self._peek_ready_message(session_id) is None:
+                while self._peek_ready_message(instance_id) is None:
                     elapsed = time.monotonic() - start_time
                     remaining = timeout - elapsed
                     if remaining <= 0:
@@ -162,20 +162,20 @@ class InputMessageQueue:
                     condition.wait(timeout=remaining)
             else:
                 # Quick check without waiting
-                if self._peek_ready_message(session_id) is None:
+                if self._peek_ready_message(instance_id) is None:
                     return None
 
             # Use repository to dequeue
-            msg = self._repository.dequeue_by_session(session_id)
+            msg = self._repository.dequeue_by_instance(instance_id)
 
             if msg is None:
-                logger.debug(f"No ready message for session {session_id[:8]}...")
+                logger.debug(f"No ready message for instance {instance_id[:8]}...")
                 return None
 
             now = datetime.now(timezone.utc)
             queued_msg = QueuedMessage(
                 message_id=msg.message_id,
-                session_id=msg.session_id,
+                instance_id=msg.instance_id,
                 content=msg.content,
                 source=msg.source,
                 priority=msg.priority,
@@ -187,14 +187,14 @@ class InputMessageQueue:
                 status=msg.status,
                 error_message=msg.error_message,
             )
-            logger.info(f"📤 Dequeued message {queued_msg.message_id[:8]}... from session {session_id[:8]}...")
+            logger.info(f"📤 Dequeued message {queued_msg.message_id[:8]}... from instance {instance_id[:8]}...")
             return queued_msg
 
-    def _peek_ready_message(self, session_id: str) -> Optional[str]:
+    def _peek_ready_message(self, instance_id: str) -> Optional[str]:
         """Check if there's a ready message without claiming it."""
         # Use repository to list ready messages
         ready_messages = self._repository.list(
-            session_id=session_id,
+            instance_id=instance_id,
             status="ready",
             limit=1
         )
@@ -208,7 +208,7 @@ class InputMessageQueue:
     def update_activity(self, message_id: str) -> None:
         """Update last_activity_at timestamp for a processing message.
         
-        This is called during message processing to indicate the session
+        This is called during message processing to indicate the instance
         is still active (not stuck), even if processing takes a long time.
         
         Args:
@@ -232,21 +232,21 @@ class InputMessageQueue:
         self._repository.retry(message_id, error)
         logger.debug(f"Message {message_id} scheduled for retry")
 
-    def get_stats(self, session_id: str) -> QueueStats:
-        """Get queue statistics for a session."""
-        stats = self._repository.get_stats(session_id)
+    def get_stats(self, instance_id: str) -> QueueStats:
+        """Get queue statistics for an instance."""
+        stats = self._repository.get_stats(instance_id)
         return QueueStats(
             pending_count=stats["pending_count"],
             processing_count=stats["processing_count"],
             oldest_message_age_seconds=stats["oldest_message_age_seconds"]
         )
 
-    def is_empty(self, session_id: str) -> bool:
-        """Check if the queue is empty for a session.
+    def is_empty(self, instance_id: str) -> bool:
+        """Check if the queue is empty for an instance.
         
         Returns True if there are no ready, processing, or retry-ready messages.
         """
-        return self._repository.is_empty(session_id)
+        return self._repository.is_empty(instance_id)
 
     def cleanup_completed(self, max_age_hours: int = 24) -> int:
         """Remove old completed messages."""
@@ -256,33 +256,33 @@ class InputMessageQueue:
         return deleted
 
 
-class SessionCircuitBreaker:
+class InstanceCircuitBreaker:
     """Circuit breaker to prevent cascading failures."""
 
     def __init__(self):
         """Initialize the circuit breaker."""
-        self._states: dict[str, str] = {}  # session_id -> state
+        self._states: dict[str, str] = {}  # instance_id -> state
         self._failure_counts: dict[str, int] = {}
         self._last_failure_time: dict[str, datetime] = {}
         self._lock = threading.Lock()
 
-    def can_execute(self, session_id: str) -> bool:
-        """Check if execution is allowed for the session."""
+    def can_execute(self, instance_id: str) -> bool:
+        """Check if execution is allowed for the instance."""
         with self._lock:
-            state = self._states.get(session_id, "closed")
+            state = self._states.get(instance_id, "closed")
             
             if state == "closed":
                 return True
             
             if state == "open":
                 # Check if recovery timeout has passed
-                last_failure = self._last_failure_time.get(session_id)
+                last_failure = self._last_failure_time.get(instance_id)
                 if last_failure:
                     if (datetime.now(timezone.utc) - last_failure).total_seconds() >= CIRCUIT_RECOVERY_TIMEOUT:
                         # Transition to half_open
-                        self._states[session_id] = "half_open"
-                        self._failure_counts[session_id] = 0
-                        logger.info(f"Circuit breaker for session {session_id} transitioned to half_open")
+                        self._states[instance_id] = "half_open"
+                        self._failure_counts[instance_id] = 0
+                        logger.info(f"Circuit breaker for instance {instance_id} transitioned to half_open")
                         return True
                 return False
             
@@ -292,41 +292,41 @@ class SessionCircuitBreaker:
             
             return False
 
-    def record_success(self, session_id: str) -> None:
+    def record_success(self, instance_id: str) -> None:
         """Record a successful execution."""
         with self._lock:
-            # Use same default as can_execute - "closed" for new sessions
-            state = self._states.get(session_id, "closed")
+            # Use same default as can_execute - "closed" for new instances
+            state = self._states.get(instance_id, "closed")
             
             if state == "half_open":
                 # Successful request in half_open - close the circuit
-                self._states[session_id] = "closed"
-                self._failure_counts[session_id] = 0
-                logger.info(f"Circuit breaker for session {session_id} closed")
+                self._states[instance_id] = "closed"
+                self._failure_counts[instance_id] = 0
+                logger.info(f"Circuit breaker for instance {instance_id} closed")
             elif state == "closed":
                 # Reset failure count on success
-                self._failure_counts[session_id] = 0
+                self._failure_counts[instance_id] = 0
 
-    def record_failure(self, session_id: str) -> None:
+    def record_failure(self, instance_id: str) -> None:
         """Record a failed execution."""
         with self._lock:
-            self._failure_counts[session_id] = self._failure_counts.get(session_id, 0) + 1
-            self._last_failure_time[session_id] = datetime.now(timezone.utc)
+            self._failure_counts[instance_id] = self._failure_counts.get(instance_id, 0) + 1
+            self._last_failure_time[instance_id] = datetime.now(timezone.utc)
             
-            current_state = self._states.get(session_id, "closed")
+            current_state = self._states.get(instance_id, "closed")
             
             if current_state == "closed":
-                if self._failure_counts[session_id] >= CIRCUIT_FAILURE_THRESHOLD:
-                    self._states[session_id] = "open"
-                    logger.warning(f"Circuit breaker for session {session_id} opened after {self._failure_counts[session_id]} failures")
+                if self._failure_counts[instance_id] >= CIRCUIT_FAILURE_THRESHOLD:
+                    self._states[instance_id] = "open"
+                    logger.warning(f"Circuit breaker for instance {instance_id} opened after {self._failure_counts[instance_id]} failures")
             
             elif current_state == "half_open":
                 # Any failure in half_open opens the circuit again
-                self._states[session_id] = "open"
-                logger.warning(f"Circuit breaker for session {session_id} reopened after half_open failure")
+                self._states[instance_id] = "open"
+                logger.warning(f"Circuit breaker for instance {instance_id} reopened after half_open failure")
 
 
-class SessionWatchdog:
+class InstanceWatchdog:
     """Background thread to monitor and recover stuck messages."""
 
     def __init__(
@@ -342,9 +342,9 @@ class SessionWatchdog:
             queue_repository: The message queue repository for database operations.
             request_registry: Optional registry for cancelling active requests.
                  on_message_failed: Optional callback when a message is permanently failed.
-                     Called with (session_id, message_id, error_message).
+                     Called with (instance_id, message_id, error_message).
                  on_retry_ready: Optional callback when retry-ready messages are found.
-                     Called with set of session_ids that have retry-ready messages.
+                     Called with set of instance_ids that have retry-ready messages.
         """
         self._queue_repository: "SQLModelMessageQueueRepository" = queue_repository
         self._request_registry = request_registry
@@ -357,14 +357,14 @@ class SessionWatchdog:
     def start(self) -> None:
         """Start the watchdog daemon thread."""
         if self._running:
-            logger.warning("SessionWatchdog already running")
+            logger.warning("InstanceWatchdog already running")
             return
         
         self._running = True
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        logger.info("SessionWatchdog started")
+        logger.info("InstanceWatchdog started")
 
     def stop(self) -> None:
         """Stop the watchdog thread."""
@@ -377,7 +377,7 @@ class SessionWatchdog:
         if self._thread:
             self._thread.join(timeout=5)
         
-        logger.info("SessionWatchdog stopped")
+        logger.info("InstanceWatchdog stopped")
 
     def _run_loop(self) -> None:
         """Main loop that checks for stuck and retry-ready messages."""
@@ -386,7 +386,7 @@ class SessionWatchdog:
                 self._check_stuck_messages()
                 self._check_retry_ready_messages()
             except Exception as e:
-                logger.error(f"Error in SessionWatchdog loop: {e}")
+                logger.error(f"Error in InstanceWatchdog loop: {e}")
             
             # Wait for next check interval or stop signal
             self._stop_event.wait(timeout=CHECK_INTERVAL_SECONDS)
@@ -424,7 +424,7 @@ class SessionWatchdog:
                 # Notify callback if registered
                 if self._on_message_failed:
                     try:
-                        self._on_message_failed(message.session_id, message_id, error_msg)
+                        self._on_message_failed(message.instance_id, message_id, error_msg)
                     except Exception as e:
                         logger.error(f"Error in on_message_failed callback: {e}")
             else:
@@ -442,14 +442,14 @@ class SessionWatchdog:
         retry_ready_messages = self._queue_repository.find_retry_ready_messages()
         
         if retry_ready_messages:
-            # Get unique session IDs
-            session_ids = list(set(msg.session_id for msg in retry_ready_messages))
+            # Get unique instance IDs
+            instance_ids = list(set(msg.instance_id for msg in retry_ready_messages))
             
             # Move to ready
             message_ids = [msg.message_id for msg in retry_ready_messages]
             count = self._queue_repository.move_retry_ready_to_ready(message_ids)
-            logger.info(f"Moved {count} messages from retrying to ready for sessions: {[s[:8] for s in session_ids]}")
+            logger.info(f"Moved {count} messages from retrying to ready for instances: {[s[:8] for s in instance_ids]}")
             
-            # Trigger re-processing for each session via callback
+            # Trigger re-processing for each instance via callback
             if self._on_retry_ready:
-                self._on_retry_ready(session_ids)
+                self._on_retry_ready(instance_ids)

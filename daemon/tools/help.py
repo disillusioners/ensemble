@@ -56,7 +56,7 @@ def create_help_tool(all_tools: list):
         
         Args:
             tool_name: Specific tool to get detailed help for.
-            category: List tools in a category (e.g., "project", "session", "bash").
+            category: List tools in a category (e.g., "project", "instance", "bash").
         
         Returns:
             Help text with tool documentation or tool list.

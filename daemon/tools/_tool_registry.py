@@ -31,7 +31,7 @@ def register_tool(
     
     Args:
         tool_name: Unique tool identifier.
-        category: Tool category for grouping (e.g., "project", "session").
+        category: Tool category for grouping (e.g., "project", "instance").
         short_doc: Brief one-line description.
         full_doc: Detailed documentation.
     

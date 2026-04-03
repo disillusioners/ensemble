@@ -4,7 +4,7 @@ Provides CRUD operations for projects with:
 - Main directory and related directories tracking
 - Status management (active, paused, completed, archived)
 - Flexible metadata and tagging
-- Relationships to sessions, agents, and other projects
+- Relationships to instances, agents, and other projects
 """
 
 from langchain_core.tools import tool
@@ -100,17 +100,17 @@ Args:
 Returns:
     List of matching project dictionaries.""",
     
-    "project_get_by_session": """Get all projects linked to a session.
+    "project_get_by_instance": """Get all projects linked to an instance.
 
 Returns projects where:
-- The session created the project, OR
-- The session is linked via project_link("sessions", session_id)
+- The instance created the project, OR
+- The instance is linked via project_link("instances", instance_id)
 
 Args:
-    session_id: The session ID to search for.
+    instance_id: The instance ID to search for.
 
 Returns:
-    List of project dictionaries linked to this session.""",
+    List of project dictionaries linked to this instance.""",
     
     "project_get_by_directory": """Get all projects that reference a directory.
 
@@ -270,14 +270,14 @@ Returns:
     "project_link": """Link a project to another entity.
 
 Use this to establish relationships between projects and:
-- sessions: Link to agent sessions working on this project
+- instances: Link to agent instances working on this project
 - projects: Link to related/sub-projects
 - agents: Link to agents assigned to this project
 - Any custom entity type you need
 
 Args:
     project_id: The project ID.
-    entity_type: Type of entity (e.g., "sessions", "projects", "agents").
+    entity_type: Type of entity (e.g., "instances", "projects", "agents").
     entity_id: ID of the related entity.
 
 Returns:
@@ -306,12 +306,12 @@ Returns:
 }
 
 
-def create_project_tools(store: SQLModelProjectRepository, current_session_id: str = "", agent_id: str = ""):
+def create_project_tools(store: SQLModelProjectRepository, current_instance_id: str = "", agent_id: str = ""):
     """Create project management tools with injected repository.
     
     Args:
         store: SQLModelProjectRepository instance for database operations.
-        current_session_id: The current session ID (used for creator tracking).
+        current_instance_id: The current instance ID (used for creator tracking).
         agent_id: The current agent ID (primary parameter).
     
     Returns:
@@ -357,7 +357,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
                 description=description,
                 tags=tags,
                 metadata=metadata,
-                creator_session_id=current_session_id or None,
+                creator_instance_id=current_instance_id or None,
                 creator_agent_id=agent_id or None,
             )
             return project.to_dict()
@@ -407,11 +407,11 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
     project_search._full_doc_ = _FULL_DOCS["project_search"]
     
     @tool
-    def project_get_by_session(session_id: str) -> list[dict]:
-        """Get projects linked to a session. Use tool_help("project_get_by_session") for details."""
-        projects = store.get_by_session(session_id)
+    def project_get_by_instance(instance_id: str) -> list[dict]:
+        """Get projects linked to an instance. Use tool_help("project_get_by_instance") for details."""
+        projects = store.get_by_instance(instance_id)
         return [p.to_dict() for p in projects]
-    project_get_by_session._full_doc_ = _FULL_DOCS["project_get_by_session"]
+    project_get_by_instance._full_doc_ = _FULL_DOCS["project_get_by_instance"]
     
     @tool
     def project_get_by_directory(directory: str) -> list[dict]:
@@ -650,7 +650,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_session_id: s
         project_get,
         project_list,
         project_search,
-        project_get_by_session,
+        project_get_by_instance,
         project_get_by_directory,
         project_update,
         project_set_status,

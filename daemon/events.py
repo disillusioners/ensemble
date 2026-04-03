@@ -29,7 +29,7 @@ class EventPriority(IntEnum):
 class Event:
     """Structured event for SSE broadcast."""
     type: str  # "message_queued" | "status_changed" | "content_chunk" | "tool_call" | "completed" | "error"
-    session_id: str
+    instance_id: str
     message_id: Optional[str] = None
     data: dict[str, Any] = field(default_factory=dict)
     event_id: int = 0  # Monotonic counter for reconnection
@@ -140,12 +140,12 @@ class EventBroadcaster:
                 logger.error(f"Error in event cleanup: {e}")
     
     async def _cleanup_expired(self) -> None:
-        """Remove expired events from history and clean up stale sessions."""
+        """Remove expired events from history and clean up stale instances."""
         now = time.monotonic()
-        sessions_to_remove = []
+        instances_to_remove = []
         
         with self._lock:
-            for session_id, history in list(self._event_history.items()):
+            for instance_id, history in list(self._event_history.items()):
                 # Remove expired events from left (oldest first)
                 expired_count = 0
                 while history and (now - history[0].created_at) > self._event_ttl:
@@ -153,17 +153,17 @@ class EventBroadcaster:
                     expired_count += 1
                 
                 if expired_count > 0:
-                    logger.debug(f"Removed {expired_count} expired events for session {session_id}")
+                    logger.debug(f"Removed {expired_count} expired events for instance {instance_id}")
                 
-                # Mark empty session state for removal (if no active queue)
-                if not history and session_id not in self._queues:
-                    sessions_to_remove.append(session_id)
+                # Mark empty instance state for removal (if no active queue)
+                if not history and instance_id not in self._queues:
+                    instances_to_remove.append(instance_id)
             
-            # Clean up stale session state
-            for session_id in sessions_to_remove:
-                self._event_history.pop(session_id, None)
-                self._event_counters.pop(session_id, None)
-                logger.debug(f"Cleaned up stale session state for {session_id}")
+            # Clean up stale instance state
+            for instance_id in instances_to_remove:
+                self._event_history.pop(instance_id, None)
+                self._event_counters.pop(instance_id, None)
+                logger.debug(f"Cleaned up stale instance state for {instance_id}")
     
     def get_event_priority(self, event_type: str) -> EventPriority:
         """Get priority for an event type.
@@ -182,8 +182,8 @@ class EventBroadcaster:
             self._async_lock = asyncio.Lock()
         return self._async_lock
     
-    async def get_queue(self, session_id: str) -> asyncio.Queue:
-        """Get (or create) the event queue for a session.
+    async def get_queue(self, instance_id: str) -> asyncio.Queue:
+        """Get (or create) the event queue for an instance.
         
         Thread-safe queue creation to prevent duplicate queues.
         
@@ -192,21 +192,21 @@ class EventBroadcaster:
         - The double-check pattern after acquiring lock prevents duplicates
         
         Args:
-            session_id: The session ID.
+            instance_id: The instance ID.
             
         Returns:
-            asyncio.Queue for the session.
+            asyncio.Queue for the instance.
         """
         # Fast path - queue already exists (safe: dict read is atomic in Python)
-        if session_id in self._queues:
-            return self._queues[session_id]
+        if instance_id in self._queues:
+            return self._queues[instance_id]
         
         # Slow path - need to create queue with lock
         async with self._get_async_lock():
             # Double-check after acquiring lock
-            if session_id not in self._queues:
-                self._queues[session_id] = asyncio.Queue(maxsize=self._max_queue_size)
-            return self._queues[session_id]
+            if instance_id not in self._queues:
+                self._queues[instance_id] = asyncio.Queue(maxsize=self._max_queue_size)
+            return self._queues[instance_id]
     
     async def subscribe_all(self, subscriber_id: str, maxsize: int = 1000) -> asyncio.Queue:
         """Subscribe to ALL events across all sessions.
@@ -248,39 +248,39 @@ class EventBroadcaster:
         logger.debug(f"Global subscriber '{subscriber_id}' unregistered")
     
     async def broadcast(self, event: Event) -> None:
-        session_id = event.session_id
+        instance_id = event.instance_id
         
         # Assign priority based on event type
         event.priority = self.get_event_priority(event.type)
         
         # Thread-safe counter increment and history update
         with self._lock:
-            self._event_counters[session_id] += 1
-            event.event_id = self._event_counters[session_id]
+            self._event_counters[instance_id] += 1
+            event.event_id = self._event_counters[instance_id]
             
             # Store in history for reconnection - deque with maxlen handles size automatically
-            if session_id not in self._event_history:
-                self._event_history[session_id] = deque(maxlen=self._history_size)
-            self._event_history[session_id].append(event)
+            if instance_id not in self._event_history:
+                self._event_history[instance_id] = deque(maxlen=self._history_size)
+            self._event_history[instance_id].append(event)
             
             # Copy global subscribers list to avoid holding lock during broadcast
             global_subscribers = list(self._global_subscribers)
         
-        # Broadcast to session queue if it exists (active SSE connection)
-        queue = self._queues.get(session_id)
+        # Broadcast to instance queue if it exists (active SSE connection)
+        queue = self._queues.get(instance_id)
         if queue is not None:
             current_size = queue.qsize()
             if current_size >= self._max_queue_size * 0.9:  # Log warning at 90% capacity
                 logger.warning(
-                    f"Queue near full for session {session_id}: "
+                    f"Queue near full for instance {instance_id}: "
                     f"{current_size}/{self._max_queue_size}, event type={event.type}"
                 )
             try:
                 queue.put_nowait(event)
-                logger.debug(f"Broadcast event {event.type} (id={event.event_id}) to session {session_id}, queue size now: {queue.qsize()}")
+                logger.debug(f"Broadcast event {event.type} (id={event.event_id}) to instance {instance_id}, queue size now: {queue.qsize()}")
             except asyncio.QueueFull:
                 logger.warning(
-                    f"Event queue full for session {session_id}, dropping event: "
+                    f"Event queue full for instance {instance_id}, dropping event: "
                     f"type={event.type}, priority={event.priority.name}"
                 )
         
@@ -321,17 +321,17 @@ class EventBroadcaster:
                 logger.error(f"Error in broadcast_sync: {e}")
         future.add_done_callback(_log_exception)
     
-    def get_events_since(self, session_id: str, last_event_id: int) -> list[Event]:
+    def get_events_since(self, instance_id: str, last_event_id: int) -> list[Event]:
         """Get missed events for reconnection with TTL filtering.
         
         Args:
-            session_id: The session ID.
+            instance_id: The instance ID.
             last_event_id: The last event ID the client received.
             
         Returns:
             List of events after the given ID that haven't expired.
         """
-        history = self._event_history.get(session_id)
+        history = self._event_history.get(instance_id)
         if not history:
             return []
         
@@ -342,30 +342,30 @@ class EventBroadcaster:
             if e.event_id > last_event_id and (now - e.created_at) <= self._event_ttl
         ]
     
-    def cleanup_session(self, session_id: str) -> None:
-        """Remove all state for a session.
+    def cleanup_instance(self, instance_id: str) -> None:
+        """Remove all state for an instance.
         
-        Should be called when a session is terminated to prevent memory leaks.
+        Should be called when an instance is terminated to prevent memory leaks.
         
         Args:
-            session_id: The session ID to clean up.
+            instance_id: The instance ID to clean up.
         """
         with self._lock:
-            self._queues.pop(session_id, None)
-            self._event_history.pop(session_id, None)
-            self._event_counters.pop(session_id, None)
-        logger.debug(f"Cleaned up event state for session {session_id}")
+            self._queues.pop(instance_id, None)
+            self._event_history.pop(instance_id, None)
+            self._event_counters.pop(instance_id, None)
+        logger.debug(f"Cleaned up event state for instance {instance_id}")
     
-    def clear_queue(self, session_id: str) -> None:
-        """Clear the event queue for a session.
+    def clear_queue(self, instance_id: str) -> None:
+        """Clear the event queue for an instance.
         
         Should be called when a new SSE connection is established to prevent
         old events from accumulating when there was no active consumer.
         
         Args:
-            session_id: The session ID to clear the queue for.
+            instance_id: The instance ID to clear the queue for.
         """
-        queue = self._queues.get(session_id)
+        queue = self._queues.get(instance_id)
         if queue:
             cleared = 0
             # Drain the queue
@@ -376,20 +376,20 @@ class EventBroadcaster:
                 except asyncio.QueueEmpty:
                     break
             if cleared > 0:
-                logger.debug(f"Cleared {cleared} stale events from queue for session {session_id}")
+                logger.debug(f"Cleared {cleared} stale events from queue for instance {instance_id}")
     
-    def get_stats(self, session_id: str) -> dict:
-        """Get statistics for a session's event queue.
+    def get_stats(self, instance_id: str) -> dict:
+        """Get statistics for an instance's event queue.
         
         Args:
-            session_id: The session ID.
+            instance_id: The instance ID.
             
         Returns:
             Dict with queue stats including TTL and age information.
         """
         with self._lock:
-            queue = self._queues.get(session_id)
-            history = self._event_history.get(session_id)
+            queue = self._queues.get(instance_id)
+            history = self._event_history.get(instance_id)
             
             now = time.monotonic()
             oldest_age = 0.0
@@ -400,7 +400,7 @@ class EventBroadcaster:
                 "queue_size": queue.qsize() if queue else 0,
                 "max_queue_size": self._max_queue_size,
                 "history_size": len(history) if history else 0,
-                "last_event_id": self._event_counters.get(session_id, 0),
+                "last_event_id": self._event_counters.get(instance_id, 0),
                 "oldest_event_age_seconds": oldest_age,
                 "ttl_seconds": self._event_ttl,
                 "has_consumer": queue is not None and queue.qsize() > 0,
@@ -421,7 +421,7 @@ def event_to_sse(event: Event) -> dict:
         "event": event.type,
         "data": json.dumps({
             "message_id": event.message_id,
-            "session_id": event.session_id,
+            "instance_id": event.instance_id,
             **event.data
         })
     }

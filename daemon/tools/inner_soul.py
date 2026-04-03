@@ -16,7 +16,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from ..manager import SessionManager
+    from ..manager import InstanceManager
 
 
 # Semantic classification patterns
@@ -139,16 +139,16 @@ CLASSIFICATION_RULES = {
 
 
 def create_inner_soul_tool(
-    manager: "SessionManager",
+    manager: "InstanceManager",
     agent_id: str,
-    session_id: str,
+    instance_id: str,
 ):
     """Create inner_soul tool bound to a specific agent.
     
     Args:
-        manager: SessionManager for cache invalidation
+        manager: InstanceManager for cache invalidation
         agent_id: The agent identifier (e.g., "coder")
-        session_id: Current session ID for logging
+        instance_id: Current instance ID for logging
     
     Returns:
         The inner_soul tool function
@@ -317,7 +317,7 @@ def _execute_update(
     target: str,
     intent: str | None,
     rules: dict,
-    manager: "SessionManager",
+    manager: "InstanceManager",
     classification: dict
 ) -> dict:
     """Execute an update to a specific target."""
@@ -336,7 +336,7 @@ def _execute_update(
         return {"success": False, "target": target, "error": f"Unknown target: {target}"}
 
 
-def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: Optional["SessionManager"] = None) -> dict:
+def _update_memories(agent_id: str, agent_path: Path, request: str, classification: dict, manager: Optional["InstanceManager"] = None) -> dict:
     """Create timestamped memory file."""
     memories_dir = agent_path / "memories"
     memories_dir.mkdir(exist_ok=True)
@@ -380,7 +380,7 @@ def _update_memories(agent_id: str, agent_path: Path, request: str, classificati
     }
 
 
-def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
+def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["InstanceManager"] = None) -> dict:
     """Add to core memory.md."""
     memory_file = agent_path / "memory.md"
     
@@ -425,7 +425,7 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
     }
 
 
-def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
+def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["InstanceManager"] = None) -> dict:
     """Apply soul.md change directly - identity updates are applied immediately."""
     soul_file = agent_path / "soul.md"
     history_dir = agent_path / "history"
@@ -516,7 +516,7 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
     }
 
 
-def _update_user(agent_id: str, agent_path: Path, request: str, manager: Optional["SessionManager"] = None) -> dict:
+def _update_user(agent_id: str, agent_path: Path, request: str, manager: Optional["InstanceManager"] = None) -> dict:
     """Add user information to user.md."""
     user_file = agent_path / "user.md"
     
@@ -539,7 +539,7 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: Optiona
     }
 
 
-def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["SessionManager"] = None) -> dict:
+def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict, manager: Optional["InstanceManager"] = None) -> dict:
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
     

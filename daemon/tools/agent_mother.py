@@ -13,18 +13,18 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from ..manager import SessionManager
+    from ..manager import InstanceManager
 
 # Base directory for agents
 BASE_DIR = Path(__file__).parent.parent.parent
 
 
-def create_mother_tools(manager: "SessionManager", current_session_id: str):
+def create_mother_tools(manager: "InstanceManager", current_instance_id: str):
     """Create agent management tools for the Mother agent.
     
     Args:
-        manager: The SessionManager instance
-        current_session_id: The current session ID
+        manager: The InstanceManager instance
+        current_instance_id: The current instance ID
         
     Returns:
         List of tool functions for agent management
