@@ -124,7 +124,7 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
     
     # Determine PK column per table
     pk_column = "instance_id"
-    if table_name == "session_mappings":
+    if table_name in ("instance_mappings", "session_mappings"):
         pk_column = "mapping_id"
     elif table_name in ("job_queue_items", "jobqueue"):
         pk_column = "job_id"
@@ -200,11 +200,11 @@ def run_migrations(engine: Engine) -> None:
         except Exception as e:
             logger.warning(f"Migration failed for instances table: {e}")
         
-        # Migration: Add agent_id to session_mappings
+        # Migration: Add agent_id to instance_mappings
         try:
-            _add_agent_id_column(conn, "session_mappings", logger)
+            _add_agent_id_column(conn, "instance_mappings", logger)
         except Exception as e:
-            logger.warning(f"Migration failed for session_mappings table: {e}")
+            logger.warning(f"Migration failed for instance_mappings table: {e}")
         
         # Migration: Add agent_id to jobqueue (legacy table name)
         try:

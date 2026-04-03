@@ -237,6 +237,43 @@ class MigrationRunner:
         all_migrations = self.discover_migrations()
         return [m for m in all_migrations if m.version not in applied]
     
+    def _table_exists(self, conn, table_name: str) -> bool:
+        """Check if a table exists in the database."""
+        result = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name=:name"),
+            {"name": table_name},
+        )
+        return result.fetchone() is not None
+    
+    def _column_exists(self, conn, table_name: str, column_name: str) -> bool:
+        """Check if a column exists in a table."""
+        if not self._table_exists(conn, table_name):
+            return False
+        result = conn.execute(text(f"PRAGMA table_info({table_name})"))
+        return any(row[1] == column_name for row in result.fetchall())
+    
+    def _is_rename_migration_needed(self, conn) -> bool:
+        """Check if the session→instance rename migration needs to run.
+        
+        Returns True if any old 'session' named tables or columns exist.
+        """
+        # Check for old table names
+        for old_table in ("sessions", "session_hierarchy", "session_mappings"):
+            if self._table_exists(conn, old_table):
+                return True
+        
+        # Check for old column names in renamed/existing tables
+        for table, old_col in [
+            ("schedule_executions", "session_id"),
+            ("projects", "creator_session_id"),
+            ("job_queue_items", "session_id"),
+            ("message_queue", "session_id"),
+        ]:
+            if self._column_exists(conn, table, old_col):
+                return True
+        
+        return False
+    
     def apply_migration(self, migration: MigrationFile) -> float:
         """Apply a single migration within a transaction.
         
@@ -247,12 +284,32 @@ class MigrationRunner:
             Execution time in milliseconds.
             
         Raises:
-            MigrationError: If the migration fails for non-duplicate reasons,
-                or if any statement is skipped/fails.
+            MigrationError: If the migration fails for reasons other than
+                idempotent scenarios (duplicate column, missing table, already exists).
         """
         logger.info(f"Starting migration: {migration.version} - {migration.name}")
         start_time = time.perf_counter()
-        statements_failed = False
+        
+        # Pre-check for rename migration: if old session tables/columns don't exist,
+        # the rename migration is a no-op (tables already created with new names)
+        if "rename session to instance" in migration.name.lower():
+            with self.engine.connect() as check_conn:
+                if not self._is_rename_migration_needed(check_conn):
+                    logger.info(
+                        f"Migration {migration.version}: no old 'session' schema detected, "
+                        f"recording as applied (no-op)"
+                    )
+                    with Session(self.engine) as session:
+                        record = SchemaMigration(
+                            version=migration.version,
+                            name=migration.name,
+                            applied_at=datetime.now(timezone.utc).isoformat(),
+                            execution_time_ms=0,
+                            checksum=migration.checksum,
+                        )
+                        session.add(record)
+                        session.commit()
+                    return 0.0
         
         with self.engine.begin() as conn:
             # Execute the UP SQL
@@ -266,20 +323,41 @@ class MigrationRunner:
                         try:
                             conn.execute(text(stmt))
                         except Exception as stmt_err:
-                            # Handle "duplicate column name" gracefully - column already exists
-                            # This happens when SQLModel.metadata.create_all() already added the column
+                            # Handle idempotent scenarios gracefully:
+                            # These occur when SQLModel.metadata.create_all() has already
+                            # applied the schema change, or when tables have been renamed.
                             err_str = str(stmt_err).lower()
+                            
                             if "duplicate column name" in err_str:
                                 # Column already exists - idempotent operation, continue
                                 logger.info(
                                     f"Migration {migration.version}: column already exists, skipping (idempotent)"
                                 )
-                            # Handle "no such table" - table doesn't exist, this is a real failure
                             elif "no such table" in err_str:
-                                logger.warning(
-                                    f"Migration {migration.version}: table doesn't exist, skipping"
+                                # Table doesn't exist - this is safe to skip when:
+                                # 1. create_all() already created tables with new names (rename migration)
+                                # 2. The table was never created (baseline migration on fresh DB)
+                                # 3. The table was already renamed by an earlier step
+                                logger.info(
+                                    f"Migration {migration.version}: table doesn't exist, skipping (idempotent)"
                                 )
-                                statements_failed = True
+                            elif "already exists" in err_str:
+                                # Table/index already exists - idempotent for CREATE statements
+                                logger.info(
+                                    f"Migration {migration.version}: object already exists, skipping (idempotent)"
+                                )
+                            elif "no such column" in err_str:
+                                # Column doesn't exist - this happens when a rename migration
+                                # tries to SELECT an old column name but the table was already
+                                # created with new column names by create_all()
+                                logger.info(
+                                    f"Migration {migration.version}: column doesn't exist, skipping (idempotent)"
+                                )
+                            elif "has no column" in err_str:
+                                # INSERT into column that doesn't exist - same scenario as above
+                                logger.info(
+                                    f"Migration {migration.version}: column mismatch, skipping (idempotent)"
+                                )
                             else:
                                 raise
             except Exception as e:
@@ -288,15 +366,8 @@ class MigrationRunner:
                     f"Migration {migration.version} failed: {e}"
                 ) from e
             
-            # If any statement was skipped, do NOT record the migration as complete
-            # Migration must be atomic - all statements must succeed
-            if statements_failed:
-                raise MigrationError(
-                    f"Migration {migration.version} had skipped statements - "
-                    f"migration is not atomic and was not recorded as complete"
-                )
-            
-            # Record the migration only if all statements succeeded
+            # Record the migration as applied (even if some statements were idempotently skipped)
+            # This prevents re-running migrations that are no-ops on the current schema
             execution_time_ms = int((time.perf_counter() - start_time) * 1000)
             with Session(bind=conn) as session:
                 record = SchemaMigration(

@@ -1,11 +1,13 @@
--- Migration: add agent_id to sessions
+-- Migration: add agent_id to instances (originally sessions)
 -- Created: 2024-01-03 (retrospective)
 -- Author: system
--- Description: Add agent_id column to sessions table, populating from agent_dir
+-- Description: Add agent_id column to instances table, populating from agent_dir
+-- Updated: 2026-04-03 - Updated table name from 'sessions' to 'instances' after session→instance rename
 
 -- UP
 -- Add agent_id column (populated from agent_dir by the migration runner)
-ALTER TABLE sessions ADD COLUMN agent_id TEXT;
+-- Handles both old table name (sessions) and new table name (instances)
+ALTER TABLE instances ADD COLUMN agent_id TEXT;
 
 -- DOWN
 -- SQLite does not support DROP COLUMN

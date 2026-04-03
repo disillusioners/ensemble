@@ -7,10 +7,15 @@
 -- This migration handles:
 -- - Table renames: sessions→instances, session_hierarchy→instance_hierarchy, session_mappings→instance_mappings
 -- - Column renames: session_id→instance_id, session_metadata→instance_metadata, etc.
--- - Index renames: session-named indexes to instance-named indexes
+-- - Index creation with new names
 --
 -- Note: SQLite does not support RENAME COLUMN directly, so we use the
 -- create-copy-drop-rename pattern for column renames.
+--
+-- Updated: 2026-04-03 - The migration runner now detects if old schema exists
+-- and skips this migration entirely on fresh databases where create_all() has
+-- already created tables with new names. This migration only runs when old
+-- 'session'-named tables or columns are detected.
 
 -- UP
 
@@ -26,7 +31,6 @@ ALTER TABLE session_hierarchy RENAME TO instance_hierarchy;
 -- SQLite doesn't support RENAME COLUMN, so we use the temp table pattern
 PRAGMA foreign_keys=off;
 
--- Create temp table with new column names
 CREATE TABLE instances (
     instance_id TEXT PRIMARY KEY,
     agent_id TEXT,
@@ -39,12 +43,10 @@ CREATE TABLE instances (
     updated_at TEXT NOT NULL
 );
 
--- Copy data from old sessions table (with column rename)
 INSERT INTO instances (instance_id, agent_id, agent_dir, agent_name, parent_id, status, created_at, updated_at, instance_metadata)
 SELECT session_id, agent_id, agent_dir, agent_name, parent_id, status, created_at, updated_at, session_metadata
 FROM sessions;
 
--- Drop old sessions table
 DROP TABLE sessions;
 
 PRAGMA foreign_keys=on;
@@ -53,7 +55,6 @@ PRAGMA foreign_keys=on;
 -- Note: We need to rename column agent_session_id→agent_instance_id
 PRAGMA foreign_keys=off;
 
--- Create temp table with new column names
 CREATE TABLE instance_mappings (
     mapping_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
@@ -66,7 +67,6 @@ CREATE TABLE instance_mappings (
     created_at TEXT NOT NULL
 );
 
--- Copy data from old session_mappings table (with column rename)
 INSERT INTO instance_mappings (mapping_id, source_id, external_user_id, agent_instance_id,
                                 agent_id, agent_dir, mapping_metadata, last_message_at,
                                 created_at)
@@ -74,7 +74,6 @@ SELECT mapping_id, source_id, external_user_id, agent_session_id,
        agent_id, agent_dir, mapping_metadata, last_message_at, created_at
 FROM session_mappings;
 
--- Drop old session_mappings table
 DROP TABLE session_mappings;
 
 PRAGMA foreign_keys=on;
@@ -210,41 +209,28 @@ PRAGMA foreign_keys=on;
 -- PHASE 3: Recreate indexes with new names
 -- ============================================================================
 
--- Drop old indexes on instance_hierarchy (if they exist with old names)
--- Note: SQLite auto-creates indexes for PRIMARY KEY, so we recreate them
+CREATE INDEX IF NOT EXISTS ix_instances_agent_id ON instances(agent_id);
+CREATE INDEX IF NOT EXISTS ix_instances_agent_dir ON instances(agent_dir);
+CREATE INDEX IF NOT EXISTS ix_instances_agent_name ON instances(agent_name);
+CREATE INDEX IF NOT EXISTS ix_instances_parent_id ON instances(parent_id);
+CREATE INDEX IF NOT EXISTS ix_instances_status ON instances(status);
 
--- Create indexes on instances table
-CREATE INDEX ix_instances_agent_id ON instances(agent_id);
-CREATE INDEX ix_instances_agent_dir ON instances(agent_dir);
-CREATE INDEX ix_instances_agent_name ON instances(agent_name);
-CREATE INDEX ix_instances_parent_id ON instances(parent_id);
-CREATE INDEX ix_instances_status ON instances(status);
+CREATE INDEX IF NOT EXISTS ix_instance_mappings_source ON instance_mappings(source_id);
+CREATE INDEX IF NOT EXISTS ix_instance_mappings_instance ON instance_mappings(agent_instance_id);
+CREATE INDEX IF NOT EXISTS ix_instance_mappings_cleanup ON instance_mappings(last_message_at);
 
--- Create indexes on instance_mappings table
-CREATE INDEX ix_instance_mappings_source ON instance_mappings(source_id);
-CREATE INDEX ix_instance_mappings_instance ON instance_mappings(agent_instance_id);
-CREATE INDEX ix_instance_mappings_cleanup ON instance_mappings(last_message_at);
+CREATE INDEX IF NOT EXISTS ix_schedule_executions_schedule_id ON schedule_executions(schedule_id);
+CREATE INDEX IF NOT EXISTS ix_schedule_executions_instance ON schedule_executions(instance_id);
 
--- Create indexes on schedule_executions table
-CREATE INDEX ix_schedule_executions_schedule_id ON schedule_executions(schedule_id);
-CREATE INDEX ix_schedule_executions_instance ON schedule_executions(instance_id);
+CREATE INDEX IF NOT EXISTS ix_job_queue_status ON job_queue_items(status);
+CREATE INDEX IF NOT EXISTS ix_job_queue_instance ON job_queue_items(instance_id);
+CREATE INDEX IF NOT EXISTS ix_job_queue_project ON job_queue_items(project_id);
 
--- Create indexes on job_queue_items table
-CREATE INDEX ix_job_queue_status ON job_queue_items(status);
-CREATE INDEX ix_job_queue_instance ON job_queue_items(instance_id);
-CREATE INDEX ix_job_queue_project ON job_queue_items(project_id);
-
--- Create indexes on message_queue table
-CREATE INDEX ix_message_queue_instance ON message_queue(instance_id);
-CREATE INDEX ix_message_queue_status ON message_queue(status);
+CREATE INDEX IF NOT EXISTS ix_message_queue_instance ON message_queue(instance_id);
+CREATE INDEX IF NOT EXISTS ix_message_queue_status ON message_queue(status);
 
 -- ============================================================================
 -- DOWN (rollback)
 -- ============================================================================
 -- Note: This migration is NOT safely reversible because SQLite doesn't support
 -- DROP COLUMN and we dropped original tables. For rollback, restore from backup.
--- This DOWN section is a placeholder for documentation purposes only.
-
--- To rollback, you would need to:
--- 1. Restore from a database backup made before this migration
--- 2. Or manually recreate tables with old names and copy data back
