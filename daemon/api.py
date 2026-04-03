@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
     # Initialize and start JobProcessor
     job_processor = JobProcessor(
         queue_service=job_queue_service,
-        session_manager=manager,
+        instance_manager=manager,
         project_repo=manager._project_repository,
         poll_interval=2.0,
     )

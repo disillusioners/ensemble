@@ -388,15 +388,15 @@ class InstanceManager:
         # Must be created before SourceRegistry
         self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
 
-        # NEW: Session repository for session management
-        # Must be created before SourceRegistry for scheduler session mode
+        # NEW: Instance repository for instance management
+        # Must be created before SourceRegistry for scheduler instance mode
         self._instance_repository = create_instance_repository(engine=self._engine, create_tables=False)
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
             source_repo=self._source_repository,
             manager=self,
-            session_repo=self._instance_repository,
+            instance_repo=self._instance_repository,
         )
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
