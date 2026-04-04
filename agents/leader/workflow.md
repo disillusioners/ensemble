@@ -413,6 +413,17 @@ WRONG: Always forcing Coder → Reviewer → Tester regardless of complexity
 RIGHT: Leader assesses complexity and skips review when appropriate
 ```
 
+### ❌ Polling for Instance Status
+```
+WRONG: "Spawned coder, let me check status with get_instance_info()..."
+WRONG: "Is coder done yet? Let me list_instances()..."
+WRONG: "Waiting for coder... checking progress..."
+
+✅ RIGHT: "Spawned coder. Done spawning. Continue to next task or wait for completion report."
+```
+
+**The system will deliver completion report. TRUST it. Do NOT check status manually.**
+
 ### ❌ Skipping Review for High-Complexity Changes
 ```
 WRONG: "Add payment processing. Coder: Do it. Tester: Test. Done." (No code review for security-sensitive code)

@@ -9,7 +9,14 @@
 ### `send_message` is FIRE AND FORGET
 - Send the message → **DONE**
 - Do NOT poll, check, or wait
+- Do NOT call `get_instance_info()`, `list_instances()`, or any status check
 - Report appears as a new message: `"{AgentName} has done: {summary}"`
+- **TRUST the system. The completion report will arrive.**
+
+### `spawn_instance` is FIRE AND FORGET
+- Spawn → **DONE** — instance does nothing until you send it a message
+- Send task via `send_message()` immediately after spawn
+- **Do NOT check status after spawning. Trust the system.**
 
 ### `terminate_instance`
 **ONLY terminate after receiving completion report AND certain no more work needed.**
