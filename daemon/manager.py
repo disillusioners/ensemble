@@ -2065,7 +2065,8 @@ Title:"""
             instance_id: The ID of the instance.
 
         Returns:
-            Instance metadata dictionary from the database.
+            Instance metadata dictionary with queue info added.
+            If status is IDLE and there are pending messages, status is changed to QUEUED.
 
         Raises:
             KeyError: If instance is not found.
@@ -2073,7 +2074,21 @@ Title:"""
         meta = self._instance_repository.get(instance_id)
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
-        return meta.to_dict()
+        
+        result = meta.to_dict()
+        
+        # Get queue stats
+        queue_stats = self._queue_repository.get_stats(instance_id)
+        queued_messages_count = queue_stats.get("pending_count", 0)
+        
+        # Add queued_messages_count to result
+        result["queued_messages_count"] = queued_messages_count
+        
+        # If idle but has queued messages, change status to QUEUED
+        if meta.status == InstanceStatus.IDLE.value and queued_messages_count > 0:
+            result["status"] = InstanceStatus.QUEUED.value
+        
+        return result
 
     async def get_messages(self, instance_id: str) -> list[dict]:
         """Get message history for an instance.

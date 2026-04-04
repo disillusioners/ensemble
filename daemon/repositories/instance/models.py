@@ -23,6 +23,7 @@ class InstanceStatus(str, enum.Enum):
     COMPLETED = "completed"
     ERROR = "error"
     TERMINATED = "terminated"
+    QUEUED = "queued"  # Idle but has queued messages
     
     @classmethod
     def is_valid(cls, status: str) -> bool:
