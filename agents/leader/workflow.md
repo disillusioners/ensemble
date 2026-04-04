@@ -348,6 +348,31 @@ User: "Plan and implement a notification system"
 
 ---
 
+## ⚠️ CRITICAL: Spawn Instance is Fire-and-Forget
+
+**Spawning is NOT blocking. The instance does nothing until you message it.**
+
+```
+1. spawn_instance("coder") → returns instance_id IMMEDIATELY (~1ms)
+2. send_message(instance_id, "task...") → fire-and-forget
+3. DONE spawning — move on
+4. Later: completion report arrives as a new message → "{AgentName} has done: {summary}"
+```
+
+**The "Wait for result" in workflows means:**
+- ❌ WRONG: Poll with `get_instance_info()` or `list_instances()`
+- ✅ RIGHT: Do other work, wait for completion report message to arrive
+
+**Spawning multiple parallel agents:**
+```
+1. spawn coder-1 → send_message(task A)
+2. spawn coder-2 → send_message(task B)  
+3. spawn coder-3 → send_message(task C)
+4. (all spawned) → wait for completion reports to arrive
+```
+
+---
+
 ## ⚠️ CRITICAL: Instance Communication
 
 **USE `send_message()` to respond to agent instances. ALWAYS.**
