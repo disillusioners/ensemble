@@ -17,6 +17,7 @@ from langchain_core.outputs import LLMResult
 
 from .config import Config
 from .graph import build_session_graph
+from .llm_error_classifier import ContextLengthExceededError
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
     get_session_messages,
@@ -561,6 +562,12 @@ class SessionManager:
             "max_retries": self.config.queue.llm_max_retries,
         }
 
+        # Build graph config with thread_id for state management
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": self.config.limits.graph_recursion_limit,
+        }
+
         # Build graph with checkpointer
         graph = build_session_graph(
             tools=tools,
@@ -568,6 +575,8 @@ class SessionManager:
             llm_config=llm_config,
             system_prompt=system_prompt,
             retry_config=retry_config,
+            compactor=self._compactor,
+            graph_config=config,
         )
 
         # Save metadata to DB using session repository
@@ -1002,44 +1011,69 @@ class SessionManager:
                     raise  # Re-raise to properly handle task cancellation
                     
                 except Exception as e:
-                    logger.error(f"Error processing message {msg.message_id}: {e}")
-                    self.circuit_breaker.record_failure(session_id)
-                    
-                    if msg.retry_count < self.config.queue.max_retries:
-                        # Use repository to schedule retry
-                        self._queue_repository.retry(msg.message_id, str(e))
-                        # Broadcast retry scheduled event
-                        await self.broadcaster.broadcast(Event(
-                            type="status_changed",
-                            session_id=session_id,
-                            message_id=msg.message_id,
-                            data={
-                                "status": "retrying",
-                                "retry_count": msg.retry_count + 1,
-                                "error": str(e)
-                            }
-                        ))
-                    else:
-                        # Use repository to mark as failed
+                    # Check for permanent errors first (compaction already attempted at LLM level)
+                    if isinstance(e, ContextLengthExceededError):
+                        logger.error(
+                            f'Context length exceeded for session {session_id[:8]}... '
+                            f'(compaction attempted but failed), failing immediately'
+                        )
                         self._queue_repository.fail(msg.message_id, str(e))
-                        # Broadcast error event
                         await self.broadcaster.broadcast(Event(
-                            type="error",
+                            type='error',
                             session_id=session_id,
                             message_id=msg.message_id,
                             data={
-                                "error": str(e),
-                                "status": "failed",
-                                "retry_count": msg.retry_count
+                                'error': str(e),
+                                'status': 'failed',
+                                'error_type': 'context_length_exceeded',
                             }
                         ))
-                        # Send error report to parent if this is a child session
                         await self._send_error_report(
                             session_id=session_id,
-                            error=f"Max retries ({msg.retry_count}) exceeded: {e}",
-                            error_type="max_retries_exceeded",
-                            message_id=msg.message_id
+                            error=f'Context length exceeded (compaction attempted): {e}',
+                            error_type='context_length_exceeded',
+                            message_id=msg.message_id,
                         )
+                    else:
+                        # existing retry logic stays here unchanged
+                        logger.error(f'Error processing message {msg.message_id}: {e}')
+                        self.circuit_breaker.record_failure(session_id)
+                        
+                        if msg.retry_count < self.config.queue.max_retries:
+                            # Use repository to schedule retry
+                            self._queue_repository.retry(msg.message_id, str(e))
+                            # Broadcast retry scheduled event
+                            await self.broadcaster.broadcast(Event(
+                                type="status_changed",
+                                session_id=session_id,
+                                message_id=msg.message_id,
+                                data={
+                                    "status": "retrying",
+                                    "retry_count": msg.retry_count + 1,
+                                    "error": str(e)
+                                }
+                            ))
+                        else:
+                            # Use repository to mark as failed
+                            self._queue_repository.fail(msg.message_id, str(e))
+                            # Broadcast error event
+                            await self.broadcaster.broadcast(Event(
+                                type="error",
+                                session_id=session_id,
+                                message_id=msg.message_id,
+                                data={
+                                    "error": str(e),
+                                    "status": "failed",
+                                    "retry_count": msg.retry_count
+                                }
+                            ))
+                            # Send error report to parent if this is a child session
+                            await self._send_error_report(
+                                session_id=session_id,
+                                error=f"Max retries ({msg.retry_count}) exceeded: {e}",
+                                error_type="max_retries_exceeded",
+                                message_id=msg.message_id
+                            )
                 
                 finally:
                     # Always unregister the request
@@ -2075,6 +2109,12 @@ Title:"""
             "max_retries": self.config.queue.llm_max_retries,
         }
 
+        # Build graph config with thread_id for state management
+        config = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": self.config.limits.graph_recursion_limit,
+        }
+
         # Build graph with checkpointer (will restore state from checkpoints)
         graph = build_session_graph(
             tools=tools,
@@ -2082,6 +2122,8 @@ Title:"""
             llm_config=llm_config,
             system_prompt=system_prompt,
             retry_config=retry_config,
+            compactor=self._compactor,
+            graph_config=config,
         )
 
         # Store in sessions dict

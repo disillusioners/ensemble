@@ -13,16 +13,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Define transient exceptions for LLM retry
-try:
-    import openai
-    TRANSIENT_EXCEPTIONS = (
-        openai.RateLimitError,
-        openai.APITimeoutError,
-        openai.APIConnectionError,
-    )
-except ImportError:
-    TRANSIENT_EXCEPTIONS = ()
+from .llm_error_classifier import (
+    classify_llm_errors,
+    ContextLengthExceededError,
+    TransientAPIError,
+    TRANSIENT_EXCEPTIONS,
+)
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -184,25 +180,77 @@ def should_continue(state: MessagesState) -> str:
     return END
 
 
-def create_agent_node(llm_with_tools, system_prompt: str):
-    """Create the agent node function.
+def create_agent_node(
+    llm_with_tools,
+    system_prompt: str,
+    compactor=None,
+    graph_ref=None,
+    config=None,
+    llm_config=None,
+):
+    """Create the agent node function with optional reactive compaction.
     
     Args:
         llm_with_tools: LLM already bound with tools.
         system_prompt: System prompt to prepend to messages.
+        compactor: Optional ContextCompactor for reactive compaction.
+        graph_ref: Optional list for late-bound graph reference.
+        config: Optional config for compaction.
+        llm_config: Optional LLM config for compaction context.
     """
-    def agent_node(state: MessagesState) -> dict:
-        messages = state["messages"]
-        # Prepend system prompt
-        full_messages = [SystemMessage(content=system_prompt)] + messages
-        logger.debug(f"Invoking LLM with {len(full_messages)} messages")
-        response = llm_with_tools.invoke(full_messages)
-        tool_info = ""
+    
+    async def agent_node(state):
+        messages = state['messages']
+        full_messages = [SystemMessage(content=system_prompt)] + list(messages)
+        logger.debug(f'Invoking LLM with {len(full_messages)} messages')
+        
+        try:
+            response = llm_with_tools.invoke(full_messages)
+        except ContextLengthExceededError:
+            if compactor is None or graph_ref is None or graph_ref[0] is None:
+                logger.warning('Context length exceeded but no compactor available, re-raising')
+                raise
+            
+            logger.info(f'Context length exceeded, attempting reactive compaction for {len(messages)} messages')
+            
+            graph = graph_ref[0]
+            thread_config = config or {}
+            
+            current_state = await graph.aget_state(thread_config)
+            current_messages = current_state.values.get('messages', [])
+            compacted_at_val = current_state.values.get('compacted_at')
+            
+            from .compaction import CompactionContext
+            ctx = CompactionContext(
+                messages=current_messages,
+                system_prompt_tokens=0,
+                model_name=llm_config.get('model', '') if llm_config else '',
+                config=compactor.config,
+                llm_config=compactor.llm_config,
+                last_compacted_at=compacted_at_val,
+            )
+            
+            result = await compactor.compact_state(ctx)
+            if result is None or result.replacement_messages is None:
+                logger.warning('Reactive compaction returned no result, re-raising')
+                raise
+            
+            await graph.aupdate_state(thread_config, {'messages': result.replacement_messages}, as_node='agent')
+            if result.compacted_at:
+                await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
+            
+            logger.info(f'Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
+            
+            updated_state = await graph.aget_state(thread_config)
+            compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
+            response = llm_with_tools.invoke(compact_messages)
+        
+        tool_info = ''
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
-            tool_info = f", tools: {tool_names}"
-        logger.info(f"LLM response: {response.content[:80] if response.content else 'empty'}...{tool_info}")
-        return {"messages": [response]}
+            tool_info = f', tools: {tool_names}'
+        logger.info(f'LLM response: {response.content[:80] if response.content else "empty"}...{tool_info}')
+        return {'messages': [response]}
     
     return agent_node
 
@@ -212,7 +260,9 @@ def build_instance_graph(
     checkpointer,
     llm_config: dict,
     system_prompt: str,
-    retry_config: dict | None = None,  # NEW: optional retry config
+    retry_config: dict | None = None,
+    compactor=None,
+    graph_config=None,
 ):
     """Build and return a compiled instance graph with LLM-level retry."""
     # Add proxy header to all LLM requests
@@ -225,8 +275,11 @@ def build_instance_graph(
     # Bind tools BEFORE wrapping with retry (RunnableRetry doesn't have bind_tools)
     llm_with_tools = llm.bind_tools(tools)
 
-    # Wrap with retry if config provided
+    # Wrap with error classification and retry if config provided
     if retry_config:
+        # CRITICAL: classify errors BEFORE with_retry so they can be caught
+        llm_with_tools = classify_llm_errors(llm_with_tools)
+        
         max_retries = retry_config.get("max_retries", 3)
         llm_with_tools = llm_with_tools.with_retry(
             stop_after_attempt=max_retries,
@@ -235,10 +288,20 @@ def build_instance_graph(
         )
         logger.debug(f"LLM configured with {max_retries} retries")
     
+    # Late binding for graph reference
+    graph_ref = [None]
+    
     graph = StateGraph(SessionState)
     
     # Add nodes
-    graph.add_node("agent", create_agent_node(llm_with_tools, system_prompt))
+    graph.add_node("agent", create_agent_node(
+        llm_with_tools,
+        system_prompt,
+        compactor=compactor,
+        graph_ref=graph_ref,
+        config=graph_config,
+        llm_config=llm_config_with_headers,
+    ))
     graph.add_node("tools", ToolNode(tools))
     
     # Add edges
@@ -246,4 +309,13 @@ def build_instance_graph(
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
     graph.add_edge("tools", "agent")
     
-    return graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer)
+    
+    # Late bind graph reference
+    graph_ref[0] = compiled
+    
+    return compiled
+
+
+# Backward compatibility alias
+build_session_graph = build_instance_graph
