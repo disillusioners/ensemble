@@ -130,35 +130,27 @@ def compose_system_prompt(
         6. workflow.md (methodology)
         7. memory.md (knowledge)
         8. project-experience.md (how to use .agents directory for project knowledge)
-        Separated by "\n\n---\n\n" with headers.
+        Separated by "\n\n---\n\n". Headers come from the file content itself.
     """
-    section_titles = {
-        "soul": "Identity",
-        "rule": "Rules",
-        "tools": "Tools",
-        "workflow": "Workflow",
-        "memory": "Memory"
-    }
-    
     sections: list[str] = []
     
     # 1. Add soul section first (identity - who I am)
     if "soul" in prompts:
         content = prompts["soul"].strip()
         if content:
-            sections.append(f"## {section_titles['soul']}\n\n{content}")
+            sections.append(content)
     
     # 2. Add rule section (constraints - highest priority)
     if "rule" in prompts:
         content = prompts["rule"].strip()
         if content:
-            sections.append(f"## {section_titles['rule']}\n\n{content}")
+            sections.append(content)
     
     # 3. Add base skill if exists (backward compatibility)
     if "skill" in prompts:
         content = prompts["skill"].strip()
         if content:
-            sections.append(f"## Skills\n\n{content}")
+            sections.append(content)
     
     # 4. Add all skills from skills/ directory (sorted for deterministic order)
     if skills:
@@ -166,9 +158,7 @@ def compose_system_prompt(
             skill_content = skills[skill_name]
             content = skill_content.strip()
             if content:
-                # Format skill name as title (e.g., "code-review" -> "Code Review")
-                formatted_name = skill_name.replace("-", " ").replace("_", " ").title()
-                sections.append(f"## Skill: {formatted_name}\n\n{content}")
+                sections.append(content)
     
     # 5. Add tools section (combine common + agent-specific, only if non-empty)
     tools_parts = []
@@ -181,14 +171,14 @@ def compose_system_prompt(
     
     if tools_parts:
         combined_tools = "\n\n---\n\n".join(tools_parts)
-        sections.append(f"## {section_titles['tools']}\n\n{combined_tools}")
+        sections.append(combined_tools)
     
     # 6-7. Add workflow and memory sections
     for key in ["workflow", "memory"]:
         if key in prompts:
             content = prompts[key].strip()
             if content:
-                sections.append(f"## {section_titles[key]}\n\n{content}")
+                sections.append(content)
     
     # Add recent memories section (filenames only, max 5)
     if recent_memories:

@@ -74,25 +74,26 @@ class TestComposeSystemPrompt:
 
         result = compose_system_prompt(prompts)
 
-        # Check order: rule should come first
-        rule_pos = result.find("## Rules")
-        skill_pos = result.find("## Skills")
-        workflow_pos = result.find("## Workflow")
-        memory_pos = result.find("## Memory")
+        # Check order: rule should come first (raw content, no added headers)
+        rule_pos = result.find("# Rules")
+        skill_pos = result.find("# Skills")
+        workflow_pos = result.find("# Workflow")
+        memory_pos = result.find("# Memory")
 
         assert rule_pos < skill_pos < workflow_pos < memory_pos
 
-    def test_compose_system_prompt_headers(self, tmp_path):
-        """Test that each section has proper header."""
+    def test_compose_system_prompt_content(self, tmp_path):
+        """Test that each section content is present."""
         prompts = {
-            "skill": "Skill content",
-            "rule": "Rule content",
+            "skill": "# Skills\n\nSkill content",
+            "rule": "# Rules\n\nRule content",
         }
 
         result = compose_system_prompt(prompts)
 
-        assert "## Rules\n\nRule content" in result
-        assert "## Skills\n\nSkill content" in result
+        # Content should be preserved as-is (no auto-added headers)
+        assert "# Rules\n\nRule content" in result
+        assert "# Skills\n\nSkill content" in result
 
     def test_compose_system_prompt_separator(self, tmp_path):
         """Test that sections are separated by '---'."""
@@ -183,8 +184,9 @@ class TestLoadAndCachePrompt:
 
         prompt, tokens = load_and_cache_prompt("test_agent", agent_dir, cache)
 
-        assert "## Skills" in prompt
-        assert "## Rules" in prompt
+        # Content preserved as-is (no auto-added headers)
+        assert "# Skills" in prompt
+        assert "# Rules" in prompt
         assert tokens > 0
 
     def test_load_and_cache_prompt_cached(self, tmp_path):
@@ -307,12 +309,12 @@ class TestComposeSystemPromptWithSkills:
         
         result = compose_system_prompt(prompts, skills)
         
-        # Check all sections are present
-        assert "## Rules" in result
-        assert "## Skills" not in result  # No base skill
-        assert "## Skill: Coding" in result
-        assert "## Skill: Reviewing" in result
-        assert "## Workflow" in result
+        # Check all sections are present (raw content, no auto-added headers)
+        assert "# Rules" in result
+        assert "# Skills" not in result  # No base skill
+        assert "# Coding" in result
+        assert "# Reviewing" in result
+        assert "# Workflow" in result
 
     def test_compose_with_base_skill_and_skills(self):
         """Test composing prompt with both base skill and additional skills."""
@@ -326,16 +328,16 @@ class TestComposeSystemPromptWithSkills:
         
         result = compose_system_prompt(prompts, skills)
         
-        # Base skill comes before additional skills
-        base_pos = result.find("## Skills")
-        testing_pos = result.find("## Skill: Testing")
+        # Base skill comes before additional skills (raw content)
+        base_pos = result.find("# Base Skill")
+        testing_pos = result.find("# Testing")
         
         assert base_pos != -1
         assert testing_pos != -1
         assert base_pos < testing_pos
 
-    def test_compose_skill_name_formatting(self):
-        """Test that skill names are formatted nicely (kebab-case -> Title Case)."""
+    def test_compose_skill_content_preserved(self):
+        """Test that skill names and content are preserved as-is."""
         prompts = {}
         skills = {
             "code-review": "# Code Review\nReview code",
@@ -344,8 +346,9 @@ class TestComposeSystemPromptWithSkills:
         
         result = compose_system_prompt(prompts, skills)
         
-        assert "## Skill: Code Review" in result
-        assert "## Skill: Test Driven Dev" in result
+        # Content preserved exactly (no auto formatting)
+        assert "# Code Review\nReview code" in result
+        assert "# TDD\nTest first" in result
 
     def test_compose_no_skills(self):
         """Test composing prompt without skills dict."""
@@ -356,9 +359,8 @@ class TestComposeSystemPromptWithSkills:
         
         result = compose_system_prompt(prompts, None)
         
-        assert "## Rules" in result
-        assert "## Skills" in result
-        assert "## Skill:" not in result
+        assert "# Rules" in result
+        assert "# Skills" in result
 
 
 class TestLoadAndCachePromptWithSkills:
@@ -381,8 +383,9 @@ class TestLoadAndCachePromptWithSkills:
         cache = PromptCache()
         prompt, tokens = load_and_cache_prompt("test_agent", agent_dir, cache)
         
-        assert "## Rules" in prompt
-        assert "## Skill: Coding" in prompt
+        # Content preserved as-is
+        assert "# Rules" in prompt
+        assert "# Coding" in prompt
         assert tokens > 0
 
     def test_cache_invalidates_on_skill_change(self, tmp_path):
@@ -440,10 +443,10 @@ class TestToolsLoading:
         
         result = compose_system_prompt(prompts)
         
-        # Check order: rules → tools → workflow
-        rule_pos = result.find("## Rules")
-        tools_pos = result.find("## Tools")
-        workflow_pos = result.find("## Workflow")
+        # Check order: rules → tools → workflow (raw content)
+        rule_pos = result.find("# Rules")
+        tools_pos = result.find("# Tools")
+        workflow_pos = result.find("# Workflow")
         
         assert rule_pos != -1
         assert tools_pos != -1
@@ -465,12 +468,13 @@ class TestToolsLoading:
         
         result = compose_system_prompt(prompts, skills)
         
-        soul_pos = result.find("## Identity")
-        rule_pos = result.find("## Rules")
-        skill_pos = result.find("## Skill: Coding")
-        tools_pos = result.find("## Tools")
-        workflow_pos = result.find("## Workflow")
-        memory_pos = result.find("## Memory")
+        # Order preserved with raw content
+        soul_pos = result.find("# Who I Am")
+        rule_pos = result.find("# Rules")
+        skill_pos = result.find("# Coding skill")
+        tools_pos = result.find("# Tools")
+        workflow_pos = result.find("# Workflow")
+        memory_pos = result.find("# Memory")
         
         assert soul_pos < rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
 
@@ -510,7 +514,7 @@ class TestSoulLoading:
         assert prompts["soul"] == "# Who I Am\nI am a helpful assistant."
 
     def test_compose_includes_soul_section_first(self):
-        """Test that soul (Identity) section comes first in composed prompt."""
+        """Test that soul section comes first in composed prompt."""
         prompts = {
             "soul": "# Who I Am\nI am a coder.",
             "rule": "# Rules\nFollow rules",
@@ -519,10 +523,10 @@ class TestSoulLoading:
         
         result = compose_system_prompt(prompts)
         
-        # Check order: soul → rules → tools
-        soul_pos = result.find("## Identity")
-        rule_pos = result.find("## Rules")
-        tools_pos = result.find("## Tools")
+        # Check order: soul → rules → tools (raw content)
+        soul_pos = result.find("# Who I Am")
+        rule_pos = result.find("# Rules")
+        tools_pos = result.find("# Tools")
         
         assert soul_pos != -1
         assert rule_pos != -1
@@ -544,12 +548,13 @@ class TestSoulLoading:
         
         result = compose_system_prompt(prompts, skills)
         
-        soul_pos = result.find("## Identity")
-        rule_pos = result.find("## Rules")
-        skill_pos = result.find("## Skill: Coding")
-        tools_pos = result.find("## Tools")
-        workflow_pos = result.find("## Workflow")
-        memory_pos = result.find("## Memory")
+        # Order preserved with raw content
+        soul_pos = result.find("# Who I Am")
+        rule_pos = result.find("# Rules")
+        skill_pos = result.find("# Coding skill")
+        tools_pos = result.find("# Tools")
+        workflow_pos = result.find("# Workflow")
+        memory_pos = result.find("# Memory")
         
         assert soul_pos < rule_pos < skill_pos < tools_pos < workflow_pos < memory_pos
 
