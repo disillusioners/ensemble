@@ -240,27 +240,49 @@ app = FastAPI(
 # API Router with /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Access log filter middleware
-class AccessLogFilter(logging.Filter):
-    """Filter that excludes specific paths from access logs."""
+
+# Selective access log middleware - logs only paths we want to see
+class SelectiveAccessLogMiddleware:
+    """Middleware that logs access for paths we want to monitor."""
     
-    # Paths to hide from access logs
-    HIDDEN_PATTERNS = [
-        "/api/instances",
-        # "/api/messages",
-        # "/api/sources",
-        # "/api/schedules",
-        # "/api/agents",
-        # "/api/mappings",
+    # Paths to LOG (instead of hide)
+    LOG_PATTERNS = [
+        "/health",
+        "/api/agents",
+        "/api/jobs",
+        # Add paths you want to see in logs
     ]
     
-    def filter(self, record: logging.LogRecord) -> bool:
-        # Uvicorn access log format: "127.0.0.1:port - "METHOD /path HTTP/x.x" status"
-        if hasattr(record, 'msg') and isinstance(record.msg, str):
-            for pattern in self.HIDDEN_PATTERNS:
-                if pattern in record.msg:
-                    return False
-        return True
+    def __init__(self, app):
+        self.app = app
+    
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        
+        # Extract request info before processing
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        client = scope.get("client")
+        client_addr = f"{client[0]}:{client[1]}" if client else "unknown"
+        
+        status_code = 200  # default
+        
+        async def custom_send(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+            await send(message)
+        
+        # Process the request
+        await self.app(scope, receive, custom_send)
+        
+        # Log after response is sent
+        for pattern in self.LOG_PATTERNS:
+            if path.startswith(pattern):
+                logger.info(f'{client_addr} - "{method} {path} HTTP/1.1" {status_code}')
+                break
 
 
 # Add CORS
@@ -271,9 +293,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure uvicorn access logger to filter hidden paths
-uvicorn_access = logging.getLogger("uvicorn.access")
-uvicorn_access.addFilter(AccessLogFilter())
+# Add selective access log middleware
+app.add_middleware(SelectiveAccessLogMiddleware)
 
 # Global exception handler
 @app.exception_handler(Exception)
