@@ -127,7 +127,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             lambda t: _handle_process_result(t, instance_id)
         )
         
-        return message_id
+        return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     
     send_message._full_doc_ = """Send a message to another instance's input queue.
 
