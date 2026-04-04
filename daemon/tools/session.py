@@ -17,7 +17,7 @@ from .project import create_project_tools
 from .help import create_help_tool
 
 if TYPE_CHECKING:
-    from ..manager import SessionManager
+    from ..manager import InstanceManager
 
 
 class SpawnSessionInput(BaseModel):
@@ -40,7 +40,7 @@ class SpawnSessionInput(BaseModel):
         return self
 
 
-def create_session_tools(manager: "SessionManager", current_session_id: str, agent_id: str = ""):
+def create_session_tools(manager: "InstanceManager", current_session_id: str, agent_id: str = ""):
     """Create tools with injected manager reference.
     
     Args:

@@ -16,31 +16,31 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from .config import Config
-from .graph import build_session_graph
+from .graph import build_instance_graph
 from .llm_error_classifier import ContextLengthExceededError
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
-    get_session_messages,
+    get_instance_messages,
     get_checkpointer,
 )
 from .repositories import (
-    SQLModelSessionRepository,
+    SQLModelInstanceRepository,
     SQLModelProjectRepository,
     SQLModelSourceRepository,
     SQLModelMessageQueueRepository,
     DatabaseConfig,
     create_engine_from_config,
     create_project_repository,
-    create_session_repository,
+    create_instance_repository,
     create_source_repository,
     create_message_queue_repository,
 )
 from .registry import get_registry
 
-from .queue import InputMessageQueue, SessionWatchdog, SessionCircuitBreaker, QueuedMessage
-from .repositories.session.repository import get_agent_name
-from .repositories.session.models import Session
-from .tools import create_session_tools
+from .queue import InputMessageQueue, InstanceWatchdog, InstanceCircuitBreaker, QueuedMessage
+from .repositories.instance.repository import get_agent_name
+from .repositories.instance.models import Instance
+from .tools import create_instance_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .cancellation import (
@@ -251,7 +251,7 @@ def parse_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-class SessionManager:
+class InstanceManager:
     """Manages all agent sessions, their graphs, and lifecycle."""
 
     def __init__(self, config: Config):
@@ -393,13 +393,13 @@ class SessionManager:
                 except Exception as e:
                     logger.error(f"Error triggering retry processing for {session_id[:8]}...: {e}")
         
-        self.watchdog = SessionWatchdog(
+        self.watchdog = InstanceWatchdog(
             self._queue_repository,
             request_registry=self._request_registry,
             on_message_failed=_on_watchdog_message_failed,
             on_retry_ready=_on_watchdog_retry_ready,
         )
-        self.circuit_breaker = SessionCircuitBreaker()
+        self.circuit_breaker = InstanceCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
         self._processing_lock = asyncio.Lock()
         
@@ -412,13 +412,13 @@ class SessionManager:
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode
-        self._session_repository = create_session_repository(engine=self._engine, create_tables=False)
+        self._instance_repository = create_instance_repository(engine=self._engine, create_tables=False)
 
         # NEW: Pluggable message sources system
         self.source_registry = SourceRegistry(
             source_repo=self._source_repository,
             manager=self,
-            session_repo=self._session_repository,
+            session_repo=self._instance_repository,
         )
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,
@@ -532,7 +532,7 @@ class SessionManager:
 
         # Check max_children_per_session limit if parent_id is provided
         if parent_id is not None:
-            parent_meta = self._session_repository.get(parent_id)
+            parent_meta = self._instance_repository.get(parent_id)
             if parent_meta and parent_meta.children:
                 child_count = len(parent_meta.children)
                 if child_count >= self.config.limits.max_children_per_session:
@@ -546,7 +546,7 @@ class SessionManager:
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, resolved_agent_id)
+        tools = create_instance_tools(self, session_id, resolved_agent_id)
 
         # Build LLM config
         llm_config = {
@@ -569,7 +569,7 @@ class SessionManager:
         }
 
         # Build graph with checkpointer
-        graph = build_session_graph(
+        graph = build_instance_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
@@ -592,7 +592,7 @@ class SessionManager:
                 )
             session_metadata["project_id"] = project_id
         
-        self._session_repository.create(
+        self._instance_repository.create(
             session_id=session_id,
             agent_id=resolved_agent_id,
             agent_dir=resolved_agent_dir,
@@ -747,13 +747,13 @@ class SessionManager:
         # Check if this is the first message for this session
         # If so, store the source as root_source in session metadata
         # This preserves the original external source for child sessions that inherit it
-        session_meta = self._session_repository.get(session_id)
+        session_meta = self._instance_repository.get(session_id)
         if session_meta and session_meta.session_metadata is not None:
             if "root_source" not in session_meta.session_metadata:
                 # First message for this session - store the source as root_source
                 # Skip storing for internal agent sources (they start with "agent:")
                 if not source.startswith("agent:"):
-                    self._session_repository.set_metadata(
+                    self._instance_repository.set_metadata(
                         session_id=session_id,
                         key="root_source",
                         value=source
@@ -764,12 +764,12 @@ class SessionManager:
                     # The parent session's metadata should have root_source if it was from external source
                     parent_meta = None
                     if session_meta.parent_id:
-                        parent_meta = self._session_repository.get(session_meta.parent_id)
+                        parent_meta = self._instance_repository.get(session_meta.parent_id)
                     
                     if parent_meta and parent_meta.session_metadata:
                         parent_root = parent_meta.session_metadata.get("root_source")
                         if parent_root:
-                            self._session_repository.set_metadata(
+                            self._instance_repository.set_metadata(
                                 session_id=session_id,
                                 key="root_source",
                                 value=parent_root
@@ -841,7 +841,7 @@ class SessionManager:
             if not self.circuit_breaker.can_execute(session_id):
                 logger.warning(f"Circuit breaker open for session {session_id[:8]}...")
                 # Notify parent if this is a child session with pending messages
-                meta = self._session_repository.get(session_id)
+                meta = self._instance_repository.get(session_id)
                 if meta and meta.parent_id:
                     # Get pending messages (single query, use count from result)
                     pending = self._queue_repository.list(session_id=session_id, status="ready", limit=100)
@@ -865,7 +865,7 @@ class SessionManager:
                 
                 # Check if this is the first message and generate title
                 # Get message count before processing this message
-                existing_messages = await get_session_messages(self.checkpointer, session_id)
+                existing_messages = await get_instance_messages(self.checkpointer, session_id)
                 is_first_message = len(existing_messages) == 0
                 
                 # Check retry_count instead of metadata flag (more reliable)
@@ -891,7 +891,7 @@ class SessionManager:
                     message_content = msg.content
                     if is_first_message:
                         # PRIORITY 1: Use explicit project_id from session metadata
-                        session_meta = self._session_repository.get(session_id)
+                        session_meta = self._instance_repository.get(session_id)
                         explicit_project_id = (
                             session_meta.session_metadata.get("project_id") 
                             if session_meta and session_meta.session_metadata 
@@ -958,7 +958,7 @@ class SessionManager:
                     # Determine the source for the completed event
                     # Root source inheritance: child sessions don't broadcast completed events
                     # Only the root session (parentless) broadcasts with the original external source
-                    meta = self._session_repository.get(session_id)
+                    meta = self._instance_repository.get(session_id)
                     
                     # Skip broadcast entirely if this is a child session
                     if meta and meta.parent_id:
@@ -1081,7 +1081,7 @@ class SessionManager:
             
             # Queue is empty - check if this is a child session and send completion report
             if self._queue_repository.is_empty(session_id):
-                meta = self._session_repository.get(session_id)
+                meta = self._instance_repository.get(session_id)
                 if meta and meta.parent_id:
                     # This is a child session that has completed - send report to parent
                     await self._send_completion_report(session_id)
@@ -1504,7 +1504,7 @@ class SessionManager:
         from langchain_openai import ChatOpenAI
         
         # Get session messages
-        messages = await get_session_messages(self.checkpointer, session_id)
+        messages = await get_instance_messages(self.checkpointer, session_id)
         
         if not messages:
             return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
@@ -1581,7 +1581,7 @@ Provide a concise summary:"""
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
         # Get session metadata
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(session_id)
         if not meta:
             logger.warning(f"Cannot send completion report: session {session_id} not found")
             return
@@ -1653,7 +1653,7 @@ Provide a concise summary:"""
         try:
             # Prevent duplicate error reports - check if we already sent one
             if message_id:
-                meta_check = self._session_repository.get(session_id)
+                meta_check = self._instance_repository.get(session_id)
                 if meta_check and meta_check.parent_id:
                     # Check for existing error report in parent's queue
                     existing = self._queue_repository.list(
@@ -1667,7 +1667,7 @@ Provide a concise summary:"""
                             return
             
             # Get session metadata
-            meta = self._session_repository.get(session_id)
+            meta = self._instance_repository.get(session_id)
             if not meta:
                 logger.warning(f"Cannot send error report: session {session_id} not found")
                 return
@@ -1748,7 +1748,7 @@ Provide a concise summary:"""
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_session_messages(self.checkpointer, session_id)
+        messages = await get_instance_messages(self.checkpointer, session_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1784,7 +1784,7 @@ Provide a concise summary:"""
             return None
         
         # Check if title already exists
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(session_id)
         if meta and meta.session_metadata.get("title"):
             # Title already exists, skip
             logger.debug(f"Title already exists for session {session_id}, skipping generation")
@@ -1845,7 +1845,7 @@ Title:"""
                 title = title[:97] + "..."
             
             # Store title in session metadata
-            self._session_repository.update_title(session_id, title)
+            self._instance_repository.update_title(session_id, title)
             logger.info(f"Generated title for session {session_id}: {title}")
             return title
             
@@ -1867,7 +1867,7 @@ Title:"""
             The number of tokens in the system prompt, or 0 if not found.
         """
         try:
-            meta = self._session_repository.get(session_id)
+            meta = self._instance_repository.get(session_id)
             if not meta:
                 return 0
             # Get cached token count from prompt cache using agent_id
@@ -2003,8 +2003,8 @@ Title:"""
         # Get session metadata BEFORE modifying state (needed for children cascade)
         # Check if _session_repository exists first (not all configs may have it)
         meta = None
-        if hasattr(self, '_session_repository') and self._session_repository:
-            meta = self._session_repository.get(session_id)
+        if hasattr(self, '_session_repository') and self._instance_repository:
+            meta = self._instance_repository.get(session_id)
         
         # Cascade to children FIRST - terminate all child sessions recursively
         if meta and meta.children:
@@ -2030,8 +2030,8 @@ Title:"""
                 return False
 
         # 5. Update DB status to terminated using repository
-        if hasattr(self, '_session_repository') and self._session_repository:
-            self._session_repository.update_status(session_id, "terminated")
+        if hasattr(self, '_session_repository') and self._instance_repository:
+            self._instance_repository.update_status(session_id, "terminated")
 
         # 6. Release project lock if JobQueueService is connected
         if self._job_queue_service is not None:
@@ -2068,7 +2068,7 @@ Title:"""
             return graph
 
         # Not in memory - check database and restore if found
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(session_id)
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
 
@@ -2093,7 +2093,7 @@ Title:"""
         system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, self.prompt_cache)
 
         # Create tools with this manager reference
-        tools = create_session_tools(self, session_id, meta.agent_id)
+        tools = create_instance_tools(self, session_id, meta.agent_id)
 
         # Build LLM config
         llm_config = {
@@ -2116,7 +2116,7 @@ Title:"""
         }
 
         # Build graph with checkpointer (will restore state from checkpoints)
-        graph = build_session_graph(
+        graph = build_instance_graph(
             tools=tools,
             checkpointer=self.checkpointer,
             llm_config=llm_config,
@@ -2141,7 +2141,7 @@ Title:"""
         Returns:
             Tuple of (list of session info dictionaries, total count).
         """
-        sessions, total = self._session_repository.list(limit=limit, offset=offset)
+        sessions, total = self._instance_repository.list(limit=limit, offset=offset)
         # Convert Session objects to dicts for backward compatibility
         return [s.to_dict() for s in sessions], total
 
@@ -2157,7 +2157,7 @@ Title:"""
         Raises:
             KeyError: If session is not found.
         """
-        meta = self._session_repository.get(session_id)
+        meta = self._instance_repository.get(session_id)
         if meta is None:
             raise KeyError(f"Session not found: {session_id}")
         return meta.to_dict()
@@ -2177,7 +2177,7 @@ Title:"""
         # Verify session exists
         self.get_session(session_id)  # raises KeyError if not found
         
-        return await get_session_messages(self.checkpointer, session_id)
+        return await get_instance_messages(self.checkpointer, session_id)
 
     def clear_all_sessions(self) -> int:
         """Clear all sessions from memory and database.
@@ -2192,7 +2192,7 @@ Title:"""
         self.sessions.clear()
 
         # Clear database sessions
-        return self._session_repository.delete_all()
+        return self._instance_repository.delete_all()
     
     async def start_sources(self) -> None:
         """Start the pluggable message sources system.
@@ -2235,6 +2235,68 @@ Title:"""
     def get_source_registry(self) -> SourceRegistry:
         """Get the source registry for adapter management."""
         return self.source_registry
+
+    def _edit_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein edit distance between two strings.
+        
+        Args:
+            s1: First string.
+            s2: Second string.
+            
+        Returns:
+            The minimum number of edit operations (insertions, deletions, substitutions)
+            needed to transform s1 into s2.
+        """
+        if len(s1) < len(s2):
+            return self._edit_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # cost is 0 if characters match, 1 otherwise
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+
+    def find_near_instance(self, instance_id: str, max_distance: int = 2) -> str | None:
+        """Find a near-matching instance ID from recent instances.
+        
+        Searches through recent instances using edit distance to find a close match.
+        Matching is case-insensitive.
+        
+        Args:
+            instance_id: The instance ID to find a near match for.
+            max_distance: Maximum edit distance threshold (default: 2).
+            
+        Returns:
+            The near-matching instance_id if found, None otherwise.
+        """
+        # Get recent instances from repository (ordered by recency)
+        instances, _ = self._instance_repository.list(limit=100, offset=0)
+        
+        # Normalize input for case-insensitive comparison
+        normalized_input = instance_id.lower()
+        
+        for instance in instances:
+            # Skip if length difference exceeds threshold (quick filter)
+            stored_id = instance.instance_id
+            if abs(len(stored_id) - len(instance_id)) > max_distance:
+                continue
+            
+            # Case-insensitive edit distance
+            distance = self._edit_distance(normalized_input, stored_id.lower())
+            if distance <= max_distance:
+                return stored_id
+        
+        return None
 
     def cleanup(self) -> None:
         """Cleanup resources including database connections."""

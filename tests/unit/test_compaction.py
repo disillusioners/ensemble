@@ -30,7 +30,7 @@ from daemon.compaction import (
 )
 from daemon.config import CompactionConfig as CompactionConfigModel
 from daemon.loader import estimate_messages_tokens
-from daemon.manager import SessionManager
+from daemon.manager import InstanceManager
 
 
 # =============================================================================
@@ -838,9 +838,9 @@ class TestCompactionRetrySkip:
         mock_graph = AsyncMock()
         mock_graph.aget_state = AsyncMock(return_value=mock_state)
         
-        # Create SessionManager and mock its internals
-        with patch.object(SessionManager, '__init__', lambda self, **kwargs: None):
-            manager = SessionManager.__new__(SessionManager)
+        # Create InstanceManager and mock its internals
+        with patch.object(InstanceManager, '__init__', lambda self, **kwargs: None):
+            manager = InstanceManager.__new__(InstanceManager)
             manager.config = MagicMock()
             manager.config.llm.model = "gpt-4o"
             manager.config.llm.base_url = "http://localhost:1234/v1"

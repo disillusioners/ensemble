@@ -34,15 +34,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from .models import (
-    SessionCreate,
-    SessionInfo,
+    InstanceCreate,
+    InstanceInfo,
     MessageCreate,
     MessageResponse,
     ErrorResponse,
     ErrorCodes,
-    SessionStatus,
+    InstanceStatus,
     HealthResponse,
-    SessionListResponse,
+    InstanceListResponse,
     AgentInfo,
     AgentListResponse,
     AgentCreate,
@@ -57,9 +57,9 @@ from .models import (
     SourceTestRequest,
     SourceTestResponse,
     # Mapping models
-    SessionMappingCreate,
-    SessionMappingInfo,
-    SessionMappingListResponse,
+    InstanceMappingCreate,
+    InstanceMappingInfo,
+    InstanceMappingListResponse,
     DeleteResponse,
     # Schedule models
     ScheduleInfo,
@@ -69,7 +69,7 @@ from .models import (
     ScheduleExecutionListResponse,
     ScheduleTriggerResponse,
 )
-from .manager import SessionManager
+from .manager import InstanceManager
 from .config import Config, load_config
 from .events import event_to_sse
 from .sources.credentials import CredentialManager
@@ -142,7 +142,7 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 MAX_CREDENTIALS_SIZE = 4096
 
 # Global state
-manager: SessionManager = None
+manager: InstanceManager = None
 start_time: float = None
 credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
@@ -153,7 +153,7 @@ job_processor: JobProcessor = None
 async def lifespan(app: FastAPI):
     global manager, start_time, job_queue_service, job_processor
     config = load_config()
-    manager = SessionManager(config)
+    manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
@@ -178,7 +178,7 @@ async def lifespan(app: FastAPI):
     from daemon.routers.projects import set_project_repository
     set_project_repository(manager._project_repository)
     
-    # Wire JobQueueService into SessionManager for proper cleanup
+    # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
     # Initialize and start JobProcessor
@@ -436,8 +436,8 @@ async def delete_agent(agent_id: str):
 
 
 # 2. POST /sessions - Spawn session
-@api_router.post("/sessions", response_model=SessionInfo, status_code=201)
-async def create_session(session_create: SessionCreate):
+@api_router.post("/sessions", response_model=InstanceInfo, status_code=201)
+async def create_session(session_create: InstanceCreate):
     """Spawn a new session."""
     try:
         # Prefer agent_id over agent_dir
@@ -466,11 +466,11 @@ async def create_session(session_create: SessionCreate):
 
     # Get session info from database
     session_meta = manager.get_session_info(session_id)
-    return SessionInfo(
+    return InstanceInfo(
         session_id=session_meta["session_id"],
         agent_id=session_meta["agent_id"],
         agent_dir=session_meta["agent_dir"],
-        status=SessionStatus(session_meta["status"]),
+        status=InstanceStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
         children=session_meta.get("children", []),
         created_at=datetime.fromisoformat(session_meta["created_at"]).replace(tzinfo=timezone.utc) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
@@ -479,7 +479,7 @@ async def create_session(session_create: SessionCreate):
 
 
 # 3. GET /sessions - List sessions
-@api_router.get("/sessions", response_model=SessionListResponse)
+@api_router.get("/sessions", response_model=InstanceListResponse)
 async def list_sessions(
     limit: int = 20,
     offset: int = 0
@@ -497,11 +497,11 @@ async def list_sessions(
     sessions_data, total = manager.list_sessions(limit=limit, offset=offset)
     sessions = []
     for sess in sessions_data:
-        sessions.append(SessionInfo(
+        sessions.append(InstanceInfo(
             session_id=sess["session_id"],
             agent_id=sess["agent_id"],
             agent_dir=sess["agent_dir"],
-            status=SessionStatus(sess["status"]),
+            status=InstanceStatus(sess["status"]),
             parent_id=sess.get("parent_id"),
             children=sess.get("children", []),
             title=sess.get("title"),
@@ -511,7 +511,7 @@ async def list_sessions(
     
     has_more = (offset + limit) < total
     
-    return SessionListResponse(
+    return InstanceListResponse(
         sessions=sessions,
         total=total,
         limit=limit,
@@ -521,7 +521,7 @@ async def list_sessions(
 
 
 # 4. GET /sessions/{session_id} - Get session info
-@api_router.get("/sessions/{session_id}", response_model=SessionInfo)
+@api_router.get("/sessions/{session_id}", response_model=InstanceInfo)
 async def get_session(session_id: str):
     """Get session information."""
     try:
@@ -535,11 +535,11 @@ async def get_session(session_id: str):
             ).model_dump()
         )
 
-    return SessionInfo(
+    return InstanceInfo(
         session_id=session_meta["session_id"],
         agent_id=session_meta["agent_id"],
         agent_dir=session_meta["agent_dir"],
-        status=SessionStatus(session_meta["status"]),
+        status=InstanceStatus(session_meta["status"]),
         parent_id=session_meta.get("parent_id"),
         children=session_meta.get("children", []),
         title=session_meta.get("title"),
@@ -1174,7 +1174,7 @@ async def stop_source(source_id: str):
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source
-@api_router.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
+@api_router.get("/sources/{source_id}/mappings", response_model=InstanceMappingListResponse)
 async def list_mappings(source_id: str):
     """List all session mappings for a source."""
     # Check source exists
@@ -1191,7 +1191,7 @@ async def list_mappings(source_id: str):
     mappings_data = manager._source_repository.list_session_mappings(source_id)
     mappings = []
     for m in mappings_data:
-        mappings.append(SessionMappingInfo(
+        mappings.append(InstanceMappingInfo(
             mapping_id=m.mapping_id,
             source_id=m.source_id,
             external_user_id=m.external_user_id,
@@ -1202,12 +1202,12 @@ async def list_mappings(source_id: str):
             last_message_at=datetime.fromisoformat(m.last_message_at).replace(tzinfo=timezone.utc) if m.last_message_at and isinstance(m.last_message_at, str) else m.last_message_at,
             created_at=datetime.fromisoformat(m.created_at).replace(tzinfo=timezone.utc) if isinstance(m.created_at, str) else m.created_at,
         ))
-    return SessionMappingListResponse(mappings=mappings)
+    return InstanceMappingListResponse(mappings=mappings)
 
 
 # POST /sources/{source_id}/mappings - Create or update a mapping
-@api_router.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
-async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
+@api_router.post("/sources/{source_id}/mappings", response_model=InstanceMappingInfo, status_code=201)
+async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     """Create a session mapping for an external user."""
     import uuid
     
@@ -1283,7 +1283,7 @@ async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
     
     # Get the saved mapping
     saved = manager._source_repository.get_session_mapping(source_id, mapping_create.external_user_id)
-    return SessionMappingInfo(
+    return InstanceMappingInfo(
         mapping_id=saved.mapping_id,
         source_id=saved.source_id,
         external_user_id=saved.external_user_id,

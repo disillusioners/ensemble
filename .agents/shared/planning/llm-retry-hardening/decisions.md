@@ -63,22 +63,65 @@
 
 ---
 
-## ADR-004: Context overflow as permanent error (no retry)
+## ADR-004: Reactive compaction for context overflow (REVISED)
 
-**Decision**: Detect `context_length_exceeded` errors and immediately fail the message without retry. Send a clear error report to the parent agent.
+**Decision**: When `context_length_exceeded` is detected, attempt reactive compaction using the existing `ContextCompactor` and retry the LLM call once. If compaction fails or the retry still exceeds context, fail immediately with a clear error report to the parent agent — no queue-level retry.
 
-**Context**: `context_length_exceeded` is a permanent error — the context is too large for the model. Retrying with the same context will produce the same error. Currently, this error falls through to the generic queue retry handler, wasting 5 retry cycles (each producing the same error).
+**Context**: The compaction feature (`daemon/compaction.py`) is now fully merged. It provides proactive compaction (triggered at 80% threshold before each message processing via `_maybe_compact_context`). However, proactive compaction is best-effort and based on token estimation — it can miss edge cases where the actual LLM call exceeds the context limit. The gap: `context_length_exceeded` errors from the LLM have no recovery handler.
 
-**Rationale**: Context overflow cannot be resolved by retrying. Until compaction is built (separate project), the only correct action is to fail fast and report clearly. The parent agent needs to know *why* it failed so it can take corrective action (e.g., summarize the conversation, reduce tool output, start a new session).
+**Previous decision (ADR-004 v1)**: Context overflow is permanent, fail immediately. This was made when compaction didn't exist.
 
-**Implementation note**: `openai.BadRequestError` IS A SUBCLASS of `openai.APIStatusError`. The `except BadRequestError` clause MUST appear BEFORE `except APIStatusError` in the classifier, or context overflow detection is dead code (Bug 1 from review).
+**Architecture constraint**: Reactive compaction MUST happen at the graph/node level, NOT inside `with_retry`'s scope. Reason:
+1. Compaction modifies graph state (removes messages via `RemoveMessage` sentinels through `aupdate_state()`)
+2. The retry needs to re-invoke the LLM with the compacted (smaller) message list
+3. `with_retry` only retries the same call with same inputs — it cannot change state between retries
+
+**Flow**:
+```
+agent_node(state)
+  └─ llm_with_tools.invoke(full_messages)
+       ├─ LLMErrorClassifier._run_with_classification()
+       │    ├─ invoke() → BadRequestError(context_length_exceeded)
+       │    └─ raises ContextLengthExceededError  ← NOT in TRANSIENT_EXCEPTIONS
+       └─ with_retry sees ContextLengthExceededError → NOT retried by with_retry
+            → propagates to agent_node
+  except ContextLengthExceededError:
+       ├─ compactor is available?
+       │    ├─ YES → compactor.compact_state(context) → aupdate_state → retry invoke()
+       │    │         └─ still fails? → raise ContextLengthExceededError (permanent)
+       │    └─ NO → raise ContextLengthExceededError (permanent)
+       └─ ContextLengthExceededError reaches manager
+            → fail immediately, clear error report, NO queue retry
+```
+
+**Options considered**:
+1. **Reactive compaction in agent_node + single retry** — Catch `ContextLengthExceededError` in the node, compact, retry once ✅ CHOSEN
+2. **Fail immediately (ADR-004 v1)** — No recovery, just report — **NOW UNNECESSARY** — compaction exists and works
+3. **Compaction inside with_retry** — Custom retry that modifies state between attempts → **NOT POSSIBLE** — `with_retry` doesn't support state mutation
+4. **Manager-level compaction** — Catch in manager, compact, re-invoke graph → **WRONG LAYER** — loses graph execution context, wastes a full graph invocation cycle
+
+**Rationale**: Option 1 is the natural fit. The agent node is the right scope because:
+- It has access to graph state (messages)
+- It can call the compactor which uses `aupdate_state()` to modify the graph
+- It can immediately retry the LLM call with the compacted state
+- If compaction works, the user sees success instead of an error
+- If it doesn't work, we fail once (not 5 times like the current bug)
+
+**Interaction with proactive compaction**:
+- Proactive compaction runs BEFORE each graph invocation (in `_process_queue_via_streaming`/`_process_message`)
+- Proactive is best-effort estimation; reactive is authoritative (the LLM itself said "too big")
+- After reactive compaction, the session state is updated, so subsequent invocations see the compacted state
+- The `compacted_at` dedup field prevents compaction from running twice in quick succession
 
 **Consequences**:
-- (+) Saves 5 wasted retry cycles (currently ~5-10 minutes of wall clock time)
-- (+) Parent agent gets actionable error information
-- (+) Clear separation between transient and permanent errors
-- (-) No automatic recovery until compaction is implemented
-- (-) Long conversations will fail permanently (known limitation)
+- (+) Context overflow becomes recoverable (not permanent failure)
+- (+) Saves 5 wasted retry cycles from old behavior
+- (+) Clear error when compaction can't help (truly too large even after compaction)
+- (+) Natural integration — compactor already exists, just needs to be wired into the node
+- (-) `create_agent_node` needs an optional `compactor` parameter (minor API change)
+- (-) Agent node complexity increases (compaction + retry logic)
+- (-) Compaction during LLM call adds latency (one LLM call for summarization)
+- (-) Edge case: compaction summarization itself could fail (handled by truncation fallback)
 
 ---
 
@@ -119,3 +162,33 @@
 - (+) Budget is configurable per deployment
 - (-) A burst of mixed failures could exhaust budget faster than expected
 - (-) No granular control over retry allocation between error types
+
+---
+
+## ADR-007: Compaction at node level, not inside with_retry
+
+**Decision**: Reactive compaction runs in `agent_node` (the LangGraph node function), NOT inside the `LLMErrorClassifier` or `with_retry` scope.
+
+**Context**: When `ContextLengthExceededError` occurs, we need to: (1) compact the conversation history, (2) update graph state via `aupdate_state()`, (3) re-invoke the LLM with the smaller message list. This requires graph state mutation between the failed call and the retry.
+
+**Why NOT in the classifier / with_retry**:
+- `with_retry` wraps a callable and retries it with the SAME inputs. It has no mechanism to modify inputs between attempts.
+- The classifier is a `RunnableLambda` — a stateless function. It has no access to `graph.aupdate_state()` or the compactor.
+- Compaction needs the `CompiledStateGraph` reference and the thread config to call `aupdate_state()`.
+
+**Why in agent_node**:
+- `agent_node` is created by `create_agent_node(llm_with_tools, system_prompt, compactor=None, graph=None, config=None)`. It can hold references to the compactor, graph, and config.
+- When `ContextLengthExceededError` is caught, agent_node can: call `compactor.compact_state()`, call `graph.aupdate_state()` to apply `RemoveMessage` sentinels, rebuild `full_messages` from the updated state, and retry `llm_with_tools.invoke()`.
+- The retry is explicit (one attempt) rather than implicit (retry loop).
+
+**Why pass compactor into create_agent_node (dependency injection)**:
+- The compactor is owned by the `SessionManager` (initialized in `__init__` based on config).
+- `build_instance_graph` doesn't know about the compactor — it just builds the graph structure.
+- By injecting the compactor at `create_agent_node` time, we keep `build_instance_graph` clean and let the manager wire up the compactor when it creates the node.
+
+**Consequences**:
+- (+) Clean separation: classifier classifies, node handles recovery
+- (+) `with_retry` remains simple (only handles transient errors)
+- (+) Compactor is optional (graceful degradation if compaction is disabled)
+- (-) `create_agent_node` gains 3 optional parameters (compactor, graph, config)
+- (-) Node function is no longer pure — it has a side effect (state mutation via compaction)
