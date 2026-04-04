@@ -378,7 +378,7 @@ class InstanceManager:
             on_retry_ready=_on_watchdog_retry_ready,
         )
         self.circuit_breaker = InstanceCircuitBreaker()
-        self._processing: set[str] = set()  # sessions currently processing
+        self._processing: set[str] = set()  # instance currently processing
         self._processing_lock = asyncio.Lock()
         
         # NEW: Event broadcaster for real-time SSE updates
@@ -2066,7 +2066,10 @@ Title:"""
 
         Returns:
             Instance metadata dictionary with queue info added.
-            If status is IDLE and there are pending messages, status is changed to QUEUED.
+            Status logic:
+            - RUNNING if currently processing messages (in _processing or processing_count > 0)
+            - QUEUED if idle but has pending messages
+            - Otherwise preserves original status
 
         Raises:
             KeyError: If instance is not found.
@@ -2079,13 +2082,24 @@ Title:"""
         
         # Get queue stats
         queue_stats = self._queue_repository.get_stats(instance_id)
-        queued_messages_count = queue_stats.get("pending_count", 0)
+        pending_count = queue_stats.get("pending_count", 0)
+        processing_count = queue_stats.get("processing_count", 0)
         
-        # Add queued_messages_count to result
-        result["queued_messages_count"] = queued_messages_count
+        # Add queue info to result
+        result["queued_messages_count"] = pending_count
         
-        # If idle but has queued messages, change status to QUEUED
-        if meta.status == InstanceStatus.IDLE.value and queued_messages_count > 0:
+        # Determine effective status
+        # Check if actually running (processing messages)
+        is_processing = (
+            instance_id in self._processing 
+            or processing_count > 0
+            or meta.status == InstanceStatus.RUNNING.value
+        )
+        
+        if is_processing:
+            result["status"] = InstanceStatus.RUNNING.value
+        elif pending_count > 0 and meta.status == InstanceStatus.IDLE.value:
+            # Has queued messages but not yet processing
             result["status"] = InstanceStatus.QUEUED.value
         
         return result
