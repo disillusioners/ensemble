@@ -35,7 +35,7 @@ def main():
         "daemon.api:app",
         host=config.daemon.host,
         port=config.daemon.port,
-        reload=False
+        reload=False,
     )
 
 if __name__ == "__main__":

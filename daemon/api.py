@@ -240,6 +240,29 @@ app = FastAPI(
 # API Router with /api prefix
 api_router = APIRouter(prefix="/api")
 
+# Access log filter middleware
+class AccessLogFilter(logging.Filter):
+    """Filter that excludes specific paths from access logs."""
+    
+    # Paths to hide from access logs
+    HIDDEN_PATTERNS = [
+        "/api/instances",
+        # "/api/messages",
+        # "/api/sources",
+        # "/api/schedules",
+        # "/api/agents",
+        # "/api/mappings",
+    ]
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn access log format: "127.0.0.1:port - "METHOD /path HTTP/x.x" status"
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            for pattern in self.HIDDEN_PATTERNS:
+                if pattern in record.msg:
+                    return False
+        return True
+
+
 # Add CORS
 app.add_middleware(
     CORSMiddleware,
@@ -247,6 +270,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Configure uvicorn access logger to filter hidden paths
+uvicorn_access = logging.getLogger("uvicorn.access")
+uvicorn_access.addFilter(AccessLogFilter())
 
 # Global exception handler
 @app.exception_handler(Exception)
