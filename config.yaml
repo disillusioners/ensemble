@@ -12,19 +12,19 @@ llm:
 # Server Configuration  
 daemon:
   host: ${HOST:-0.0.0.0}
-  port: ${PORT:-8079}
+  port: ${PORT:-8088}
 
 # Session Limits
 limits:
-  max_instances: 100
-  max_children_per_instance: 50
-  instance_timeout_minutes: 60
+  max_sessions: 100
+  max_children_per_session: 10
+  session_timeout_minutes: 60
   message_rate_limit: 60
   graph_recursion_limit: 200
 
 # Persistence Settings
 persistence:
-  db_path: ./data/instances.db
+  db_path: ./data/sessions.db
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24

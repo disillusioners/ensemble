@@ -11,7 +11,6 @@ import time
 import logging
 import asyncio
 import json
-import difflib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, APIRouter
@@ -35,15 +34,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from .models import (
-    InstanceCreate,
-    InstanceInfo,
-    InstanceStatus,
+    SessionCreate,
+    SessionInfo,
     MessageCreate,
     MessageResponse,
     ErrorResponse,
     ErrorCodes,
+    SessionStatus,
     HealthResponse,
-    InstanceListResponse,
+    SessionListResponse,
     AgentInfo,
     AgentListResponse,
     AgentCreate,
@@ -58,9 +57,9 @@ from .models import (
     SourceTestRequest,
     SourceTestResponse,
     # Mapping models
-    InstanceMappingCreate,
-    InstanceMappingInfo,
-    InstanceMappingListResponse,
+    SessionMappingCreate,
+    SessionMappingInfo,
+    SessionMappingListResponse,
     DeleteResponse,
     # Schedule models
     ScheduleInfo,
@@ -70,7 +69,7 @@ from .models import (
     ScheduleExecutionListResponse,
     ScheduleTriggerResponse,
 )
-from .manager import InstanceManager
+from .manager import SessionManager
 from .config import Config, load_config
 from .events import event_to_sse
 from .sources.credentials import CredentialManager
@@ -100,38 +99,11 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     # Check agent exists
     metadata = registry.get(agent_id)
     if metadata is None:
-        # Check if it's a skill (not an agent)
-        agents_with_skill = registry.find_skill(agent_id)
-        if agents_with_skill:
-            available_agents = [a.id for a in registry.list_all() if not a.system]
-            if not available_agents:
-                agents_msg = "No agents are currently registered."
-            else:
-                agents_msg = f"Available agents: {', '.join(available_agents)}."
-            raise HTTPException(
-                status_code=404,
-                detail=ErrorResponse(
-                    code=ErrorCodes.INVALID_REQUEST,
-                    message=f"'{agent_id}' is a skill, not an agent. "
-                            f"Skills are used by agents. Available agents with this skill: {agents_with_skill}. "
-                            f"{agents_msg}"
-                ).model_dump()
-            )
-
-        # Suggest close match for typos
-        available_agents = [a.id for a in registry.list_all() if not a.system]
-        suggestion = difflib.get_close_matches(agent_id, available_agents, cutoff=0.6, n=1)
-        suggestion_msg = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
-        if not available_agents:
-            agents_msg = "No agents are currently registered."
-        else:
-            agents_msg = f"Available agents: {', '.join(available_agents)}."
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=f"Agent not found: {agent_id}. "
-                        f"{agents_msg}{suggestion_msg}"
+                message=f"Agent not found: {agent_id}"
             ).model_dump()
         )
     
@@ -170,7 +142,7 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 MAX_CREDENTIALS_SIZE = 4096
 
 # Global state
-manager: InstanceManager = None
+manager: SessionManager = None
 start_time: float = None
 credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
@@ -181,7 +153,7 @@ job_processor: JobProcessor = None
 async def lifespan(app: FastAPI):
     global manager, start_time, job_queue_service, job_processor
     config = load_config()
-    manager = InstanceManager(config)
+    manager = SessionManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
@@ -206,13 +178,13 @@ async def lifespan(app: FastAPI):
     from daemon.routers.projects import set_project_repository
     set_project_repository(manager._project_repository)
     
-    # Wire JobQueueService into InstanceManager for proper cleanup
+    # Wire JobQueueService into SessionManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
     # Initialize and start JobProcessor
     job_processor = JobProcessor(
         queue_service=job_queue_service,
-        instance_manager=manager,
+        session_manager=manager,
         project_repo=manager._project_repository,
         poll_interval=2.0,
     )
@@ -240,29 +212,6 @@ app = FastAPI(
 # API Router with /api prefix
 api_router = APIRouter(prefix="/api")
 
-# Access log filter middleware
-class AccessLogFilter(logging.Filter):
-    """Filter that excludes specific paths from access logs."""
-    
-    # Paths to hide from access logs
-    HIDDEN_PATTERNS = [
-        "/api/instances",
-        # "/api/messages",
-        # "/api/sources",
-        # "/api/schedules",
-        # "/api/agents",
-        # "/api/mappings",
-    ]
-    
-    def filter(self, record: logging.LogRecord) -> bool:
-        # Uvicorn access log format: "127.0.0.1:port - "METHOD /path HTTP/x.x" status"
-        if hasattr(record, 'msg') and isinstance(record.msg, str):
-            for pattern in self.HIDDEN_PATTERNS:
-                if pattern in record.msg:
-                    return False
-        return True
-
-
 # Add CORS
 app.add_middleware(
     CORSMiddleware,
@@ -270,10 +219,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure uvicorn access logger to filter hidden paths
-uvicorn_access = logging.getLogger("uvicorn.access")
-uvicorn_access.addFilter(AccessLogFilter())
 
 # Global exception handler
 @app.exception_handler(Exception)
@@ -309,12 +254,12 @@ async def list_agents():
     
     if agents_dir.exists():
         for agent_path in sorted(agents_dir.iterdir()):
-            # Skip hidden directories (starting with .) and internal directories (starting with _)
+            # Skip hidden directories (starting with .) and non-directories
             if not agent_path.is_dir() or agent_path.name.startswith("."):
                 continue
             
             # Skip special internal directories that aren't agents
-            if agent_path.name.startswith("_"):
+            if agent_path.name in ("_trash", "_baby_template"):
                 continue
             
             meta_path = agent_path / "meta.json"
@@ -490,15 +435,15 @@ async def delete_agent(agent_id: str):
         )
 
 
-# 2. POST /instances - Spawn instance
-@api_router.post("/instances", response_model=InstanceInfo, status_code=201)
-async def create_instance(instance_create: InstanceCreate):
-    """Spawn a new instance."""
+# 2. POST /sessions - Spawn session
+@api_router.post("/sessions", response_model=SessionInfo, status_code=201)
+async def create_session(session_create: SessionCreate):
+    """Spawn a new session."""
     try:
         # Prefer agent_id over agent_dir
-        instance_id = manager.spawn_instance(
-            agent_id=instance_create.agent_id,
-            instance_id=instance_create.instance_id,
+        session_id = manager.spawn_session(
+            agent_id=session_create.agent_id,
+            session_id=session_create.session_id,
         )
     except ValueError as e:
         error_msg = str(e)
@@ -506,7 +451,7 @@ async def create_instance(instance_create: InstanceCreate):
             raise HTTPException(
                 status_code=429,
                 detail=ErrorResponse(
-                    code=ErrorCodes.MAX_INSTANCES_EXCEEDED,
+                    code=ErrorCodes.MAX_SESSIONS_EXCEEDED,
                     message=error_msg
                 ).model_dump()
             )
@@ -519,44 +464,44 @@ async def create_instance(instance_create: InstanceCreate):
                 ).model_dump()
             )
 
-    # Get instance info from database
-    instance_meta = manager.get_instance_info(instance_id)
-    return InstanceInfo(
-        instance_id=instance_meta["instance_id"],
-        agent_id=instance_meta["agent_id"],
-        agent_dir=instance_meta["agent_dir"],
-        status=InstanceStatus(instance_meta["status"]),
-        parent_id=instance_meta.get("parent_id"),
-        children=instance_meta.get("children", []),
-        created_at=datetime.fromisoformat(instance_meta["created_at"]).replace(tzinfo=timezone.utc) if isinstance(instance_meta["created_at"], str) else instance_meta["created_at"],
-        updated_at=datetime.fromisoformat(instance_meta["updated_at"]).replace(tzinfo=timezone.utc) if instance_meta.get("updated_at") and isinstance(instance_meta["updated_at"], str) else instance_meta.get("updated_at"),
+    # Get session info from database
+    session_meta = manager.get_session_info(session_id)
+    return SessionInfo(
+        session_id=session_meta["session_id"],
+        agent_id=session_meta["agent_id"],
+        agent_dir=session_meta["agent_dir"],
+        status=SessionStatus(session_meta["status"]),
+        parent_id=session_meta.get("parent_id"),
+        children=session_meta.get("children", []),
+        created_at=datetime.fromisoformat(session_meta["created_at"]).replace(tzinfo=timezone.utc) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
+        updated_at=datetime.fromisoformat(session_meta["updated_at"]).replace(tzinfo=timezone.utc) if session_meta.get("updated_at") and isinstance(session_meta["updated_at"], str) else session_meta.get("updated_at"),
     )
 
 
-# 3. GET /instances - List instances
-@api_router.get("/instances", response_model=InstanceListResponse)
-async def list_instances(
-    limit: int = 100,
+# 3. GET /sessions - List sessions
+@api_router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(
+    limit: int = 20,
     offset: int = 0
 ):
-    """List instances with pagination.
+    """List sessions with pagination.
     
     Args:
-        limit: Maximum number of instances to return (default: 100, max: 100).
-        offset: Number of instances to skip (default: 0, min: 0).
+        limit: Maximum number of sessions to return (default: 20, max: 100).
+        offset: Number of sessions to skip (default: 0, min: 0).
     """
     # Input validation
     limit = max(1, min(limit, 100))  # Clamp to 1-100
     offset = max(0, offset)  # Ensure non-negative
     
-    sessions_data, total = manager.list_instances(limit=limit, offset=offset)
-    instances = []
+    sessions_data, total = manager.list_sessions(limit=limit, offset=offset)
+    sessions = []
     for sess in sessions_data:
-        instances.append(InstanceInfo(
-            instance_id=sess["instance_id"],
+        sessions.append(SessionInfo(
+            session_id=sess["session_id"],
             agent_id=sess["agent_id"],
             agent_dir=sess["agent_dir"],
-            status=InstanceStatus(sess["status"]),
+            status=SessionStatus(sess["status"]),
             parent_id=sess.get("parent_id"),
             children=sess.get("children", []),
             title=sess.get("title"),
@@ -566,8 +511,8 @@ async def list_instances(
     
     has_more = (offset + limit) < total
     
-    return InstanceListResponse(
-        instances=instances,
+    return SessionListResponse(
+        sessions=sessions,
         total=total,
         limit=limit,
         offset=offset,
@@ -575,75 +520,75 @@ async def list_instances(
     )
 
 
-# 4. GET /instances/{instance_id} - Get instance info
-@api_router.get("/instances/{instance_id}", response_model=InstanceInfo)
-async def get_instance(instance_id: str):
-    """Get instance information."""
+# 4. GET /sessions/{session_id} - Get session info
+@api_router.get("/sessions/{session_id}", response_model=SessionInfo)
+async def get_session(session_id: str):
+    """Get session information."""
     try:
-        instance_meta = manager.get_instance_info(instance_id)
+        session_meta = manager.get_session_info(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
 
-    return InstanceInfo(
-        instance_id=instance_meta["instance_id"],
-        agent_id=instance_meta["agent_id"],
-        agent_dir=instance_meta["agent_dir"],
-        status=InstanceStatus(instance_meta["status"]),
-        parent_id=instance_meta.get("parent_id"),
-        children=instance_meta.get("children", []),
-        title=instance_meta.get("title"),
-        created_at=datetime.fromisoformat(instance_meta["created_at"]) if isinstance(instance_meta["created_at"], str) else instance_meta["created_at"],
-        updated_at=datetime.fromisoformat(instance_meta["updated_at"]) if instance_meta.get("updated_at") and isinstance(instance_meta["updated_at"], str) else instance_meta.get("updated_at"),
+    return SessionInfo(
+        session_id=session_meta["session_id"],
+        agent_id=session_meta["agent_id"],
+        agent_dir=session_meta["agent_dir"],
+        status=SessionStatus(session_meta["status"]),
+        parent_id=session_meta.get("parent_id"),
+        children=session_meta.get("children", []),
+        title=session_meta.get("title"),
+        created_at=datetime.fromisoformat(session_meta["created_at"]) if isinstance(session_meta["created_at"], str) else session_meta["created_at"],
+        updated_at=datetime.fromisoformat(session_meta["updated_at"]) if session_meta.get("updated_at") and isinstance(session_meta["updated_at"], str) else session_meta.get("updated_at"),
     )
 
 
-# 5. DELETE /instances/{instance_id} - Terminate instance
-@api_router.delete("/instances/{instance_id}")
-async def terminate_instance(instance_id: str):
-    """Terminate an instance."""
-    # Check instance exists
+# 5. DELETE /sessions/{session_id} - Terminate session
+@api_router.delete("/sessions/{session_id}")
+async def terminate_session(session_id: str):
+    """Terminate a session."""
+    # Check session exists
     try:
-        manager.get_instance(instance_id)
+        manager.get_session(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
 
-    manager.terminate_instance(instance_id)
+    manager.terminate_session(session_id)
     
     return {"terminated": True}
 
 
-# 6. POST /instances/{instance_id}/messages - Send message
-@api_router.post("/instances/{instance_id}/messages", response_model=MessageResponse)
-async def send_message(instance_id: str, message: MessageCreate):
-    """Send a message to an instance (async via queue)."""
-    # Check instance exists
+# 6. POST /sessions/{session_id}/messages - Send message
+@api_router.post("/sessions/{session_id}/messages", response_model=MessageResponse)
+async def send_message(session_id: str, message: MessageCreate):
+    """Send a message to a session (async via queue)."""
+    # Check session exists
     try:
-        manager.get_instance(instance_id)
+        manager.get_session(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
 
     # Enqueue the message (non-blocking)
     try:
         result = await manager.enqueue_message(
-            instance_id=instance_id,
+            session_id=session_id,
             message=message.content,
             source="api"
         )
@@ -670,28 +615,28 @@ async def send_message(instance_id: str, message: MessageCreate):
     )
 
 
-# 7. GET /instances/{instance_id}/messages/{message_id} - Get message status
-@api_router.get("/instances/{instance_id}/messages/{message_id}")
-async def get_message_status(instance_id: str, message_id: str):
+# 7. GET /sessions/{session_id}/messages/{message_id} - Get message status
+@api_router.get("/sessions/{session_id}/messages/{message_id}")
+async def get_message_status(session_id: str, message_id: str):
     """Get the status of a queued message."""
-    # Check instance exists
+    # Check session exists
     try:
-        manager.get_instance(instance_id)
+        manager.get_session(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
     
     # Get queue stats
-    stats = manager.get_queue_stats(instance_id)
+    stats = manager.get_queue_stats(session_id)
     
     return {
         "message_id": message_id,
-        "instance_id": instance_id,
+        "session_id": session_id,
         "queue_stats": {
             "pending_count": stats.pending_count,
             "processing_count": stats.processing_count,
@@ -700,52 +645,52 @@ async def get_message_status(instance_id: str, message_id: str):
     }
 
 
-# 8. GET /instances/{instance_id}/messages - Get message history
-@api_router.get("/instances/{instance_id}/messages")
-async def get_messages(instance_id: str):
-    """Get message history for an instance."""
-    # Check instance exists
+# 8. GET /sessions/{session_id}/messages - Get message history
+@api_router.get("/sessions/{session_id}/messages")
+async def get_messages(session_id: str):
+    """Get message history for a session."""
+    # Check session exists
     try:
-        manager.get_instance(instance_id)
+        manager.get_session(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
 
     # Get message history from LangGraph checkpoints
-    return await manager.get_messages(instance_id)
+    return await manager.get_messages(session_id)
 
 
-# 9. GET /instances/{instance_id}/events - SSE stream
-@api_router.get("/instances/{instance_id}/events")
-async def stream_events(instance_id: str, request: Request):
-    """SSE stream for instance events."""
-    # Check instance exists
+# 9. GET /sessions/{session_id}/events - SSE stream
+@api_router.get("/sessions/{session_id}/events")
+async def stream_events(session_id: str, request: Request):
+    """SSE stream for session events."""
+    # Check session exists
     try:
-        manager.get_instance(instance_id)
+        manager.get_session(session_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
+                code=ErrorCodes.SESSION_NOT_FOUND,
+                message=f"Session not found: {session_id}"
             ).model_dump()
         )
 
     broadcaster = manager.broadcaster
 
     async def event_generator() -> AsyncGenerator[dict, None]:
-        """Generate SSE events for the instance."""
+        """Generate SSE events for the session."""
         import asyncio
         import json
         
         try:
             # Send initial connection event
-            yield {"event": "connected", "data": json.dumps({"instance_id": instance_id})}
+            yield {"event": "connected", "data": json.dumps({"session_id": session_id})}
 
             # Handle reconnection - get Last-Event-ID header
             last_event_id = request.headers.get("Last-Event-ID")
@@ -753,25 +698,25 @@ async def stream_events(instance_id: str, request: Request):
                 try:
                     last_id = int(last_event_id)
                     # Send missed events for reconnection
-                    missed_events = broadcaster.get_events_since(instance_id, last_id)
+                    missed_events = broadcaster.get_events_since(session_id, last_id)
                     for event in missed_events:
                         yield event_to_sse(event)
-                    logger.debug(f"Replayed {len(missed_events)} events for instance {instance_id}")
+                    logger.debug(f"Replayed {len(missed_events)} events for session {session_id}")
                 except ValueError:
                     logger.warning(f"Invalid Last-Event-ID header: {last_event_id}")
 
             # Clear any stale events from previous connection
-            broadcaster.clear_queue(instance_id)
+            broadcaster.clear_queue(session_id)
             
-            # Get the event queue for this instance
-            queue = await broadcaster.get_queue(instance_id)
-            logger.info(f"SSE connected to instance {instance_id}, queue ready")
+            # Get the event queue for this session
+            queue = await broadcaster.get_queue(session_id)
+            logger.info(f"SSE connected to session {session_id}, queue ready")
 
             event_count = 0
             while True:
                 # Check for client disconnect
                 if await request.is_disconnected():
-                    logger.info(f"Client disconnected from instance {instance_id} after {event_count} events")
+                    logger.info(f"Client disconnected from session {session_id} after {event_count} events")
                     break
 
                 try:
@@ -780,14 +725,14 @@ async def stream_events(instance_id: str, request: Request):
                     event_count += 1
                     # Log every 50 events to track consumption rate
                     if event_count % 50 == 0:
-                        logger.debug(f"SSE sent {event_count} events for instance {instance_id}, queue size: {queue.qsize()}")
+                        logger.debug(f"SSE sent {event_count} events for session {session_id}, queue size: {queue.qsize()}")
                     yield event_to_sse(event)
                 except asyncio.TimeoutError:
                     # Send keepalive to prevent connection timeout
                     yield {"event": "keepalive", "data": "{}"}
                 except Exception as e:
                     # Log the error but continue the stream for transient errors
-                    logger.error(f"Error retrieving event for instance {instance_id}: {e}")
+                    logger.error(f"Error retrieving event for session {session_id}: {e}")
                     # Only break on fatal errors, not transient ones
                     if isinstance(e, (asyncio.CancelledError, asyncio.InvalidStateError)):
                         yield {
@@ -802,7 +747,7 @@ async def stream_events(instance_id: str, request: Request):
                     }
         except Exception as e:
             # Catch-all for generator errors
-            logger.exception(f"Fatal error in event generator for instance {instance_id}")
+            logger.exception(f"Fatal error in event generator for session {session_id}")
             yield {
                 "event": "error",
                 "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
@@ -861,20 +806,22 @@ async def create_source(source_create: SourceCreate):
             ).model_dump()
         )
     
-    # For scheduler sources, validate instance_mode in config
-    instance_mode = source_create.config.get("instance_mode")
-    validated = validate_instance_mode(
-        instance_mode=instance_mode,
-        config=source_create.config
-    )
-    final_config = {**source_create.config, **validated}
-    
-    # If instance_mode is reuse_instance, enforce max_concurrent = 1
-    if final_config.get("instance_mode") == "reuse_instance":
-        current_max = final_config.get("max_concurrent")
-        if current_max is not None and current_max != 1:
-            logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_instance mode")
-            final_config["max_concurrent"] = 1
+    # For scheduler sources, validate session_mode in config
+    final_config = source_create.config
+    if source_create.source_type.value == "scheduler" and source_create.config:
+        session_mode = source_create.config.get("session_mode")
+        validated = validate_session_mode(
+            session_mode=session_mode,
+            config=source_create.config
+        )
+        final_config = {**source_create.config, **validated}
+        
+        # If session_mode is reuse_session, enforce max_concurrent = 1
+        if final_config.get("session_mode") == "reuse_session":
+            current_max = final_config.get("max_concurrent")
+            if current_max is not None and current_max != 1:
+                logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_session mode")
+                final_config["max_concurrent"] = 1
     
     # Validate and encrypt credentials
     credentials_json = None
@@ -1223,13 +1170,13 @@ async def stop_source(source_id: str):
     )
 
 
-# ==================== Instance Mapping Endpoints ====================
+# ==================== Session Mapping Endpoints ====================
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source
-@api_router.get("/sources/{source_id}/mappings", response_model=InstanceMappingListResponse)
+@api_router.get("/sources/{source_id}/mappings", response_model=SessionMappingListResponse)
 async def list_mappings(source_id: str):
-    """List all instance mappings for a source."""
+    """List all session mappings for a source."""
     # Check source exists
     source = manager._source_repository.get_source_config(source_id)
     if not source:
@@ -1244,24 +1191,24 @@ async def list_mappings(source_id: str):
     mappings_data = manager._source_repository.list_session_mappings(source_id)
     mappings = []
     for m in mappings_data:
-        mappings.append(InstanceMappingInfo(
+        mappings.append(SessionMappingInfo(
             mapping_id=m.mapping_id,
             source_id=m.source_id,
             external_user_id=m.external_user_id,
-            agent_instance_id=m.agent_instance_id,
+            agent_session_id=m.agent_session_id,
             agent_id=m.agent_id,
             agent_dir=m.agent_dir,
             metadata=m.mapping_metadata,
             last_message_at=datetime.fromisoformat(m.last_message_at).replace(tzinfo=timezone.utc) if m.last_message_at and isinstance(m.last_message_at, str) else m.last_message_at,
             created_at=datetime.fromisoformat(m.created_at).replace(tzinfo=timezone.utc) if isinstance(m.created_at, str) else m.created_at,
         ))
-    return InstanceMappingListResponse(mappings=mappings)
+    return SessionMappingListResponse(mappings=mappings)
 
 
 # POST /sources/{source_id}/mappings - Create or update a mapping
-@api_router.post("/sources/{source_id}/mappings", response_model=InstanceMappingInfo, status_code=201)
-async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
-    """Create an instance mapping for an external user."""
+@api_router.post("/sources/{source_id}/mappings", response_model=SessionMappingInfo, status_code=201)
+async def create_mapping(source_id: str, mapping_create: SessionMappingCreate):
+    """Create a session mapping for an external user."""
     import uuid
     
     # Validate agent_id
@@ -1291,21 +1238,21 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     
     # Generate IDs (use standard UUID format for consistency)
     mapping_id = f"{source_id}:{mapping_create.external_user_id}"
-    # Let manager auto-generate a valid UUID instance_id
-    instance_id = None
+    # Let manager auto-generate a valid UUID session_id
+    session_id = None
     
-    # Spawn the agent instance
+    # Spawn the agent session
     try:
-        instance_id = manager.spawn_instance(
+        session_id = manager.spawn_session(
             agent_id=resolved_agent_id,
-            instance_id=instance_id,
+            session_id=session_id,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=ErrorResponse(
                 code=ErrorCodes.INTERNAL_ERROR,
-                message=f"Failed to spawn instance: {str(e)}"
+                message=f"Failed to spawn session: {str(e)}"
             ).model_dump()
         )
     
@@ -1314,16 +1261,16 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
         manager._source_repository.create_session_mapping(
             source_id=source_id,
             external_user_id=mapping_create.external_user_id,
-            agent_instance_id=instance_id,
+            agent_session_id=session_id,
             agent_id=resolved_agent_id,
             agent_dir=str(agent_path),
             metadata=mapping_create.metadata,
             mapping_id=mapping_id,
         )
     except Exception as e:
-        # Rollback: terminate the orphaned instance
+        # Rollback: terminate the orphaned session
         try:
-            manager.terminate_instance(instance_id)
+            manager.terminate_session(session_id)
         except Exception:
             pass  # Best effort cleanup
         raise HTTPException(
@@ -1336,11 +1283,11 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     
     # Get the saved mapping
     saved = manager._source_repository.get_session_mapping(source_id, mapping_create.external_user_id)
-    return InstanceMappingInfo(
+    return SessionMappingInfo(
         mapping_id=saved.mapping_id,
         source_id=saved.source_id,
         external_user_id=saved.external_user_id,
-        agent_instance_id=saved.agent_instance_id,
+        agent_session_id=saved.agent_session_id,
         agent_id=saved.agent_id,
         agent_dir=saved.agent_dir,
         metadata=saved.mapping_metadata,
@@ -1352,7 +1299,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
 # DELETE /sources/{source_id}/mappings/{mapping_id} - Delete a mapping
 @api_router.delete("/sources/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
 async def delete_mapping(source_id: str, mapping_id: str):
-    """Delete an instance mapping."""
+    """Delete a session mapping."""
     # URL decode the mapping_id if needed
     # mapping_id format is "source_id:external_user_id"
     
@@ -1386,7 +1333,7 @@ async def list_schedules():
         if src.source_type == "scheduler":
             # Calculate next_run_at from adapter if available
             next_run_at = None
-            adapter = manager.source_registry.get(src.source_id) if manager.source_registry else None
+            adapter = manager.source_registry.get(src.source_id)
             if adapter and hasattr(adapter, '_get_next_trigger_time'):
                 try:
                     next_run_at = adapter._get_next_trigger_time()
@@ -1405,22 +1352,22 @@ async def list_schedules():
     return ScheduleListResponse(schedules=schedules)
 
 
-def validate_instance_mode(instance_mode: str | None, schedule_type: str | None = None, config: dict | None = None) -> dict[str, Any]:
-    """Validate instance_mode and return processed config.
+def validate_session_mode(session_mode: str | None, schedule_type: str | None = None, config: dict | None = None) -> dict[str, Any]:
+    """Validate session_mode and return processed config.
     
     Args:
-        instance_mode: The instance mode to validate ('new_instance', 'reuse_instance', or None).
+        session_mode: The session mode to validate ('new_session', 'reuse_session', or None).
         schedule_type: The schedule type ('cron', 'interval', 'one_time') if known.
         config: The schedule config dict to potentially modify.
         
     Returns:
-        Processed config dict with instance_mode set appropriately.
+        Processed config dict with session_mode set appropriately.
         
     Raises:
-        HTTPException: If instance_mode is invalid.
+        HTTPException: If session_mode is invalid.
     """
-    VALID_INSTANCE_MODES = {"new_instance", "reuse_instance"}
-    default_instance_mode = "new_instance"
+    VALID_SESSION_MODES = {"new_session", "reuse_session"}
+    default_session_mode = "new_session"
     
     # Determine schedule type from config if not provided
     if schedule_type is None and config:
@@ -1431,26 +1378,26 @@ def validate_instance_mode(instance_mode: str | None, schedule_type: str | None 
         elif "schedule" in config:
             schedule_type = "cron"
     
-    # For one_time schedules: ALWAYS force to new_instance
+    # For one_time schedules: ALWAYS force to new_session
     if schedule_type == "one_time":
-        if instance_mode is not None and instance_mode != "new_instance":
-            logger.info("Forcing instance_mode to 'new_instance' for one_time schedule")
-        return {"instance_mode": "new_instance"}
+        if session_mode is not None and session_mode != "new_session":
+            logger.info("Forcing session_mode to 'new_session' for one_time schedule")
+        return {"session_mode": "new_session"}
     
-    # Validate instance_mode if provided
-    if instance_mode is not None and instance_mode not in VALID_INSTANCE_MODES:
+    # Validate session_mode if provided
+    if session_mode is not None and session_mode not in VALID_SESSION_MODES:
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid instance_mode: '{instance_mode}'. Valid options: {list(VALID_INSTANCE_MODES)}"
+                message=f"Invalid session_mode: '{session_mode}'. Valid options: {list(VALID_SESSION_MODES)}"
             ).model_dump()
         )
     
     # Use provided value or default
-    resolved_mode = instance_mode if instance_mode is not None else default_instance_mode
+    resolved_mode = session_mode if session_mode is not None else default_session_mode
     
-    return {"instance_mode": resolved_mode}
+    return {"session_mode": resolved_mode}
 
 
 # PUT /schedules/{schedule_id} - Update a schedule
@@ -1487,18 +1434,18 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         merged_config = {**existing.config, **schedule_update.config}
         updated_config = merged_config
     
-    # Validate and process instance_mode
-    instance_mode_config = validate_instance_mode(
-        instance_mode=schedule_update.instance_mode,
+    # Validate and process session_mode
+    session_mode_config = validate_session_mode(
+        session_mode=schedule_update.session_mode,
         config=updated_config
     )
-    updated_config["instance_mode"] = instance_mode_config["instance_mode"]
+    updated_config["session_mode"] = session_mode_config["session_mode"]
     
-    # If instance_mode is reuse_instance, enforce max_concurrent = 1
-    if updated_config.get("instance_mode") == "reuse_instance":
+    # If session_mode is reuse_session, enforce max_concurrent = 1
+    if updated_config.get("session_mode") == "reuse_session":
         current_max = updated_config.get("max_concurrent")
         if current_max is not None and current_max != 1:
-            logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_instance mode")
+            logger.info(f"Adjusting max_concurrent from {current_max} to 1 for reuse_session mode")
             updated_config["max_concurrent"] = 1
     
     # Update source config using repository
@@ -1748,7 +1695,7 @@ async def get_schedule_executions(
             execution_id=exec_data.execution_id,
             schedule_id=exec_data.schedule_id,
             triggered_at=datetime.fromisoformat(exec_data.triggered_at).replace(tzinfo=timezone.utc) if isinstance(exec_data.triggered_at, str) else exec_data.triggered_at,
-            instance_id=exec_data.instance_id,
+            session_id=exec_data.session_id,
             status=exec_data.status,
             error_message=exec_data.error_message,
             completed_at=datetime.fromisoformat(exec_data.completed_at).replace(tzinfo=timezone.utc) if exec_data.completed_at and isinstance(exec_data.completed_at, str) else exec_data.completed_at,
