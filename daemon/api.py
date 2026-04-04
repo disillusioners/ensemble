@@ -244,45 +244,44 @@ api_router = APIRouter(prefix="/api")
 # Selective access log middleware - logs only paths we want to see
 class SelectiveAccessLogMiddleware:
     """Middleware that logs access for paths we want to monitor."""
-    
-    # Paths to LOG (instead of hide)
-    LOG_PATTERNS = [
-        "/health",
-        "/api/agents",
-        "/api/jobs",
-        # Add paths you want to see in logs
+
+    # Paths to HIDE (exclude from default logging)
+    HIDE_PATTERNS = [
+        "/api/instances",
     ]
-    
+
     def __init__(self, app):
         self.app = app
-    
+
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        
+
         # Extract request info before processing
         method = scope.get("method", "")
         path = scope.get("path", "")
         client = scope.get("client")
         client_addr = f"{client[0]}:{client[1]}" if client else "unknown"
-        
+
         status_code = 200  # default
-        
+
         async def custom_send(message):
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
             await send(message)
-        
+
         # Process the request
         await self.app(scope, receive, custom_send)
-        
-        # Log after response is sent
-        for pattern in self.LOG_PATTERNS:
+
+        # Skip logging if path matches hide patterns
+        for pattern in self.HIDE_PATTERNS:
             if path.startswith(pattern):
-                logger.info(f'{client_addr} - "{method} {path} HTTP/1.1" {status_code}')
-                break
+                return
+
+        # Log all other requests
+        logger.info(f'{client_addr} - "{method} {path} HTTP/1.1" {status_code}')
 
 
 # Add CORS

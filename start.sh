@@ -89,5 +89,5 @@ echo ""
 exec -a ensemble-prod $PYTHON -c "
 import uvicorn
 import os
-uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']))
+uvicorn.run('daemon.api:app', host=os.environ['HOST'], port=int(os.environ['PORT']), access_log=False)
 "
