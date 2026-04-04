@@ -10,6 +10,7 @@ from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from typing import Any, Mapping, Optional, cast
 import logging
+import random
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,31 @@ try:
     )
 except ImportError:
     TRANSIENT_EXCEPTIONS = ()
+
+
+def wait_exponential_linear_jitter(attempt: int, max_wait: float = 60.0) -> float:
+    """Custom wait strategy: 10s -> 20s -> 30s -> 60s (max).
+    
+    Pattern: 10s, 20s, 30s, 60s, 60s, 60s, 60s (7 retries = ~5min total)
+    
+    Args:
+        attempt: Zero-indexed attempt number.
+        max_wait: Maximum wait time in seconds.
+    
+    Returns:
+        Wait time in seconds with small random jitter.
+    """
+    # Base delays: 10s, 20s, 30s, 60s, 60s, 60s, 60s (7 retries = ~5min total)
+    base_delays = [10.0, 20.0, 30.0, 60.0, 60.0, 60.0, 60.0]
+    
+    if attempt < len(base_delays):
+        base_wait = base_delays[attempt]
+    else:
+        base_wait = max_wait  # Cap at max
+    
+    # Add small jitter (±10%) to prevent thundering herd
+    jitter = random.uniform(0.9, 1.1)
+    return min(base_wait * jitter, max_wait)
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -216,13 +242,13 @@ def build_instance_graph(
 
     # Wrap with retry if config provided
     if retry_config:
-        max_retries = retry_config.get("max_retries", 3)
+        max_retries = retry_config.get("max_retries", 5)  # Default 5 for ~3min total
         llm_with_tools = llm_with_tools.with_retry(
             stop_after_attempt=max_retries,
             retry_if_exception_type=TRANSIENT_EXCEPTIONS,
-            wait_exponential_jitter=True,
+            wait=wait_exponential_linear_jitter,
         )
-        logger.debug(f"LLM configured with {max_retries} retries")
+        logger.debug(f"LLM configured with {max_retries} retries (pattern: 10s-20s-30s-60s×4 = ~5min)")
     
     graph = StateGraph(MessagesState)
     

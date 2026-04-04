@@ -91,7 +91,7 @@ class QueueConfig(BaseSettings):
 
     max_queue_size: int = Field(default=100)
     message_timeout_seconds: int = Field(default=3600)  # 1 hour
-    max_retries: int = Field(default=5)
+    max_retries: int = Field(default=7)  # Message-level retries
     watchdog_check_interval_seconds: int = Field(default=30)
     cleanup_completed_age_hours: int = Field(default=24)
     circuit_breaker_failure_threshold: int = Field(default=5)
@@ -101,9 +101,9 @@ class QueueConfig(BaseSettings):
     discard_on_startup: bool = Field(default=False)
 
     # LLM retry configuration
-    llm_max_retries: int = Field(default=3)
-    llm_retry_delay_seconds: float = Field(default=10.0)
-    llm_retry_exponential_base: float = Field(default=2.0)
+    llm_max_retries: int = Field(default=7)  # 7 retries = ~5min total (10s+20s+30s+60s*4)
+    llm_retry_delay_seconds: float = Field(default=10.0)  # First delay in pattern
+    llm_retry_max_delay: float = Field(default=60.0)  # Max delay cap
 
 
 class AgentsConfig(BaseSettings):

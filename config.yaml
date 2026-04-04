@@ -38,11 +38,11 @@ agents:
 queue:
   max_queue_size: 100
   message_timeout_seconds: 3600  # 1 hour for long tasks
-  max_retries: 5
+  max_retries: 7  # Tier 2: message-level retries
   watchdog_check_interval_seconds: 30
   cleanup_completed_age_hours: 24
   circuit_breaker_failure_threshold: 5
   circuit_breaker_recovery_timeout_seconds: 300
-  llm_max_retries: 3
+  llm_max_retries: 7  # Tier 1: LLM retries (~5min with 10s-20s-30s-60s×4)
   llm_retry_delay_seconds: 10.0
-  llm_retry_exponential_base: 2.0
+  llm_retry_max_delay: 60.0  # Max delay cap
