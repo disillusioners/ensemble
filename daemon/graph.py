@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChun
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from typing import Any, Mapping, Optional, cast
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,13 @@ def create_agent_node(
         logger.debug(f'Invoking LLM with {len(full_messages)} messages')
         
         try:
-            response = llm_with_tools.invoke(full_messages)
+            # Use run_in_executor to avoid blocking the event loop.
+            # This allows SSE streaming to continue while LLM processes.
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: llm_with_tools.invoke(full_messages)
+            )
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
                 logger.warning('Context length exceeded but no compactor available, re-raising')
@@ -243,7 +250,12 @@ def create_agent_node(
             
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
-            response = llm_with_tools.invoke(compact_messages)
+            # Use run_in_executor to avoid blocking the event loop after compaction
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: llm_with_tools.invoke(compact_messages)
+            )
         
         tool_info = ''
         if hasattr(response, 'tool_calls') and response.tool_calls:
