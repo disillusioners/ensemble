@@ -65,10 +65,19 @@ tests/
 - See `.agents/tester/RESULTS/2026-04-05-phase2-concurrency-fixes.md` for Phase 2 details
 
 ## Current Focus
-Phase 2 concurrency model fixes VERIFIED COMPLETE. Ready for Phase 3.
-All changes correct:
-- LLM rate limiting semaphore + call timeout
-- Watchdog fire-and-forget batching
-- Config validation (ge=1, gt=0)
-- Buffer flush on timeout, timeout error messages
-- Quick fixes applied: get_queue_stats return type (aa75121), async event loop mock (734c32b)
+**FINAL VALIDATION COMPLETE for feature/concurrency-model-fixes (all P1-P4)**
+
+### Status: 🟡 CONDITIONAL PASS — 2 fixable regressions
+
+**Branch:** 18 commits, head `881673f`
+- **Core tests:** 1045/1055 PASS (8 pre-existing failures in instructive_errors)
+- **Job queue tests:** 59/60 FAIL — **REGRESSION** from `5dcc584` (asyncio.to_thread + SQLite in-memory)
+- **Scheduler API tests:** 2/3 FAIL — **REGRESSION** (source_registry null guard missing)
+- **Import validation:** 7/8 PASS (1 stale `create_app` reference)
+- **dev.sh smoke test:** ✅ PASS — clean start, graceful shutdown
+
+### Before Merge: Fix Required
+1. Job queue test fixtures need `StaticPool` for SQLite threading (59 tests)
+2. Scheduler API needs null guard for `source_registry` (2 tests)
+
+See `.agents/tester/RESULTS/2026-04-06-final-validation-P1-P4.md` for full details.
