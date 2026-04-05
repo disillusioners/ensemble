@@ -225,6 +225,30 @@ class SelectiveAccessLogMiddleware:
         "/api/instances",
     ]
 
+    # ANSI color codes
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    
+    # Method colors
+    COLORS = {
+        "GET": "\033[92m",      # Green
+        "POST": "\033[96m",     # Cyan
+        "PUT": "\033[93m",      # Yellow
+        "PATCH": "\033[93m",    # Yellow
+        "DELETE": "\033[91m",   # Red
+    }
+    
+    # Status colors
+    def status_color(self, code: int) -> str:
+        if 200 <= code < 300:
+            return "\033[92m"   # Green
+        elif 300 <= code < 400:
+            return "\033[94m"   # Blue
+        elif 400 <= code < 500:
+            return "\033[93m"   # Yellow
+        else:
+            return "\033[91m"   # Red
+
     def __init__(self, app):
         self.app = app
 
@@ -254,8 +278,17 @@ class SelectiveAccessLogMiddleware:
         if path in self.HIDE_PATTERNS:
             return
 
-        # Log all other requests
-        logger.info(f'{client_addr} - "{method} {path} HTTP/1.1" {status_code}')
+        # Colorize log output
+        method_color = self.COLORS.get(method, self.RESET)
+        status_color = self.status_color(status_code)
+        
+        log_msg = (
+            f"{self.BOLD}{client_addr}{self.RESET} "
+            f"{method_color}{method}{self.RESET} "
+            f"{path} "
+            f"{status_color}{status_code}{self.RESET}"
+        )
+        logger.info(log_msg)
 
 
 # Add CORS
