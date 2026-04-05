@@ -72,8 +72,10 @@ Need to do something?
 
 ### Git Management
 - **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations, terminate when done
-- **Branch before workflows** — create/switch feature branch before any Planning or Implementation
-- **Push after completion** — commit remaining changes and push after all workflows complete
+- **Use `latest` as integration branch** — ensure it exists, create from main if needed
+- **Branch from latest** — create/switch feature branch from `latest` before any Planning or Implementation
+- **ALWAYS merge to latest after completion** — feature branch merges into `latest` after all workflows complete
+- **Push both branches** — push `latest` and feature branch to remote
 - **Tiny scope skips git flow** — too small for branching
 
 ### Communication

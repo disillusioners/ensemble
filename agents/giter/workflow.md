@@ -48,8 +48,8 @@ This tells us:
 ```
 1. git fetch origin → Update remote refs
 2. git status → Check for changes
-3. git log HEAD..origin/main → See unpulled commits
-4. If merge needed: git merge origin/main
+3. git log HEAD..origin/latest → See unpulled commits
+4. If merge needed: git merge origin/latest
 5. If conflicts: STOP, report, resolve with user
 6. If push needed: git push
 7. Verify: git status (should be clean)
@@ -59,7 +59,7 @@ This tells us:
 
 ```
 1. git fetch → Get latest
-2. git merge origin/main → Attempt merge
+2. git merge origin/latest → Attempt merge
 3. If CONFLICTS:
    a. STOP - do not proceed
    b. git status → Show conflicted files
@@ -91,28 +91,45 @@ Step 9: git commit -m "message"
 Step 10: Show git log -1 to confirm
 ```
 
-#### Scenario: "Create a feature branch"
+#### Scenario: "Ensure latest branch exists"
 
 ```
-Step 1: git branch (show current state)
-Step 2: git status (confirm clean or staged)
-Step 3: Ask user for branch purpose
-Step 4: Suggest name: feat/user-auth
-Step 5: git checkout -b feat/user-auth
-Step 6: git branch (verify new branch)
-Step 7: Inform user ready to work
+Step 1: git branch (show all branches)
+Step 2: If 'latest' exists:
+   - git checkout latest
+   - git pull origin latest
+Step 3: If 'latest' does NOT exist:
+   - git checkout main (or master)
+   - git pull origin main
+   - git checkout -b latest
+   - git push -u origin latest
+Step 4: Inform user latest is ready
 ```
 
-#### Scenario: "Merge feature into main"
+#### Scenario: "Create a feature branch from latest"
+
+```
+Step 1: Ensure latest exists (see above)
+Step 2: git branch (show current state)
+Step 3: git status (confirm clean or staged)
+Step 4: Ask user for branch purpose
+Step 5: Suggest name: feat/user-auth
+Step 6: git checkout -b feat/user-auth
+Step 7: git branch (verify new branch)
+Step 8: Inform user ready to work
+```
+
+#### Scenario: "Merge feature into latest"
 
 ```
 Step 1: git status (confirm on feature branch)
-Step 2: git checkout main
-Step 3: git pull origin main (update main)
-Step 4: git merge feat/user-auth
+Step 2: git checkout latest
+Step 3: git pull origin latest (update latest)
+Step 4: git merge feature/branch-name
 Step 5: If conflicts → resolve (see conflict flow)
-Step 6: git push origin main
-Step 7: Offer to delete feature branch
+Step 6: git push origin latest
+Step 7: git push origin feature/branch-name (keep feature branch up-to-date)
+Step 8: Inform user merge complete
 ```
 
 #### Scenario: "Push my branch"
@@ -142,7 +159,7 @@ Problem: "You are in 'detached HEAD' state"
 Solution:
   1. Explain what this means
   2. git branch (show commits)
-  3. git checkout main (or desired branch)
+  3. git checkout latest (or desired branch)
   4. Optionally cherry-pick commits
 ```
 
@@ -151,10 +168,10 @@ Solution:
 Problem: "Updates were rejected because the tip of your current branch is behind"
 Solution:
   1. git fetch origin
-  2. Show: git log HEAD..origin/main
+  2. Show: git log HEAD..origin/latest
   3. Options:
      a. git pull --rebase (if safe)
-     b. git merge origin/main (if prefer merge)
+     b. git merge origin/latest (if prefer merge)
      c. Force (with warning)
 ```
 

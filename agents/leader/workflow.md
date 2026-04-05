@@ -33,26 +33,35 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **The leader manages git via a dedicated giter instance. This instance is reused ONLY for git operations throughout the entire task lifecycle.**
 
+### Base Branch: `latest`
+
+- **`latest` is the integration branch** — all features merge here when complete
+- If `latest` branch does not exist, create it first (from `main` or current HEAD)
+- Feature branches are always created from `latest`
+
 ### Flow
 
 ```
 1. BEFORE any workflow:
    - Spawn giter instance (dedicated, reused for all git operations)
-   - giter: "Create feature branch '[branch-name]' from main. If branch exists, switch to it."
+   - giter: "Ensure 'latest' branch exists (create from main if needed). Create feature branch '[branch-name]' from latest. If branch exists, switch to it."
 
 2. DURING workflows:
    - Other agents (coder, reviewer, tester) work normally
    - They may commit as needed (their own logic, not leader's concern)
 
 3. AFTER everything completed:
-   - giter: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'. Push to remote."
+   - giter: "Check git status. Commit any uncommitted changes with message '[type]: [summary]'."
+   - Wait for result
+   - giter: "Merge feature branch into latest. Push latest and feature branch to remote."
    - Wait for result
    - Terminate giter instance
 ```
 
-### Branch Naming
-- Use descriptive names: `feature/notifications`, `fix/login-bug`, `refactor/auth-module`
-- Derived from the task goal
+### Key Rules
+- **ALWAYS merge to latest after feature is done** — this keeps latest as the current state
+- Push both `latest` and the feature branch to keep them in sync
+- `latest` should always contain the latest completed features
 
 ### When Git Flow Applies
 | Scope | Git Flow |
@@ -309,7 +318,7 @@ User: "Plan and implement a notification system"
 1. LEADER: Scope = BIG, Workflow = Planning first
 2. GIT FLOW — Setup:
    - Spawn giter (dedicated for git operations)
-   - giter: "Create branch 'feature/notifications' from main"
+   - giter: "Ensure 'latest' branch exists (create from main if needed). Create branch 'feature/notifications' from latest."
    - Wait for confirmation
 
 3. PLANNING WORKFLOW:
@@ -339,11 +348,13 @@ User: "Plan and implement a notification system"
    - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
 
 6. GIT FLOW — Finalize:
-   - giter: "Check git status. Commit any uncommitted changes. Push feature/notifications to remote."
+   - giter: "Check git status. Commit any uncommitted changes. Merge feature/notifications into latest."
+   - Wait for confirmation
+   - giter: "Push latest and feature/notifications to remote."
    - Wait for confirmation
    - Terminate giter
 
-7. Leader → User: "✅ Notification system implemented, tested, and pushed to feature/notifications."
+7. Leader → User: "✅ Notification system implemented, tested, merged to latest, and pushed."
 ```
 
 ---
