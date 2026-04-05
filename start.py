@@ -80,7 +80,7 @@ def main():
     print(f"  UI:         http://localhost:{port}/ui\n")
 
     # Start uvicorn
-    args = ["uvicorn", "daemon.api:app", "--host", host, "--port", str(port)]
+    args = ["uvicorn", "daemon.api:app", "--host", host, "--port", str(port), "--no-access-log"]
     if reload_mode:
         args.append("--reload")
 

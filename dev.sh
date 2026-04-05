@@ -59,4 +59,4 @@ if [ "$LOG_LEVEL" = "debug" ]; then
 fi
 echo ""
 
-$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL"
+$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL" --no-access-log
