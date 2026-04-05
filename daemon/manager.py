@@ -803,8 +803,11 @@ class InstanceManager:
 
     def _ensure_consumer(self, instance_id: str) -> None:
         """Ensure a persistent consumer task exists for this instance. Thread-safe."""
+        # Guard: don't create consumers for terminated/non-existent instances
+        if instance_id not in self.instances:
+            return
         if instance_id not in self._instance_queues:
-            self._instance_queues[instance_id] = asyncio.Queue()
+            self._instance_queues[instance_id] = asyncio.Queue(maxsize=100)
         if instance_id not in self._consumer_tasks or self._consumer_tasks[instance_id].done():
             # Use run_coroutine_threadsafe for thread-safety (watchdog calls from non-async thread)
             loop = self._loop
@@ -829,23 +832,33 @@ class InstanceManager:
         queue = self._instance_queues.get(instance_id)
         if not queue:
             return
+        consecutive_errors = 0
         while True:
             try:
                 await queue.get()
                 queue.task_done()
                 await self._process_queue(instance_id)
+                consecutive_errors = 0
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                consecutive_errors += 1
+                if consecutive_errors > 10:
+                    logger.error(f"Consumer for {instance_id[:8]}... exceeded max retries, stopping")
+                    break
+                backoff = min(1 << consecutive_errors, 30)  # Exponential, max 30s
                 logger.error(f"Consumer error for instance {instance_id[:8]}...: {e}", exc_info=True)
-                await asyncio.sleep(1)  # Prevent tight error loop
+                await asyncio.sleep(backoff)
 
     def _signal_consumer(self, instance_id: str) -> None:
         """Signal the persistent consumer that there is work to do. Thread-safe."""
         self._ensure_consumer(instance_id)
         queue = self._instance_queues.get(instance_id)
         if queue is not None:
-            queue.put_nowait(None)
+            try:
+                queue.put_nowait(None)
+            except asyncio.QueueFull:
+                logger.debug(f"Queue full for {instance_id[:8]}..., consumer is alive and will process eventually")
 
     async def _process_queue(self, instance_id: str) -> None:
         """Event-driven queue processor for an instance."""

@@ -779,8 +779,8 @@ class TestGenerateAndBroadcastTitle:
             assert event.data == {"title": "Exact Title"}
 
 
-class TestTitleGenerationFireAndForget:
-    """Tests for asyncio.create_task behavior in _process_queue."""
+class TestTitleGenerationAsync:
+    """Tests for asyncio.create_task behavior in _process_queue with persistent consumer pattern."""
 
     @pytest.mark.asyncio
     async def test_title_generation_does_not_block_completed_event(self, mock_config, mock_instance_repository):
