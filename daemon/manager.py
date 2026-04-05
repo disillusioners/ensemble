@@ -856,7 +856,7 @@ class InstanceManager:
             
             logger.debug(f"Starting dequeue loop for instance {instance_id[:8]}...")
             while True:
-                msg = self._queue_repository.dequeue_by_instance(instance_id)
+                msg = await asyncio.to_thread(self._queue_repository.dequeue_by_instance, instance_id)
                 if msg is None:
                     logger.debug(f"No more messages for instance {instance_id[:8]}..., exiting loop")
                     break
@@ -931,9 +931,9 @@ class InstanceManager:
                     self.circuit_breaker.record_success(instance_id)
                     
                     # Use repository to check status
-                    status = self._queue_repository.get_status(msg.message_id)
+                    status = await asyncio.to_thread(self._queue_repository.get_status, msg.message_id)
                     if status == 'processing':
-                        self._queue_repository.complete(msg.message_id)
+                        await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
                     else:
                         logger.warning(
                             f"Message {msg.message_id[:8]}... status changed to '{status if status else 'unknown'}' "
@@ -1007,7 +1007,7 @@ class InstanceManager:
                     
                     if msg.retry_count < self.config.queue.max_retries:
                         # Use repository to schedule retry
-                        self._queue_repository.retry(msg.message_id, str(e))
+                        await asyncio.to_thread(self._queue_repository.retry, msg.message_id, str(e))
                         # Broadcast retry scheduled event
                         await self.broadcaster.broadcast(Event(
                             type="status_changed",
@@ -1021,7 +1021,7 @@ class InstanceManager:
                         ))
                     else:
                         # Use repository to mark as failed
-                        self._queue_repository.fail(msg.message_id, str(e))
+                        await asyncio.to_thread(self._queue_repository.fail, msg.message_id, str(e))
                         # Broadcast error event
                         await self.broadcaster.broadcast(Event(
                             type="error",
@@ -1046,7 +1046,7 @@ class InstanceManager:
                     self._request_registry.unregister(msg.message_id)
             
             # Queue is empty - check if this is a child instance and send completion report
-            if self._queue_repository.is_empty(instance_id):
+            if await asyncio.to_thread(self._queue_repository.is_empty, instance_id):
                 meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
                     # This is a child instance that has completed - send report to parent
@@ -1055,10 +1055,6 @@ class InstanceManager:
             async with self._processing_lock:
                 self._processing.discard(instance_id)
                 logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
-
-    def _process_message_sync(self, instance_id: str, message: str) -> MessageResult:
-        """Synchronous message processing (wraps existing send_message logic)."""
-        return self.send_message(instance_id, message)
 
     async def _process_message_with_tracking(
         self, 

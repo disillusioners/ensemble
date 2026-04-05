@@ -305,7 +305,7 @@ class SourceRegistry:
                 error_message: Optional[str] = None,
             ):
                 """Sync callback - run in thread pool to avoid blocking."""
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 loop.run_in_executor(
                     _executor,
                     _safe_sync_callback,
