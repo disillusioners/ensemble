@@ -90,7 +90,7 @@ class JobProcessor:
     async def _process_next_job(self) -> None:
         """Get the next pending job and process it."""
         # Get next pending job (highest priority, oldest first)
-        job = self._queue_service.get_next_pending_job()
+        job = await self._queue_service.get_next_pending_job()
         if job is None:
             return
         
@@ -115,7 +115,7 @@ class JobProcessor:
             
             # Spawn instance for this job
             try:
-                instance_id = await self._instance_manager.spawn_instance(
+                instance_id = self._instance_manager.spawn_instance(
                     agent_id=job.agent_id,
                     instance_id=started_job.instance_id,
                 )

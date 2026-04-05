@@ -220,10 +220,10 @@ async def get_job(
     position = None
     if job.status == JobStatus.PENDING.value and job.project_id:
         try:
-            position = service._get_queue_position(job.job_id, job.project_id)
+            position = await service._get_queue_position(job.job_id, job.project_id)
         except Exception:
             pass  # Best effort
-    
+
     return _job_to_response(job, position=position)
 
 
@@ -420,10 +420,10 @@ async def retry_job(
     position = None
     if new_job.status == JobStatus.PENDING.value and new_job.project_id:
         try:
-            position = service._get_queue_position(new_job.job_id, new_job.project_id)
+            position = await service._get_queue_position(new_job.job_id, new_job.project_id)
         except Exception:
             pass
-    
+
     return _job_to_response(
         new_job,
         position=position,
