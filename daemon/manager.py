@@ -418,7 +418,7 @@ class InstanceManager:
         self.source_registry = SourceRegistry(
             source_repo=self._source_repository,
             manager=self,
-            session_repo=self._instance_repository,
+            instance_repo=self._instance_repository,
         )
         self.source_dispatcher = ResponseDispatcher(
             broadcaster=self.broadcaster,

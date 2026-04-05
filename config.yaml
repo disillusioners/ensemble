@@ -14,11 +14,11 @@ daemon:
   host: ${HOST:-0.0.0.0}
   port: ${PORT:-8088}
 
-# Session Limits
+# Instance Limits
 limits:
-  max_sessions: 100
-  max_children_per_session: 10
-  session_timeout_minutes: 60
+  max_instances: 100
+  max_children_per_instance: 10
+  instance_timeout_minutes: 60
   message_rate_limit: 60
   graph_recursion_limit: 200
 
