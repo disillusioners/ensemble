@@ -56,3 +56,4 @@ config.local.yaml
 agents-ensemble.db
 test-results/*
 test_e2e_queue.db
+tmp_test/*

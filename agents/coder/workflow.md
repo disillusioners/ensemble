@@ -709,3 +709,11 @@ Enforce these through opencode sessions:
 - Add comments for complex logic
 - Use meaningful variable names
 - Keep functions focused and small
+
+
+---
+
+**Learned:**
+
+- Step 4: Review before responding
+- Step 4: Review before responding

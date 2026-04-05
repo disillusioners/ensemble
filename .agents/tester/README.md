@@ -54,5 +54,12 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
+## Test Results (Latest: 2026-04-05)
+- **1189 tests pass**, 18 pre-existing failures (unrelated to session→instance rename)
+- See `.agents/tester/RESULTS/2026-04-05-session-instance-rename-verification.md` for details
+
 ## Current Focus
-Context compaction Phase 4: Testing & Observability
+Session→instance rename verification complete. 18 pre-existing failures in:
+- test_manager.py (title generation — missing method)
+- test_scheduler_api.py (source_registry None)
+- test_spawn_instance_instructive_errors.py (error message format)

@@ -1,5 +1,0 @@
-# Memory
-
-## Known Patterns
-
-(Empty)

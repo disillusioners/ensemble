@@ -262,6 +262,10 @@ async def list_agents():
             if agent_path.name in ("_trash", "_baby_template"):
                 continue
             
+            # Skip internal agents (starting with _)
+            if agent_path.name.startswith("_"):
+                continue
+            
             meta_path = agent_path / "meta.json"
             if meta_path.exists():
                 try:
