@@ -45,6 +45,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 1. BEFORE any workflow:
    - Spawn giter instance (dedicated, reused for all git operations)
    - giter: "Ensure 'latest' branch exists (create from main if needed). Create feature branch '[branch-name]' from latest. If branch exists, switch to it."
+   - ⛔ WAIT for git branch creation to COMPLETE before proceeding
 
 2. DURING workflows:
    - Other agents (coder, reviewer, tester) work normally
@@ -56,6 +57,29 @@ I support two workflows. The user may invoke them sequentially within a single s
    - giter: "Merge feature branch into latest. Push latest and feature branch to remote."
    - Wait for result
    - Terminate giter instance
+```
+
+### ⚠️ CRITICAL: Git Setup is NOT Parallelizable
+
+**Git branch creation MUST complete before any coding begins.** This is a hard dependency because:
+
+1. **Branch must exist first** — Coding happens ON the feature branch. If the branch doesn't exist yet, code changes go to wrong branch.
+2. **Atomic git operations** — Git commands modify shared repository state and cannot run concurrently.
+3. **Wrong branch = lost work** — If coders start before branch exists, their commits go to `latest` or `main`, not the feature branch.
+
+**❌ WRONG sequence (broken):**
+```
+1. Spawn giter → send_message(create branch)
+2. Spawn coder → send_message(start coding)
+3. (both running in parallel) ❌ BROKEN
+```
+
+**✅ CORRECT sequence:**
+```
+1. Spawn giter → send_message(create branch)
+2. Wait for giter completion report
+3. ✅ Branch confirmed created
+4. Spawn coder → send_message(start coding)
 ```
 
 ### Key Rules
@@ -259,6 +283,16 @@ PHASE 2:
 ## Phase Scheduling — Parallelism & Pipelining
 
 **The leader MUST assess dependencies between phases and schedule them intelligently. Never default to fully sequential if parallelism is possible.**
+
+### Prerequisite: Git Setup Must Complete First
+
+**Before ANY phase scheduling, git setup must complete:**
+1. Spawn giter instance
+2. Create feature branch from `latest`
+3. ✅ WAIT for branch creation to complete
+4. ONLY THEN schedule phases
+
+The giter instance is excluded from the phase scheduling table — it runs before and after phases, not during them.
 
 ### Hard Constraint: Max Concurrent Instances = 3
 

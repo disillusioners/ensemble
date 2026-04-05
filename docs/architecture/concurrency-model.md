@@ -128,7 +128,34 @@ Telegram adapter's `_chat_locks` (telegram.py:89) with `OrderedDict` and MAX_CHA
 
 ### 🔴 CRITICAL Issues
 
-#### 1. `subprocess.run()` Blocks Event Loop in Tool Execution
+#### 0. `terminate_instance` Never Awaits Async Lock Release (Resource Leak)
+**Files**: `manager.py:2012`, `tools/instance.py:149`  
+**Problem**: `terminate_instance()` is a **sync** method called from the sync `terminate_instance` tool. At line 2012, it calls `self._job_queue_service.release_lock_by_instance(instance_id)` — but that method is **`async`** (`job_queue_service.py:455`). The coroutine is never awaited, causing:
+
+1. `released_projects` receives a coroutine object, not a `list[str]`
+2. `if released_projects:` at line 2013 tries `bool()` on the coroutine
+3. `len(released_projects)` at line 2015 raises `TypeError: object of type 'coroutine' has no len()`
+4. **Project locks are never actually released** — instances hold locks indefinitely after termination
+
+**Impact**: Critical - Active resource leak. Every terminated instance leaves its project lock dangling, blocking future jobs for that project.
+
+**Fix**: Wrap the async call in `asyncio.run_coroutine_threadsafe()` from the sync context:
+```python
+if self._job_queue_service is not None:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+    released_projects = loop.run_until_complete(
+        self._job_queue_service.release_lock_by_instance(instance_id)
+    )
+    if released_projects:
+        logger.info(...)
+```
+
+---
+
+#### 2. `subprocess.run()` Blocks Event Loop in Tool Execution
 **File**: `tools/bash.py:19`  
 **Problem**: The bash tool uses synchronous `subprocess.run()` with up to 1800s timeout. While `agent_node` wraps LLM calls in `run_in_executor`, the `ToolNode` runs tools synchronously, which blocks the event loop. This can stall all SSE connections.
 
@@ -148,7 +175,7 @@ stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
 ---
 
-#### 2. `run_coroutine_threadsafe().result(timeout=5)` Blocks Watchdog
+#### 3. `run_coroutine_threadsafe().result(timeout=5)` Blocks Watchdog
 **File**: `manager.py:383-394`  
 **Problem**: The watchdog thread calls `asyncio.run_coroutine_threadsafe()` then waits with `.result(timeout=5.0)`. This turns an async operation into a synchronous blocking one. If multiple instances have retry-ready messages, the watchdog blocks **sequentially** for each instance.
 
@@ -171,7 +198,7 @@ asyncio.run_coroutine_threadsafe(
 
 ### 🟡 HIGH Priority Issues
 
-#### 3. Sync DB Access on Event Loop Thread
+#### 4. Sync DB Access on Event Loop Thread
 **Files**: `queue.py`, `manager.py`  
 **Problem**: `self._queue_repository.*()` calls are synchronous SQLAlchemy operations that hit SQLite. These run directly on the asyncio event loop. Under load, disk I/O can stall the event loop for milliseconds, affecting SSE latency.
 
@@ -186,7 +213,7 @@ msg = await asyncio.to_thread(self._queue_repository.dequeue_by_instance, instan
 
 ---
 
-#### 4. Multiple `create_task` Call Sites for `_process_queue`
+#### 5. Multiple `create_task` Call Sites for `_process_queue`
 **Files**: `manager.py:804, 1596, 1696`, `sources/registry.py:712`  
 **Problem**: `_process_queue(instance_id)` is called from multiple places via `asyncio.create_task()`. While the `asyncio.Lock` prevents concurrent execution, every call creates a new task that immediately exits when the lock is held. This creates unnecessary task churn.
 
@@ -209,7 +236,7 @@ async def _instance_consumer(instance_id: str):
 
 ---
 
-#### 5. Deprecated `asyncio.get_event_loop()` in Callback
+#### 6. Deprecated `asyncio.get_event_loop()` in Callback
 **File**: `sources/registry.py:308`  
 **Problem**: `execution_callback` calls `asyncio.get_event_loop()` to get `run_in_executor`. In Python 3.12+, `get_event_loop()` is deprecated and may raise errors when called from outside an event loop context.
 
@@ -227,7 +254,7 @@ except RuntimeError:
 
 ---
 
-#### 6. Watchdog Cannot Recover from Hung LLM Calls
+#### 7. Watchdog Cannot Recover from Hung LLM Calls
 **File**: `manager.py`  
 **Problem**: The `InstanceWatchdog` monitors `_processing_messages` timestamps and retries stuck messages. However, if `agent_node` hangs inside `run_in_executor` (e.g., a stalled LLM call), the watchdog has no visibility into or recovery path for this state. The message appears "in flight" but is effectively orphaned.
 
@@ -237,7 +264,7 @@ except RuntimeError:
 
 ---
 
-#### 7. No Global Limit on Concurrent LLM Calls
+#### 8. No Global Limit on Concurrent LLM Calls
 **Problem**: There's no bounded semaphore around `graph.astream()`. Under heavy load, multiple instances can fire LLM requests simultaneously, potentially hitting API rate limits.
 
 **Impact**: High - Rate limit errors cascade across all instances, not just the originating one.
@@ -259,7 +286,7 @@ async def _process_message_with_tracking(...):
 
 ### 🟠 MEDIUM Priority Issues
 
-#### 8. Shared Sync SQLAlchemy Engine + SQLite Write Contention
+#### 9. Shared Sync SQLAlchemy Engine + SQLite Write Contention
 **File**: `manager.py:296`  
 **Problem**: A single synchronous SQLAlchemy engine is shared across repositories accessed from both the event loop thread and the watchdog thread. SQLite in WAL mode allows concurrent reads but writes are still serialized. Under load, competing writers (event loop + watchdog) cause lock contention.
 
@@ -267,7 +294,7 @@ async def _process_message_with_tracking(...):
 
 ---
 
-#### 9. Dead `_process_message_sync` Method
+#### 10. Dead `_process_message_sync` Method
 **File**: `manager.py:1059-1061`  
 **Problem**: `_process_message_sync()` calls `self.send_message()` which is `async`. This method returns a coroutine object, not a `MessageResult`. It's never used and would break if called.
 
@@ -275,7 +302,7 @@ async def _process_message_with_tracking(...):
 
 ---
 
-#### 10. AsyncSqliteSaver May Spawn Background Threads
+#### 11. AsyncSqliteSaver May Spawn Background Threads
 **File**: `daemon/persistence.py`  
 **Problem**: `AsyncSqliteSaver` from LangGraph may internally spawn threads for checkpoint persistence. These background threads are not visible in the architecture diagram and could cause silent contention or blocking.
 
@@ -285,24 +312,24 @@ async def _process_message_with_tracking(...):
 
 ### 🔵 LOW Priority Issues
 
-#### 11. No Graceful Shutdown Ordering
+#### 12. No Graceful Shutdown Ordering
 **Problem**: During process shutdown (e.g., SIGTERM to uvicorn), the watchdog thread may be mid-operation via `run_coroutine_threadsafe`. Submitted coroutines can be lost if the event loop stops before they complete. There is no defined shutdown sequence (e.g., stop watchdog → drain queues → close adapters → stop loop).
 
 **Fix**: Implement a lifecycle shutdown manager that orchestrates component teardown in dependency order. Use `signal.signal()` or FastAPI lifespan events to trigger graceful shutdown.
 
 ---
 
-#### 12. SSE Connection Leaks Without Heartbeat
+#### 13. SSE Connection Leaks Without Heartbeat
 **Problem**: Long-lived SSE connections have no heartbeat or inactivity timeout. If a client disconnects without properly closing (e.g., network drop, browser crash), the async generator in `stream_events()` may not be cleaned up promptly, accumulating stale connections.
 
 **Fix**: Add periodic heartbeat events (e.g., `{"type": "ping"}` every 30s) and a connection TTL. The heartbeat also serves as a liveness check — if `yield` raises `ClientDisconnect`, the generator can clean up.
 
 ---
 
-#### 13. `_process_queue` Lock Starvation Under High Frequency
-**Problem**: The `asyncio.Lock` guarding `_process_queue` is fair by default, but the multiple `create_task` call sites (see issue #4) mean a high-frequency source (e.g., scheduler) can repeatedly queue tasks that contend for the lock, potentially starving lower-frequency sources. While not a correctness issue, it causes unfair latency distribution.
+#### 14. `_process_queue` Lock Starvation Under High Frequency
+**Problem**: The `asyncio.Lock` guarding `_process_queue` is fair by default, but the multiple `create_task` call sites (see issue #5) mean a high-frequency source (e.g., scheduler) can repeatedly queue tasks that contend for the lock, potentially starving lower-frequency sources. While not a correctness issue, it causes unfair latency distribution.
 
-**Fix**: This is resolved by the persistent consumer pattern proposed in issue #4. A single consumer per instance naturally serializes processing without starvation.
+**Fix**: This is resolved by the persistent consumer pattern proposed in issue #5. A single consumer per instance naturally serializes processing without starvation.
 
 ---
 
@@ -310,18 +337,19 @@ async def _process_message_with_tracking(...):
 
 | Priority | Action | Issue | Files |
 |----------|--------|-------|-------|
-| P1 | Fix bash tool to use `asyncio.create_subprocess_exec` | #1 | `tools/bash.py` |
-| P1 | Wrap sync DB calls in `asyncio.to_thread()` | #3 | `queue.py`, `manager.py` |
-| P2 | Replace multiple `create_task` with persistent consumer | #4 | `manager.py` |
-| P2 | Fix watchdog callbacks to be truly async | #2 | `manager.py` |
-| P2 | Add global `asyncio.Semaphore` for LLM rate limiting | #7 | `manager.py` |
-| P2 | Add watchdog timeout visibility for LLM calls | #6 | `manager.py` |
-| P2 | Fix `asyncio.get_event_loop()` → `get_running_loop()` | #5 | `sources/registry.py` |
-| P3 | Verify `AsyncSqliteSaver` thread behavior | #10 | `persistence.py` |
-| P3 | Remove dead `_process_message_sync` method | #9 | `manager.py` |
-| P3 | Consider `aiosqlite` for async DB access | #8 | `persistence.py` |
-| P4 | Add graceful shutdown ordering | #11 | `manager.py`, `api.py` |
-| P4 | Add SSE heartbeat and connection TTL | #12 | `api.py` |
+| P1 | Fix `terminate_instance` to await async lock release | #0 | `manager.py` |
+| P1 | Fix bash tool to use `asyncio.create_subprocess_exec` | #2 | `tools/bash.py` |
+| P1 | Wrap sync DB calls in `asyncio.to_thread()` | #4 | `queue.py`, `manager.py` |
+| P2 | Replace multiple `create_task` with persistent consumer | #5 | `manager.py` |
+| P2 | Fix watchdog callbacks to be truly async | #3 | `manager.py` |
+| P2 | Add global `asyncio.Semaphore` for LLM rate limiting | #8 | `manager.py` |
+| P2 | Add watchdog timeout visibility for LLM calls | #7 | `manager.py` |
+| P2 | Fix `asyncio.get_event_loop()` → `get_running_loop()` | #6 | `sources/registry.py` |
+| P3 | Verify `AsyncSqliteSaver` thread behavior | #11 | `persistence.py` |
+| P3 | Remove dead `_process_message_sync` method | #10 | `manager.py` |
+| P3 | Consider `aiosqlite` for async DB access | #9 | `persistence.py` |
+| P4 | Add graceful shutdown ordering | #12 | `manager.py`, `api.py` |
+| P4 | Add SSE heartbeat and connection TTL | #13 | `api.py` |
 
 ---
 
@@ -331,6 +359,7 @@ async def _process_message_with_tracking(...):
 
 | Fix | Effort | Impact | Why |
 |-----|--------|--------|-----|
+| Await async lock release in `terminate_instance` | ~15 min | Critical | Active resource leak — locks never freed on termination |
 | `subprocess.run` → `asyncio.create_subprocess_exec` | ~30 min | Critical | 1800s timeout can stall entire event loop |
 | Remove dead `_process_message_sync` | ~5 min | Low | Dead code, prevents future misuse |
 | `get_event_loop()` → `get_running_loop()` | ~15 min | Medium | Prevents deprecation errors on Python 3.12+ |
