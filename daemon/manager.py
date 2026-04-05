@@ -739,13 +739,14 @@ class InstanceManager:
         # Check if this is the first message for this instance
         # If so, store the source as root_source in instance metadata
         # This preserves the original external source for child instances that inherit it
-        instance_meta = self._instance_repository.get(instance_id)
+        instance_meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
         if instance_meta and instance_meta.instance_metadata is not None:
             if "root_source" not in instance_meta.instance_metadata:
                 # First message for this instance - store the source as root_source
                 # Skip storing for internal agent sources (they start with "agent:")
                 if not source.startswith("agent:"):
-                    self._instance_repository.set_metadata(
+                    await asyncio.to_thread(
+                        self._instance_repository.set_metadata,
                         instance_id=instance_id,
                         key="root_source",
                         value=source
@@ -756,12 +757,13 @@ class InstanceManager:
                     # The parent instance's metadata should have root_source if it was from external source
                     parent_meta = None
                     if instance_meta.parent_id:
-                        parent_meta = self._instance_repository.get(instance_meta.parent_id)
+                        parent_meta = await asyncio.to_thread(self._instance_repository.get, instance_meta.parent_id)
                     
                     if parent_meta and parent_meta.instance_metadata:
                         parent_root = parent_meta.instance_metadata.get("root_source")
                         if parent_root:
-                            self._instance_repository.set_metadata(
+                            await asyncio.to_thread(
+                                self._instance_repository.set_metadata,
                                 instance_id=instance_id,
                                 key="root_source",
                                 value=parent_root
@@ -769,7 +771,8 @@ class InstanceManager:
                             logger.debug(f"Propagated root_source='{parent_root}' from parent for child instance {instance_id[:8]}...")
         
         # Enqueue the message using repository
-        msg = self._queue_repository.enqueue(
+        msg = await asyncio.to_thread(
+            self._queue_repository.enqueue,
             instance_id=instance_id,
             content=message,
             source=source,
@@ -1592,7 +1595,7 @@ Provide a concise summary:"""
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
         # Get instance metadata
-        meta = self._instance_repository.get(instance_id)
+        meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
         if not meta:
             logger.warning(f"Cannot send completion report: instance {instance_id} not found")
             return
@@ -1613,7 +1616,8 @@ Provide a concise summary:"""
             summary = await self._get_last_assistant_message(instance_id, agent_name)
         
         # Enqueue report message to parent using repository
-        msg = self._queue_repository.enqueue(
+        msg = await asyncio.to_thread(
+            self._queue_repository.enqueue,
             instance_id=parent_id,
             content=summary,
             source=f"report:{instance_id}",
@@ -1664,10 +1668,11 @@ Provide a concise summary:"""
         try:
             # Prevent duplicate error reports - check if we already sent one
             if message_id:
-                meta_check = self._instance_repository.get(instance_id)
+                meta_check = await asyncio.to_thread(self._instance_repository.get, instance_id)
                 if meta_check and meta_check.parent_id:
                     # Check for existing error report in parent's queue
-                    existing = self._queue_repository.list(
+                    existing = await asyncio.to_thread(
+                        self._queue_repository.list,
                         instance_id=meta_check.parent_id, 
                         status="ready", 
                         limit=10
@@ -1678,7 +1683,7 @@ Provide a concise summary:"""
                             return
             
             # Get instance metadata
-            meta = self._instance_repository.get(instance_id)
+            meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
             if not meta:
                 logger.warning(f"Cannot send error report: instance {instance_id} not found")
                 return
@@ -1702,7 +1707,8 @@ Provide a concise summary:"""
             error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"
             
             # Enqueue error report message to parent using repository
-            msg = self._queue_repository.enqueue(
+            msg = await asyncio.to_thread(
+                self._queue_repository.enqueue,
                 instance_id=parent_id,
                 content=error_report,
                 source=f"error_report:{instance_id}",
@@ -1794,7 +1800,7 @@ Provide a concise summary:"""
             return
         
         # Check if title already exists
-        meta = self._instance_repository.get(instance_id)
+        meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
         if meta and meta.instance_metadata and meta.instance_metadata.get("title"):
             # Title already exists, skip
             logger.debug(f"Title already exists for instance {instance_id}, skipping generation")
@@ -1855,7 +1861,7 @@ Title:"""
                 title = title[:97] + "..."
             
             # Store title in instance metadata
-            self._instance_repository.update_title(instance_id, title)
+            await asyncio.to_thread(self._instance_repository.update_title, instance_id, title)
             logger.info(f"Generated title for instance {instance_id}: {title}")
             
             # Broadcast title_updated event for frontend refresh

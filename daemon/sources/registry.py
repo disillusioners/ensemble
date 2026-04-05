@@ -151,7 +151,7 @@ class SourceRegistry:
         logger.info("Loading and starting all enabled adapters...")
         
         # Load configs from database
-        configs = self._source_repo.list_source_configs()
+        configs = await asyncio.to_thread(self._source_repo.list_source_configs)
         
         started_count = 0
         for config in configs:
@@ -379,7 +379,7 @@ class SourceRegistry:
         
         # Update status
         adapter._status = SourceStatus.STARTING
-        self._source_repo.update_source_status(source_id, SourceStatus.STARTING.value)
+        await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STARTING.value)
         
         # Start supervisor task
         self._running[source_id] = True
@@ -423,7 +423,7 @@ class SourceRegistry:
         
         # Update status
         adapter._status = SourceStatus.STOPPED
-        self._source_repo.update_source_status(source_id, SourceStatus.STOPPED.value)
+        await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STOPPED.value)
         
         logger.info(f"Stopped adapter: {source_id}")
         return True
@@ -443,7 +443,7 @@ class SourceRegistry:
             return False
         
         # Reload config from database
-        config_dict = self._source_repo.get_source_config(source_id)
+        config_dict = await asyncio.to_thread(self._source_repo.get_source_config, source_id)
         if config_dict is None:
             logger.error(f"Config not found in database: {source_id}")
             return False
@@ -493,7 +493,7 @@ class SourceRegistry:
                 # Start the adapter
                 logger.info(f"Starting adapter: {source_id}")
                 adapter._status = SourceStatus.STARTING
-                self._source_repo.update_source_status(source_id, SourceStatus.STARTING.value)
+                await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STARTING.value)
                 
                 # Add timeout to start() to detect hung adapters
                 try:
@@ -504,7 +504,7 @@ class SourceRegistry:
                 # Adapter started successfully
                 adapter._status = SourceStatus.RUNNING
                 adapter._error = None
-                self._source_repo.update_source_status(source_id, SourceStatus.RUNNING.value)
+                await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.RUNNING.value)
                 logger.info(f"Adapter running: {source_id}")
                 
                 # Record success and reset backoff
@@ -535,9 +535,7 @@ class SourceRegistry:
                 logger.error(f"Adapter crashed {source_id}: {e}")
                 adapter._status = SourceStatus.ERROR
                 adapter._error = str(e)
-                self._source_repo.update_source_status(
-                    source_id, SourceStatus.ERROR.value, str(e)
-                )
+                await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.ERROR.value, str(e))
                 
                 # Stop the adapter if still running
                 try:
@@ -602,9 +600,7 @@ class SourceRegistry:
             logger.debug(f"Checking for duplicate: external_msg_id={external_msg_id}")
             
             if external_msg_id:
-                is_dup = self._source_repo.check_and_mark_processed(
-                    source_id, external_msg_id
-                )
+                is_dup = await asyncio.to_thread(self._source_repo.check_and_mark_processed, source_id, external_msg_id)
                 if is_dup:
                     logger.info(
                         f"Skipping duplicate message: source_id={source_id}, "
@@ -638,13 +634,11 @@ class SourceRegistry:
             
             if force_new:
                 # Delete existing mapping if exists
-                existing_mapping = self._source_repo.get_instance_mapping(
-                    source_id, msg.external_user_id
-                )
+                existing_mapping = await asyncio.to_thread(self._source_repo.get_instance_mapping, source_id, msg.external_user_id)
                 if existing_mapping:
                     mapping_id = existing_mapping.mapping_id
                     old_instance_id = existing_mapping.agent_instance_id
-                    self._source_repo.delete_instance_mapping(mapping_id)
+                    await asyncio.to_thread(self._source_repo.delete_instance_mapping, mapping_id)
                     logger.info(
                         f"🗑️ Deleted existing mapping for /new: "
                         f"user={msg.external_user_id}, old_instance={old_instance_id}"
