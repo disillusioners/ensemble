@@ -31,6 +31,10 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 
+# Suppress uvicorn INFO-level access logs (our SelectiveAccessLogMiddleware handles selective logging)
+uvicorn_access = logging.getLogger("uvicorn.access")
+uvicorn_access.setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 from .models import (
@@ -216,7 +220,7 @@ api_router = APIRouter(prefix="/api")
 class SelectiveAccessLogMiddleware:
     """Middleware that controls access logging via custom logic."""
 
-    # Paths to HIDE (exclude from logging)
+    # Exact paths to HIDE (exclude from logging)
     HIDE_PATTERNS = [
         "/api/instances",
     ]
@@ -246,10 +250,9 @@ class SelectiveAccessLogMiddleware:
         # Process the request
         await self.app(scope, receive, custom_send)
 
-        # Skip logging if path matches hide patterns
-        for pattern in self.HIDE_PATTERNS:
-            if path.startswith(pattern):
-                return
+        # Skip logging if path exactly matches hide patterns
+        if path in self.HIDE_PATTERNS:
+            return
 
         # Log all other requests
         logger.info(f'{client_addr} - "{method} {path} HTTP/1.1" {status_code}')
@@ -263,6 +266,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add selective access log middleware (must be added AFTER CORS)
+app.add_middleware(SelectiveAccessLogMiddleware)
 
 # Global exception handler
 @app.exception_handler(Exception)
