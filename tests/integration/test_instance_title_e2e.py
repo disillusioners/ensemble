@@ -89,6 +89,9 @@ async def test_instance_title_generation_e2e(
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)
     
+    # Initialize async components (checkpointer, etc.)
+    await manager.initialize()
+    
     # Ensure main loop is set for event broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
@@ -103,9 +106,9 @@ async def test_instance_title_generation_e2e(
     # Verify initial state - no title
     instance = manager._instance_repository.get(instance_id)
     assert instance is not None
-    initial_meta = instance.instance_metadata
-    assert initial_meta["title"] is None, "Title should be None before first message"
-    logger.info(f"[TEST] Initial title: {initial_meta['title']}")
+    initial_meta = instance.instance_metadata or {}
+    assert initial_meta.get("title") is None, "Title should be None before first message"
+    logger.info(f"[TEST] Initial title: {initial_meta.get('title')}")
     
     # Track events
     events_received = []

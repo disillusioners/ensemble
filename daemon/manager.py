@@ -1859,8 +1859,18 @@ Title:"""
             logger.warning(f"Failed to generate title for instance {instance_id}: {e}")
 
     def get_queue_stats(self, instance_id: str):
-        """Get queue statistics for an instance."""
-        return self._queue_repository.get_stats(instance_id)
+        """Get queue statistics for an instance.
+        
+        Returns a QueueStats object with pending_count, processing_count,
+        and oldest_message_age_seconds attributes.
+        """
+        from .queue import QueueStats
+        stats = self._queue_repository.get_stats(instance_id)
+        return QueueStats(
+            pending_count=stats["pending_count"],
+            processing_count=stats["processing_count"],
+            oldest_message_age_seconds=stats["oldest_message_age_seconds"]
+        )
 
     def _get_system_prompt_tokens(self, instance_id: str) -> int:
         """Get the cached system prompt token count for an instance's agent.

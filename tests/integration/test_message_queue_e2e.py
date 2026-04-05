@@ -247,9 +247,9 @@ async def test_single_message_no_duplicate_llm_calls(
     while time.time() - start_time < wait_timeout:
         # Check if message was completed (check queue stats)
         stats = manager.get_queue_stats(instance_id)
-        logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
+        logger.debug(f"[TEST] Queue stats: pending={stats.pending_count}, processing={stats.processing_count}")
         
-        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
+        if stats.pending_count == 0 and stats.processing_count == 0:
             # Check if we got a response
             await asyncio.sleep(0.5)  # Small delay to ensure events are processed
             completed_received = True
@@ -294,9 +294,9 @@ async def test_single_message_no_duplicate_llm_calls(
         # Log detailed debugging info
         logger.error("[TEST] Checking queue state...")
         stats = manager.get_queue_stats(instance_id)
-        logger.error(f"[TEST]   Pending: {stats['pending_count']}")
-        logger.error(f"[TEST]   Processing: {stats['processing_count']}")
-        logger.error(f"[TEST]   Oldest age: {stats['oldest_message_age_seconds']}s")
+        logger.error(f"[TEST]   Pending: {stats.pending_count}")
+        logger.error(f"[TEST]   Processing: {stats.processing_count}")
+        logger.error(f"[TEST]   Oldest age: {stats.oldest_message_age_seconds}s")
         
         logger.error("[TEST] Checking processing set...")
         logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
