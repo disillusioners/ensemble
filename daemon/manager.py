@@ -913,7 +913,7 @@ class InstanceManager:
                         else:
                             # FALLBACK: Text extraction only if no explicit project_id
                             keywords = extract_project_keywords(msg.content)
-                            project = self.project_store.match_by_keywords(keywords)
+                            project = await asyncio.to_thread(self.project_store.match_by_keywords, keywords)
                             if project:
                                 project_context = format_project_context(project)
                                 message_content = project_context + msg.content
