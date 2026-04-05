@@ -780,8 +780,6 @@ async def stream_events(instance_id: str, request: Request):
         )
 
     broadcaster = manager.broadcaster
-    current_task = asyncio.current_task()
-    connected_at = time.monotonic()
     connection_id = str(uuid.uuid4())  # Unique ID for this connection
 
     async def event_generator() -> AsyncGenerator[dict, None]:
@@ -789,7 +787,8 @@ async def stream_events(instance_id: str, request: Request):
         import asyncio
         import json
         
-        nonlocal connected_at, current_task, connection_id
+        nonlocal connection_id
+        current_task = asyncio.current_task()
         connected_at = time.monotonic()
         
         # Track this connection
@@ -843,8 +842,8 @@ async def stream_events(instance_id: str, request: Request):
                     break
 
                 try:
-                    # Wait for events with timeout
-                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    # Wait for events
+                    event = await queue.get()
                     
                     # Check for sentinel (shutdown signal)
                     if event is None:
@@ -857,9 +856,6 @@ async def stream_events(instance_id: str, request: Request):
                     if event_count % 50 == 0:
                         logger.debug(f"SSE sent {event_count} events for instance {instance_id}, queue size: {queue.qsize()}")
                     yield event_to_sse(event)
-                except asyncio.TimeoutError:
-                    # Send keepalive as SSE comment format (prevents connection timeout)
-                    yield {"comment": "heartbeat"}
                 except Exception as e:
                     # Log the error but continue the stream for transient errors
                     logger.error(f"Error retrieving event for instance {instance_id}: {e}")
@@ -888,7 +884,7 @@ async def stream_events(instance_id: str, request: Request):
                 _sse_connections.pop(connection_id, None)
             logger.debug(f"SSE disconnected from instance {instance_id}")
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), ping=30)
 
 
 # ==================== Source Management Endpoints ====================

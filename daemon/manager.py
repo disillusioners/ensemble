@@ -2347,9 +2347,10 @@ Title:"""
         return None
 
     def cleanup(self) -> None:
-        """Cleanup resources including database connections."""
-        self.watchdog.stop()
+        """Cleanup resources including database connections.
         
+        Note: Assumes shutdown() has already been called and stopped the watchdog.
+        """
         # Dispose the shared engine to close all connections in the pool
         if hasattr(self, '_engine') and self._engine:
             self._engine.dispose()
@@ -2373,7 +2374,7 @@ Title:"""
         Args:
             grace_period: Maximum seconds to wait for in-flight processing (default: 10s).
         """
-        if getattr(self, '_shutting_down', False):
+        if self._shutting_down:
             logger.debug("Shutdown already in progress, skipping")
             return
         
@@ -2406,8 +2407,8 @@ Title:"""
     
     async def _cancel_all_active_requests(self) -> None:
         """Cancel all active requests in the registry with SHUTDOWN reason."""
-        with self._request_registry._lock:
-            message_ids = list(self._request_registry._requests.keys())
+        # Use asyncio.to_thread to avoid blocking the event loop with the thread lock
+        message_ids = await asyncio.to_thread(self._request_registry.get_all_message_ids)
         
         if message_ids:
             logger.info(f"Cancelling {len(message_ids)} active request(s)...")

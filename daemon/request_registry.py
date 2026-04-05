@@ -129,3 +129,12 @@ class ActiveRequestRegistry:
         
         if message_ids:
             logger.info(f"Cancelled {len(message_ids)} request(s) for instance {instance_id[:8]}...")
+
+    def get_all_message_ids(self) -> list[str]:
+        """Get snapshot of all active message IDs.
+        
+        Returns:
+            List of all message IDs currently in the registry.
+        """
+        with self._lock:
+            return list(self._requests.keys())

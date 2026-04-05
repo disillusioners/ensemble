@@ -417,6 +417,17 @@ class EventBroadcaster:
         # Stop cleanup task first
         await self.stop_cleanup_task()
         
+        # Run lock-protected shutdown logic in thread to avoid blocking event loop
+        await asyncio.to_thread(self._shutdown_sync)
+        
+        logger.info("EventBroadcaster shutdown complete")
+    
+    def _shutdown_sync(self) -> None:
+        """Synchronous shutdown logic protected by threading.Lock.
+        
+        Must be called from a thread (via asyncio.to_thread) to avoid blocking
+        the event loop when the watchdog thread holds the lock.
+        """
         with self._lock:
             # Send sentinel to all queues to unblock waiting generators
             for instance_id, queue in list(self._queues.items()):
@@ -434,8 +445,6 @@ class EventBroadcaster:
             # Clear global subscribers
             self._global_subscribers.clear()
             self._subscriber_refs.clear()
-        
-        logger.info("EventBroadcaster shutdown complete")
 
 
 def event_to_sse(event: Event) -> dict:
