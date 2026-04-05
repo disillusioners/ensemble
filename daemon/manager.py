@@ -2005,7 +2005,7 @@ Title:"""
         # 6. Release project lock if JobQueueService is connected
         if self._job_queue_service is not None:
             try:
-                released_projects = self._job_queue_service.release_lock_by_instance(instance_id)
+                released_projects = self._job_queue_service._lock_manager.release_by_instance_sync(instance_id)
                 if released_projects:
                     logger.info(
                         f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "
