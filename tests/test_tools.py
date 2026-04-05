@@ -12,56 +12,63 @@ from daemon.tools.filesystem import list_directory, read_file, glob_files
 class TestBashTool:
     """Tests for bash command execution tool."""
 
-    def test_bash_simple_command(self):
+    @pytest.mark.asyncio
+    async def test_bash_simple_command(self):
         """Test simple echo command execution."""
-        result = bash.invoke({"command": "echo hello"})
+        result = await bash.ainvoke({"command": "echo hello"})
 
         assert "hello" in result
         assert "EXIT CODE: 0" in result
 
-    def test_bash_command_with_output(self):
+    @pytest.mark.asyncio
+    async def test_bash_command_with_output(self):
         """Test command that produces stdout output."""
-        result = bash.invoke({"command": "echo -e 'line1\\nline2\\nline3'"})
+        result = await bash.ainvoke({"command": "echo -e 'line1\\nline2\\nline3'"})
 
         assert "line1" in result
         assert "line2" in result
         assert "line3" in result
 
-    def test_bash_nonzero_exit_code(self):
+    @pytest.mark.asyncio
+    async def test_bash_nonzero_exit_code(self):
         """Test command that exits with non-zero code."""
-        result = bash.invoke({"command": "exit 1"})
+        result = await bash.ainvoke({"command": "exit 1"})
 
         assert "EXIT CODE: 1" in result
 
-    def test_bash_stderr_captured(self):
+    @pytest.mark.asyncio
+    async def test_bash_stderr_captured(self):
         """Test that stderr is captured."""
-        result = bash.invoke({"command": "ls /nonexistent_directory_12345 2>&1"})
+        result = await bash.ainvoke({"command": "ls /nonexistent_directory_12345 2>&1"})
 
         assert "No such file" in result or "not found" in result.lower()
 
-    def test_bash_timeout(self):
+    @pytest.mark.asyncio
+    async def test_bash_timeout(self):
         """Test timeout handling."""
-        result = bash.invoke({"command": "sleep 5", "timeout": 1})
+        result = await bash.ainvoke({"command": "sleep 5", "timeout": 1})
 
         assert "timed out" in result.lower()
 
-    def test_bash_working_directory(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_bash_working_directory(self, tmp_path):
         """Test working directory option."""
         # Create a file in a specific directory
         test_file = tmp_path / "test_file.txt"
         test_file.write_text("test content")
 
         # Run pwd in that directory
-        result = bash.invoke({
+        result = await bash.ainvoke({
             "command": "pwd",
             "workdir": str(tmp_path)
         })
 
         assert str(tmp_path) in result
 
-    def test_bash_with_environment_variable(self):
+    @pytest.mark.asyncio
+    async def test_bash_with_environment_variable(self):
         """Test command that uses environment variables."""
-        result = bash.invoke({"command": "echo $HOME"})
+        result = await bash.ainvoke({"command": "echo $HOME"})
 
         assert result.strip() != ""
         assert "echo $HOME" not in result  # Should expand the variable

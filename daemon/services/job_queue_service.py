@@ -465,3 +465,17 @@ class JobQueueService:
             List of project_ids that were released.
         """
         return await self._lock_manager.release_by_instance(instance_id)
+    
+    def release_locks_by_instance_sync(self, instance_id: str) -> list[str]:
+        """Release any locks held by an instance (synchronous version).
+        
+        This method is used during manager shutdown when async context
+        is not available. Waiter notification is scheduled via the event loop.
+        
+        Args:
+            instance_id: The instance to release locks for.
+            
+        Returns:
+            List of project_ids that were released.
+        """
+        return self._lock_manager.release_by_instance_sync(instance_id)

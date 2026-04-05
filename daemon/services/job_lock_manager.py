@@ -188,13 +188,27 @@ class JobLockManager:
     def release_by_instance_sync(self, instance_id: str) -> list[str]:
         """Synchronous version of release_by_instance.
         
-        Note: Not thread-safe. Use async release_by_instance() in async contexts.
+        Note: Not thread-safe for concurrent access. Use async release_by_instance()
+        in async contexts. Waiter notification is scheduled via the event loop.
         """
         released = []
         for project_id, info in list(self._locks.items()):
             if info.instance_id == instance_id:
                 del self._locks[project_id]
                 released.append(project_id)
+        
+        # Notify waiters via the event loop since we can't await directly
+        for project_id in released:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule notification on the event loop
+                    loop.call_soon_threadsafe(
+                        lambda pid=project_id: asyncio.create_task(self._notify_waiter(pid))
+                    )
+            except RuntimeError:
+                # No event loop available, skip waiter notification
+                pass
         
         return released
     

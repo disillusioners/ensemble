@@ -841,10 +841,10 @@ class InstanceManager:
             if not self.circuit_breaker.can_execute(instance_id):
                 logger.warning(f"Circuit breaker open for instance {instance_id[:8]}...")
                 # Notify parent if this is a child instance with pending messages
-                meta = self._instance_repository.get(instance_id)
+                meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
                 if meta and meta.parent_id:
                     # Get pending messages (single query, use count from result)
-                    pending = self._queue_repository.list(instance_id=instance_id, status="ready", limit=100)
+                    pending = await asyncio.to_thread(self._queue_repository.list, instance_id=instance_id, status="ready", limit=100)
                     if pending:
                         await self._send_error_report(
                             instance_id=instance_id,
@@ -891,7 +891,7 @@ class InstanceManager:
                     message_content = msg.content
                     if is_first_message:
                         # PRIORITY 1: Use explicit project_id from instance metadata
-                        instance_meta = self._instance_repository.get(instance_id)
+                        instance_meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
                         explicit_project_id = (
                             instance_meta.instance_metadata.get("project_id") 
                             if instance_meta and instance_meta.instance_metadata 
@@ -900,7 +900,7 @@ class InstanceManager:
                         
                         if explicit_project_id:
                             # Use explicit project context (no text extraction)
-                            project = self._project_repository.get(explicit_project_id)
+                            project = await asyncio.to_thread(self._project_repository.get, explicit_project_id)
                             if project:
                                 project_context = format_project_context(project)
                                 message_content = project_context + msg.content
@@ -943,7 +943,7 @@ class InstanceManager:
                     # Determine the source for the completed event
                     # Root source inheritance: child instances don't broadcast completed events
                     # Only the root instance (parentless) broadcasts with the original external source
-                    meta = self._instance_repository.get(instance_id)
+                    meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
                     
                     # Skip broadcast entirely if this is a child instance
                     if meta and meta.parent_id:
@@ -1047,7 +1047,7 @@ class InstanceManager:
             
             # Queue is empty - check if this is a child instance and send completion report
             if await asyncio.to_thread(self._queue_repository.is_empty, instance_id):
-                meta = self._instance_repository.get(instance_id)
+                meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
                 if meta and meta.parent_id:
                     # This is a child instance that has completed - send report to parent
                     await self._send_completion_report(instance_id)
@@ -2005,7 +2005,7 @@ Title:"""
         # 6. Release project lock if JobQueueService is connected
         if self._job_queue_service is not None:
             try:
-                released_projects = self._job_queue_service._lock_manager.release_by_instance_sync(instance_id)
+                released_projects = self._job_queue_service.release_locks_by_instance_sync(instance_id)
                 if released_projects:
                     logger.info(
                         f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "

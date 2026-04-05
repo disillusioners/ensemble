@@ -208,7 +208,7 @@ def create_agent_node(
         try:
             # Use run_in_executor to avoid blocking the event loop.
             # This allows SSE streaming to continue while LLM processes.
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None,
                 lambda: llm_with_tools.invoke(full_messages)
@@ -251,7 +251,7 @@ def create_agent_node(
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
             # Use run_in_executor to avoid blocking the event loop after compaction
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None,
                 lambda: llm_with_tools.invoke(compact_messages)
