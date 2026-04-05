@@ -2445,7 +2445,7 @@ Title:"""
             )
             await asyncio.sleep(0.5)
     
-    def _stop_watchdog(self) -> None:
+    async def _stop_watchdog(self) -> None:
         """Stop the watchdog thread."""
         self.watchdog.stop()
     
