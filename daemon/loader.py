@@ -206,6 +206,64 @@ def estimate_tokens(text: str) -> int:
     return len(encoder.encode(text))
 
 
+def estimate_messages_tokens(messages: list) -> int:
+    """Estimate total token count for a list of LangChain messages.
+    
+    Accounts for per-message overhead (role tokens, formatting) that LLMs add.
+    Uses rough overhead estimates based on OpenAI token accounting:
+    - Each message: +4 tokens (role markers, separators)
+    - Tool calls: additional tokens for function call formatting
+    
+    Args:
+        messages: List of LangChain BaseMessage objects.
+        
+    Returns:
+        Estimated total token count including overhead.
+    """
+    if not messages:
+        return 0
+        
+    total = 0
+    for msg in messages:
+        # Content tokens
+        content = getattr(msg, "content", "") or ""
+        if isinstance(content, list):
+            # Some models return content as list of blocks
+            for block in content:
+                if isinstance(block, dict):
+                    total += estimate_tokens(block.get("text", ""))
+                else:
+                    total += estimate_tokens(str(block))
+        else:
+            total += estimate_tokens(str(content))
+        
+        # Per-message overhead (~4 tokens for role markers, separators)
+        total += 4
+        
+        # Tool calls overhead
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if isinstance(tc, dict):
+                    total += estimate_tokens(str(tc.get("args", {})))
+                    total += estimate_tokens(tc.get("name", ""))
+                else:
+                    total += estimate_tokens(str(getattr(tc, "args", {})))
+                    total += estimate_tokens(getattr(tc, "name", ""))
+                total += 3  # function call formatting overhead
+        
+        # Tool response metadata
+        if hasattr(msg, "name") and msg.name:
+            total += estimate_tokens(msg.name) + 2
+        
+        # Additional kwargs (thinking, reasoning)
+        if hasattr(msg, "additional_kwargs") and msg.additional_kwargs:
+            for key, val in msg.additional_kwargs.items():
+                if key in ("reasoning_content", "thinking"):
+                    total += estimate_tokens(str(val))
+    
+    return total
+
+
 class PromptCache:
     """In-memory cache for compiled prompts.
     
