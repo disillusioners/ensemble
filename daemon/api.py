@@ -1216,7 +1216,7 @@ async def stop_source(source_id: str):
     )
 
 
-# ==================== Session Mapping Endpoints ====================
+# ==================== Instance Mapping Endpoints ====================
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source

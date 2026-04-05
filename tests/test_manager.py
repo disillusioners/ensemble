@@ -545,8 +545,8 @@ class TestThinkTagParsing:
             
             assert result.thinking_extracted == "Upper case thinking"
             assert result.content == "Response"
-class TestGenerateInstanceTitle:
-    """Tests for _generate_instance_title method."""
+class TestGenerateAndBroadcastTitle:
+    """Tests for _generate_and_broadcast_title method."""
 
     @pytest.fixture
     def mock_llm(self):
@@ -558,13 +558,14 @@ class TestGenerateInstanceTitle:
         return mock
 
     @pytest.mark.asyncio
-    async def test_generate_instance_title_success(self, mock_config, mock_llm, mock_instance_repository):
-        """Test that title is generated and stored."""
+    async def test_generate_and_broadcast_title_success(self, mock_config, mock_llm, mock_instance_repository):
+        """Test that title is generated and broadcast correctly."""
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
              patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Mock the instance repository to return a instance with no title
             mock_instance = MagicMock()
@@ -572,39 +573,43 @@ class TestGenerateInstanceTitle:
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
-            title = await manager._generate_instance_title("test-instance", "Hello, how are you?")
+            await manager._generate_and_broadcast_title("test-instance", "Hello, how are you?")
             
-            # Verify title was generated
-            assert title is not None
-            assert title == "Test Instance Title"
+            # Verify broadcast was called with correct event
+            manager.broadcaster.broadcast.assert_called_once()
+            call_args = manager.broadcaster.broadcast.call_args
+            event = call_args[0][0]
+            assert isinstance(event, Event)
+            assert event.type == "title_updated"
+            assert event.instance_id == "test-instance"
+            assert event.data == {"title": "Test Instance Title"}
             
             # Verify update_title was called
-            mock_instance_repository.update_title.assert_called_once()
-            
+            mock_instance_repository.update_title.assert_called_once_with("test-instance", "Test Instance Title")
+
     @pytest.mark.asyncio
-    async def test_generate_instance_title_already_exists(self, mock_config, mock_instance_repository):
-        """Test that returns None when title already exists."""
+    async def test_generate_and_broadcast_title_already_exists(self, mock_config, mock_instance_repository):
+        """Test that broadcast is NOT called when title already exists."""
         with patch('daemon.manager.PromptCache', return_value=Mock()):
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Mock the instance repository to return a instance with existing title
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {"title": "Existing Title"}
             mock_instance_repository.get.return_value = mock_instance
             
-            # Call the method - should return None since title exists
-            title = await manager._generate_instance_title("test-instance", "Hello!")
+            # Call the method - should return early since title exists
+            await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
-            # Should return None because title already exists
-            assert title is None
+            # Broadcast should NOT be called because title already exists
+            manager.broadcaster.broadcast.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_generate_instance_title_llm_failure(self, mock_config, mock_instance_repository):
-        """Test that handles LLM failure gracefully."""
-        # We need to mock at the instantiation level too, since the try/except 
-        # doesn't cover the LLM instantiation (line 1126 in manager.py)
+    async def test_generate_and_broadcast_title_llm_failure(self, mock_config, mock_instance_repository):
+        """Test that handles LLM failure gracefully without broadcasting."""
         mock_llm_instance = Mock()
         mock_llm_instance.invoke.side_effect = Exception("LLM Error")
         
@@ -614,26 +619,24 @@ class TestGenerateInstanceTitle:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Mock the instance repository
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
             
-            # Call the method - should not raise (exception is caught in try/except)
-            title = await manager._generate_instance_title("test-instance", "Hello!")
+            # Call the method - should not raise (exception is caught)
+            await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
-            # Should return None on failure
-            assert title is None
-            
-            # Should not call update_title
-            mock_instance_repository.update_title.assert_not_called()
+            # Broadcast should NOT be called on failure
+            manager.broadcaster.broadcast.assert_not_called()
             
             # Should log warning
             mock_logger.warning.assert_called()
 
     @pytest.mark.asyncio
-    async def test_generate_instance_title_truncates_long_titles(self, mock_config, mock_instance_repository):
+    async def test_generate_and_broadcast_title_truncates_long_titles(self, mock_config, mock_instance_repository):
         """Test that long titles are truncated to 100 chars."""
         long_title = "A" * 200  # 200 character title
         
@@ -647,6 +650,7 @@ class TestGenerateInstanceTitle:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Mock the instance repository
             mock_instance = MagicMock()
@@ -654,31 +658,38 @@ class TestGenerateInstanceTitle:
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
-            title = await manager._generate_instance_title("test-instance", "Hello!")
+            await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
-            # Verify title was truncated to 100 chars (actually 97 + "...")
-            assert title is not None
-            assert len(title) <= 100
-            assert title.endswith("...")
+            # Verify broadcast was called with truncated title
+            manager.broadcaster.broadcast.assert_called_once()
+            call_args = manager.broadcaster.broadcast.call_args
+            event = call_args[0][0]
+            assert len(event.data["title"]) <= 100
+            assert event.data["title"].endswith("...")
 
     @pytest.mark.asyncio
-    async def test_generate_instance_title_empty_message(self, mock_config, mock_instance_repository):
-        """Test that empty message returns None."""
+    async def test_generate_and_broadcast_title_empty_message(self, mock_config, mock_instance_repository):
+        """Test that empty message returns early without broadcasting."""
         with patch('daemon.manager.PromptCache', return_value=Mock()):
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Call with empty message
-            title = await manager._generate_instance_title("test-instance", "")
-            assert title is None
+            await manager._generate_and_broadcast_title("test-instance", "")
+            
+            # Broadcast should NOT be called
+            manager.broadcaster.broadcast.assert_not_called()
             
             # Call with whitespace only
-            title = await manager._generate_instance_title("test-instance", "   ")
-            assert title is None
+            await manager._generate_and_broadcast_title("test-instance", "   ")
+            
+            # Broadcast should NOT be called
+            manager.broadcaster.broadcast.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_generate_instance_title_list_content(self, mock_config, mock_instance_repository):
+    async def test_generate_and_broadcast_title_list_content(self, mock_config, mock_instance_repository):
         """Test that list content from LLM is handled correctly."""
         mock_llm = Mock()
         mock_response = Mock()
@@ -691,6 +702,7 @@ class TestGenerateInstanceTitle:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            manager.broadcaster = AsyncMock()
             
             # Mock the instance repository
             mock_instance = MagicMock()
@@ -698,89 +710,60 @@ class TestGenerateInstanceTitle:
             mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
-            title = await manager._generate_instance_title("test-instance", "Hello!")
+            await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
-            # Verify title was extracted from list
-            assert title is not None
-            assert "List Response Title" in title
-
-
-class TestGenerateAndBroadcastInstanceTitle:
-    """Tests for _generate_and_broadcast_title helper method."""
-
-    @pytest.mark.asyncio
-    async def test_generate_and_broadcast_instance_title_success(self, mock_config, mock_instance_repository):
-        """Test that title is generated and broadcast correctly."""
-        with patch('daemon.manager.PromptCache', return_value=Mock()):
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            manager.broadcaster = AsyncMock()
-            
-            # Mock _generate_instance_title to return a title
-            manager._generate_instance_title = AsyncMock(return_value="Test Title")
-            
-            # Call the method
-            await manager._generate_and_broadcast_title("test-instance", "Hello, how are you?")
-            
-            # Verify broadcast was called with correct event
+            # Verify title was extracted from list and broadcast
             manager.broadcaster.broadcast.assert_called_once()
             call_args = manager.broadcaster.broadcast.call_args
             event = call_args[0][0]
-            assert isinstance(event, Event)
-            assert event.type == "title_updated"
-            assert event.instance_id == "test-instance"
-            assert event.message_id == ""
-            assert event.data == {"title": "Test Title"}
+            assert "List Response Title" in event.data["title"]
 
     @pytest.mark.asyncio
-    async def test_generate_and_broadcast_instance_title_no_title_returned(self, mock_config, mock_instance_repository):
-        """Test that broadcast is NOT called when no title is generated."""
-        with patch('daemon.manager.PromptCache', return_value=Mock()):
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            manager.broadcaster = AsyncMock()
-            
-            # Mock _generate_instance_title to return None
-            manager._generate_instance_title = AsyncMock(return_value=None)
-            
-            # Call the method
-            await manager._generate_and_broadcast_title("test-instance", "Hello!")
-            
-            # Verify broadcast was NOT called
-            manager.broadcaster.broadcast.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_generate_and_broadcast_instance_title_error_caught(self, mock_config, mock_instance_repository):
+    async def test_generate_and_broadcast_title_error_caught(self, mock_config, mock_instance_repository):
         """Test that errors are caught and logged without crashing."""
+        mock_llm_instance = Mock()
+        mock_llm_instance.invoke.side_effect = Exception("LLM Error")
+        
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm_instance), \
              patch('daemon.manager.logger') as mock_logger:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.broadcaster = AsyncMock()
             
-            # Mock _generate_instance_title to raise an exception
-            manager._generate_instance_title = AsyncMock(side_effect=Exception("LLM Error"))
+            # Mock the instance repository
+            mock_instance = MagicMock()
+            mock_instance.instance_metadata = {}
+            mock_instance_repository.get.return_value = mock_instance
             
-            # Call the method - should not raise
+            # Call the method - should not raise (exception is caught)
             await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
             # Verify broadcast was NOT called due to error
             manager.broadcaster.broadcast.assert_not_called()
             
-            # Verify warning was logged
+            # Should log warning
             mock_logger.warning.assert_called()
             assert "Failed to generate title" in str(mock_logger.warning.call_args)
 
     @pytest.mark.asyncio
     async def test_generate_and_broadcast_instance_title_broadcasts_correct_event(self, mock_config, mock_instance_repository):
         """Test that the broadcast event has exactly the expected structure."""
-        with patch('daemon.manager.PromptCache', return_value=Mock()):
+        mock_llm = Mock()
+        mock_response = Mock()
+        mock_response.content = "Exact Title"
+        mock_llm.invoke.return_value = mock_response
+        
+        with patch('daemon.manager.PromptCache', return_value=Mock()), \
+             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.broadcaster = AsyncMock()
             
-            # Mock _generate_instance_title to return a specific title
-            manager._generate_instance_title = AsyncMock(return_value="Exact Title")
+            # Mock the instance repository
+            mock_instance = MagicMock()
+            mock_instance.instance_metadata = {}
+            mock_instance_repository.get.return_value = mock_instance
             
             # Call the method
             await manager._generate_and_broadcast_title("instance-123", "User message content")
