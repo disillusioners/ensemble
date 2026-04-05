@@ -24,7 +24,7 @@ limits:
 
 # Persistence Settings
 persistence:
-  db_path: ./data/sessions.db
+  db_path: ./data/instances.db
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
