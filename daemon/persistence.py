@@ -1,4 +1,13 @@
-"""Persistence layer with SQLite for LangGraph checkpointing."""
+"""
+Persistence layer with SQLite for LangGraph checkpointing.
+
+Threading Notes:
+- AsyncSqliteSaver uses aiosqlite which runs SQLite operations in a background thread pool.
+- This is safe because aiosqlite manages thread isolation internally.
+- The checkpointer operates independently from the main SQLAlchemy session used by repositories.
+- No additional synchronization is needed between checkpointing and repository operations since they
+  use separate connections.
+"""
 
 import logging
 from pathlib import Path
@@ -13,10 +22,25 @@ logger = logging.getLogger(__name__)
 async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     """Create and return an AsyncSqliteSaver checkpointer.
     
-    Note: This creates the aiosqlite connection directly which will be
-    kept alive for the entire application lifetime. The checkpointer will
-    be cleaned up when the application shuts down via the cleanup_checkpointer()
-    method on the InstanceManager class.
+    Threading Model:
+    - AsyncSqliteSaver uses aiosqlite internally, which runs SQLite operations in a dedicated
+      background thread pool managed by asyncio's default executor.
+    - All database operations are offloaded from the main event loop, so they don't block
+      async execution.
+    - aiosqlite handles thread isolation internally - you don't need to manage locks or use
+      run_in_executor() yourself.
+    
+    Lifecycle:
+    - This creates the aiosqlite connection directly which will be kept alive for the entire
+      application lifetime.
+    - The checkpointer will be cleaned up when the application shuts down via the
+      cleanup_checkpointer() method on the InstanceManager class.
+    
+    Independence:
+    - The checkpointer uses its own connection to the SQLite database, separate from any
+      SQLAlchemy sessions used by repositories.
+    - No additional synchronization is needed between checkpointing and repository operations
+      since they use separate connections.
     
     Args:
         db_path: Path to the SQLite database file.

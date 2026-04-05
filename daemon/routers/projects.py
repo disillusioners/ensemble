@@ -1,5 +1,6 @@
 """Project Queue API endpoints."""
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -81,7 +82,7 @@ async def get_project(
         200 with project details
         404 if project doesn't exist
     """
-    project = repo.get(project_id)
+    project = await asyncio.to_thread(repo.get, project_id)
     
     if project is None:
         raise HTTPException(
@@ -107,7 +108,7 @@ async def list_projects(
     Returns:
         200 with list of projects
     """
-    projects = repo.list_projects()
+    projects = await asyncio.to_thread(repo.list_projects)
     
     return ProjectListResponse(
         projects=[_project_to_response(p) for p in projects],
@@ -125,7 +126,7 @@ async def list_projects_trailing(
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectListResponse:
     """List all projects (trailing slash variant)."""
-    projects = repo.list_projects()
+    projects = await asyncio.to_thread(repo.list_projects)
     
     return ProjectListResponse(
         projects=[_project_to_response(p) for p in projects],
@@ -158,7 +159,7 @@ async def set_queue_status(
         404 if project doesn't exist
     """
     # Check project exists
-    project = repo.get(project_id)
+    project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
         raise HTTPException(
             status_code=404,
@@ -177,7 +178,7 @@ async def set_queue_status(
         )
     
     # Update the job_queue_paused field
-    updated = repo.update(project_id, job_queue_paused=paused)
+    updated = await asyncio.to_thread(repo.update, project_id, job_queue_paused=paused)
     
     if updated is None:
         raise HTTPException(
@@ -206,7 +207,7 @@ async def pause_queue(
         200 with updated project
         404 if project doesn't exist
     """
-    project = repo.get(project_id)
+    project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
         raise HTTPException(
             status_code=404,
@@ -216,7 +217,7 @@ async def pause_queue(
             ).model_dump()
         )
     
-    updated = repo.update(project_id, job_queue_paused=True)
+    updated = await asyncio.to_thread(repo.update, project_id, job_queue_paused=True)
     
     if updated is None:
         raise HTTPException(
@@ -245,7 +246,7 @@ async def resume_queue(
         200 with updated project
         404 if project doesn't exist
     """
-    project = repo.get(project_id)
+    project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
         raise HTTPException(
             status_code=404,
@@ -255,7 +256,7 @@ async def resume_queue(
             ).model_dump()
         )
     
-    updated = repo.update(project_id, job_queue_paused=False)
+    updated = await asyncio.to_thread(repo.update, project_id, job_queue_paused=False)
     
     if updated is None:
         raise HTTPException(

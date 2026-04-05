@@ -127,7 +127,7 @@ async def _reject_scheduler_lifecycle(source_id: str) -> None:
     Raises:
         HTTPException: If the source is a scheduler type.
     """
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if source and source.source_type == "scheduler":
         raise HTTPException(
             status_code=400,
@@ -850,7 +850,7 @@ async def stream_events(instance_id: str, request: Request):
 @api_router.get("/sources", response_model=SourceListResponse)
 async def list_sources():
     """List all configured message sources."""
-    sources_data = manager._source_repository.list_source_configs()
+    sources_data = await asyncio.to_thread(manager._source_repository.list_source_configs)
     sources = []
     for src in sources_data:
         sources.append(SourceInfo(
@@ -872,7 +872,7 @@ async def list_sources():
 async def create_source(source_create: SourceCreate):
     """Create a new message source."""
     # Check if source already exists
-    existing = manager._source_repository.get_source_config(source_create.source_id)
+    existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_create.source_id)
     if existing:
         raise HTTPException(
             status_code=409,
@@ -924,7 +924,8 @@ async def create_source(source_create: SourceCreate):
         credentials_json = credential_manager.encrypt(source_create.credentials)
     
     # Create source config using repository
-    source = manager._source_repository.create_source_config(
+    source = await asyncio.to_thread(
+        manager._source_repository.create_source_config,
         source_type=source_create.source_type.value,
         name=source_create.name,
         config=final_config,
@@ -998,7 +999,7 @@ async def test_source(test_request: SourceTestRequest):
 @api_router.get("/sources/{source_id}", response_model=SourceInfo)
 async def get_source(source_id: str):
     """Get a specific message source."""
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1025,7 +1026,7 @@ async def get_source(source_id: str):
 @api_router.put("/sources/{source_id}", response_model=SourceInfo)
 async def update_source(source_id: str, source_update: SourceUpdate):
     """Update a message source configuration."""
-    existing = manager._source_repository.get_source_config(source_id)
+    existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not existing:
         raise HTTPException(
             status_code=404,
@@ -1071,7 +1072,8 @@ async def update_source(source_id: str, source_update: SourceUpdate):
         credentials_json = existing.credentials
     
     # Update source config using repository
-    updated = manager._source_repository.update_source_config(
+    updated = await asyncio.to_thread(
+        manager._source_repository.update_source_config,
         source_id=source_id,
         source_type=existing.source_type,
         name=updated_name,
@@ -1098,7 +1100,7 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 async def delete_source(source_id: str):
     """Delete a message source."""
     # Get source to check type first
-    existing = manager._source_repository.get_source_config(source_id)
+    existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not existing:
         raise HTTPException(
             status_code=404,
@@ -1119,7 +1121,7 @@ async def delete_source(source_id: str):
         logger.warning(f"Failed to stop adapter during delete {source_id}: {e}")
     
     # Delete from database
-    result = manager._source_repository.delete_source_config(source_id)
+    result = await asyncio.to_thread(manager._source_repository.delete_source_config, source_id)
     
     return DeleteResponse(deleted=True, message=f"Source {source_id} deleted")
 
@@ -1130,7 +1132,7 @@ async def start_source(source_id: str):
     """Start a message source adapter."""
     from .sources.base import SourceConfig
     
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1191,14 +1193,14 @@ async def start_source(source_id: str):
             
             # Start the adapter
             await manager.source_registry.start_adapter(source_id)
-            manager._source_repository.update_source_status(source_id, "running")
+            await asyncio.to_thread(manager._source_repository.update_source_status, source_id, "running")
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.running,
                 message=f"Source {source_id} started successfully"
             )
         except Exception as e:
-            manager._source_repository.update_source_status(source_id, "error", str(e))
+            await asyncio.to_thread(manager._source_repository.update_source_status, source_id, "error", str(e))
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.error,
@@ -1216,7 +1218,7 @@ async def start_source(source_id: str):
 @api_router.post("/sources/{source_id}/stop", response_model=SourceActionResponse)
 async def stop_source(source_id: str):
     """Stop a message source adapter."""
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1233,21 +1235,21 @@ async def stop_source(source_id: str):
     if manager.source_registry:
         try:
             await manager.source_registry.stop_adapter(source_id)
-            manager._source_repository.update_source_status(source_id, "stopped")
+            await asyncio.to_thread(manager._source_repository.update_source_status, source_id, "stopped")
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.stopped,
                 message=f"Source {source_id} stopped successfully"
             )
         except Exception as e:
-            manager._source_repository.update_source_status(source_id, "error", str(e))
+            await asyncio.to_thread(manager._source_repository.update_source_status, source_id, "error", str(e))
             return SourceActionResponse(
                 source_id=source_id,
                 status=SourceStatus.error,
                 message=f"Failed to stop source: {str(e)}"
             )
     
-    manager._source_repository.update_source_status(source_id, "stopped")
+    await asyncio.to_thread(manager._source_repository.update_source_status, source_id, "stopped")
     return SourceActionResponse(
         source_id=source_id,
         status=SourceStatus.stopped,
@@ -1263,7 +1265,7 @@ async def stop_source(source_id: str):
 async def list_mappings(source_id: str):
     """List all instance mappings for a source."""
     # Check source exists
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1273,7 +1275,7 @@ async def list_mappings(source_id: str):
             ).model_dump()
         )
     
-    mappings_data = manager._source_repository.list_instance_mappings(source_id)
+    mappings_data = await asyncio.to_thread(manager._source_repository.list_instance_mappings, source_id)
     mappings = []
     for m in mappings_data:
         mappings.append(InstanceMappingInfo(
@@ -1300,7 +1302,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     resolved_agent_id, agent_path = validate_agent_id(mapping_create.agent_id)
     
     # Check source exists
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1311,7 +1313,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
         )
     
     # Check if mapping already exists
-    existing = manager._source_repository.get_instance_mapping(source_id, mapping_create.external_user_id)
+    existing = await asyncio.to_thread(manager._source_repository.get_instance_mapping, source_id, mapping_create.external_user_id)
     if existing:
         raise HTTPException(
             status_code=409,
@@ -1343,7 +1345,8 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     
     # Save the mapping with rollback on failure
     try:
-        manager._source_repository.create_instance_mapping(
+        await asyncio.to_thread(
+            manager._source_repository.create_instance_mapping,
             source_id=source_id,
             external_user_id=mapping_create.external_user_id,
             agent_instance_id=instance_id,
@@ -1367,7 +1370,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
         )
     
     # Get the saved mapping
-    saved = manager._source_repository.get_instance_mapping(source_id, mapping_create.external_user_id)
+    saved = await asyncio.to_thread(manager._source_repository.get_instance_mapping, source_id, mapping_create.external_user_id)
     return InstanceMappingInfo(
         mapping_id=saved.mapping_id,
         source_id=saved.source_id,
@@ -1388,7 +1391,7 @@ async def delete_mapping(source_id: str, mapping_id: str):
     # URL decode the mapping_id if needed
     # mapping_id format is "source_id:external_user_id"
     
-    result = manager._source_repository.delete_instance_mapping(mapping_id)
+    result = await asyncio.to_thread(manager._source_repository.delete_instance_mapping, mapping_id)
     if not result.get("deleted"):
         raise HTTPException(
             status_code=404,
@@ -1412,7 +1415,7 @@ async def list_schedules():
     This endpoint filters sources to only return those with source_type='scheduler'.
     Returns schedules in the format expected by the frontend.
     """
-    all_sources = manager._source_repository.list_source_configs()
+    all_sources = await asyncio.to_thread(manager._source_repository.list_source_configs)
     schedules = []
     for src in all_sources:
         if src.source_type == "scheduler":
@@ -1490,7 +1493,7 @@ def validate_instance_mode(instance_mode: str | None, schedule_type: str | None 
 async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
     """Update a schedule configuration."""
     # Check source exists and is a scheduler
-    existing = manager._source_repository.get_source_config(schedule_id)
+    existing = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not existing:
         raise HTTPException(
             status_code=404,
@@ -1534,7 +1537,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
             updated_config["max_concurrent"] = 1
     
     # Update source config using repository
-    updated = manager._source_repository.update_source_config(
+    updated = await asyncio.to_thread(
+        manager._source_repository.update_source_config,
         source_id=schedule_id,
         source_type=existing.source_type,
         name=updated_name,
@@ -1574,7 +1578,7 @@ async def trigger_schedule(schedule_id: str):
     from .sources.base import SourceConfig
     
     # Check source exists and is a scheduler
-    source = manager._source_repository.get_source_config(schedule_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1640,7 +1644,7 @@ async def trigger_schedule(schedule_id: str):
 async def start_schedule(schedule_id: str):
     """Start a scheduler source."""
     # Check source exists
-    source = manager._source_repository.get_source_config(schedule_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1686,7 +1690,7 @@ async def start_schedule(schedule_id: str):
 async def stop_schedule(schedule_id: str):
     """Stop a scheduler source."""
     # Check source exists
-    source = manager._source_repository.get_source_config(schedule_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1740,7 +1744,7 @@ async def get_schedule_executions(
         offset: Number of executions to skip (default: 0).
     """
     # Check source exists and is a scheduler
-    source = manager._source_repository.get_source_config(schedule_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
         raise HTTPException(
             status_code=404,
@@ -1764,7 +1768,8 @@ async def get_schedule_executions(
     offset = max(0, offset)  # Ensure non-negative
     
     # Get executions from repository
-    executions_data = manager._source_repository.list_schedule_executions(
+    executions_data = await asyncio.to_thread(
+        manager._source_repository.list_schedule_executions,
         schedule_id=schedule_id,
         limit=limit,
         offset=offset
@@ -1800,7 +1805,7 @@ async def get_schedule_executions(
 async def receive_webhook(source_id: str, request: Request):
     """Receive a webhook from an external message source."""
     # Check source exists
-    source = manager._source_repository.get_source_config(source_id)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,

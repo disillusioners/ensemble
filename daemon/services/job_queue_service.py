@@ -6,6 +6,7 @@ coordinating between the database repository and the lock manager.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -76,7 +77,8 @@ class JobQueueService:
         agent_dir = str(agent_meta.path)
         
         # Create job once (status defaults to PENDING in repository)
-        job = self._repository.create(
+        job = await asyncio.to_thread(
+            self._repository.create,
             agent_id=agent_id,
             agent_dir=agent_dir,
             message=message,
@@ -89,7 +91,7 @@ class JobQueueService:
         # If no project_id, execute immediately without locking
         if project_id is None:
             instance_id = str(uuid.uuid4())
-            started_job = self._repository.start_job(job.job_id, instance_id)
+            started_job = await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
             assert started_job is not None, f"Failed to start job {job.job_id}"
             return started_job
         
@@ -103,7 +105,7 @@ class JobQueueService:
         
         if acquired:
             try:
-                started_job = self._repository.start_job(job.job_id, instance_id)
+                started_job = await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
                 assert started_job is not None, f"Failed to start job {job.job_id}"
                 return started_job
             except Exception:
@@ -123,7 +125,7 @@ class JobQueueService:
         Returns:
             JobItem if found, None otherwise.
         """
-        return self._repository.get(job_id)
+        return await asyncio.to_thread(self._repository.get, job_id)
     
     async def update_job(self, job_id: str, **updates) -> Optional[JobItem]:
         """Update job fields.
@@ -135,7 +137,7 @@ class JobQueueService:
         Returns:
             Updated JobItem if found, None otherwise.
         """
-        return self._repository.update(job_id, **updates)
+        return await asyncio.to_thread(self._repository.update, job_id, **updates)
     
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel a pending job or abort a running job.
@@ -147,13 +149,13 @@ class JobQueueService:
             True if cancelled successfully, False if job not found or
             not in a cancellable state.
         """
-        job = self._repository.get(job_id)
+        job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return False
         
         # Can only cancel PENDING jobs
         if job.status == JobStatus.PENDING.value:
-            self._repository.cancel_job(job_id)
+            await asyncio.to_thread(self._repository.cancel_job, job_id)
             return True
         
         # Can abort PROCESSING jobs (release lock)
@@ -163,7 +165,8 @@ class JobQueueService:
                 await self._lock_manager.release_by_instance(job.instance_id)
             # Use update() instead of cancel_job() since PROCESSING jobs
             # can't be cancelled via cancel_job() (raises ValueError)
-            self._repository.update(
+            await asyncio.to_thread(
+                self._repository.update,
                 job_id,
                 status=JobStatus.CANCELLED.value,
                 cancelled_at=datetime.utcnow().isoformat(),
@@ -185,7 +188,7 @@ class JobQueueService:
             New JobItem if retry successful, None if job not found or
             not in a retryable state (not FAILED).
         """
-        job = self._repository.get(job_id)
+        job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return None
         
@@ -223,7 +226,8 @@ class JobQueueService:
             List of JobItem objects.
         """
         status_value = status.value if status else None
-        jobs, _ = self._repository.list(
+        jobs, _ = await asyncio.to_thread(
+            self._repository.list,
             status=status_value,
             project_id=project_id,
             limit=limit,
@@ -232,7 +236,7 @@ class JobQueueService:
     
     # ========== Helper Methods ==========
     
-    def _try_start_job(self, job: JobItem) -> bool:
+    async def _try_start_job(self, job: JobItem) -> bool:
         """Try to start a pending job.
         
         Attempts to acquire the lock for the job's project and start
@@ -247,7 +251,7 @@ class JobQueueService:
         if job.project_id is None:
             # No project, can start immediately
             instance_id = str(uuid.uuid4())
-            self._repository.start_job(job.job_id, instance_id)
+            await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
             return True
         
         # Try to acquire lock
@@ -260,12 +264,12 @@ class JobQueueService:
         )
         
         if acquired:
-            self._repository.start_job(job.job_id, instance_id)
+            await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
             return True
         
         return False
     
-    def _complete_job(self, job: JobItem, result_summary: Optional[str]) -> None:
+    async def _complete_job(self, job: JobItem, result_summary: Optional[str]) -> None:
         """Mark a job as completed and release its lock.
         
         Args:
@@ -277,9 +281,9 @@ class JobQueueService:
             self._lock_manager.release_sync(job.project_id, job.job_id)
         
         # Mark job as completed
-        self._repository.complete_job(job.job_id, result_summary)
+        await asyncio.to_thread(self._repository.complete_job, job.job_id, result_summary)
     
-    def _fail_job(self, job: JobItem, error_message: str) -> None:
+    async def _fail_job(self, job: JobItem, error_message: str) -> None:
         """Mark a job as failed and release its lock.
         
         Args:
@@ -291,9 +295,9 @@ class JobQueueService:
             self._lock_manager.release_sync(job.project_id, job.job_id)
         
         # Mark job as failed
-        self._repository.fail_job(job.job_id, error_message)
+        await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
     
-    def _get_next_job(self, project_id: Optional[str]) -> Optional[JobItem]:
+    async def _get_next_job(self, project_id: Optional[str]) -> Optional[JobItem]:
         """Get the next pending job for a project.
         
         Args:
@@ -304,13 +308,13 @@ class JobQueueService:
             Next JobItem to process, or None if no pending jobs.
         """
         if project_id:
-            pending = self._repository.list_pending_by_project(project_id)
+            pending = await asyncio.to_thread(self._repository.list_pending_by_project, project_id)
             return pending[0] if pending else None
         else:
-            pending = self._repository.list_all_pending()
+            pending = await asyncio.to_thread(self._repository.list_all_pending)
             return pending[0] if pending else None
     
-    def _get_queue_position(self, job_id: Optional[str], project_id: str) -> int:
+    async def _get_queue_position(self, job_id: Optional[str], project_id: str) -> int:
         """Get the queue position for a job in its project.
         
         Returns the 1-based position of the job in the pending queue
@@ -324,7 +328,7 @@ class JobQueueService:
         Returns:
             1-based queue position, or None if job not found in pending queue.
         """
-        pending = self._repository.list_pending_by_project(project_id)
+        pending = await asyncio.to_thread(self._repository.list_pending_by_project, project_id)
         
         if job_id is None:
             # Return position as if this job was added to end
@@ -338,7 +342,7 @@ class JobQueueService:
 
     # ========== JobProcessor Helper Methods ==========
     
-    def get_next_pending_job(self) -> Optional[JobItem]:
+    async def get_next_pending_job(self) -> Optional[JobItem]:
         """Get the next pending job (highest priority, oldest first).
         
         Returns the first pending job from all projects, ordered by
@@ -347,7 +351,7 @@ class JobQueueService:
         Returns:
             Next JobItem to process, or None if no pending jobs.
         """
-        pending = self._repository.list_all_pending()
+        pending = await asyncio.to_thread(self._repository.list_all_pending)
         return pending[0] if pending else None
     
     async def start_job(self, job_id: str) -> Optional[JobItem]:
@@ -363,7 +367,7 @@ class JobQueueService:
             Updated JobItem if started successfully, None if
             job not found, cancelled, or lock acquisition failed.
         """
-        job = self._repository.get(job_id)
+        job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return None
         
@@ -377,7 +381,7 @@ class JobQueueService:
         # If no project_id, start immediately without locking
         if job.project_id is None:
             try:
-                return self._repository.start_job(job_id, instance_id)
+                return await asyncio.to_thread(self._repository.start_job, job_id, instance_id)
             except ValueError:
                 return None
         
@@ -393,7 +397,7 @@ class JobQueueService:
             return None
         
         try:
-            return self._repository.start_job(job_id, instance_id)
+            return await asyncio.to_thread(self._repository.start_job, job_id, instance_id)
         except ValueError:
             # Job state changed between check and start
             await self._lock_manager.release(job.project_id, job_id)
@@ -416,7 +420,7 @@ class JobQueueService:
             Updated JobItem if completed successfully, None if
             job not found or not in a processable state.
         """
-        job = self._repository.get(job_id)
+        job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return None
         
@@ -427,9 +431,9 @@ class JobQueueService:
         # Mark job based on success/failure
         try:
             if success:
-                return self._repository.complete_job(job_id, result_summary="Job queued successfully")
+                return await asyncio.to_thread(self._repository.complete_job, job_id, result_summary="Job queued successfully")
             else:
-                return self._repository.fail_job(job_id, error_message=error or "Unknown error")
+                return await asyncio.to_thread(self._repository.fail_job, job_id, error_message=error or "Unknown error")
         except ValueError:
             # Job state changed (already completed/cancelled)
             return None
@@ -446,7 +450,7 @@ class JobQueueService:
         Returns:
             The next JobItem started, or None if no pending jobs.
         """
-        next_job = self._get_next_job(project_id)
+        next_job = await self._get_next_job(project_id)
         if next_job is None:
             return None
         

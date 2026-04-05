@@ -167,7 +167,7 @@ async def create_job(
         position = None
         if job.project_id:
             try:
-                position = service._get_queue_position(job.job_id, job.project_id)
+                position = await service._get_queue_position(job.job_id, job.project_id)
             except Exception:
                 pass  # Best effort - position is optional
         
@@ -275,7 +275,7 @@ async def list_jobs(
         position = None
         if job.status == JobStatus.PENDING.value and job.project_id:
             try:
-                position = service._get_queue_position(job.job_id, job.project_id)
+                position = await service._get_queue_position(job.job_id, job.project_id)
             except Exception:
                 pass
         

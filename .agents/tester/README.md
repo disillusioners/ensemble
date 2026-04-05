@@ -54,16 +54,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-05)
-- **1195+ unit/functional tests pass** on feature/concurrency-model-fixes branch
-- 10 pre-existing failures (scheduler, spawn errors — not Phase 2 related)
-- 5 integration tests require real OPENAI_API_KEY (401 with dummy key)
-- **0 NEW failures** introduced by Phase 2 concurrency changes
+## Test Results (Latest: 2026-04-05 Post-Completion)
+- **1108+ unit/functional/integration tests pass** on feature/concurrency-model-fixes branch
+- 8 pre-existing failures (instructive error tests — feature never implemented on this branch)
+- 2 collection errors (missing `croniter` dependency)
+- 14 skipped (integration tests requiring mock LLM server)
+- **0 NEW failures** — Phase 2 concurrency changes confirmed clean
+- dev.sh validated and working (ensure.md: PASS)
+- See `.agents/tester/RESULTS/2026-04-05-phase2-post-completion-validation.md` for full details
 - See `.agents/tester/RESULTS/2026-04-05-phase2-concurrency-fixes.md` for Phase 2 details
-- See `.agents/tester/RESULTS/2026-04-05-session-instance-rename-verification.md` for earlier details
 
 ## Current Focus
-Phase 2 concurrency model fixes VERIFIED COMPLETE. All changes correct:
+Phase 2 concurrency model fixes VERIFIED COMPLETE. Ready for Phase 3.
+All changes correct:
 - LLM rate limiting semaphore + call timeout
 - Watchdog fire-and-forget batching
 - Config validation (ge=1, gt=0)

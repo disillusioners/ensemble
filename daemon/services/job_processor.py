@@ -96,7 +96,7 @@ class JobProcessor:
         
         # Check if project's queue is paused before processing
         if job.project_id:
-            project = self._project_repo.get(job.project_id)
+            project = await asyncio.to_thread(self._project_repo.get, job.project_id)
             if project and project.job_queue_paused:
                 logger.info(
                     f"Skipping job {job.job_id} - project {job.project_id} queue is paused"
@@ -115,7 +115,7 @@ class JobProcessor:
             
             # Spawn instance for this job
             try:
-                instance_id = self._instance_manager.spawn_instance(
+                instance_id = await self._instance_manager.spawn_instance(
                     agent_id=job.agent_id,
                     instance_id=started_job.instance_id,
                 )
