@@ -11,6 +11,7 @@ import time
 import logging
 import asyncio
 import json
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, APIRouter
@@ -152,6 +153,11 @@ credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
 job_processor: JobProcessor = None
 
+# SSE connection tracking: {connection_id: {instance_id, connected_at, task}}
+_sse_connections: dict[str, dict] = {}
+_sse_lock = asyncio.Lock()
+SSE_CONNECTION_TTL_SECONDS = 3600  # 1 hour max connection lifetime
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -200,11 +206,12 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Stop message sources on shutdown
-    await manager.stop_sources()
-    
     # Stop JobProcessor on shutdown
     await job_processor.stop()
+    
+    # Call manager shutdown for graceful shutdown sequence
+    # This handles cancellation of active requests, consumers, SSE, stop_sources(), etc.
+    await manager.shutdown()
 
 
 app = FastAPI(
@@ -756,6 +763,10 @@ async def get_messages(instance_id: str):
 @api_router.get("/instances/{instance_id}/events")
 async def stream_events(instance_id: str, request: Request):
     """SSE stream for instance events."""
+    # Reject new connections during shutdown
+    if manager.is_shutting_down:
+        raise HTTPException(status_code=503, detail="Server is shutting down")
+    
     # Check instance exists
     try:
         manager.get_instance(instance_id)
@@ -769,11 +780,25 @@ async def stream_events(instance_id: str, request: Request):
         )
 
     broadcaster = manager.broadcaster
+    current_task = asyncio.current_task()
+    connected_at = time.monotonic()
+    connection_id = str(uuid.uuid4())  # Unique ID for this connection
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         """Generate SSE events for the instance."""
         import asyncio
         import json
+        
+        nonlocal connected_at, current_task, connection_id
+        connected_at = time.monotonic()
+        
+        # Track this connection
+        async with _sse_lock:
+            _sse_connections[connection_id] = {
+                "instance_id": instance_id,
+                "connected_at": connected_at,
+                "task": current_task
+            }
         
         try:
             # Send initial connection event
@@ -805,18 +830,36 @@ async def stream_events(instance_id: str, request: Request):
                 if await request.is_disconnected():
                     logger.info(f"Client disconnected from instance {instance_id} after {event_count} events")
                     break
+                
+                # Check connection TTL
+                if time.monotonic() - connected_at > SSE_CONNECTION_TTL_SECONDS:
+                    logger.info(f"SSE connection TTL expired for instance {instance_id} after {event_count} events")
+                    yield {"event": "shutdown", "data": json.dumps({"reason": "connection_timeout"})}
+                    break
+                
+                # Check if manager is shutting down
+                if manager.is_shutting_down:
+                    yield {"event": "shutdown", "data": json.dumps({"reason": "server_shutdown"})}
+                    break
 
                 try:
                     # Wait for events with timeout
                     event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    
+                    # Check for sentinel (shutdown signal)
+                    if event is None:
+                        logger.debug(f"Received sentinel for instance {instance_id}")
+                        yield {"event": "shutdown", "data": json.dumps({"reason": "sentinel"})}
+                        break
+                    
                     event_count += 1
                     # Log every 50 events to track consumption rate
                     if event_count % 50 == 0:
                         logger.debug(f"SSE sent {event_count} events for instance {instance_id}, queue size: {queue.qsize()}")
                     yield event_to_sse(event)
                 except asyncio.TimeoutError:
-                    # Send keepalive to prevent connection timeout
-                    yield {"event": "keepalive", "data": "{}"}
+                    # Send keepalive as SSE comment format (prevents connection timeout)
+                    yield {"comment": "heartbeat"}
                 except Exception as e:
                     # Log the error but continue the stream for transient errors
                     logger.error(f"Error retrieving event for instance {instance_id}: {e}")
@@ -839,6 +882,11 @@ async def stream_events(instance_id: str, request: Request):
                 "event": "error",
                 "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
             }
+        finally:
+            # Clean up connection tracking
+            async with _sse_lock:
+                _sse_connections.pop(connection_id, None)
+            logger.debug(f"SSE disconnected from instance {instance_id}")
 
     return EventSourceResponse(event_generator())
 

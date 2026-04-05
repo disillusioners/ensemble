@@ -430,6 +430,9 @@ class InstanceManager:
 
         # Start watchdog
         self.watchdog.start()
+        
+        # Shutdown flag for graceful shutdown
+        self._shutting_down = False
 
     @property
     def checkpointer(self):
@@ -733,6 +736,10 @@ class InstanceManager:
         Returns:
             AsyncMessageResult with message_id and status.
         """
+        # Reject new messages during shutdown
+        if self.is_shutting_down:
+            raise RuntimeError("Manager is shutting down, cannot accept new messages")
+
         # Check instance exists
         self.get_instance(instance_id)  # raises KeyError if not found
         
@@ -2347,3 +2354,119 @@ Title:"""
         if hasattr(self, '_engine') and self._engine:
             self._engine.dispose()
             logger.info("Database engine disposed")
+    
+    async def shutdown(self, grace_period: float = 10.0) -> None:
+        """Gracefully shutdown all manager components in order.
+        
+        This implements an ordered shutdown sequence:
+        1. Set _shutting_down flag to reject new messages
+        2. Stop accepting new messages via source registry
+        3. Cancel active LLM streams via request registry
+        4. Wait for in-flight processing to finish (grace period)
+        5. Cancel persistent consumer tasks
+        6. Stop watchdog
+        7. Close SSE connections via broadcaster
+        8. Clean up resources
+        
+        Each step is wrapped in its own try/except so failures don't skip subsequent steps.
+        
+        Args:
+            grace_period: Maximum seconds to wait for in-flight processing (default: 10s).
+        """
+        if getattr(self, '_shutting_down', False):
+            logger.debug("Shutdown already in progress, skipping")
+            return
+        
+        self._shutting_down = True
+        logger.info("Starting graceful shutdown...")
+        
+        steps = [
+            ("stop_sources", self.stop_sources(timeout=grace_period)),
+            ("cancel_active_requests", self._cancel_all_active_requests()),
+            ("wait_inflight", self._wait_for_inflight(grace_period)),
+            ("cancel_consumers", self._cancel_consumers()),
+            ("stop_watchdog", self._stop_watchdog()),
+            ("shutdown_broadcaster", self.broadcaster.shutdown()),
+        ]
+        
+        for name, step_coro in steps:
+            try:
+                await step_coro
+            except Exception as e:
+                logger.error(f"Error during shutdown step '{name}': {e}", exc_info=True)
+        
+        # Clean up resources (existing cleanup method) - also resilient
+        try:
+            logger.info("Step 7/8: Cleaning up resources...")
+            self.cleanup()
+        except Exception as e:
+            logger.error(f"Error during shutdown step 'cleanup': {e}", exc_info=True)
+        
+        logger.info("Graceful shutdown complete")
+    
+    async def _cancel_all_active_requests(self) -> None:
+        """Cancel all active requests in the registry with SHUTDOWN reason."""
+        with self._request_registry._lock:
+            message_ids = list(self._request_registry._requests.keys())
+        
+        if message_ids:
+            logger.info(f"Cancelling {len(message_ids)} active request(s)...")
+            for message_id in message_ids:
+                self._request_registry.cancel(message_id, CancellationReason.SHUTDOWN)
+    
+    async def _wait_for_inflight(self, grace_period: float) -> None:
+        """Wait for in-flight processing to finish.
+        
+        Args:
+            grace_period: Maximum seconds to wait.
+        """
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < grace_period:
+            # Check if any consumers are still processing
+            active_tasks = [
+                task for task in self._consumer_tasks.values()
+                if not task.done()
+            ]
+            
+            if not active_tasks:
+                logger.debug("All consumers idle, proceeding with shutdown")
+                break
+            
+            # Check if any requests are still active
+            with self._request_registry._lock:
+                active_requests = len(self._request_registry._requests)
+            
+            if active_requests == 0 and not any(task for task in active_tasks if not task.done()):
+                break
+            
+            logger.debug(
+                f"Waiting for shutdown: {len(active_tasks)} consumers, "
+                f"{active_requests} active requests"
+            )
+            await asyncio.sleep(0.5)
+    
+    def _stop_watchdog(self) -> None:
+        """Stop the watchdog thread."""
+        self.watchdog.stop()
+    
+    async def _cancel_consumers(self) -> None:
+        """Cancel all persistent consumer tasks."""
+        for instance_id, task in list(self._consumer_tasks.items()):
+            if not task.done():
+                task.cancel()
+                logger.debug(f"Cancelled consumer for instance {instance_id[:8]}...")
+        
+        # Wait for tasks to complete cancellation
+        if self._consumer_tasks:
+            await asyncio.gather(
+                *[task for task in self._consumer_tasks.values()],
+                return_exceptions=True
+            )
+        
+        self._consumer_tasks.clear()
+        self._instance_queues.clear()
+    
+    @property
+    def is_shutting_down(self) -> bool:
+        """Check if shutdown is in progress."""
+        return getattr(self, '_shutting_down', False)

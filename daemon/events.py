@@ -405,6 +405,37 @@ class EventBroadcaster:
                 "ttl_seconds": self._event_ttl,
                 "has_consumer": queue is not None and queue.qsize() > 0,
             }
+    
+    async def shutdown(self) -> None:
+        """Gracefully shutdown the broadcaster.
+        
+        Sends sentinel values to all queues to unblock waiting generators,
+        then clears all state. Should be called during application shutdown.
+        """
+        logger.info("Shutting down EventBroadcaster...")
+        
+        # Stop cleanup task first
+        await self.stop_cleanup_task()
+        
+        with self._lock:
+            # Send sentinel to all queues to unblock waiting generators
+            for instance_id, queue in list(self._queues.items()):
+                try:
+                    # Put sentinel value to wake up any waiting consumers
+                    queue.put_nowait(None)
+                except Exception as e:
+                    logger.warning(f"Failed to send sentinel to queue for {instance_id}: {e}")
+            
+            # Clear all instance state
+            self._queues.clear()
+            self._event_history.clear()
+            self._event_counters.clear()
+            
+            # Clear global subscribers
+            self._global_subscribers.clear()
+            self._subscriber_refs.clear()
+        
+        logger.info("EventBroadcaster shutdown complete")
 
 
 def event_to_sse(event: Event) -> dict:
