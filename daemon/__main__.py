@@ -30,12 +30,13 @@ def main():
     # Load config to get host/port
     config = load_config()
     
-    # Run server
+    # Run server (access_log=False: custom SelectiveAccessLogMiddleware handles selective logging)
     uvicorn.run(
         "daemon.api:app",
         host=config.daemon.host,
         port=config.daemon.port,
         reload=False,
+        access_log=False,
     )
 
 if __name__ == "__main__":
