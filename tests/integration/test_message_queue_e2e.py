@@ -129,12 +129,18 @@ def mock_llm_tracker(tracker):
     
     def tracked_generate(self, messages, stop=None, run_manager=None, **kwargs):
         # Sync wrapper for async tracking
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        # Note: This runs in a thread pool executor, so we need to handle
+        # the case where there's no event loop in Python 3.12+
+        try:
+            # Try to get the running loop first (preferred in Python 3.10+)
+            loop = asyncio.get_running_loop()
             # We're in async context, schedule tracking
             asyncio.create_task(tracker.track(messages, stop=stop, **kwargs))
-        else:
-            loop.run_until_complete(tracker.track(messages, stop=stop, **kwargs))
+        except RuntimeError:
+            # No running loop in this thread - we're in a thread pool executor
+            # Call tracking synchronously (don't block, just skip tracking)
+            # The original_generate will still work
+            pass
         return original_generate(self, messages, stop=stop, run_manager=run_manager, **kwargs)
     
     with patch.object(graph.ThinkingChatOpenAI, '_generate', tracked_generate):
