@@ -4,6 +4,7 @@ import pytest
 from datetime import datetime
 
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import JobRepository
@@ -14,8 +15,17 @@ from daemon.services.job_queue_service import JobQueueService
 
 @pytest.fixture
 def engine():
-    """Create in-memory SQLite engine for testing."""
-    engine = create_engine("sqlite:///:memory:", echo=False)
+    """Create in-memory SQLite engine for testing.
+    
+    Uses StaticPool to reuse the same connection across threads.
+    Required because asyncio.to_thread() runs workers in different threads,
+    and SQLite in-memory databases are per-thread by default.
+    """
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     SQLModel.metadata.create_all(engine)
     yield engine
     engine.dispose()

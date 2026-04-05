@@ -1465,7 +1465,7 @@ async def list_schedules():
         if src.source_type == "scheduler":
             # Calculate next_run_at from adapter if available
             next_run_at = None
-            adapter = manager.source_registry.get(src.source_id)
+            adapter = manager.source_registry.get(src.source_id) if manager.source_registry else None
             if adapter and hasattr(adapter, '_get_next_trigger_time'):
                 try:
                     next_run_at = adapter._get_next_trigger_time()
