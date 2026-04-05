@@ -290,6 +290,10 @@ class InstanceManager:
         # Maps instance_id to tuple of (graph, agent_dir)
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
 
+        # LLM concurrency and timeout settings
+        self._llm_semaphore = asyncio.Semaphore(config.limits.llm_concurrency)
+        self._llm_timeout = config.limits.llm_timeout
+
         # Create ONE shared database engine for all repositories
         # This prevents database lock contention when multiple components
         # (watchdog thread, async processors, etc.) access the same SQLite file
@@ -377,21 +381,24 @@ class InstanceManager:
                 logger.warning("Cannot trigger retry processing: event loop is closed")
                 return
             
+            if not instance_ids:
+                return
+
+            # Fire-and-forget: submit ALL coroutines without waiting for each one.
+            # This avoids sequential blocking where instance B waits for instance A.
+            # The watchdog re-checks on next interval if something fails.
+            submitted_count = 0
             for instance_id in instance_ids:
                 try:
-                    logger.info(f"Triggering retry processing for instance {instance_id[:8]}...")
-                    future = asyncio.run_coroutine_threadsafe(
+                    asyncio.run_coroutine_threadsafe(
                         self._process_queue(instance_id),
                         loop
                     )
-                    # Add timeout to prevent hanging
-                    future.result(timeout=5.0)
+                    submitted_count += 1
                 except RuntimeError as e:
                     logger.warning(f"Cannot trigger retry for {instance_id[:8]}...: {e}")
-                except TimeoutError:
-                    logger.warning(f"Retry trigger timed out for {instance_id[:8]}...")
-                except Exception as e:
-                    logger.error(f"Error triggering retry processing for {instance_id[:8]}...: {e}")
+
+            logger.info(f"Triggered retry processing for {submitted_count} instances")
         
         self.watchdog = InstanceWatchdog(
             self._queue_repository,
@@ -1156,220 +1163,222 @@ class InstanceManager:
         # Stream through graph execution
         # When using multiple stream modes, events are tuples: (mode, data)
         try:
-            async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
-                # Unpack tuple: (mode, data)
-                if isinstance(event, tuple):
-                    mode, data = event
-                else:
-                    # Single mode - treat as updates
-                    mode = "updates"
-                    data = event
-                
-                if mode == "updates":
-                    # Handle node-level updates
-                    if "agent" in data:
-                        # Agent node completed - could have new thinking or content
-                        agent_output = data["agent"]
-                        if "messages" in agent_output:
-                            latest_msg = agent_output["messages"][-1]
-                            if hasattr(latest_msg, 'content'):
-                                final_content = latest_msg.content or ""
-                            
-                            # Extract thinking from the message
-                            if not thinking_content:
-                                if hasattr(latest_msg, 'thinking') and latest_msg.thinking:
-                                    thinking_content = latest_msg.thinking
-                                elif hasattr(latest_msg, 'additional_kwargs'):
-                                    kwargs = latest_msg.additional_kwargs or {}
-                                    thinking_content = kwargs.get("reasoning_content") or kwargs.get("thinking")
-                                
-                                if thinking_content:
-                                    # Broadcast thinking event
-                                    await self.broadcaster.broadcast(Event(
-                                        type="thinking",
-                                        instance_id=instance_id,
-                                        message_id=message_id,
-                                        data={"content": thinking_content}
-                                    ))
-                            
-                            # Track tool calls from AI message for matching
-                            if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
-                                for tc in latest_msg.tool_calls:
-                                    tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                                    tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                                    tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+            async with self._llm_semaphore:
+                async with asyncio.timeout(self._llm_timeout):
+                    async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
+                        # Unpack tuple: (mode, data)
+                        if isinstance(event, tuple):
+                            mode, data = event
+                        else:
+                            # Single mode - treat as updates
+                            mode = "updates"
+                            data = event
+                        
+                        if mode == "updates":
+                            # Handle node-level updates
+                            if "agent" in data:
+                                # Agent node completed - could have new thinking or content
+                                agent_output = data["agent"]
+                                if "messages" in agent_output:
+                                    latest_msg = agent_output["messages"][-1]
+                                    if hasattr(latest_msg, 'content'):
+                                        final_content = latest_msg.content or ""
                                     
-                                    # Store for matching with tool output
-                                    tool_call_map[tc_id] = {
-                                        "name": tc_name,
-                                        "args": tc_args,
+                                    # Extract thinking from the message
+                                    if not thinking_content:
+                                        if hasattr(latest_msg, 'thinking') and latest_msg.thinking:
+                                            thinking_content = latest_msg.thinking
+                                        elif hasattr(latest_msg, 'additional_kwargs'):
+                                            kwargs = latest_msg.additional_kwargs or {}
+                                            thinking_content = kwargs.get("reasoning_content") or kwargs.get("thinking")
+                                        
+                                        if thinking_content:
+                                            # Broadcast thinking event
+                                            await self.broadcaster.broadcast(Event(
+                                                type="thinking",
+                                                instance_id=instance_id,
+                                                message_id=message_id,
+                                                data={"content": thinking_content}
+                                            ))
+                                    
+                                    # Track tool calls from AI message for matching
+                                    if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
+                                        for tc in latest_msg.tool_calls:
+                                            tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                                            tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                                            tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                                            
+                                            # Store for matching with tool output
+                                            tool_call_map[tc_id] = {
+                                                "name": tc_name,
+                                                "args": tc_args,
+                                            }
+                                            
+                                            # Broadcast tool_call event (tool starting)
+                                            await self.broadcaster.broadcast(Event(
+                                                type="tool_call",
+                                                instance_id=instance_id,
+                                                message_id=message_id,
+                                                data={
+                                                    "id": tc_id,
+                                                    "name": tc_name,
+                                                    "arguments": tc_args,
+                                                }
+                                            ))
+                            
+                            elif "tools" in data:
+                                # Tools node completed - tool execution finished
+                                tool_messages = data["tools"].get("messages", [])
+                                for tool_msg in tool_messages:
+                                    # Get tool_call_id to match with original call
+                                    tool_call_id = getattr(tool_msg, 'tool_call_id', None)
+                                    
+                                    # Skip if no tool_call_id
+                                    if not tool_call_id:
+                                        logger.warning(f"Tool message missing tool_call_id: {tool_msg}")
+                                        continue
+                                    
+                                    # Look up original tool call info
+                                    original_call = tool_call_map.get(tool_call_id)
+                                    
+                                    if not original_call:
+                                        logger.warning(f"No matching tool call for ID {tool_call_id}, using fallback")
+                                        original_call = {"name": getattr(tool_msg, 'name', 'unknown'), "args": {}}
+                                    
+                                    tool_call_data = {
+                                        "id": tool_call_id,
+                                        "name": original_call.get("name", getattr(tool_msg, 'name', 'unknown')),
+                                        "arguments": original_call.get("args", {}),
+                                        "output": getattr(tool_msg, 'content', ""),
                                     }
                                     
-                                    # Broadcast tool_call event (tool starting)
+                                    # Broadcast tool_complete event
                                     await self.broadcaster.broadcast(Event(
-                                        type="tool_call",
+                                        type="tool_complete",
                                         instance_id=instance_id,
                                         message_id=message_id,
-                                        data={
-                                            "id": tc_id,
-                                            "name": tc_name,
-                                            "arguments": tc_args,
-                                        }
+                                        data=tool_call_data
                                     ))
-                    
-                    elif "tools" in data:
-                        # Tools node completed - tool execution finished
-                        tool_messages = data["tools"].get("messages", [])
-                        for tool_msg in tool_messages:
-                            # Get tool_call_id to match with original call
-                            tool_call_id = getattr(tool_msg, 'tool_call_id', None)
-                            
-                            # Skip if no tool_call_id
-                            if not tool_call_id:
-                                logger.warning(f"Tool message missing tool_call_id: {tool_msg}")
-                                continue
-                            
-                            # Look up original tool call info
-                            original_call = tool_call_map.get(tool_call_id)
-                            
-                            if not original_call:
-                                logger.warning(f"No matching tool call for ID {tool_call_id}, using fallback")
-                                original_call = {"name": getattr(tool_msg, 'name', 'unknown'), "args": {}}
-                            
-                            tool_call_data = {
-                                "id": tool_call_id,
-                                "name": original_call.get("name", getattr(tool_msg, 'name', 'unknown')),
-                                "arguments": original_call.get("args", {}),
-                                "output": getattr(tool_msg, 'content', ""),
-                            }
-                            
-                            # Broadcast tool_complete event
-                            await self.broadcaster.broadcast(Event(
-                                type="tool_complete",
-                                instance_id=instance_id,
-                                message_id=message_id,
-                                data=tool_call_data
-                            ))
-                
-                elif mode == "messages":
-                    # Handle token-level streaming with adaptive batching to reduce event rate
-                    # data is a tuple: (message_chunk, metadata)
-                    if isinstance(data, tuple) and len(data) == 2:
-                        chunk, metadata = data
-                        if hasattr(chunk, 'content') and chunk.content:
-                            content_buffer += chunk.content
-                            content_buffer_size += len(chunk.content)
-                            event_count += 1
                         
-                        # Accumulate reasoning_content from delta chunks (e.g., GLM extended thinking)
-                        chunk_reasoning = None
-
-                        # Try 1: additional_kwargs (standard LangChain location for reasoning_content)
-                        if hasattr(chunk, 'additional_kwargs'):
-                            kwargs = chunk.additional_kwargs or {}
-                            chunk_reasoning = kwargs.get("reasoning_content") or kwargs.get("thinking")
-
-                        # Try 2: direct reasoning_content attribute (some LangChain versions)
-                        if not chunk_reasoning and hasattr(chunk, 'reasoning_content'):
-                            chunk_reasoning = chunk.reasoning_content
-
-                        # Try 3: response_metadata (some provider-specific implementations)
-                        if not chunk_reasoning and hasattr(chunk, 'response_metadata'):
-                            meta = chunk.response_metadata or {}
-                            chunk_reasoning = meta.get("reasoning_content") or meta.get("thinking")
-
-                        # Try 4: content as list (Responses API format: [{"type": "reasoning", "reasoning": "..."}])
-                        if not chunk_reasoning and hasattr(chunk, 'content') and isinstance(chunk.content, list):
-                            for block in chunk.content:
-                                if isinstance(block, dict):
-                                    if block.get("type") == "reasoning":
-                                        chunk_reasoning = block.get("reasoning") or block.get("summary_text", "")
-                                        break
-                                    elif block.get("type") == "reasoning_summary_text":
-                                        chunk_reasoning = block.get("text", "")
-                                        break
-
-                        if chunk_reasoning:
-                            thinking_buffer += chunk_reasoning
-                            thinking_buffer_size = len(thinking_buffer)
-                            
-                            now = time.monotonic()
-                            should_flush = (
-                                thinking_buffer_size >= adaptive_thinking_threshold or
-                                (now - last_thinking_flush) >= adaptive_thinking_timeout
-                            )
-                            
-                            if should_flush and thinking_buffer:
-                                await self.broadcaster.broadcast(Event(
-                                    type="thinking",
-                                    instance_id=instance_id,
-                                    message_id=message_id,
-                                    data={"content": thinking_buffer}
-                                ))
-                                thinking_buffer = ""
-                                thinking_buffer_size = 0
-                                last_thinking_flush = now
-                            
-                            # Flush if buffer exceeds threshold OR timeout elapsed
-                            now = time.monotonic()
-                            should_flush = (
-                                content_buffer_size >= adaptive_threshold or
-                                (now - last_content_flush) >= adaptive_timeout
-                            )
-                            
-                            if should_flush and content_buffer:
-                                await self.broadcaster.broadcast(Event(
-                                    type="content_chunk",
-                                    instance_id=instance_id,
-                                    message_id=message_id,
-                                    data={"chunk": content_buffer}
-                                ))
-                                content_buffer = ""
-                                content_buffer_size = 0
-                                last_content_flush = now
+                        elif mode == "messages":
+                            # Handle token-level streaming with adaptive batching to reduce event rate
+                            # data is a tuple: (message_chunk, metadata)
+                            if isinstance(data, tuple) and len(data) == 2:
+                                chunk, metadata = data
+                                if hasattr(chunk, 'content') and chunk.content:
+                                    content_buffer += chunk.content
+                                    content_buffer_size += len(chunk.content)
+                                    event_count += 1
                                 
-                                # Adaptive batching: check queue health periodically
-                                if event_count % 20 == 0:
-                                    stats = self.broadcaster.get_stats(instance_id)
-                                    queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
+                                # Accumulate reasoning_content from delta chunks (e.g., GLM extended thinking)
+                                chunk_reasoning = None
+
+                                # Try 1: additional_kwargs (standard LangChain location for reasoning_content)
+                                if hasattr(chunk, 'additional_kwargs'):
+                                    kwargs = chunk.additional_kwargs or {}
+                                    chunk_reasoning = kwargs.get("reasoning_content") or kwargs.get("thinking")
+
+                                # Try 2: direct reasoning_content attribute (some LangChain versions)
+                                if not chunk_reasoning and hasattr(chunk, 'reasoning_content'):
+                                    chunk_reasoning = chunk.reasoning_content
+
+                                # Try 3: response_metadata (some provider-specific implementations)
+                                if not chunk_reasoning and hasattr(chunk, 'response_metadata'):
+                                    meta = chunk.response_metadata or {}
+                                    chunk_reasoning = meta.get("reasoning_content") or meta.get("thinking")
+
+                                # Try 4: content as list (Responses API format: [{"type": "reasoning", "reasoning": "..."}])
+                                if not chunk_reasoning and hasattr(chunk, 'content') and isinstance(chunk.content, list):
+                                    for block in chunk.content:
+                                        if isinstance(block, dict):
+                                            if block.get("type") == "reasoning":
+                                                chunk_reasoning = block.get("reasoning") or block.get("summary_text", "")
+                                                break
+                                            elif block.get("type") == "reasoning_summary_text":
+                                                chunk_reasoning = block.get("text", "")
+                                                break
+
+                                if chunk_reasoning:
+                                    thinking_buffer += chunk_reasoning
+                                    thinking_buffer_size = len(thinking_buffer)
                                     
-                                    # Increase batch size when queue is > 50% full
-                                    if queue_fill_ratio > 0.5:
-                                        adaptive_threshold = min(CONTENT_BATCH_THRESHOLD * 1.5, 2000)  # max 2000
-                                        adaptive_timeout = min(CONTENT_BATCH_TIMEOUT * 1.5, 1.0)     # max 1.0s
-                                        adaptive_thinking_threshold = min(THINKING_BATCH_THRESHOLD * 3, 2000)  # max 2000
-                                        adaptive_thinking_timeout = min(THINKING_BATCH_TIMEOUT * 2, 1.0)     # max 1.0s
-                                        if event_count == 20:  # Log once
-                                            logger.info(
-                                                f"Queue at {queue_fill_ratio:.0%} capacity, "
-                                                f"increasing batch size for instance {instance_id[:8]}"
-                                            )
-                                else:
-                                    adaptive_threshold = CONTENT_BATCH_THRESHOLD
-                                    adaptive_timeout = CONTENT_BATCH_TIMEOUT
-                                    adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
-                                    adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
-            
-            # Flush any remaining content in buffer after streaming ends
-            if content_buffer:
-                await self.broadcaster.broadcast(Event(
-                    type="content_chunk",
-                    instance_id=instance_id,
-                    message_id=message_id,
-                    data={"chunk": content_buffer}
-                ))
-                logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
-            
-            # Flush any remaining thinking in buffer after streaming ends
-            if thinking_buffer:
-                await self.broadcaster.broadcast(Event(
-                    type="thinking",
-                    instance_id=instance_id,
-                    message_id=message_id,
-                    data={"content": thinking_buffer}
-                ))
-                thinking_buffer = ""
-                
+                                    now = time.monotonic()
+                                    should_flush = (
+                                        thinking_buffer_size >= adaptive_thinking_threshold or
+                                        (now - last_thinking_flush) >= adaptive_thinking_timeout
+                                    )
+                                    
+                                    if should_flush and thinking_buffer:
+                                        await self.broadcaster.broadcast(Event(
+                                            type="thinking",
+                                            instance_id=instance_id,
+                                            message_id=message_id,
+                                            data={"content": thinking_buffer}
+                                        ))
+                                        thinking_buffer = ""
+                                        thinking_buffer_size = 0
+                                        last_thinking_flush = now
+                                    
+                                    # Flush if buffer exceeds threshold OR timeout elapsed
+                                    now = time.monotonic()
+                                    should_flush = (
+                                        content_buffer_size >= adaptive_threshold or
+                                        (now - last_content_flush) >= adaptive_timeout
+                                    )
+                                    
+                                    if should_flush and content_buffer:
+                                        await self.broadcaster.broadcast(Event(
+                                            type="content_chunk",
+                                            instance_id=instance_id,
+                                            message_id=message_id,
+                                            data={"chunk": content_buffer}
+                                        ))
+                                        content_buffer = ""
+                                        content_buffer_size = 0
+                                        last_content_flush = now
+                                        
+                                        # Adaptive batching: check queue health periodically
+                                        if event_count % 20 == 0:
+                                            stats = self.broadcaster.get_stats(instance_id)
+                                            queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
+                                            
+                                            # Increase batch size when queue is > 50% full
+                                            if queue_fill_ratio > 0.5:
+                                                adaptive_threshold = min(CONTENT_BATCH_THRESHOLD * 1.5, 2000)  # max 2000
+                                                adaptive_timeout = min(CONTENT_BATCH_TIMEOUT * 1.5, 1.0)     # max 1.0s
+                                                adaptive_thinking_threshold = min(THINKING_BATCH_THRESHOLD * 3, 2000)  # max 2000
+                                                adaptive_thinking_timeout = min(THINKING_BATCH_TIMEOUT * 2, 1.0)     # max 1.0s
+                                                if event_count == 20:  # Log once
+                                                    logger.info(
+                                                        f"Queue at {queue_fill_ratio:.0%} capacity, "
+                                                        f"increasing batch size for instance {instance_id[:8]}"
+                                                    )
+                                        else:
+                                            adaptive_threshold = CONTENT_BATCH_THRESHOLD
+                                            adaptive_timeout = CONTENT_BATCH_TIMEOUT
+                                            adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
+                                            adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
+                    
+                    # Flush any remaining content in buffer after streaming ends
+                    if content_buffer:
+                        await self.broadcaster.broadcast(Event(
+                            type="content_chunk",
+                            instance_id=instance_id,
+                            message_id=message_id,
+                            data={"chunk": content_buffer}
+                        ))
+                        logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
+                    
+                    # Flush any remaining thinking in buffer after streaming ends
+                    if thinking_buffer:
+                        await self.broadcaster.broadcast(Event(
+                            type="thinking",
+                            instance_id=instance_id,
+                            message_id=message_id,
+                            data={"content": thinking_buffer}
+                        ))
+                        thinking_buffer = ""
+                        
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
             # Broadcast error event
