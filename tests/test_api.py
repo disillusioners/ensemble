@@ -133,7 +133,7 @@ async def mock_manager():
         created_sources.pop(source_id, None)
         return True
     manager._source_repository.delete_source_config = MagicMock(side_effect=mock_delete_source)
-    manager._source_repository.list_session_mappings = MagicMock(return_value=[])
+    manager._source_repository.list_instance_mappings = MagicMock(return_value=[])
     
     yield manager
     # Cleanup: close connection and delete temp file
@@ -204,7 +204,7 @@ async def test_create_instance_max_limit(client, mock_manager):
     """Test POST /instances with max instances exceeded."""
     # Configure mock to raise ValueError (as the real manager does)
     mock_manager.spawn_instance.side_effect = ValueError(
-        "Max sessions limit reached: 5"
+        "Max instances limit reached: 5"
     )
     
     response = await client.post(
