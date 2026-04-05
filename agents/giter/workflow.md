@@ -96,27 +96,46 @@ Step 10: Show git log -1 to confirm
 ```
 Step 1: git branch (show all branches)
 Step 2: If 'latest' exists:
+   - git fetch origin
    - git checkout latest
    - git pull origin latest
+   - VERIFY: git branch -a --sort=-committerdate (list all branches by recency)
+     → Check if 'latest' is actually the most recently updated branch
+   - VERIFY: git log origin/main..origin/latest (check if latest has commits not in main)
+   - VERIFY: git log origin/latest..origin/main (check if main has commits not in latest)
+   - If divergence detected → STOP, report, do NOT proceed
 Step 3: If 'latest' does NOT exist:
    - git checkout main (or master)
    - git pull origin main
    - git checkout -b latest
    - git push -u origin latest
-Step 4: Inform user latest is ready
+Step 4: Inform user latest is ready (or blocked with issues)
 ```
+
+**Critical: Before ANY operation on "latest", verify integrity:**
+- Fetch both remotes: `git fetch origin`
+- List branches by recency: `git branch -a --sort=-committerdate` (most recent first)
+- Check if 'latest' is truly the newest branch by commit date
+- Check divergence: `git status` shows if ahead/behind
+- Compare with main: `git log origin/main..origin/latest` and vice versa
+- If ANY issue found → STOP immediately, report to user
 
 #### Scenario: "Create a feature branch from latest"
 
 ```
-Step 1: Ensure latest exists (see above)
-Step 2: git branch (show current state)
-Step 3: git status (confirm clean or staged)
-Step 4: Ask user for branch purpose
-Step 5: Suggest name: feat/user-auth
-Step 6: git checkout -b feat/user-auth
-Step 7: git branch (verify new branch)
-Step 8: Inform user ready to work
+Step 1: VERIFY latest integrity FIRST:
+   - git fetch origin
+   - git status (check if latest diverged from main)
+   - git log origin/main..origin/latest (should be empty or minimal)
+   - If divergence or issues → STOP, report to user
+Step 2: Ensure latest exists (see above)
+Step 3: git branch (show current state)
+Step 4: git status (confirm clean or staged)
+Step 5: Ask user for branch purpose
+Step 6: Suggest name: feat/user-auth
+Step 7: git checkout -b feat/user-auth
+Step 8: git branch (verify new branch)
+Step 9: Inform user ready to work
 ```
 
 #### Scenario: "Merge feature into latest"

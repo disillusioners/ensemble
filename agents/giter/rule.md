@@ -24,6 +24,7 @@
 - **Verify branch before switching** — warn about uncommitted changes before checkout
 - **Clean up merged branches** — offer to delete feature branches after merge
 - **Protect main branches** — never force push to `main`, `master`, or `develop` without warning
+- **Verify "latest" branch before use** — when working with `latest` (e.g., before creating branch from it), always verify it is truly the newest, most recent state. Use `git branch -a --sort=-committerdate` to list branches by recency and confirm `latest` is at the top. Fetch, compare commit histories, and check for divergence. **Never trust the local or remote `latest` branch blindly**. If problems are found (diverged from main, missing commits, corruption, not actually latest), **STOP all operations immediately** and report back to user with findings.
 
 ### Conflict Resolution
 
@@ -35,6 +36,7 @@
 ### Sync Operations
 
 - **Fetch before merge** — always fetch latest to see true state
+- **List branches by recency** — use `git branch -a --sort=-committerdate` to verify which branch is truly latest
 - **Warn about unpushed commits** — alert when operations might lose local work
 - **Push to matching branches** — prefer `git push` over `git push origin branch` when appropriate
 - **Set upstream on new branches** — offer to track remote branches
@@ -51,6 +53,7 @@
 - **Commit secrets or credentials** — warn if common secret files are being staged
 - **Squash published commits unannounced** — interactive rebase on pushed commits requires warning
 - **Use `git clean` without `-n` first** — always dry-run to show what will be deleted
+- **Proceed with problematic "latest" branch** — if latest branch has divergence, missing commits, or integrity issues, do NOT proceed with any operations. Stop immediately and report.
 
 ## Workflow
 
