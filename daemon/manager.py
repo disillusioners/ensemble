@@ -126,19 +126,6 @@ def format_project_context(project) -> str:
 """
 
 
-def _log_future_error(fut, instance_id):
-    """Log errors from futures returned by asyncio.run_coroutine_threadsafe.
-    
-    Args:
-        fut: The future to check for errors.
-        instance_id: The instance ID for logging context.
-    """
-    try:
-        fut.result()
-    except Exception as e:
-        logger.error(f"Retry processing failed for {instance_id[:8]}: {e}")
-
-
 class ActivityCallbackHandler(BaseCallbackHandler):
     """Callback to update message activity during LLM/graph execution.
     
@@ -382,37 +369,19 @@ class InstanceManager:
         def _on_watchdog_retry_ready(instance_ids: list[str]) -> None:
             """Handle retry-ready messages from watchdog sync thread.
             
-            Triggers _process_queue for each instance with retry-ready messages.
+            Signals consumers for each instance with retry-ready messages.
             """
-            # Use stored loop reference (set during initialize())
-            loop = self._loop
-            if loop is None:
-                logger.warning("Cannot trigger retry processing: event loop not initialized")
-                return
-            
-            if loop.is_closed():
-                logger.warning("Cannot trigger retry processing: event loop is closed")
-                return
-            
             if not instance_ids:
                 return
 
-            # Fire-and-forget: submit ALL coroutines without waiting for each one.
-            # This avoids sequential blocking where instance B waits for instance A.
-            # The watchdog re-checks on next interval if something fails.
-            submitted_count = 0
+            # Signal consumers (thread-safe, no event loop needed)
             for instance_id in instance_ids:
                 try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._process_queue(instance_id),
-                        loop
-                    )
-                    future.add_done_callback(lambda f, iid=instance_id: _log_future_error(f, iid))
-                    submitted_count += 1
-                except RuntimeError as e:
+                    self._signal_consumer(instance_id)
+                except Exception as e:
                     logger.warning(f"Cannot trigger retry for {instance_id[:8]}...: {e}")
 
-            logger.info(f"Triggered retry processing for {submitted_count} instances")
+            logger.info(f"Signaled retry processing for {len(instance_ids)} instances")
         
         self.watchdog = InstanceWatchdog(
             self._queue_repository,
@@ -423,6 +392,8 @@ class InstanceManager:
         self.circuit_breaker = InstanceCircuitBreaker()
         self._processing: set[str] = set()  # sessions currently processing
         self._processing_lock = asyncio.Lock()
+        self._instance_queues: dict[str, asyncio.Queue] = {}
+        self._consumer_tasks: dict[str, asyncio.Task] = {}
         
         # NEW: Event broadcaster for real-time SSE updates
         self.broadcaster = EventBroadcaster()
@@ -821,9 +792,8 @@ class InstanceManager:
         
         logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
         
-        # Trigger async processing with error handling
-        task = asyncio.create_task(self._process_queue(instance_id))
-        task.add_done_callback(lambda t: self._handle_queue_task_done(t, instance_id))
+        # Trigger async processing via persistent consumer
+        self._signal_consumer(instance_id)
         
         return AsyncMessageResult(
             message_id=message_id,
@@ -831,21 +801,51 @@ class InstanceManager:
             status="queued"
         )
 
-    def _handle_queue_task_done(self, task: asyncio.Task, instance_id: str) -> None:
-        """Callback for when _process_queue task completes.
-        
-        Logs any exceptions that occurred during processing.
-        
-        Args:
-            task: The completed task.
-            instance_id: The instance ID that was being processed.
-        """
-        try:
-            exc = task.exception()
-            if exc:
-                logger.error(f"Queue processing task failed for instance {instance_id}: {exc}")
-        except asyncio.CancelledError:
-            logger.debug(f"Queue processing task cancelled for instance {instance_id}")
+    def _ensure_consumer(self, instance_id: str) -> None:
+        """Ensure a persistent consumer task exists for this instance. Thread-safe."""
+        if instance_id not in self._instance_queues:
+            self._instance_queues[instance_id] = asyncio.Queue()
+        if instance_id not in self._consumer_tasks or self._consumer_tasks[instance_id].done():
+            # Use run_coroutine_threadsafe for thread-safety (watchdog calls from non-async thread)
+            loop = self._loop
+            if loop is None or loop.is_closed():
+                logger.warning(f"Cannot ensure consumer for {instance_id[:8]}...: event loop not available")
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._start_consumer(instance_id), loop
+                )
+            except RuntimeError as e:
+                logger.warning(f"Cannot ensure consumer for {instance_id[:8]}...: {e}")
+
+    async def _start_consumer(self, instance_id: str) -> None:
+        """Create the consumer task. Must be called from the event loop."""
+        if instance_id not in self._consumer_tasks or self._consumer_tasks[instance_id].done():
+            task = asyncio.create_task(self._instance_consumer(instance_id))
+            self._consumer_tasks[instance_id] = task
+
+    async def _instance_consumer(self, instance_id: str) -> None:
+        """Persistent consumer that processes messages for an instance."""
+        queue = self._instance_queues.get(instance_id)
+        if not queue:
+            return
+        while True:
+            try:
+                await queue.get()
+                queue.task_done()
+                await self._process_queue(instance_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Consumer error for instance {instance_id[:8]}...: {e}", exc_info=True)
+                await asyncio.sleep(1)  # Prevent tight error loop
+
+    def _signal_consumer(self, instance_id: str) -> None:
+        """Signal the persistent consumer that there is work to do. Thread-safe."""
+        self._ensure_consumer(instance_id)
+        queue = self._instance_queues.get(instance_id)
+        if queue is not None:
+            queue.put_nowait(None)
 
     async def _process_queue(self, instance_id: str) -> None:
         """Event-driven queue processor for an instance."""
@@ -1625,7 +1625,7 @@ Provide a concise summary:"""
         logger.info(f"Sent completion report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
         
         # Trigger parent queue processing
-        asyncio.create_task(self._process_queue(parent_id))
+        self._signal_consumer(parent_id)
 
     async def _send_error_report(
         self, 
@@ -1725,7 +1725,7 @@ Provide a concise summary:"""
             logger.info(f"Sent error report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
             
             # Trigger parent queue processing so it can handle the error
-            asyncio.create_task(self._process_queue(parent_id))
+            self._signal_consumer(parent_id)
             
         except Exception as e:
             logger.error(
@@ -2032,6 +2032,13 @@ Title:"""
         
         # 2. Remove from processing set
         self._processing.discard(instance_id)
+        
+        # 2b. Stop consumer for this instance
+        if instance_id in self._consumer_tasks:
+            task = self._consumer_tasks.pop(instance_id)
+            if not task.done():
+                task.cancel()
+            self._instance_queues.pop(instance_id, None)
         
         # 3. Clean up event broadcaster
         self.broadcaster.cleanup_instance(instance_id)

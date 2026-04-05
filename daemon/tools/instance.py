@@ -1,6 +1,5 @@
 """Instance management tools for multi-agent orchestration."""
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Annotated
 
@@ -54,19 +53,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     
     logger = logging.getLogger(__name__)
     
-    def _handle_process_result(task: asyncio.Task, instance_id: str) -> None:
-        """Callback to log errors from background queue processing."""
-        try:
-            exc = task.exception()
-            if exc:
-                logger.error(
-                    f"Background queue processing failed for instance "
-                    f"{instance_id[:8]}: {exc}",
-                    exc_info=exc
-                )
-        except asyncio.CancelledError:
-            logger.debug(f"Queue processing cancelled for instance {instance_id[:8]}")
-    
     @tool(args_schema=SpawnInstanceInput)
     def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection.")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
@@ -119,13 +105,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             source=f"agent:{current_instance_id}"
         )
         
-        # Fire-and-forget processing (non-blocking)
-        # Safe because: _process_queue has concurrency guard, messages are persisted,
-        # and watchdog handles failures
-        task = asyncio.create_task(manager._process_queue(instance_id))
-        task.add_done_callback(
-            lambda t: _handle_process_result(t, instance_id)
-        )
+        # Trigger queue processing via persistent consumer (non-blocking)
+        manager._signal_consumer(instance_id)
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     
