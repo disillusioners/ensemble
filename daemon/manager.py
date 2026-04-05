@@ -1,4 +1,4 @@
-"""Session manager orchestrating all agent sessions."""
+"""Instance manager orchestrating all agent instances."""
 
 import uuid
 import logging
@@ -209,7 +209,7 @@ class CancellationCallbackHandler(BaseCallbackHandler):
 
 @dataclass
 class MessageResult:
-    """Result of sending a message to a session."""
+    """Result of sending a message to an instance."""
     content: str
     thinking: str | None = None
     thinking_extracted: str | None = None  # Extracted from <think/> tags in content
@@ -252,10 +252,10 @@ def parse_think_tags(content: str) -> tuple[str, str | None]:
 
 
 class InstanceManager:
-    """Manages all agent sessions, their graphs, and lifecycle."""
+    """Manages all agent instances, their graphs, and lifecycle."""
 
     def __init__(self, config: Config):
-        """Initialize the session manager.
+        """Initialize the instance manager.
 
         Args:
             config: Configuration object with LLM, limits, and persistence settings.
@@ -327,7 +327,7 @@ class InstanceManager:
         self._request_registry = ActiveRequestRegistry()
         
         # Callback for watchdog to notify about failed messages
-        def _on_watchdog_message_failed(session_id: str, message_id: str, error: str) -> None:
+        def _on_watchdog_message_failed(instance_id: str, message_id: str, error: str) -> None:
             """Handle watchdog message failure from sync thread.
             
             Schedules async error report using the stored event loop reference.
@@ -335,17 +335,17 @@ class InstanceManager:
             # Use stored loop reference (set during initialize())
             loop = self._loop
             if loop is None:
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop not initialized")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop not initialized")
                 return
             
             if loop.is_closed():
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: event loop is closed")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop is closed")
                 return
             
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self._send_error_report(
-                        session_id=session_id,
+                        instance_id=instance_id,
                         error=f"Watchdog timeout: {error}",
                         error_type="watchdog_timeout",
                         message_id=message_id
@@ -355,17 +355,17 @@ class InstanceManager:
                 # Add timeout to prevent hanging if loop is shutting down
                 future.result(timeout=5.0)
             except RuntimeError as e:
-                logger.warning(f"Cannot send error report for {session_id[:8]}...: {e}")
+                logger.warning(f"Cannot send error report for {instance_id[:8]}...: {e}")
             except TimeoutError:
-                logger.warning(f"Error report timed out for {session_id[:8]}...")
+                logger.warning(f"Error report timed out for {instance_id[:8]}...")
             except Exception as e:
-                logger.error(f"Unexpected error sending error report for {session_id[:8]}...: {e}")
+                logger.error(f"Unexpected error sending error report for {instance_id[:8]}...: {e}")
         
         # Callback for watchdog to trigger re-processing of retry-ready messages
-        def _on_watchdog_retry_ready(session_ids: list[str]) -> None:
+        def _on_watchdog_retry_ready(instance_ids: list[str]) -> None:
             """Handle retry-ready messages from watchdog sync thread.
             
-            Triggers _process_queue for each session with retry-ready messages.
+            Triggers _process_queue for each instance with retry-ready messages.
             """
             # Use stored loop reference (set during initialize())
             loop = self._loop
@@ -377,21 +377,21 @@ class InstanceManager:
                 logger.warning("Cannot trigger retry processing: event loop is closed")
                 return
             
-            for session_id in session_ids:
+            for instance_id in instance_ids:
                 try:
-                    logger.info(f"Triggering retry processing for session {session_id[:8]}...")
+                    logger.info(f"Triggering retry processing for instance {instance_id[:8]}...")
                     future = asyncio.run_coroutine_threadsafe(
-                        self._process_queue(session_id),
+                        self._process_queue(instance_id),
                         loop
                     )
                     # Add timeout to prevent hanging
                     future.result(timeout=5.0)
                 except RuntimeError as e:
-                    logger.warning(f"Cannot trigger retry for {session_id[:8]}...: {e}")
+                    logger.warning(f"Cannot trigger retry for {instance_id[:8]}...: {e}")
                 except TimeoutError:
-                    logger.warning(f"Retry trigger timed out for {session_id[:8]}...")
+                    logger.warning(f"Retry trigger timed out for {instance_id[:8]}...")
                 except Exception as e:
-                    logger.error(f"Error triggering retry processing for {session_id[:8]}...: {e}")
+                    logger.error(f"Error triggering retry processing for {instance_id[:8]}...: {e}")
         
         self.watchdog = InstanceWatchdog(
             self._queue_repository,
@@ -605,30 +605,30 @@ class InstanceManager:
 
         return instance_id
 
-    async def send_message(self, session_id: str, message: str) -> MessageResult:
-        """Send a message to a session and get the response.
+    async def send_message(self, instance_id: str, message: str) -> MessageResult:
+        """Send a message to an instance and get the response.
 
         Args:
-            session_id: The ID of the session to send the message to.
+            instance_id: The ID of the instance to send the message to.
             message: The message content to send.
 
         Returns:
             MessageResult with content, thinking, and tool_calls.
 
         Raises:
-            KeyError: If session_id is not found.
+            KeyError: If instance_id is not found.
         """
-        # Get session graph (will lazy-load from DB if needed)
-        graph = self.get_instance(session_id)
+        # Get instance graph (will lazy-load from DB if needed)
+        graph = self.get_instance(instance_id)
 
         # Invoke with message
         config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {"thread_id": instance_id},
             "recursion_limit": self.config.limits.graph_recursion_limit,
         }
         
         # Compact context before processing (non-blocking)
-        await self._maybe_compact_context(session_id, graph, config)
+        await self._maybe_compact_context(instance_id, graph, config)
         
         result = await graph.ainvoke({"messages": [message]}, config)
 
@@ -826,46 +826,46 @@ class InstanceManager:
         except asyncio.CancelledError:
             logger.debug(f"Queue processing task cancelled for instance {instance_id}")
 
-    async def _process_queue(self, session_id: str) -> None:
-        """Event-driven queue processor for a session."""
-        logger.debug(f"_process_queue called for session {session_id[:8]}...")
+    async def _process_queue(self, instance_id: str) -> None:
+        """Event-driven queue processor for an instance."""
+        logger.debug(f"_process_queue called for instance {instance_id[:8]}...")
         # Check if already processing
         async with self._processing_lock:
-            if session_id in self._processing:
-                logger.debug(f"Session {session_id[:8]}... already being processed, skipping")
+            if instance_id in self._processing:
+                logger.debug(f"Instance {instance_id[:8]}... already being processed, skipping")
                 return
-            self._processing.add(session_id)
-            logger.debug(f"Added session {session_id[:8]}... to processing set")
+            self._processing.add(instance_id)
+            logger.debug(f"Added instance {instance_id[:8]}... to processing set")
         
         try:
-            if not self.circuit_breaker.can_execute(session_id):
-                logger.warning(f"Circuit breaker open for session {session_id[:8]}...")
-                # Notify parent if this is a child session with pending messages
-                meta = self._instance_repository.get(session_id)
+            if not self.circuit_breaker.can_execute(instance_id):
+                logger.warning(f"Circuit breaker open for instance {instance_id[:8]}...")
+                # Notify parent if this is a child instance with pending messages
+                meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
                     # Get pending messages (single query, use count from result)
-                    pending = self._queue_repository.list(session_id=session_id, status="ready", limit=100)
+                    pending = self._queue_repository.list(instance_id=instance_id, status="ready", limit=100)
                     if pending:
                         await self._send_error_report(
-                            session_id=session_id,
-                            error=f"Circuit breaker open - session has {len(pending)} message(s) blocked",
+                            instance_id=instance_id,
+                            error=f"Circuit breaker open - instance has {len(pending)} message(s) blocked",
                             error_type="circuit_breaker_open",
                             message_id=pending[0].message_id
                         )
                 return
             
-            logger.debug(f"Starting dequeue loop for session {session_id[:8]}...")
+            logger.debug(f"Starting dequeue loop for instance {instance_id[:8]}...")
             while True:
-                msg = self._queue_repository.dequeue_by_session(session_id)
+                msg = self._queue_repository.dequeue_by_instance(instance_id)
                 if msg is None:
-                    logger.debug(f"No more messages for session {session_id[:8]}..., exiting loop")
+                    logger.debug(f"No more messages for instance {instance_id[:8]}..., exiting loop")
                     break
                 
-                logger.info(f"Processing message {msg.message_id[:8]}... for session {session_id[:8]}...")
+                logger.info(f"Processing message {msg.message_id[:8]}... for instance {instance_id[:8]}...")
                 
                 # Check if this is the first message and generate title
                 # Get message count before processing this message
-                existing_messages = await get_instance_messages(self.checkpointer, session_id)
+                existing_messages = await get_instance_messages(self.checkpointer, instance_id)
                 is_first_message = len(existing_messages) == 0
                 
                 # Check retry_count instead of metadata flag (more reliable)
@@ -874,7 +874,7 @@ class InstanceManager:
                 # Broadcast status_changed event
                 await self.broadcaster.broadcast(Event(
                     type="status_changed",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=msg.message_id,
                     data={"status": "processing", "is_retry": is_retry}
                 ))
@@ -882,7 +882,7 @@ class InstanceManager:
                 # Register request for cancellation support
                 cancellation_source = self._request_registry.register(
                     message_id=msg.message_id,
-                    session_id=session_id,
+                    instance_id=instance_id,
                     task=asyncio.current_task()
                 )
                 
@@ -890,11 +890,11 @@ class InstanceManager:
                     # Project context injection on first message (BEFORE processing)
                     message_content = msg.content
                     if is_first_message:
-                        # PRIORITY 1: Use explicit project_id from session metadata
-                        session_meta = self._instance_repository.get(session_id)
+                        # PRIORITY 1: Use explicit project_id from instance metadata
+                        instance_meta = self._instance_repository.get(instance_id)
                         explicit_project_id = (
-                            session_meta.session_metadata.get("project_id") 
-                            if session_meta and session_meta.session_metadata 
+                            instance_meta.instance_metadata.get("project_id") 
+                            if instance_meta and instance_meta.instance_metadata 
                             else None
                         )
                         
@@ -907,8 +907,8 @@ class InstanceManager:
                                 logger.debug(f"Injected explicit project context: {project.name}")
                             else:
                                 logger.warning(
-                                    f"Project '{explicit_project_id}' not found for session {session_id[:8]}... "
-                                    f"(may have been deleted after session creation)"
+                                    f"Project '{explicit_project_id}' not found for instance {instance_id[:8]}... "
+                                    f"(may have been deleted after instance creation)"
                                 )
                         else:
                             # FALLBACK: Text extraction only if no explicit project_id
@@ -919,7 +919,7 @@ class InstanceManager:
                                 message_content = project_context + msg.content
                                 logger.debug(f"Injected inferred project context: {project.name}")
                     result = await self._process_message_with_tracking(
-                        session_id,
+                        instance_id,
                         message_content,
                         msg.message_id,
                         cancellation_token=cancellation_source.token,
@@ -928,7 +928,7 @@ class InstanceManager:
                     
                     # Pre-ACK status check to prevent race condition with watchdog
                     # Always record success since processing completed without error
-                    self.circuit_breaker.record_success(session_id)
+                    self.circuit_breaker.record_success(instance_id)
                     
                     # Use repository to check status
                     status = self._queue_repository.get_status(msg.message_id)
@@ -940,51 +940,36 @@ class InstanceManager:
                             f"during processing, skipping ack (success already recorded)"
                         )
                     
-                    # Generate title if this was the first message
-                    if is_first_message:
-                        try:
-                            title = await self._generate_session_title(session_id, msg.content)
-                            if title:
-                                # Broadcast title_updated event for frontend refresh
-                                await self.broadcaster.broadcast(Event(
-                                    type="title_updated",
-                                    session_id=session_id,
-                                    message_id=msg.message_id,
-                                    data={"title": title}
-                                ))
-                        except Exception as e:
-                            logger.warning(f"Failed to generate title for session {session_id}: {e}")
-                    
                     # Determine the source for the completed event
-                    # Root source inheritance: child sessions don't broadcast completed events
-                    # Only the root session (parentless) broadcasts with the original external source
-                    meta = self._instance_repository.get(session_id)
+                    # Root source inheritance: child instances don't broadcast completed events
+                    # Only the root instance (parentless) broadcasts with the original external source
+                    meta = self._instance_repository.get(instance_id)
                     
-                    # Skip broadcast entirely if this is a child session
+                    # Skip broadcast entirely if this is a child instance
                     if meta and meta.parent_id:
-                        # Child session - internal completion only, no broadcast
-                        # The parent session will handle the response
+                        # Child instance - internal completion only, no broadcast
+                        # The parent instance will handle the response
                         logger.debug(
-                            f"Child session {session_id[:8]}... completed internally "
+                            f"Child instance {instance_id[:8]}... completed internally "
                             f"(parent={meta.parent_id[:8]}...), skipping broadcast"
                         )
                     else:
-                        # Root session - broadcast completed event
+                        # Root instance - broadcast completed event
                         # Use root_source from metadata if available, otherwise fallback to msg.source
-                        session_metadata = meta.session_metadata if meta else None
-                        root_source = session_metadata.get("root_source") if session_metadata else None
+                        instance_metadata = meta.instance_metadata if meta else None
+                        root_source = instance_metadata.get("root_source") if instance_metadata else None
                         
                         if root_source is None:
-                            # Fallback to msg.source (shouldn't happen for properly initialized sessions)
+                            # Fallback to msg.source (shouldn't happen for properly initialized instances)
                             root_source = msg.source
                             logger.warning(
-                                f"Session {session_id[:8]}... missing root_source in metadata, "
+                                f"Instance {instance_id[:8]}... missing root_source in metadata, "
                                 f"falling back to msg.source='{root_source}'"
                             )
                         
                         await self.broadcaster.broadcast(Event(
                             type="completed",
-                            session_id=session_id,
+                            instance_id=instance_id,
                             message_id=msg.message_id,
                             data={
                                 "content": result.content,
@@ -995,13 +980,19 @@ class InstanceManager:
                             }
                         ))
                     
+                    # Fire-and-forget title generation - don't block the completed event
+                    if is_first_message:
+                        asyncio.create_task(
+                            self._generate_and_broadcast_title(instance_id, msg.content)
+                        )
+                    
                 except OperationCancelledError as e:
                     logger.info(f"Message {msg.message_id[:8]}... was cancelled: {e.reason.value}")
                     # Don't schedule retry here - watchdog already did
                     # Broadcast cancelled event
                     await self.broadcaster.broadcast(Event(
                         type="cancelled",
-                        session_id=session_id,
+                        instance_id=instance_id,
                         message_id=msg.message_id,
                         data={"reason": e.reason.value}
                     ))
@@ -1011,92 +1002,67 @@ class InstanceManager:
                     raise  # Re-raise to properly handle task cancellation
                     
                 except Exception as e:
-                    # Check for permanent errors first (compaction already attempted at LLM level)
-                    if isinstance(e, ContextLengthExceededError):
-                        logger.error(
-                            f'Context length exceeded for session {session_id[:8]}... '
-                            f'(compaction attempted but failed), failing immediately'
-                        )
-                        self._queue_repository.fail(msg.message_id, str(e))
+                    logger.error(f"Error processing message {msg.message_id}: {e}")
+                    self.circuit_breaker.record_failure(instance_id)
+                    
+                    if msg.retry_count < self.config.queue.max_retries:
+                        # Use repository to schedule retry
+                        self._queue_repository.retry(msg.message_id, str(e))
+                        # Broadcast retry scheduled event
                         await self.broadcaster.broadcast(Event(
-                            type='error',
-                            session_id=session_id,
+                            type="status_changed",
+                            instance_id=instance_id,
                             message_id=msg.message_id,
                             data={
-                                'error': str(e),
-                                'status': 'failed',
-                                'error_type': 'context_length_exceeded',
+                                "status": "retrying",
+                                "retry_count": msg.retry_count + 1,
+                                "error": str(e)
                             }
                         ))
-                        await self._send_error_report(
-                            session_id=session_id,
-                            error=f'Context length exceeded (compaction attempted): {e}',
-                            error_type='context_length_exceeded',
-                            message_id=msg.message_id,
-                        )
                     else:
-                        # existing retry logic stays here unchanged
-                        logger.error(f'Error processing message {msg.message_id}: {e}')
-                        self.circuit_breaker.record_failure(session_id)
-                        
-                        if msg.retry_count < self.config.queue.max_retries:
-                            # Use repository to schedule retry
-                            self._queue_repository.retry(msg.message_id, str(e))
-                            # Broadcast retry scheduled event
-                            await self.broadcaster.broadcast(Event(
-                                type="status_changed",
-                                session_id=session_id,
-                                message_id=msg.message_id,
-                                data={
-                                    "status": "retrying",
-                                    "retry_count": msg.retry_count + 1,
-                                    "error": str(e)
-                                }
-                            ))
-                        else:
-                            # Use repository to mark as failed
-                            self._queue_repository.fail(msg.message_id, str(e))
-                            # Broadcast error event
-                            await self.broadcaster.broadcast(Event(
-                                type="error",
-                                session_id=session_id,
-                                message_id=msg.message_id,
-                                data={
-                                    "error": str(e),
-                                    "status": "failed",
-                                    "retry_count": msg.retry_count
-                                }
-                            ))
-                            # Send error report to parent if this is a child session
-                            await self._send_error_report(
-                                session_id=session_id,
-                                error=f"Max retries ({msg.retry_count}) exceeded: {e}",
-                                error_type="max_retries_exceeded",
-                                message_id=msg.message_id
-                            )
+                        # Use repository to mark as failed
+                        self._queue_repository.fail(msg.message_id, str(e))
+                        # Broadcast error event
+                        await self.broadcaster.broadcast(Event(
+                            type="error",
+                            instance_id=instance_id,
+                            message_id=msg.message_id,
+                            data={
+                                "error": str(e),
+                                "status": "failed",
+                                "retry_count": msg.retry_count
+                            }
+                        ))
+                        # Send error report to parent if this is a child instance
+                        await self._send_error_report(
+                            instance_id=instance_id,
+                            error=f"Max retries ({msg.retry_count}) exceeded: {e}",
+                            error_type="max_retries_exceeded",
+                            message_id=msg.message_id
+                        )
                 
                 finally:
                     # Always unregister the request
                     self._request_registry.unregister(msg.message_id)
             
-            # Queue is empty - check if this is a child session and send completion report
-            if self._queue_repository.is_empty(session_id):
-                meta = self._instance_repository.get(session_id)
+            # Queue is empty - check if this is a child instance and send completion report
+            if self._queue_repository.is_empty(instance_id):
+                meta = self._instance_repository.get(instance_id)
                 if meta and meta.parent_id:
-                    # This is a child session that has completed - send report to parent
-                    await self._send_completion_report(session_id)
+                    # This is a child instance that has completed - send report to parent
+                    await self._send_completion_report(instance_id)
         finally:
             async with self._processing_lock:
-                self._processing.discard(session_id)
-                logger.debug(f"Removed session {session_id[:8]}... from processing set")
+                self._processing.discard(instance_id)
+                logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
 
-    def _process_message_sync(self, session_id: str, message: str) -> MessageResult:
+    def _process_message_sync(self, instance_id: str, message: str) -> MessageResult:
         """Synchronous message processing (wraps existing send_message logic)."""
-        return self.send_message(session_id, message)
+        return self.send_message(instance_id, message)
 
     async def _process_message_with_tracking(
         self, 
-        session_id: str, 
+        instance_id: str, 
         message: str,
         message_id: str,
         cancellation_token: CancellationToken | None = None,
@@ -1108,7 +1074,7 @@ class InstanceManager:
         to prevent duplicate execution.
         
         Args:
-            session_id: The session ID.
+            instance_id: The instance ID.
             message: The message content.
             message_id: The queue message ID.
             cancellation_token: Optional token to check for cancellation.
@@ -1120,7 +1086,7 @@ class InstanceManager:
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
-        graph = self.get_instance(session_id)
+        graph = self.get_instance(instance_id)
         
         # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
@@ -1142,7 +1108,7 @@ class InstanceManager:
             callbacks.append(cancellation_callback)
         
         config = {
-            "configurable": {"thread_id": session_id},
+            "configurable": {"thread_id": instance_id},
             "callbacks": callbacks,
             "recursion_limit": self.config.limits.graph_recursion_limit,
         }
@@ -1178,14 +1144,14 @@ class InstanceManager:
         
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
-            await self._maybe_compact_context(session_id, graph, config)
+            await self._maybe_compact_context(instance_id, graph, config)
         
         if is_retry:
-            if await self._has_checkpoint(session_id):
-                logger.info(f"Resuming session {session_id[:8]}... from checkpoint (retry #{msg.retry_count})")
+            if await self._has_checkpoint(instance_id):
+                logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{msg.retry_count})")
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
-                logger.warning(f"Retry for session {session_id[:8]}... but no checkpoint found, re-adding message")
+                logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
                 graph_input = {"messages": [message]}
         else:
             # First attempt - add message to conversation
@@ -1225,7 +1191,7 @@ class InstanceManager:
                                     # Broadcast thinking event
                                     await self.broadcaster.broadcast(Event(
                                         type="thinking",
-                                        session_id=session_id,
+                                        instance_id=instance_id,
                                         message_id=message_id,
                                         data={"content": thinking_content}
                                     ))
@@ -1246,7 +1212,7 @@ class InstanceManager:
                                     # Broadcast tool_call event (tool starting)
                                     await self.broadcaster.broadcast(Event(
                                         type="tool_call",
-                                        session_id=session_id,
+                                        instance_id=instance_id,
                                         message_id=message_id,
                                         data={
                                             "id": tc_id,
@@ -1284,7 +1250,7 @@ class InstanceManager:
                             # Broadcast tool_complete event
                             await self.broadcaster.broadcast(Event(
                                 type="tool_complete",
-                                session_id=session_id,
+                                instance_id=instance_id,
                                 message_id=message_id,
                                 data=tool_call_data
                             ))
@@ -1340,7 +1306,7 @@ class InstanceManager:
                             if should_flush and thinking_buffer:
                                 await self.broadcaster.broadcast(Event(
                                     type="thinking",
-                                    session_id=session_id,
+                                    instance_id=instance_id,
                                     message_id=message_id,
                                     data={"content": thinking_buffer}
                                 ))
@@ -1358,7 +1324,7 @@ class InstanceManager:
                             if should_flush and content_buffer:
                                 await self.broadcaster.broadcast(Event(
                                     type="content_chunk",
-                                    session_id=session_id,
+                                    instance_id=instance_id,
                                     message_id=message_id,
                                     data={"chunk": content_buffer}
                                 ))
@@ -1366,22 +1332,22 @@ class InstanceManager:
                                 content_buffer_size = 0
                                 last_content_flush = now
                                 
-                            # Adaptive batching: check queue health periodically
-                            if event_count % 20 == 0:
-                                stats = self.broadcaster.get_stats(session_id)
-                                queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
-                                
-                                # Increase batch size when queue is > 50% full
-                                if queue_fill_ratio > 0.5:
-                                    adaptive_threshold = min(CONTENT_BATCH_THRESHOLD * 1.5, 2000)  # max 2000
-                                    adaptive_timeout = min(CONTENT_BATCH_TIMEOUT * 1.5, 1.0)     # max 1.0s
-                                    adaptive_thinking_threshold = min(THINKING_BATCH_THRESHOLD * 3, 2000)  # max 2000
-                                    adaptive_thinking_timeout = min(THINKING_BATCH_TIMEOUT * 2, 1.0)     # max 1.0s
-                                    if event_count == 20:  # Log once
-                                        logger.info(
-                                            f"Queue at {queue_fill_ratio:.0%} capacity, "
-                                            f"increasing batch size for session {session_id[:8]}"
-                                        )
+                                # Adaptive batching: check queue health periodically
+                                if event_count % 20 == 0:
+                                    stats = self.broadcaster.get_stats(instance_id)
+                                    queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
+                                    
+                                    # Increase batch size when queue is > 50% full
+                                    if queue_fill_ratio > 0.5:
+                                        adaptive_threshold = min(CONTENT_BATCH_THRESHOLD * 1.5, 2000)  # max 2000
+                                        adaptive_timeout = min(CONTENT_BATCH_TIMEOUT * 1.5, 1.0)     # max 1.0s
+                                        adaptive_thinking_threshold = min(THINKING_BATCH_THRESHOLD * 3, 2000)  # max 2000
+                                        adaptive_thinking_timeout = min(THINKING_BATCH_TIMEOUT * 2, 1.0)     # max 1.0s
+                                        if event_count == 20:  # Log once
+                                            logger.info(
+                                                f"Queue at {queue_fill_ratio:.0%} capacity, "
+                                                f"increasing batch size for instance {instance_id[:8]}"
+                                            )
                                 else:
                                     adaptive_threshold = CONTENT_BATCH_THRESHOLD
                                     adaptive_timeout = CONTENT_BATCH_TIMEOUT
@@ -1392,7 +1358,7 @@ class InstanceManager:
             if content_buffer:
                 await self.broadcaster.broadcast(Event(
                     type="content_chunk",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=message_id,
                     data={"chunk": content_buffer}
                 ))
@@ -1402,7 +1368,7 @@ class InstanceManager:
             if thinking_buffer:
                 await self.broadcaster.broadcast(Event(
                     type="thinking",
-                    session_id=session_id,
+                    instance_id=instance_id,
                     message_id=message_id,
                     data={"content": thinking_buffer}
                 ))
@@ -1413,7 +1379,7 @@ class InstanceManager:
             # Broadcast error event
             await self.broadcaster.broadcast(Event(
                 type="error",
-                session_id=session_id,
+                instance_id=instance_id,
                 message_id=message_id,
                 data={"error": str(e), "stage": "streaming"}
             ))
@@ -1427,7 +1393,7 @@ class InstanceManager:
         # Validate final_result exists
         final_result = await graph.aget_state(config)
         if not final_result:
-            logger.error(f"No final state for session {session_id} after streaming")
+            logger.error(f"No final state for instance {instance_id} after streaming")
             return MessageResult(content="", tool_calls=None)
         
         messages = final_result.values.get("messages", [])
@@ -1490,11 +1456,11 @@ class InstanceManager:
             tool_calls=all_tool_calls if all_tool_calls else None,
         )
 
-    async def _summarize_session(self, session_id: str, agent_name: str) -> str:
-        """Summarize session messages using LLM.
+    async def _summarize_instance(self, instance_id: str, agent_name: str) -> str:
+        """Summarize instance messages using LLM.
         
         Args:
-            session_id: The session ID to summarize.
+            instance_id: The instance ID to summarize.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
@@ -1503,8 +1469,8 @@ class InstanceManager:
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_openai import ChatOpenAI
         
-        # Get session messages
-        messages = await get_instance_messages(self.checkpointer, session_id)
+        # Get instance messages
+        messages = await get_instance_messages(self.checkpointer, instance_id)
         
         if not messages:
             return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
@@ -1566,86 +1532,86 @@ Provide a concise summary:"""
                 summary = str(content) if content else ""
             return f"{agent_name} has done, bellow is {agent_name} response: {summary}"
         except Exception as e:
-            logger.warning(f"Failed to summarize session {session_id}: {e}")
+            logger.warning(f"Failed to summarize instance {instance_id}: {e}")
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
-    async def _send_completion_report(self, session_id: str, use_llm_summary: bool = False) -> None:
-        """Send completion report to parent session when child is done.
+    async def _send_completion_report(self, instance_id: str, use_llm_summary: bool = False) -> None:
+        """Send completion report to parent instance when child is done.
         
-        Called when a child session's queue becomes empty.
+        Called when a child instance's queue becomes empty.
         Sends the child's last assistant message (or LLM summary) to the parent.
         
         Args:
-            session_id: The child session ID that has completed.
+            instance_id: The child instance ID that has completed.
             use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
         """
-        # Get session metadata
-        meta = self._instance_repository.get(session_id)
+        # Get instance metadata
+        meta = self._instance_repository.get(instance_id)
         if not meta:
-            logger.warning(f"Cannot send completion report: session {session_id} not found")
+            logger.warning(f"Cannot send completion report: instance {instance_id} not found")
             return
         
         parent_id = meta.parent_id
         if not parent_id:
-            logger.debug(f"Session {session_id} has no parent, skipping completion report")
+            logger.debug(f"Instance {instance_id} has no parent, skipping completion report")
             return
         
         agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
         
-        logger.info(f"Session {session_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
+        logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
         
         # Get report content - either last message or LLM summary
         if use_llm_summary:
-            summary = await self._summarize_session(session_id, agent_name)
+            summary = await self._summarize_instance(instance_id, agent_name)
         else:
-            summary = await self._get_last_assistant_message(session_id, agent_name)
+            summary = await self._get_last_assistant_message(instance_id, agent_name)
         
         # Enqueue report message to parent using repository
         msg = self._queue_repository.enqueue(
-            session_id=parent_id,
+            instance_id=parent_id,
             content=summary,
-            source=f"report:{session_id}",
+            source=f"report:{instance_id}",
             priority=1,  # Normal priority as requested
-            message_metadata={"type": "completion_report", "child_session_id": session_id}
+            message_metadata={"type": "completion_report", "child_instance_id": instance_id}
         )
         message_id = msg.message_id
         
         # Broadcast report event
         await self.broadcaster.broadcast(Event(
             type="status_changed",
-            session_id=parent_id,
+            instance_id=parent_id,
             message_id=message_id,
             data={
                 "type": "completion_report",
-                "child_session_id": session_id,
+                "child_instance_id": instance_id,
                 "agent_name": agent_name,
                 "summary": summary
             }
         ))
         
-        logger.info(f"Sent completion report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+        logger.info(f"Sent completion report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
         
         # Trigger parent queue processing
         asyncio.create_task(self._process_queue(parent_id))
 
     async def _send_error_report(
         self, 
-        session_id: str, 
+        instance_id: str, 
         error: str,
         error_type: str = "execution_error",
         message_id: str | None = None
     ) -> None:
-        """Send error report to parent session when child fails permanently.
+        """Send error report to parent instance when child fails permanently.
         
-        Called when a child session encounters an unrecoverable error:
+        Called when a child instance encounters an unrecoverable error:
         - Max retries exceeded
         - Watchdog timeout
         - Circuit breaker opened
         - Unhandled exception
         
         Args:
-            session_id: The child session ID that has failed.
+            instance_id: The child instance ID that has failed.
             error: The error message describing what went wrong.
             error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
             message_id: Optional message ID that triggered the error.
@@ -1653,33 +1619,33 @@ Provide a concise summary:"""
         try:
             # Prevent duplicate error reports - check if we already sent one
             if message_id:
-                meta_check = self._instance_repository.get(session_id)
+                meta_check = self._instance_repository.get(instance_id)
                 if meta_check and meta_check.parent_id:
                     # Check for existing error report in parent's queue
                     existing = self._queue_repository.list(
-                        session_id=meta_check.parent_id, 
+                        instance_id=meta_check.parent_id, 
                         status="ready", 
                         limit=10
                     )
                     for existing_msg in existing:
-                        if existing_msg.source == f"error_report:{session_id}":
-                            logger.debug(f"Error report already queued for session {session_id[:8]}..., skipping duplicate")
+                        if existing_msg.source == f"error_report:{instance_id}":
+                            logger.debug(f"Error report already queued for instance {instance_id[:8]}..., skipping duplicate")
                             return
             
-            # Get session metadata
-            meta = self._instance_repository.get(session_id)
+            # Get instance metadata
+            meta = self._instance_repository.get(instance_id)
             if not meta:
-                logger.warning(f"Cannot send error report: session {session_id} not found")
+                logger.warning(f"Cannot send error report: instance {instance_id} not found")
                 return
             
             parent_id = meta.parent_id
             if not parent_id:
-                logger.debug(f"Session {session_id} has no parent, skipping error report")
+                logger.debug(f"Instance {instance_id} has no parent, skipping error report")
                 return
             
             agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
             
-            logger.info(f"Session {session_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
+            logger.info(f"Instance {instance_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
             
             # Truncate error to prevent massive messages
             truncated_error = error[:2000] if len(error) > 2000 else error
@@ -1692,13 +1658,13 @@ Provide a concise summary:"""
             
             # Enqueue error report message to parent using repository
             msg = self._queue_repository.enqueue(
-                session_id=parent_id,
+                instance_id=parent_id,
                 content=error_report,
-                source=f"error_report:{session_id}",
+                source=f"error_report:{instance_id}",
                 priority=1,  # Normal priority
                 message_metadata={
                     "type": "error_report", 
-                    "child_session_id": session_id,
+                    "child_instance_id": instance_id,
                     "error_type": error_type,
                     "error": truncated_error,
                     "original_message_id": message_id,
@@ -1711,11 +1677,11 @@ Provide a concise summary:"""
             # Broadcast error report event
             await self.broadcaster.broadcast(Event(
                 type="error_report",
-                session_id=parent_id,
+                instance_id=parent_id,
                 message_id=report_message_id,
                 data={
                     "type": "error_report",
-                    "child_session_id": session_id,
+                    "child_instance_id": instance_id,
                     "agent_name": agent_name,
                     "error_type": error_type,
                     "error": truncated_error,
@@ -1724,31 +1690,31 @@ Provide a concise summary:"""
                 }
             ))
             
-            logger.info(f"Sent error report from {agent_name} ({session_id[:8]}...) to parent ({parent_id[:8]}...)")
+            logger.info(f"Sent error report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
             
             # Trigger parent queue processing so it can handle the error
             asyncio.create_task(self._process_queue(parent_id))
             
         except Exception as e:
             logger.error(
-                f"Failed to send error report for session {session_id[:8]}...: {e}. "
+                f"Failed to send error report for instance {instance_id[:8]}...: {e}. "
                 f"Original error was: {error_type}: {error[:200]}"
             )
 
-    async def _get_last_assistant_message(self, session_id: str, agent_name: str) -> str:
-        """Get the last assistant message from session history.
+    async def _get_last_assistant_message(self, instance_id: str, agent_name: str) -> str:
+        """Get the last assistant message from instance history.
         
         This is the default/simple approach for completion reports - just
         pass the agent's last response to the parent.
         
         Args:
-            session_id: The session ID to get message from.
+            instance_id: The instance ID to get message from.
             agent_name: The name of the agent (e.g., "Coder", "Designer").
             
         Returns:
             Formatted string: "{agent_name} has done: {last_message}"
         """
-        messages = await get_instance_messages(self.checkpointer, session_id)
+        messages = await get_instance_messages(self.checkpointer, instance_id)
         
         # Find the last assistant message
         last_assistant_content = None
@@ -1766,29 +1732,28 @@ Provide a concise summary:"""
             return f"{agent_name} has done, bellow is {agent_name} response: Task completed (no response message)."
 
         
-    async def _generate_session_title(self, session_id: str, first_message: str) -> str | None:
-        """Generate a session title from the first user message.
+    async def _generate_and_broadcast_title(
+        self, instance_id: str, message_content: str
+    ) -> None:
+        """Generate instance title asynchronously and broadcast the update.
         
-        Uses LLM to generate a concise, descriptive title based on the first message.
-        The title is stored in the session metadata.
+        This runs as a fire-and-forget task to avoid delaying the 'completed' event.
+        Errors are logged but not retried - title generation is best-effort.
         
         Args:
-            session_id: The session ID to generate title for.
-            first_message: The first user message content.
-            
-        Returns:
-            Generated title string, or None if generation fails.
+            instance_id: The instance to generate title for
+            message_content: The message content to base the title on
         """
         # Skip if empty message
-        if not first_message or not first_message.strip():
-            return None
+        if not message_content or not message_content.strip():
+            return
         
         # Check if title already exists
-        meta = self._instance_repository.get(session_id)
-        if meta and meta.session_metadata.get("title"):
+        meta = self._instance_repository.get(instance_id)
+        if meta and meta.instance_metadata and meta.instance_metadata.get("title"):
             # Title already exists, skip
-            logger.debug(f"Title already exists for session {session_id}, skipping generation")
-            return None
+            logger.debug(f"Title already exists for instance {instance_id}, skipping generation")
+            return
         
         from langchain_core.messages import HumanMessage, SystemMessage
         
@@ -1808,16 +1773,16 @@ Provide a concise summary:"""
         title_prompt = f"""Generate a short, descriptive title (3-6 words max) for this user message. The title should summarize what the user is asking about or trying to accomplish.
 
 User message:
-{first_message[:500]}
+{message_content[:500]}
 
 Title:"""
-
+        
         try:
             # One-shot with 30s timeout - title generation is not critical
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     llm.invoke,
-                    [SystemMessage(content="You are a helpful assistant that generates concise session titles."),
+                    [SystemMessage(content="You are a helpful assistant that generates concise instance titles."),
                      HumanMessage(content=title_prompt)]
                 ),
                 timeout=30.0
@@ -1838,36 +1803,44 @@ Title:"""
             
             # Validate and truncate title
             if not title:
-                return None
+                return
             
             # Truncate to reasonable length (100 chars max)
             if len(title) > 100:
                 title = title[:97] + "..."
             
-            # Store title in session metadata
-            self._instance_repository.update_title(session_id, title)
-            logger.info(f"Generated title for session {session_id}: {title}")
-            return title
+            # Store title in instance metadata
+            self._instance_repository.update_title(instance_id, title)
+            logger.info(f"Generated title for instance {instance_id}: {title}")
             
+            # Broadcast title_updated event for frontend refresh
+            await self.broadcaster.broadcast(Event(
+                type="title_updated",
+                instance_id=instance_id,
+                message_id="",  # Title updates don't need message_id
+                data={"title": title}
+            ))
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout generating title for instance {instance_id[:8]}...")
         except Exception as e:
-            logger.warning(f"Failed to generate title for session {session_id}: {e}")
-            return None
+            logger.warning(f"Failed to generate title for instance {instance_id}: {e}")
 
-    def get_queue_stats(self, session_id: str):
-        """Get queue statistics for a session."""
-        return self._queue_repository.get_stats(session_id)
+    def get_queue_stats(self, instance_id: str):
+        """Get queue statistics for an instance."""
+        return self._queue_repository.get_stats(instance_id)
 
-    def _get_system_prompt_tokens(self, session_id: str) -> int:
-        """Get the cached system prompt token count for a session's agent.
+    def _get_system_prompt_tokens(self, instance_id: str) -> int:
+        """Get the cached system prompt token count for an instance's agent.
 
         Args:
-            session_id: The session ID.
+            instance_id: The instance ID.
 
         Returns:
             The number of tokens in the system prompt, or 0 if not found.
         """
         try:
-            meta = self._instance_repository.get(session_id)
+            meta = self._instance_repository.get(instance_id)
             if not meta:
                 return 0
             # Get cached token count from prompt cache using agent_id
@@ -1882,17 +1855,17 @@ Title:"""
 
     async def _maybe_compact_context(
         self,
-        session_id: str,
+        instance_id: str,
         graph: CompiledStateGraph,
         config: dict[str, Any],
     ) -> None:
-        """Conditionally compact session context if threshold is exceeded.
+        """Conditionally compact instance context if threshold is exceeded.
         
         Compaction is non-blocking - failures are logged but never interrupt processing.
         
         Args:
-            session_id: The session ID to potentially compact.
-            graph: The compiled state graph for the session.
+            instance_id: The instance ID to potentially compact.
+            graph: The compiled state graph for the instance.
             config: The LangGraph config dict with configurable thread_id.
         """
         if self._compactor is None:
@@ -1905,7 +1878,7 @@ Title:"""
                 return
             
             messages = state.values.get('messages', [])
-            system_prompt_tokens = self._get_system_prompt_tokens(session_id)
+            system_prompt_tokens = self._get_system_prompt_tokens(instance_id)
             last_compacted_at = state.values.get('compacted_at')
             
             # Build compaction context
@@ -1952,7 +1925,7 @@ Title:"""
             
             # Log compaction result
             log_parts = [
-                f"[Compaction] session={session_id[:8]}...",
+                f"[Compaction] instance={instance_id[:8]}...",
                 f"compaction_type={result.compaction_type}",
                 f"messages_before={messages_before}",
                 f"messages_after={messages_after}",
@@ -1966,19 +1939,19 @@ Title:"""
             logger.info(" ".join(log_parts))
             
         except Exception as e:
-            logger.warning(f"[Compaction] Failed to compact context for {session_id[:8]}...: {e}")
+            logger.warning(f"[Compaction] Failed to compact context for {instance_id[:8]}...: {e}")
 
-    async def _has_checkpoint(self, session_id: str) -> bool:
-        """Check if a checkpoint exists for this session.
+    async def _has_checkpoint(self, instance_id: str) -> bool:
+        """Check if a checkpoint exists for this instance.
         
         Args:
-            session_id: The session ID to check.
+            instance_id: The instance ID to check.
             
         Returns:
             True if checkpoint exists, False otherwise.
         """
         try:
-            config = {"configurable": {"thread_id": session_id}}
+            config = {"configurable": {"thread_id": instance_id}}
             # Get the current state from async checkpointer
             state = await self.checkpointer.aget(config)
             return state is not None

@@ -1174,7 +1174,7 @@ async def stop_source(source_id: str):
 # GET /sources/{source_id}/mappings - List mappings for a source
 @api_router.get("/sources/{source_id}/mappings", response_model=InstanceMappingListResponse)
 async def list_mappings(source_id: str):
-    """List all session mappings for a source."""
+    """List all instance mappings for a source."""
     # Check source exists
     source = manager._source_repository.get_source_config(source_id)
     if not source:
@@ -1186,7 +1186,7 @@ async def list_mappings(source_id: str):
             ).model_dump()
         )
     
-    mappings_data = manager._source_repository.list_session_mappings(source_id)
+    mappings_data = manager._source_repository.list_instance_mappings(source_id)
     mappings = []
     for m in mappings_data:
         mappings.append(InstanceMappingInfo(
