@@ -69,8 +69,8 @@ class LimitsConfig(BaseSettings):
     instance_timeout_minutes: int = Field(default=60)
     message_rate_limit: int = Field(default=60)
     graph_recursion_limit: int = Field(default=100)
-    llm_concurrency: int = Field(default=10, description="Maximum concurrent LLM calls across all instances")
-    llm_timeout: int = Field(default=300, description="LLM call timeout in seconds")
+    llm_concurrency: int = Field(default=10, ge=1, description="Maximum concurrent LLM calls across all instances")
+    llm_timeout: int = Field(default=300, gt=0, description="LLM call timeout in seconds")
 
 
 class PersistenceConfig(BaseSettings):
