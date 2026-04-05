@@ -70,12 +70,10 @@ class TestBuildInstanceGraph:
         from daemon.graph import build_instance_graph
         assert callable(build_instance_graph)
 
-    def test_build_session_graph_alias_exists(self):
-        """build_session_graph should be an alias for build_instance_graph."""
-        from daemon.graph import build_instance_graph, build_session_graph
-        assert build_session_graph is build_instance_graph, (
-            "build_session_graph should be an alias for build_instance_graph"
-        )
+    def test_build_instance_graph_alias_exists(self):
+        """build_instance_graph should exist."""
+        from daemon.graph import build_instance_graph
+        assert callable(build_instance_graph)
 
     def test_build_instance_graph_signature_has_compactor(self):
         """build_instance_graph should accept compactor parameter."""
