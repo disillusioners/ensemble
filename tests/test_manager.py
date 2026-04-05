@@ -801,6 +801,11 @@ class TestTitleGenerationFireAndForget:
             # Mock watchdog to avoid database errors
             manager.watchdog = Mock()
             
+            # Mock project_store.match_by_keywords to prevent DB calls in asyncio.to_thread
+            # (in-memory SQLite is per-thread, so spawned threads won't see the tables)
+            manager.project_store = Mock()
+            manager.project_store.match_by_keywords = Mock(return_value=None)
+            
             # Track event order with timestamps
             event_timestamps = {}
             
