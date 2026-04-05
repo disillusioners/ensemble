@@ -7,6 +7,9 @@ The parent conftest.py mocks langgraph for unit tests.
 import os
 import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
+
+from daemon.registry import AgentMetadata
 
 
 @pytest.fixture
@@ -25,7 +28,10 @@ def integration_config():
 
 @pytest.fixture
 def test_agent_dir(tmp_path):
-    """Create a minimal test agent directory."""
+    """Create a minimal test agent directory.
+    
+    Returns the path to the agent directory.
+    """
     agent_dir = tmp_path / "test_agent"
     agent_dir.mkdir()
     
@@ -63,3 +69,21 @@ inner_soul(intent="learn", content="Testing early catches bugs")
     (agent_dir / "tools.md").write_text(tools_content)
     
     return str(agent_dir)
+
+
+@pytest.fixture
+def mock_registry_with_test_agent(test_agent_dir):
+    """Create a mock registry that includes the test agent."""
+    agent_metadata = AgentMetadata(
+        id="test_agent",
+        name="Test Agent",
+        description="Test agent for inner_soul testing",
+        path=Path(test_agent_dir),
+        system=False,
+    )
+    
+    mock_registry = MagicMock()
+    mock_registry.resolve_to_id.return_value = "test_agent"
+    mock_registry.get.return_value = agent_metadata
+    
+    return mock_registry

@@ -1,6 +1,9 @@
 #!/usr/bin/env python
 """Standalone test for inner_soul tool - runs outside pytest to avoid conftest mocks.
 
+IMPORTANT: This test uses a MOCKED registry to avoid touching real agents.
+All test artifacts are created in a temporary directory that is cleaned up.
+
 Usage:
     python tests/integration/test_inner_soul_standalone.py
 """
@@ -9,11 +12,15 @@ import os
 import sys
 import shutil
 import asyncio
+import tempfile
 from pathlib import Path
 from datetime import datetime
+from unittest.mock import patch, MagicMock
 
 import pytest
 import socket
+
+from daemon.registry import AgentMetadata
 
 
 def _load_env():
@@ -118,9 +125,16 @@ from daemon.manager import InstanceManager
 
 
 def create_test_agent(tmp_dir: Path) -> str:
-    """Create a minimal test agent directory."""
+    """Create a minimal test agent directory.
+    
+    Args:
+        tmp_dir: The parent directory for the test agent. Must exist.
+        
+    Returns:
+        Path to the created test agent directory.
+    """
     agent_dir = tmp_dir / "test_agent"
-    agent_dir.mkdir()
+    agent_dir.mkdir(parents=True)
     
     # Create minimal agent files
     (agent_dir / "soul.md").write_text("""# Who I Am
@@ -180,66 +194,74 @@ def integration_config():
     return _get_config()
 
 
-async def _run_remember_test(config):
-    """Run the remember test logic."""
-    project_root = Path(__file__).parent.parent.parent
+async def _run_remember_test(config, agent_dir: str):
+    """Run the remember test logic.
     
-    # Create temp agent directory
-    tmp_dir = project_root / "tmp_test"
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir()
-    
-    agent_dir = create_test_agent(tmp_dir)
+    Args:
+        config: The integration config
+        agent_dir: Path to the test agent directory
+    """
     memories_dir = Path(agent_dir) / "memories"
+    
+    # Create mock registry with our test agent
+    agent_metadata = AgentMetadata(
+        id="test_agent",
+        name="Test Agent",
+        description="Test agent for inner_soul testing",
+        path=Path(agent_dir),
+        system=False,
+    )
+    mock_registry = MagicMock()
+    mock_registry.resolve_to_id.return_value = "test_agent"
+    mock_registry.get.return_value = agent_metadata
     
     # Count memories before
     memories_before = list(memories_dir.glob("*.md"))
     print(f"Memories before: {len(memories_before)}")
     
-    # Create instance manager
-    manager = InstanceManager(config=config)
-    
-    # Spawn instance
-    print(f"Spawning instance with agent: {agent_dir}")
-    instance_id = manager.spawn_instance(agent_id="coder")
-    print(f"Instance ID: {instance_id}")
-    
-    # Send message asking agent to remember
-    message = """Please use the inner_soul tool to remember: "My name is TestAgent"
+    # Create instance manager with mocked registry
+    with patch("daemon.manager.get_registry", return_value=mock_registry):
+        manager = InstanceManager(config=config)
+        
+        # Spawn instance
+        print(f"Spawning instance with test_agent (mocked registry)")
+        instance_id = manager.spawn_instance(agent_id="test_agent")
+        print(f"Instance ID: {instance_id}")
+        
+        # Send message asking agent to remember
+        message = """Please use the inner_soul tool to remember: "My name is TestAgent"
 
 Call inner_soul with intent="remember" and the content above."""
-    
-    print(f"\nSending message: {message[:100]}...")
-    response = await manager.send_message(instance_id, message)
-    
-    print(f"\nAgent response:\n{response.content[:500]}...")
-    if response.tool_calls:
-        print(f"Tool calls made: {response.tool_calls}")
-    
-    # Check memories
-    memories_after = list(memories_dir.glob("*.md"))
-    new_memories = [m for m in memories_after if m not in memories_before]
-    
-    print(f"\nMemories after: {len(memories_after)}")
-    print(f"New memories: {len(new_memories)}")
-    
-    if new_memories:
-        memory_file = new_memories[0]
-        print(f"\nMemory file created: {memory_file.name}")
-        print(f"Content:\n{memory_file.read_text()[:500]}...")
-    
-    # Cleanup
-    manager.terminate_instance(instance_id)
-    shutil.rmtree(tmp_dir)
-    
-    # Assert
-    if len(new_memories) > 0:
-        print("\n✅ TEST PASSED: Memory file was created")
-        return True
-    else:
-        print("\n❌ TEST FAILED: No memory file was created")
-        return False
+        
+        print(f"\nSending message: {message[:100]}...")
+        response = await manager.send_message(instance_id, message)
+        
+        print(f"\nAgent response:\n{response.content[:500]}...")
+        if response.tool_calls:
+            print(f"Tool calls made: {response.tool_calls}")
+        
+        # Check memories
+        memories_after = list(memories_dir.glob("*.md"))
+        new_memories = [m for m in memories_after if m not in memories_before]
+        
+        print(f"\nMemories after: {len(memories_after)}")
+        print(f"New memories: {len(new_memories)}")
+        
+        if new_memories:
+            memory_file = new_memories[0]
+            print(f"\nMemory file created: {memory_file.name}")
+            print(f"Content:\n{memory_file.read_text()[:500]}...")
+        
+        # Cleanup
+        manager.terminate_instance(instance_id)
+        
+        # Assert
+        if len(new_memories) > 0:
+            print("\n✅ TEST PASSED: Memory file was created")
+            return True
+        else:
+            print("\n❌ TEST FAILED: No memory file was created")
+            return False
 
 
 @skip_llm_tests
@@ -250,44 +272,66 @@ async def test_inner_soul_remember(integration_config):
     print("\n" + "="*60)
     print("TEST: inner_soul remember")
     print("="*60)
-    return await _run_remember_test(integration_config)
-
-
-async def _run_workflow_test(config):
-    """Run the workflow change test logic."""
-    project_root = Path(__file__).parent.parent.parent
     
-    tmp_dir = project_root / "tmp_test"
+    # Create temp agent in system temp directory (auto-cleaned)
+    tmp_dir = Path(tempfile.gettempdir()) / "inner_soul_test"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir()
+    tmp_dir.mkdir(parents=True)  # Ensure parent dir exists
     
     agent_dir = create_test_agent(tmp_dir)
+    try:
+        return await _run_remember_test(integration_config, agent_dir)
+    finally:
+        # Clean up temp directory
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+
+
+async def _run_workflow_test(config, agent_dir: str):
+    """Run the workflow change test logic.
+    
+    Args:
+        config: The integration config
+        agent_dir: Path to the test agent directory
+    """
     workflow_file = Path(agent_dir) / "workflow.md"
     workflow_before = workflow_file.read_text()
     
-    manager = InstanceManager(config=config)
-    instance_id = manager.spawn_instance(agent_id="coder")
+    # Create mock registry with our test agent
+    agent_metadata = AgentMetadata(
+        id="test_agent",
+        name="Test Agent",
+        description="Test agent for inner_soul testing",
+        path=Path(agent_dir),
+        system=False,
+    )
+    mock_registry = MagicMock()
+    mock_registry.resolve_to_id.return_value = "test_agent"
+    mock_registry.get.return_value = agent_metadata
     
-    message = """Use the inner_soul tool to add a workflow step.
+    with patch("daemon.manager.get_registry", return_value=mock_registry):
+        manager = InstanceManager(config=config)
+        instance_id = manager.spawn_instance(agent_id="test_agent")
+        
+        message = """Use the inner_soul tool to add a workflow step.
 
 Call: inner_soul(intent="change", target="workflow", content="Step 4: Review before responding")"""
-    
-    print(f"Sending message...")
-    response = await manager.send_message(instance_id, message)
-    print(f"Response: {response.content[:300]}...")
-    
-    workflow_after = workflow_file.read_text()
-    
-    manager.terminate_instance(instance_id)
-    shutil.rmtree(tmp_dir)
-    
-    if len(workflow_after) > len(workflow_before):
-        print("\n✅ TEST PASSED: Workflow was updated")
-        return True
-    else:
-        print("\n❌ TEST FAILED: Workflow was not updated")
-        return False
+        
+        print(f"Sending message...")
+        response = await manager.send_message(instance_id, message)
+        print(f"Response: {response.content[:300]}...")
+        
+        workflow_after = workflow_file.read_text()
+        
+        manager.terminate_instance(instance_id)
+        
+        if len(workflow_after) > len(workflow_before):
+            print("\n✅ TEST PASSED: Workflow was updated")
+            return True
+        else:
+            print("\n❌ TEST FAILED: Workflow was not updated")
+            return False
 
 
 @skip_llm_tests
@@ -298,7 +342,20 @@ async def test_inner_soul_workflow_change(integration_config):
     print("\n" + "="*60)
     print("TEST: inner_soul change workflow")
     print("="*60)
-    return await _run_workflow_test(integration_config)
+    
+    # Create temp agent in system temp directory (auto-cleaned)
+    tmp_dir = Path(tempfile.gettempdir()) / "inner_soul_test"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)  # Ensure parent dir exists
+    
+    agent_dir = create_test_agent(tmp_dir)
+    try:
+        return await _run_workflow_test(integration_config, agent_dir)
+    finally:
+        # Clean up temp directory
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
 
 
 if __name__ == "__main__":
@@ -313,11 +370,23 @@ if __name__ == "__main__":
         print(f"\n❌ SKIPPED: {e}")
         sys.exit(0)  # Exit gracefully for CI/automation
     
+    # Create temp agent directory in system temp
+    tmp_dir = Path(tempfile.gettempdir()) / "inner_soul_test"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True)
+    
+    agent_dir = create_test_agent(tmp_dir)
+    
     results = []
     
     # Run tests using asyncio
-    results.append(("remember", asyncio.run(test_inner_soul_remember(config))))
-    results.append(("workflow", asyncio.run(test_inner_soul_workflow_change(config))))
+    results.append(("remember", asyncio.run(_run_remember_test(config, agent_dir))))
+    results.append(("workflow", asyncio.run(_run_workflow_test(config, agent_dir))))
+    
+    # Cleanup temp directory
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
     
     # Summary
     print("\n" + "="*60)
