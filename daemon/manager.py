@@ -1046,7 +1046,7 @@ class InstanceManager:
                     raise  # Re-raise to properly handle task cancellation
                     
                 except Exception as e:
-                    logger.error(f"Error processing message {msg.message_id}: {e}")
+                    logger.error(f"Error processing message {msg.message_id}: {e}", exc_info=True)
                     self.circuit_breaker.record_failure(instance_id)
                     
                     if msg.retry_count < self.config.queue.max_retries:
