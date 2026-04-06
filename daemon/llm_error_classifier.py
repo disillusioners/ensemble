@@ -89,13 +89,30 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # MUST come FIRST — BadRequestError is a subclass of APIStatusError
             error_str = str(e).lower()
             if 'context_length_exceeded' in error_str or 'maximum context length' in error_str:
+                logger.warning(f"[LLM] Context length exceeded (non-retryable), triggering compaction: {e}")
                 raise ContextLengthExceededError(e) from e
+            logger.error(f"[LLM] BadRequestError (non-retryable): {e}")
             raise  # Other BadRequestErrors (genuine bugs) — pass through
         except openai.APIStatusError as e:
             if e.status_code in RETRYABLE_STATUS_CODES:
+                logger.warning(f"[LLM] Transient API error (status={e.status_code}), will retry: {e}")
                 raise TransientAPIError(e) from e
+            logger.error(f"[LLM] Non-retryable API error (status={e.status_code}): {e}")
             raise  # Non-retryable status error — pass through
-        except Exception:
+        except openai.APITimeoutError as e:
+            logger.warning(f"[LLM] API timeout, will retry: {e}")
+            raise
+        except openai.APIConnectionError as e:
+            logger.warning(f"[LLM] Connection error, will retry: {e}")
+            raise
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
+            logger.warning(f"[LLM] Connection error ({type(e).__name__}), will retry: {e}")
+            raise
+        except LLMResponseValidationError as e:
+            logger.warning(f"[LLM] Response validation failed, will retry: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {e}")
             raise  # Everything else passes through (including socket errors)
     
     return RunnableLambda(func=_run_with_classification)

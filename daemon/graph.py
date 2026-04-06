@@ -11,6 +11,7 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from typing import Any, Mapping, Optional, cast
 import asyncio
 import logging
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ from .llm_error_classifier import (
     TransientAPIError,
     TRANSIENT_EXCEPTIONS,
 )
+from .response_validation import LLMResponseValidationError
 
 
 class ThinkingChatOpenAI(ChatOpenAI):
@@ -203,7 +205,9 @@ def create_agent_node(
     async def agent_node(state):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
-        logger.debug(f'Invoking LLM with {len(full_messages)} messages')
+        max_retries = retry_config.get('max_retries', 3) if retry_config else 3
+        thread_id = config.get("configurable", {}).get("thread_id", "?") if config else "?"
+        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (max_retries={max_retries}, thread={thread_id[:8]}...)')
         
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -215,10 +219,10 @@ def create_agent_node(
             )
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
-                logger.warning('Context length exceeded but no compactor available, re-raising')
+                logger.warning(f'[LLM] Context length exceeded (no compactor), thread={thread_id[:8]}...')
                 raise
             
-            logger.info(f'Context length exceeded, attempting reactive compaction for {len(messages)} messages')
+            logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages, thread={thread_id[:8]}...')
             
             graph = graph_ref[0]
             thread_config = config or {}
@@ -246,7 +250,7 @@ def create_agent_node(
             if result.compacted_at:
                 await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
             
-            logger.info(f'Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
+            logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type}), thread={thread_id[:8]}...')
             
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
@@ -256,12 +260,19 @@ def create_agent_node(
                 None,
                 lambda: llm_with_tools.invoke(compact_messages)
             )
+        except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError, 
+                BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
+            logger.error(f"[LLM] All retries exhausted after {retry_config.get('max_retries', 3) if retry_config else 'N/A'} attempts: {type(e).__name__}: {e}, thread={thread_id[:8]}...")
+            raise
+        except Exception as e:
+            logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}, thread={thread_id[:8]}...")
+            raise
         
         tool_info = ''
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
             tool_info = f', tools: {tool_names}'
-        logger.info(f'LLM response: {response.content[:80] if response.content else "empty"}...{tool_info}')
+        logger.info(f'[LLM] Response: {response.content[:80] if response.content else "empty"}...{tool_info}, thread={thread_id[:8]}...')
         return {'messages': [response]}
     
     return agent_node
