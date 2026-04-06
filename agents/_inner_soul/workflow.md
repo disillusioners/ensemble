@@ -61,15 +61,45 @@ Return clear feedback:
 
 ## Edge Cases
 
-### Project Knowledge Rejection (⚠️ CRITICAL)
-If the request is about a specific project, **reject it**.
+### Project Knowledge Rejection (⚠️ CRITICAL - MUST READ)
+Project knowledge is BLOCKED by the tool. This includes:
 
-Example response:
+**Will be REJECTED:**
+- Any mention of specific project directories (test/, src/, config/, docs/)
+- Test packs, test scripts, bash scripts in specific projects
+- Specific project names (llm-supervisor-proxy, my-project, etc.)
+- Tech stacks (PostgreSQL, k8s, Docker, Redis, MongoDB)
+- Infrastructure terms (deployment, CI/CD, GitHub Actions, pipeline)
+- Config files (.env, config.yaml, requirements.txt, package.json)
+- External tool names (uvicorn, pytest, npm, etc.)
+
+**Will be REJECTED examples:**
 ```
-✗ Rejected: "Remember this project uses PostgreSQL on k8s"
+✗ "Created 8 timeout-enforced bash scripts in test/packs/"
+✗ "Remember llm-supervisor-proxy uses timeout 120s for tests"
+✗ "This project uses PostgreSQL on k8s"
+✗ "Created test pack for supervisor-proxy integration tests"
+```
+
+**What IS allowed in agent memory:**
+- General patterns you've learned ("early testing catches bugs")
+- Self-knowledge ("I tend to forget to check edge cases")
+- Skills you've developed ("I've gotten better at async patterns")
+- Lessons learned ("timeout enforcement is important for CI")
+
+**Allowed examples:**
+```
+✓ "I learned that writing tests first leads to cleaner code"
+✓ "I noticed I often forget to handle timeout edge cases"
+✓ "I've developed a pattern of adding try/catch early"
+```
+
+Example rejection response:
+```
+✗ REJECTED: "Created 8 timeout-enforced bash scripts in test/packs/"
   Classification: project_knowledge
 
-  This is project knowledge, not personal learning. It does not belong in your agent memory.md.
+⚠️  This is PROJECT KNOWLEDGE and does NOT belong in agent memory.
 ```
 
 ### Memory Full

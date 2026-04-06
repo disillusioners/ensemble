@@ -660,3 +660,87 @@ class TestComposeSystemPrompt:
         result = compose_system_prompt(prompts)
 
         assert "## Recent Memories" not in result
+
+
+class TestProjectKnowledgeClassification:
+    """Tests for project_knowledge classification that rejects project-specific info."""
+
+    def test_classify_test_pack_project(self):
+        """Test pack creation should be classified as project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("Created 8 timeout-enforced bash scripts in test/packs/")
+
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
+    def test_classify_llm_supervisor_proxy(self):
+        """Specific project names should be classified as project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("Remember llm-supervisor-proxy uses timeout 120s")
+
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
+    def test_classify_kubernetes_infrastructure(self):
+        """Tech stack mentions should be classified as project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("This project uses PostgreSQL on k8s")
+
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
+    def test_classify_docker_config(self):
+        """Docker and infrastructure should be project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("Configured Docker deployment for the app")
+
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
+    def test_classify_env_config(self):
+        """Config files should be project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("Updated .env with new database settings")
+
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
+    def test_allow_general_learning_patterns(self):
+        """General learning patterns should NOT be project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("I learned that early testing catches bugs")
+
+        assert result["type"] != "project_knowledge"
+        assert result["type"] in ["knowledge", "pattern", "event"]
+
+    def test_allow_self_knowledge(self):
+        """Self-knowledge should NOT be project_knowledge."""
+        from daemon.tools.inner_soul import _classify_request
+
+        result = _classify_request("I noticed I often forget timeout edge cases")
+
+        assert result["type"] != "project_knowledge"
+
+    def test_format_rejection_message(self):
+        """_format_rejection should return clear rejection message."""
+        from daemon.tools.inner_soul import _format_rejection
+
+        classification = {
+            "type": "project_knowledge",
+            "description": "Project-specific knowledge - must NOT enter agent memory"
+        }
+
+        result = _format_rejection("Created test/packs/script.sh", classification)
+
+        assert "REJECTED" in result
+        assert "PROJECT KNOWLEDGE" in result
+        assert "Created test/packs/script.sh" in result  # shows original request
+        assert "does NOT belong" in result
+        assert "Agent memory is for" in result
+        assert "Agent memory is NOT for" in result

@@ -16,7 +16,19 @@ I classify requests into types to determine the right file(s) to update:
 | event | Events and observations | memories/ |
 | skill | New capabilities | memories/ |
 | mistake | Lessons learned | memories/ |
-| **project_knowledge** | Info about a specific project | **REJECT** — does not belong in agent memory.md |
+| **project_knowledge** | Info about a specific project (files, dirs, tools, infra, tech stack) | **REJECT** — does not belong in agent memory.md |
+
+## Project Knowledge Detection
+
+These patterns trigger automatic REJECTION:
+- Project directories: `test/`, `src/`, `config/`, `docs/`, `.agents/`
+- Test automation: `test pack`, `test script`, `bash script`, `timeout-enforced`
+- External tools: `pytest`, `npm`, `uvicorn`, `uv`, `make`
+- Project names: any specific project identifier
+- Tech stack: `PostgreSQL`, `k8s`, `Kubernetes`, `Docker`, `Redis`, `MongoDB`
+- Infrastructure: `deployment`, `CI/CD`, `GitHub Actions`, `pipeline`, `helm`
+
+If you try to write ANY of these to memory, the tool will REJECT it with a clear message.
 
 ## Validation Rules
 
@@ -64,3 +76,4 @@ Example: "Be cozy with the user"
 - Apply soul.md changes without approval
 - Delete memories (append-only)
 - Lose classification metadata
+- **Write project knowledge to memory** (auto-rejected by tool)

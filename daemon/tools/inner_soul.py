@@ -135,6 +135,29 @@ CLASSIFICATION_RULES = {
         "targets": ["memories"],
         "description": "Mistakes and lessons learned"
     },
+    "project_knowledge": {
+        "patterns": [
+            # Project-specific paths and structures
+            r"\btest/packs?\b", r"\bsrc/\b", r"\bconfig/\b", r"\bdocs/\b",
+            r"\btest\s+pack\b", r"\btest\s+script\b", r"\bbash\s+script\b",
+            # Specific project/tool names (external projects)
+            r"\bllm-supervisor-proxy\b", r"\bagents-ensemble\b", r"\bmy\s+project\b",
+            # Infrastructure and tech stack
+            r"\bpostgresql\b", r"\bpostgres\b", r"\bmysql\b", r"\bsqlite\b",
+            r"\bkubernetes\b", r"\bk8s\b", r"\bdocker\b", r"\bterraform\b",
+            r"\baws\b", r"\bgcp\b", r"\bazure\b",
+            # Project-specific configs
+            r"\.env\b", r"\bconfig\.yaml\b", r"\bsettings\.py\b",
+            r"\bpackage\.json\b", r"\brequirements\.txt\b", r"\bpyproject\.toml\b",
+            # Database/server terminology (for projects)
+            r"\bpostgres(ql)?://\b", r"\bredis://\b", r"\bmongo://\b",
+            # Deployment/infrastructure
+            r"\bdeployment\b", r"\bci/cd\b", r"\bgithub\s+actions\b",
+            r"\bpipeline\b", r"\bhelm\s+chart\b",
+        ],
+        "targets": ["REJECT"],
+        "description": "Project-specific knowledge - must NOT enter agent memory"
+    },
 }
 
 
@@ -182,6 +205,10 @@ def create_inner_soul_tool(
             
             # Classify the request semantically
             classification = _classify_request(actual_request)
+            
+            # CRITICAL: Check for project_knowledge classification BEFORE processing
+            if classification["type"] == "project_knowledge":
+                return _format_rejection(actual_request, classification)
             
             # Determine targets
             if target:
@@ -558,6 +585,35 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
         "target": "workflow",
         "file": "workflow.md"
     }
+
+
+def _format_rejection(request: str, classification: dict) -> str:
+    """Format rejection message for project knowledge attempts."""
+    truncated = request[:80] + ('...' if len(request) > 80 else '')
+    lines = [
+        f"✗ REJECTED: \"{truncated}\"",
+        f"  Classification: {classification['type']}",
+        "",
+        "⚠️  This is PROJECT KNOWLEDGE and does NOT belong in agent memory.",
+        "",
+        "Agent memory is for:",
+        "  • Personal growth and self-knowledge",
+        "  • Learned patterns about yourself",
+        "  • Lessons from interactions",
+        "  • Skills you've developed",
+        "",
+        "Agent memory is NOT for:",
+        "  • Project-specific files or directories",
+        "  • Tech stacks or infrastructure (k8s, PostgreSQL, etc.)",
+        "  • Test scripts or automation you created",
+        "  • External project names or tool names",
+        "",
+        "Project knowledge belongs in:",
+        "  • .agents/{agent-id}/memories/ (if it's an event worth remembering)",
+        "  • Project documentation (README, docs/)",
+        "  • Git history and commit messages",
+    ]
+    return "\n".join(lines)
 
 
 def _format_response(request: str, results: list, classification: dict) -> str:
