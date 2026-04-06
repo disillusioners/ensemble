@@ -207,3 +207,81 @@ async def test_unittest_mock_timeout_error():
             result.append(item)
 
     assert exc_info.value.timeout_seconds == timeout
+
+
+@pytest.mark.asyncio
+async def test_tool_executing_callback_extends_timeout():
+    """Verify tool_executing_callback uses request_timeout during tool execution.
+    
+    This tests the fix for the issue where idle timeout fires during tool execution
+    (when no events flow from graph.astream). Tool execution time should be excluded
+    from idle timeout by using request_timeout instead.
+    """
+    timeout = 0.1  # Short timeout for normal operation
+    request_timeout = 1.0  # Longer timeout for tool execution
+    
+    # Track if callback returns True (tools executing)
+    tools_executing = True
+    
+    async def tool_executing_callback():
+        return tools_executing
+    
+    # Item takes longer than normal timeout but shorter than request_timeout
+    slow_aiter = SlowAsyncIterator(items=["item"], delays=[request_timeout * 0.5])
+    
+    result = []
+    async for item in InstanceManager._idle_timeout_aiter(
+        slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+    ):
+        result.append(item)
+    
+    # Item should come through because callback returned True (uses request_timeout)
+    assert result == ["item"]
+
+
+@pytest.mark.asyncio
+async def test_tool_executing_callback_returns_false_uses_normal_timeout():
+    """Verify normal timeout applies when callback returns False (tools not executing)."""
+    timeout = 0.1
+    request_timeout = 10.0  # Should not be used
+    
+    async def tool_executing_callback():
+        return False  # Tools not executing
+    
+    # Item takes longer than normal timeout
+    slow_aiter = SlowAsyncIterator(items=["item"], delays=[timeout * 5])
+    
+    with pytest.raises(StreamIdleTimeoutError):
+        result = []
+        async for item in InstanceManager._idle_timeout_aiter(
+            slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+        ):
+            result.append(item)
+
+
+@pytest.mark.asyncio
+async def test_tool_executing_callback_dynamic_state():
+    """Verify timeout behavior changes based on callback returning different values."""
+    timeout = 0.1
+    request_timeout = 1.0
+    
+    # Simulate: tools start executing after first item
+    call_count = 0
+    
+    async def tool_executing_callback():
+        nonlocal call_count
+        call_count += 1
+        # First call returns False (normal timeout), then True (request_timeout)
+        return call_count > 1
+    
+    # First item fast, second item slower than normal timeout but OK with request_timeout
+    slow_aiter = SlowAsyncIterator(items=["first", "second"], delays=[0.0, timeout * 5])
+    
+    result = []
+    async for item in InstanceManager._idle_timeout_aiter(
+        slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+    ):
+        result.append(item)
+    
+    # Both items should come through - second one uses request_timeout
+    assert result == ["first", "second"]

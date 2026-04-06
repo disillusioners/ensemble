@@ -1100,7 +1100,7 @@ class InstanceManager:
                 logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
 
     @staticmethod
-    async def _idle_timeout_aiter(aiter, timeout: float):
+    async def _idle_timeout_aiter(aiter, timeout: float, request_timeout: int = 660, tool_executing_callback=None):
         """Wrap an async iterator with per-event idle timeout.
         
         Uses asyncio.wait_for() on each __anext__() call. If timeout fires,
@@ -1110,9 +1110,17 @@ class InstanceManager:
         IMPORTANT: asyncio.wait_for() may wrap StopAsyncIteration in a RuntimeError
         in some Python versions. We handle both cases.
         
+        IMPORTANT: Tool execution time is excluded from idle timeout. When tools
+        are executing, no events flow from graph.astream but the graph is actively
+        working. The tool_executing_callback notifies this wrapper when tools
+        are running so we use request_timeout instead of idle_timeout.
+        
         Args:
             aiter: Async iterator to wrap.
             timeout: Max seconds per event. <= 0 disables wrapping.
+            request_timeout: Max seconds to allow during tool execution (defaults to 660).
+            tool_executing_callback: Async callable that returns True if tools
+                are currently executing (uses request_timeout instead of idle timeout).
         
         Yields:
             Events from the wrapped iterator.
@@ -1129,7 +1137,13 @@ class InstanceManager:
         
         while True:
             try:
-                item = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+                # Check if tools are executing - if so, use request_timeout (tools have their own timeout)
+                if tool_executing_callback and await tool_executing_callback():
+                    effective_timeout = request_timeout
+                else:
+                    effective_timeout = timeout
+                    
+                item = await asyncio.wait_for(aiter.__anext__(), timeout=effective_timeout)
             except StopAsyncIteration:
                 break
             except RuntimeError as e:
@@ -1201,6 +1215,7 @@ class InstanceManager:
         tool_call_map = {}  # Track tool calls by ID to match with outputs
         thinking_content = None
         final_content = ""
+        tools_executing = False  # Track if tools are currently executing (excluded from idle timeout)
         
         # Content chunk batching to reduce event rate
         content_buffer = ""
@@ -1242,11 +1257,18 @@ class InstanceManager:
         
         # Stream through graph execution
         # When using multiple stream modes, events are tuples: (mode, data)
+        
+        # Callback to check if tools are executing (used by idle timeout to exclude tool execution time)
+        async def _is_tools_executing():
+            return tools_executing
+        
         try:
             async with self._llm_semaphore:
                 async for event in self._idle_timeout_aiter(
                     graph.astream(graph_input, config, stream_mode=["updates", "messages"]),
                     timeout=self.config.queue.llm_stream_idle_timeout_seconds,
+                    request_timeout=self.config.llm.request_timeout,
+                    tool_executing_callback=_is_tools_executing,
                 ):
                             # Unpack tuple: (mode, data)
                             if isinstance(event, tuple):
@@ -1290,11 +1312,14 @@ class InstanceManager:
                                                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
                                                 tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
                                                 
-                                                # Store for matching with tool call
+                                                 # Store for matching with tool call
                                                 tool_call_map[tc_id] = {
                                                     "name": tc_name,
                                                     "args": tc_args,
                                                 }
+                                                
+                                                # Mark that tools are now executing (excluded from idle timeout)
+                                                tools_executing = True
                                                 
                                                 # Broadcast tool_call event (tool starting)
                                                 await self.broadcaster.broadcast(Event(
@@ -1341,6 +1366,9 @@ class InstanceManager:
                                                 message_id=message_id,
                                                 data=tool_call_data
                                             ))
+                                        
+                                        # Mark that all tools in this batch have completed (resume idle timeout)
+                                        tools_executing = False
                             
                             elif mode == "messages":
                                 # Handle token-level streaming with adaptive batching to reduce event rate
