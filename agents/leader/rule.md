@@ -89,7 +89,7 @@ Need to do something?
 - **Huge:** Roadmap, priorities, architecture, frequent collaboration
 
 ### Tester Escalation
-- **Handle `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`** — When Tester cannot optimize test under time limit
+- **Handle `TESTER_CANT_OPTIMIZE_TEST_PACK`** — When Tester cannot optimize test under time limit
 - **TrueAuto mode:**
   - Craft quick optimization plan to fix test time
   - Re-delegate to Tester with optimization plan

@@ -1,19 +1,19 @@
 # Test Pack Skill
 
-Create self-contained test scripts with built-in timeout enforcement.
+Create self-contained test scripts with subprocess-based timeout enforcement that actually interrupts hung tests.
 
 ---
 
 ## Principles
 
-### Self-Enforcement
-Test packs must enforce their own timeout. Do not rely on external agents or callers to enforce limits.
+### Subprocess-Based Timeout
+Use `timeout` command (bash) or `subprocess.run(..., timeout=N)` (Python). Post-hoc checks are broken — they can't interrupt hung processes.
 
 ### Explicit Output
-Report one of: `PASS`, `FAIL`, `TIMEOUT`
+Report one of: `PASS`, `FAIL`, `TIMEOUT` (exit 124)
 
 ### Predictable Timing
-Before writing tests, estimate execution time. If > limit, redesign:
+Estimate execution time before writing. If > limit, redesign:
 - Split into smaller packs
 - Mock slow dependencies
 - Reduce unnecessary waits
@@ -23,20 +23,50 @@ Before writing tests, estimate execution time. If > limit, redesign:
 ## Timeout Pattern
 
 ```
+# Subprocess-based: timeout check MUST interrupt hung tests
 START = now()
-TIMEOUT = [120/300] seconds
+RUN tests as subprocess with TIMEOUT limit
 
-do_tests()
-
-if now() - START > TIMEOUT:
+if subprocess.times_out:
     cleanup()
-    print "TIMEOUT"
+    print "RESULT: TIMEOUT"
     exit 124
+elif subprocess.passed:
+    print "RESULT: PASS"
+    exit 0
 else:
-    print "PASS"
+    print "RESULT: FAIL"
+    exit 1
 ```
 
 Choose language (bash, python, go, etc.) based on project context.
+
+---
+
+## Naming Convention
+
+`<scope>_<type>_test` (e.g., `core_unit_test`, `auth_integration_test`)
+
+---
+
+## Output Format
+
+```
+=== Test Pack: <name> ===
+[optional test output]
+RESULT: PASS|FAIL|TIMEOUT
+```
+
+Exit codes:
+- `0`: PASS
+- `124`: TIMEOUT (via `timeout` command or subprocess)
+- `1`: FAIL
+
+### Partial Pass Handling
+
+- **All pass** → `RESULT: PASS`
+- **Any fail** → `RESULT: FAIL` (include count if available: `FAIL (5/7 passed)`)
+- **Any timeout** → `RESULT: TIMEOUT` (exit 124)
 
 ---
 
@@ -51,24 +81,6 @@ Choose language (bash, python, go, etc.) based on project context.
 
 ---
 
-## Naming Convention
+## TTQA
 
-`<category>_<type>_test.sh` or `.py` or `.go`
-
-Examples:
-- `core_unit_test.sh`
-- `api_integration_test.sh`
-- `feature_auth_test.sh`
-
----
-
-## TTQA Triggers
-
-When timeout occurs, attempt optimizations:
-- Mock external services for faster response
-- Skip tests requiring unavailable API keys
-- Override ENV to match conditions sooner
-- Reduce retry attempts / sleep intervals
-- Increase timeout threshold if justified
-
-If unfixable → `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`
+When timeout occurs, apply TTQA optimizations per rule.md.

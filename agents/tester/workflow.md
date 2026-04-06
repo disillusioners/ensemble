@@ -168,20 +168,37 @@ Return: Structured test results + any quick fixes applied
 
 **When leader provides phase context:**
 
-1. Analyze modified files
-2. Identify and run only relevant test packs
-3. Prefer running only relevant packs, report scope to leader
+- **Input format**: Leader provides a list of changed file paths or module names
+- **Relevance heuristic**: Match file paths to pack names via naming convention (e.g., `src/auth/` → `auth_unit_test.sh`)
+- **Ambiguity handling**: If <50% of packs are relevant, run scoped only; if ≥50% are relevant, run all packs
+- **Scope reporting template**: `"Running: [packs]. Skipped: [packs]. Reason: [no changed files in X modules]."`
 
-### Phase 1: Organize Tests into Packs
+**Decision flow:**
+1. Receive changed files from leader
+2. Match each file to test packs by naming convention
+3. Calculate relevance ratio (matched packs / total packs)
+4. If <50%: run only relevant packs, report skipped packs
+5. If ≥50%: run all packs (more efficient than skipping few)
+6. Report scope to leader using the template above
+
+**No context case**: See Decision Points section ("Phase context provided?").
+
+### Check: Pack Existence Gate
+
+1. **Check if test packs exist for this project.**
+2. **YES** → Proceed to Execute Test Pack
+3. **NO** → Proceed to Organize Tests into Packs, then Execute
+
+### Organize Tests into Packs
 1. Analyze project test structure
-2. Group tests by category:
-   - **Unit test packs** — `*_unit_test.sh` (max 2 min)
-   - **Integration test packs** — `*_integration_test.sh` (max 5 min)
-   - **Feature test packs** — `feature_<name>_test.sh` (max 5 min)
+2. Group tests by category (see timeout limits in rule.md):
+   - **Unit test packs** — `<module>_unit_test`
+   - **Integration test packs** — `<module>_integration_test`
+   - **E2E test packs** — `<module>_e2e_test`
    - **Mock test packs** — Per MOCK_TESTS.md specification
 3. Spawn opencode to create test pack scripts (use test-pack skill)
 
-### Phase 2: Execute Test Pack
+### Execute Test Pack
 **If phase context provided:** Only run packs relevant to changed files. Report skipped packs.
 **Task for opencode session:**
 ```
@@ -201,7 +218,7 @@ Requirements:
 Return: Test execution results + scope report
 ```
 
-### Phase 3: TTQA Process (when timeout occurs)
+### TTQA Loop (when timeout occurs)
 
 **When a test pack times out:**
 
@@ -209,24 +226,19 @@ Return: Test execution results + scope report
    - Which specific test/scenario timed out?
    - What is the expected vs actual duration?
 
-2. **Attempt TTQA optimizations**:
-   - Mock external services for faster response
-   - Skip tests requiring unavailable API keys
-   - Override ENV variables to match conditions sooner
-   - Reduce retry attempts / sleep intervals
-   - Increase timeout threshold if justified
+2. **Attempt TTQA optimizations** (see rule.md for canonical list)
 
 3. **Re-run test pack** with optimizations
 
-4. **If still timeout** → Proceed to Phase 4
+4. **If still timeout** → Proceed to Escalation
 
-### Phase 4: Critical Escalation
+### Escalation
 
 **If TTQA cannot bring test under timeout limit:**
 
 Report to leader with:
 ```
-TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN: Test pack [pack_name] exceeded timeout limit of [X] minutes. Attempted TTQA optimizations:
+TESTER_CANT_OPTIMIZE_TEST_PACK: Test pack [pack_name] exceeded timeout limit of 5 minutes. Attempted TTQA optimizations:
 - [Optimization 1]: [Result]
 - [Optimization 2]: [Result]
 
@@ -237,6 +249,21 @@ Test pack cannot meet timeout requirement. Manual intervention required.
 - **TrueAuto mode**: Leader crafts quick plan to fix test time, re-delegates
 - **Fix fails again**: Leader reports to user and stops
 - **Non-TrueAuto mode**: Report directly to user
+
+---
+
+## Flaky Test Handling
+
+**Definition**: A flaky test passes and fails across multiple runs with no code changes.
+
+**Detection**: If a test fails on run 1 but passes on run 2 with no fixes applied → mark as potentially flaky.
+
+**Action**:
+1. Run the test 3 times
+2. If results show ≥1 pass AND ≥1 fail → flag as flaky:
+   - Document in `.agents/tester/LESSONS/` (e.g., `flaky-test-[test-name].md`)
+   - Skip in future test runs until resolved
+   - Report to leader
 
 ---
 

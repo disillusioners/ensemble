@@ -199,19 +199,19 @@ I support two workflows. The user may invoke them sequentially within a single s
            - Issues found → Back to Tester with feedback
            - Approved → Done, report to user
 
-### Tester Escalation: `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`
+### Tester Escalation: `TESTER_CANT_OPTIMIZE_TEST_PACK`
 
 **When Tester reports this code:**
 
 1. **In TrueAuto mode:**
-   - Craft a quick plan to fix the test time issue (e.g., optimize mocks, skip unavailable API tests, reduce retry times)
+   - Craft a quick plan to fix the test time issue
    - Re-delegate to Tester with the optimization plan
-   - If Tester still fails with the same code after optimization:
-     - Report to user with details of attempted optimizations
+   - If Tester still fails after optimization:
+     - Report to user with details
      - Stop workflow
 
 2. **Not in TrueAuto mode:**
-   - Report to user immediately with the issue details
+   - Report to user immediately
    - Stop workflow
 ```
 

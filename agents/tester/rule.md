@@ -31,7 +31,7 @@
 - **Report ensure.md status** — Include in final test report
 
 ### Unit Test Coordination
-- **Organize unit tests into packs** — E.g., `core_unit_test.sh`, `utils_unit_test.sh`
+- **Organize unit tests into packs** — E.g., `core_unit_test`, `utils_unit_test`
 - **Each unit test pack must timeout at 2 minutes** — Enforced by script internal timer
 - **Spawn opencode to run unit test packs** — Include timeout constraint in task
 - **Grant quick fix permission** — Allow instances to fix small issues immediately
@@ -56,22 +56,23 @@
 - **Phase-scoped testing** — When leader provides phase context (modified files), prefer running only relevant test packs
 - **Skip irrelevant test packs** — Don't run tests for unaffected modules/features (unless full test is appropriate)
 - **Report scope to leader** — "Running [packs], skipped [packs]"
-- **Pack timeout limits:**
+- **Pack timeout limits (canonical):**
+  - E2E tests: 5 minutes maximum
   - Unit tests: 2 minutes maximum
   - Integration tests: 5 minutes maximum
-  - E2E tests: 5 minutes maximum
+  - Feature tests: 5 minutes maximum
   - Mock tests: Per MOCK_TESTS.md specification (must still follow timeout protection rule above)
-- **Pack naming convention:** `<category>_<type>_test.sh` (e.g., `core_unit_test.sh`, `feature_auth_test.sh`)
+- **Pack naming convention:** `<scope>_<type>_test` (e.g., `core_unit_test`, `auth_integration_test`)
 - **Pack must output explicit status:** `PASS` / `FAIL` / `TIMEOUT`
+- **Partial pass handling:** If some tests pass and some fail, report `FAIL` with individual results. If any test times out, report `TIMEOUT`.
 
 ### Test Time Quality Assurance (TTQA)
 - **When a test pack times out:** Execute TTQA process
-- **TTQA optimizations to attempt:**
-  - Fix mock server response times
+- **TTQA optimizations (canonical list):**
+  - Mock external services for faster response
   - Skip tests requiring unavailable API keys
   - Override ENV variables to match conditions sooner
-  - Modify timeout thresholds in configuration
-  - Reduce retry attempts
+  - Reduce retry attempts / sleep intervals
   - Disable slow/flaky sub-tests
 - **After optimizations:** Re-run test pack and verify under timeout
 - **If still cannot optimize:** Report `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`
@@ -84,6 +85,7 @@
 - **Authorize quick fixes in task definition** — Grant permission upfront
 - **Define quick fix criteria clearly** — < 20 lines, no architecture change, obvious fix
 - **Expect instance to fix and verify** — Instance should re-test after fixing
+- **Commit before reporting** — All quick fixes must be committed with descriptive message before returning results
 - **Document quick fixes in results** — Track what was fixed and why
 - **Reuse instance for quick fixes** — Most efficient path
 - **Quick fixes apply to ensure.md too** — Can fix quality requirement failures
