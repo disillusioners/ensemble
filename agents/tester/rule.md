@@ -31,7 +31,9 @@
 - **Report ensure.md status** — Include in final test report
 
 ### Unit Test Coordination
-- **Spawn opencode to run unit tests** — Never run tests myself
+- **Organize unit tests into packs** — E.g., `core_unit_test.sh`, `utils_unit_test.sh`
+- **Each unit test pack must timeout at 2 minutes** — Enforced by script internal timer
+- **Spawn opencode to run unit test packs** — Include timeout constraint in task
 - **Grant quick fix permission** — Allow instances to fix small issues immediately
 - **Spawn opencode to fix broken tests** — Provide clear failure details (if not quick-fixed)
 - **Update COVERAGE.md** — After unit test runs
@@ -47,6 +49,29 @@
 - **Ensure ports > 10000** — Never use production ports
 - **Ensure cleanup** — All processes killed, ports freed after test
 - **Validate ensure.md after mock tests** — Quality gates
+
+### Test Pack Organization
+- **All tests must be organized into packs** — Each pack is a self-contained script
+- **Use test-pack skill when creating scripts** — Follow the skill's timeout enforcement patterns
+- **Pack timeout limits:**
+  - Unit tests: 2 minutes maximum
+  - Integration tests: 5 minutes maximum
+  - E2E tests: 5 minutes maximum
+  - Mock tests: Per MOCK_TESTS.md specification (must still follow timeout protection rule above)
+- **Pack naming convention:** `<category>_<type>_test.sh` (e.g., `core_unit_test.sh`, `feature_auth_test.sh`)
+- **Pack must output explicit status:** `PASS` / `FAIL` / `TIMEOUT`
+
+### Test Time Quality Assurance (TTQA)
+- **When a test pack times out:** Execute TTQA process
+- **TTQA optimizations to attempt:**
+  - Fix mock server response times
+  - Skip tests requiring unavailable API keys
+  - Override ENV variables to match conditions sooner
+  - Modify timeout thresholds in configuration
+  - Reduce retry attempts
+  - Disable slow/flaky sub-tests
+- **After optimizations:** Re-run test pack and verify under timeout
+- **If still cannot optimize:** Report `TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN`
 
 ### Browser Automation
 - **Recommend agent-browser for web frontend projects** — When testing website bugs, provide instructions like "Do browser automation (use agent-browser skill) to auto fix the website bug"
@@ -96,14 +121,19 @@
 - **Never allow missing cleanup** — All mock tests must cleanup processes and ports
 - **Never test without mocks** — Mock tests must not call real external services
 
+### Test Pack Restrictions
+- **Never allow test packs without internal timeout enforcement** — Scripts must self-timeout
+- **Never allow tests to run indefinitely** — All packs must complete or timeout
+- **Never skip TTQA when timeout occurs** — Must attempt optimizations before escalating
+
 ### General Testing Rules
-- Skip failing tests silently
-- Test implementation details over behavior
-- Leave commented-out code
-- Over-test trivial code (getters/setters)
-- Ignore existing `.agents/tester/` documentation
-- Write redundant documentation
-- Store temporary files in `.agents/tester/` — only permanent knowledge
+- **Never skip failing tests silently**
+- **Never test implementation details over behavior**
+- **Never leave commented-out code**
+- **Never over-test trivial code (getters/setters)**
+- **Never ignore existing `.agents/tester/` documentation**
+- **Never write redundant documentation**
+- **Never store temporary files in `.agents/tester/`** — only permanent knowledge
 
 ---
 

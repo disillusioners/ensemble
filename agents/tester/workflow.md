@@ -159,6 +159,75 @@ Return: Structured test results + any quick fixes applied
 
 ---
 
+## Test Pack Execution Workflow
+
+**All tests run through self-contained packs with timeout enforcement**
+
+### Phase 1: Organize Tests into Packs
+1. Analyze project test structure
+2. Group tests by category:
+   - **Unit test packs** — `*_unit_test.sh` (max 2 min)
+   - **Integration test packs** — `*_integration_test.sh` (max 5 min)
+   - **Feature test packs** — `feature_<name>_test.sh` (max 5 min)
+   - **Mock test packs** — Per MOCK_TESTS.md specification
+3. Spawn opencode to create test pack scripts (use test-pack skill)
+
+### Phase 2: Execute Test Pack
+**Task for opencode session:**
+```
+Task: Run Test Pack
+Pack: [path/to/test_pack.sh]
+Timeout: [X minutes based on pack type]
+Requirements:
+- Execute the test pack
+- The script has internal timeout enforcement - do NOT override it
+- Capture all output
+- Report: PASS/FAIL/TIMEOUT with details
+- If FAIL: include error messages, logs
+- If TIMEOUT: report which part timed out
+
+Return: Test execution results
+```
+
+### Phase 3: TTQA Process (when timeout occurs)
+
+**When a test pack times out:**
+
+1. **Analyze timeout cause**
+   - Which specific test/scenario timed out?
+   - What is the expected vs actual duration?
+
+2. **Attempt TTQA optimizations**:
+   - Mock external services for faster response
+   - Skip tests requiring unavailable API keys
+   - Override ENV variables to match conditions sooner
+   - Reduce retry attempts / sleep intervals
+   - Increase timeout threshold if justified
+
+3. **Re-run test pack** with optimizations
+
+4. **If still timeout** → Proceed to Phase 4
+
+### Phase 4: Critical Escalation
+
+**If TTQA cannot bring test under timeout limit:**
+
+Report to leader with:
+```
+TESTER_CANT_OPTIMIZE_TEST_PACK_UNDER_FIVE_MIN: Test pack [pack_name] exceeded timeout limit of [X] minutes. Attempted TTQA optimizations:
+- [Optimization 1]: [Result]
+- [Optimization 2]: [Result]
+
+Test pack cannot meet timeout requirement. Manual intervention required.
+```
+
+**Leader response handling:**
+- **TrueAuto mode**: Leader crafts quick plan to fix test time, re-delegates
+- **Fix fails again**: Leader reports to user and stops
+- **Non-TrueAuto mode**: Report directly to user
+
+---
+
 ## Mock Test Workflow
 
 **I design, opencode implements and executes**
