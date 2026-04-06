@@ -52,6 +52,12 @@
 
 ### Test Pack Organization
 - **All tests must be organized into packs** — Each pack is a self-contained script
+- **One script per pack** — Each pack defined in PACKS.md must have exactly one corresponding script file
+- **All pack scripts must be registered in PACKS.md** — Before running any test, verify PACKS.md is up-to-date with actual script locations
+- **Validate PACKS.md integrity before testing:**
+  - Verify every pack entry has a valid, existing script path
+  - Verify every script file has a corresponding entry in PACKS.md
+  - Report discrepancies before proceeding with tests
 - **Use test-pack skill when creating scripts** — Follow the skill's timeout enforcement patterns
 - **Phase-scoped testing** — When leader provides phase context (modified files), prefer running only relevant test packs
 - **Skip irrelevant test packs** — Don't run tests for unaffected modules/features (unless full test is appropriate)
@@ -130,6 +136,7 @@
 - **Never allow test packs without internal timeout enforcement** — Scripts must self-timeout
 - **Never allow tests to run indefinitely** — All packs must complete or timeout
 - **Never skip TTQA when timeout occurs** — Must attempt optimizations before escalating
+- **Never run tests with stale PACKS.md** — Must validate script existence and registration before running
 
 ### General Testing Rules
 - **Never skip failing tests silently**
