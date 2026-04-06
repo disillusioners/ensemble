@@ -290,9 +290,8 @@ class InstanceManager:
         # Maps instance_id to tuple of (graph, agent_dir)
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
 
-        # LLM concurrency and timeout settings
+        # LLM concurrency setting
         self._llm_semaphore = asyncio.Semaphore(config.limits.llm_concurrency)
-        self._llm_timeout = config.limits.llm_timeout
 
         # Create ONE shared database engine for all repositories
         # This prevents database lock contention when multiple components
@@ -1201,9 +1200,7 @@ class InstanceManager:
         # When using multiple stream modes, events are tuples: (mode, data)
         try:
             async with self._llm_semaphore:
-                async with asyncio.timeout(self._llm_timeout):
-                    try:
-                        async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
+                async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
                             # Unpack tuple: (mode, data)
                             if isinstance(event, tuple):
                                 mode, data = event
@@ -1396,28 +1393,16 @@ class InstanceManager:
                                                     adaptive_timeout = CONTENT_BATCH_TIMEOUT
                                                     adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
                                                     adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
-                    
-                    except asyncio.TimeoutError:
-                        logger.error(f"LLM call timed out after {self._llm_timeout}s for instance {instance_id[:8]}")
-                        # Broadcast timeout error event with clear message
-                        await self.broadcaster.broadcast(Event(
-                            type="error",
-                            instance_id=instance_id,
-                            message_id=message_id,
-                            data={"error": f"LLM call timed out after {self._llm_timeout}s", "stage": "streaming"}
-                        ))
-                        raise  # Re-raise to let _process_queue handle retry logic
-
-                    except Exception as e:
-                        logger.error(f"Streaming failed for message {message_id}: {e}")
-                        # Broadcast error event
-                        await self.broadcaster.broadcast(Event(
-                            type="error",
-                            instance_id=instance_id,
-                            message_id=message_id,
-                            data={"error": str(e), "stage": "streaming"}
-                        ))
-                        raise  # Re-raise to let _process_queue handle retry logic
+        except Exception as e:
+            logger.error(f"Streaming failed for message {message_id}: {e}")
+            # Broadcast error event
+            await self.broadcaster.broadcast(Event(
+                type="error",
+                instance_id=instance_id,
+                message_id=message_id,
+                data={"error": str(e), "stage": "streaming"}
+            ))
+            raise  # Re-raise to let _process_queue handle retry logic
         finally:
             # Flush any remaining content in buffer after streaming ends
             # This runs even on timeout so content already generated is sent to client
