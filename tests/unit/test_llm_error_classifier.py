@@ -9,6 +9,7 @@ from daemon.llm_error_classifier import (
     TRANSIENT_EXCEPTIONS,
     TransientAPIError,
     ContextLengthExceededError,
+    StreamIdleTimeoutError,
     classify_llm_errors,
 )
 from daemon.response_validation import LLMResponseValidationError
@@ -128,6 +129,42 @@ class TestContextLengthExceededError:
         assert error.original_error is original
         assert isinstance(error.original_error, openai.BadRequestError)
         assert "gpt-4o" in str(error)
+
+
+class TestStreamIdleTimeoutError:
+    """Tests for StreamIdleTimeoutError exception."""
+
+    def test_creation_with_timeout(self):
+        """StreamIdleTimeoutError stores timeout_seconds attribute."""
+        error = StreamIdleTimeoutError(timeout_seconds=120.0)
+
+        assert error.timeout_seconds == 120.0
+        assert "120" in str(error)
+        assert "stream" in str(error).lower()
+
+    def test_creation_with_custom_context(self):
+        """StreamIdleTimeoutError accepts custom context string."""
+        error = StreamIdleTimeoutError(timeout_seconds=60.0, context="graph.astream")
+
+        assert error.timeout_seconds == 60.0
+        assert "graph.astream" in str(error)
+
+    def test_not_in_transient_exceptions(self):
+        """StreamIdleTimeoutError should NOT be in TRANSIENT_EXCEPTIONS."""
+        assert StreamIdleTimeoutError not in TRANSIENT_EXCEPTIONS
+
+    def test_message_includes_timeout_value(self):
+        """Error message should include the timeout value."""
+        error = StreamIdleTimeoutError(timeout_seconds=45.5)
+
+        message = str(error)
+        assert "45.5" in message
+        assert "Stream idle timeout" in message or "idle timeout" in message.lower()
+
+    def test_subclass_of_exception(self):
+        """StreamIdleTimeoutError should be a subclass of Exception."""
+        error = StreamIdleTimeoutError(timeout_seconds=10.0)
+        assert isinstance(error, Exception)
 
 
 class TestRetryableStatusCodes:

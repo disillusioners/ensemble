@@ -323,3 +323,45 @@ class TestAgentsConfig:
         config = AgentsConfig()
         
         assert config.directory == "./agents"
+
+
+class TestQueueConfig:
+    """Tests for QueueConfig."""
+
+    def test_queue_config_defaults(self):
+        """Test QueueConfig default values."""
+        from daemon.config import QueueConfig
+        
+        config = QueueConfig()
+        
+        assert config.max_queue_size == 100
+        assert config.message_timeout_seconds == 3600
+        assert config.max_retries == 5
+        assert config.watchdog_check_interval_seconds == 30
+        assert config.cleanup_completed_age_hours == 24
+        assert config.llm_max_retries == 3
+        assert config.llm_retry_delay_seconds == 10.0
+
+    def test_llm_stream_idle_timeout_default(self):
+        """Verify llm_stream_idle_timeout_seconds has default of 120."""
+        from daemon.config import QueueConfig
+        
+        config = QueueConfig()
+        
+        assert config.llm_stream_idle_timeout_seconds == 120
+
+    def test_llm_stream_idle_timeout_override(self):
+        """Verify llm_stream_idle_timeout_seconds can be overridden."""
+        from daemon.config import QueueConfig
+        
+        config = QueueConfig(llm_stream_idle_timeout_seconds=60)
+        
+        assert config.llm_stream_idle_timeout_seconds == 60
+
+    def test_llm_stream_idle_timeout_can_be_disabled(self):
+        """Verify llm_stream_idle_timeout_seconds can be set to 0 (disabled)."""
+        from daemon.config import QueueConfig
+        
+        config = QueueConfig(llm_stream_idle_timeout_seconds=0)
+        
+        assert config.llm_stream_idle_timeout_seconds == 0
