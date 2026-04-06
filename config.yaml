@@ -46,3 +46,4 @@ queue:
   llm_max_retries: 7
   llm_retry_delay_seconds: 3.0
   llm_retry_exponential_base: 2.0
+  llm_stream_idle_timeout_seconds: 120  # Stream idle detection (0 = disabled)

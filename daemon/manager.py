@@ -1099,6 +1099,48 @@ class InstanceManager:
                 self._processing.discard(instance_id)
                 logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
 
+    @staticmethod
+    async def _idle_timeout_aiter(aiter, timeout: float):
+        """Wrap an async iterator with per-event idle timeout.
+        
+        Uses asyncio.wait_for() on each __anext__() call. If timeout fires,
+        raises StreamIdleTimeoutError which propagates to _process_queue for
+        queue-level retry.
+        
+        IMPORTANT: asyncio.wait_for() may wrap StopAsyncIteration in a RuntimeError
+        in some Python versions. We handle both cases.
+        
+        Args:
+            aiter: Async iterator to wrap.
+            timeout: Max seconds per event. <= 0 disables wrapping.
+        
+        Yields:
+            Events from the wrapped iterator.
+        
+        Raises:
+            StreamIdleTimeoutError: If no event arrives within timeout seconds.
+        """
+        from .llm_error_classifier import StreamIdleTimeoutError
+        
+        if timeout <= 0:
+            async for item in aiter:
+                yield item
+            return
+        
+        while True:
+            try:
+                item = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+            except StopAsyncIteration:
+                break
+            except RuntimeError as e:
+                # asyncio.wait_for() wraps StopAsyncIteration in RuntimeError in some Python versions
+                if isinstance(e.__cause__, StopAsyncIteration):
+                    break
+                raise
+            except asyncio.TimeoutError:
+                raise StreamIdleTimeoutError(timeout, "graph.astream")
+            yield item
+
     async def _process_message_with_tracking(
         self, 
         instance_id: str, 
@@ -1125,6 +1167,8 @@ class InstanceManager:
         Raises:
             OperationCancelledError: If cancellation is requested.
         """
+        from .llm_error_classifier import StreamIdleTimeoutError
+
         graph = self.get_instance(instance_id)
         
         # Create activity callback for this message - use repository for activity updates
@@ -1200,7 +1244,10 @@ class InstanceManager:
         # When using multiple stream modes, events are tuples: (mode, data)
         try:
             async with self._llm_semaphore:
-                async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
+                async for event in self._idle_timeout_aiter(
+                    graph.astream(graph_input, config, stream_mode=["updates", "messages"]),
+                    timeout=self.config.queue.llm_stream_idle_timeout_seconds,
+                ):
                             # Unpack tuple: (mode, data)
                             if isinstance(event, tuple):
                                 mode, data = event
@@ -1394,7 +1441,14 @@ class InstanceManager:
                                                     adaptive_thinking_threshold = THINKING_BATCH_THRESHOLD
                                                     adaptive_thinking_timeout = THINKING_BATCH_TIMEOUT
         except Exception as e:
-            logger.error(f"Streaming failed for message {message_id}: {e}")
+            from .llm_error_classifier import StreamIdleTimeoutError
+            if isinstance(e, StreamIdleTimeoutError):
+                logger.warning(
+                    f"Stream idle timeout for message {message_id[:8]}... "
+                    f"(no event for {e.timeout_seconds}s)"
+                )
+            else:
+                logger.error(f"Streaming failed for message {message_id}: {e}")
             # Broadcast error event
             await self.broadcaster.broadcast(Event(
                 type="error",
