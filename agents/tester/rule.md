@@ -53,6 +53,9 @@
 ### Test Pack Organization
 - **All tests must be organized into packs** — Each pack is a self-contained script
 - **Use test-pack skill when creating scripts** — Follow the skill's timeout enforcement patterns
+- **Phase-scoped testing** — When leader provides phase context (modified files), prefer running only relevant test packs
+- **Skip irrelevant test packs** — Don't run tests for unaffected modules/features (unless full test is appropriate)
+- **Report scope to leader** — "Running [packs], skipped [packs]"
 - **Pack timeout limits:**
   - Unit tests: 2 minutes maximum
   - Integration tests: 5 minutes maximum

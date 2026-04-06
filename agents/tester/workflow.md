@@ -113,21 +113,22 @@ Expected Output:
 
 ## Unit Test Workflow
 
-**I coordinate, opencode executes**
+**I coordinate, opencode executes. When working on a phase, prefer running only relevant unit test packs.**
 
 ### Step 1: Discover & Plan
 1. Read `.agents/tester/README.md` for context
 2. Read `.agents/tester/rules/ensure.md` for quality requirements
-3. Prepare task: "Run unit test suite and report results"
-4. Spawn opencode session with clear instructions
+3. **If phase context provided**: Scope to relevant test packs only
+4. Prepare task: "Run unit tests" (scoped or full based on context)
+5. Spawn opencode session with clear instructions
 
 ### Step 2: Delegate Execution
 **Task for opencode session:**
 ```
 Task: Run Unit Tests
-Context: [Project path, test framework]
+Context: [Project path, test framework, scope if phase-scoped]
 Requirements:
-- Run all unit tests
+- Run unit tests (scoped to [specific files/modules] if provided)
 - Capture full output
 - Report: total tests, passed, failed, errors
 - For failures: include file, line, test name, error message
@@ -161,7 +162,15 @@ Return: Structured test results + any quick fixes applied
 
 ## Test Pack Execution Workflow
 
-**All tests run through self-contained packs with timeout enforcement**
+**All tests run through self-contained packs with timeout enforcement. When working on a phase, prefer running only relevant test packs.**
+
+### Phase-Scoped Testing (Productivity Optimization)
+
+**When leader provides phase context:**
+
+1. Analyze modified files
+2. Identify and run only relevant test packs
+3. Prefer running only relevant packs, report scope to leader
 
 ### Phase 1: Organize Tests into Packs
 1. Analyze project test structure
@@ -173,10 +182,12 @@ Return: Structured test results + any quick fixes applied
 3. Spawn opencode to create test pack scripts (use test-pack skill)
 
 ### Phase 2: Execute Test Pack
+**If phase context provided:** Only run packs relevant to changed files. Report skipped packs.
 **Task for opencode session:**
 ```
 Task: Run Test Pack
 Pack: [path/to/test_pack.sh]
+Scope: [phase context if provided - which files/modules changed]
 Timeout: [X minutes based on pack type]
 Requirements:
 - Execute the test pack
@@ -185,8 +196,9 @@ Requirements:
 - Report: PASS/FAIL/TIMEOUT with details
 - If FAIL: include error messages, logs
 - If TIMEOUT: report which part timed out
+- If scoped to phase: report which packs were skipped and why
 
-Return: Test execution results
+Return: Test execution results + scope report
 ```
 
 ### Phase 3: TTQA Process (when timeout occurs)
@@ -300,27 +312,29 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 
 ## Complete Testing Workflow
 
-**Full testing cycle from start to finish**
+**Full testing cycle from start to finish. When testing a phase, scope tests to changed code only.**
 
 ### Step 1: Setup
 1. Read `.agents/tester/README.md`
 2. Read `.agents/tester/rules/ensure.md`
 3. Initialize documentation if needed
 
-### Step 2: Unit Tests
-1. Run unit test workflow
-2. Fix failures (quick fix or full workflow)
-3. Document results
+### Step 2: Phase-Scoped Unit Tests
+1. **If phase context provided**: Identify relevant test packs
+2. Run unit test workflow (scoped or full based on context)
+3. Fix failures (quick fix or full workflow)
+4. Document results
 
-### Step 3: Mock Tests
-1. Design mock test specifications
-2. Create mock test scripts
-3. Run mock tests
-4. Fix failures (quick fix or full workflow)
-5. Document results
+### Step 3: Phase-Scoped Mock Tests
+1. **If phase context provided**: Only mock tests relevant to phase
+2. Design mock test specifications
+3. Create mock test scripts
+4. Run mock tests
+5. Fix failures (quick fix or full workflow)
+6. Document results
 
 ### Step 4: ensure.md Validation
-1. Validate all requirements in ensure.md
+1. Validate requirements in ensure.md (always full - quality gates)
 2. Fix failures (quick fix or full workflow)
 3. Document results
 
@@ -495,9 +509,9 @@ Expected Output:
 ### Example: Run Unit Tests with Quick Fix Permission
 ```
 Context: Testing llm-supervisor-proxy project (Go)
-Objective: Run all unit tests and report results
+Objective: Run unit tests (scoped to [files/modules] if phase-scoped)
 Requirements:
-- Run: go test ./... -v
+- Run: go test ./... -v  (or scoped: go test ./[path] -v)
 - Capture all test output
 - Parse results: count total/passed/failed/errors
 - For failures: extract file, line, test name, error
@@ -643,6 +657,8 @@ Session IDs: [list of opencode session IDs used]
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Need to run tests?** → Spawn opencode session with quick fix permission
+- **Phase context provided?** → Scope tests to relevant packs only, report scope to leader
+- **No phase context?** → Run all relevant tests (standard workflow)
 - **Need to validate ensure.md?** → Spawn opencode session with validation task
 - **Need to write test code?** → Spawn opencode session with specification
 - **Need to read source files?** → Spawn opencode session to analyze
