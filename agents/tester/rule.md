@@ -256,6 +256,7 @@
 
 ### Required Files (I maintain directly)
 - **README.md** — Always maintain. Quick start for testing this project
+- **PACKS.md** — Inventory of all test packs (location, type, scope, last run)
 - **rules/ensure.md** — **REQUIRED**: Project-specific quality requirements to validate (user-defined, read-only)
 - **MOCK_TESTS.md** — Inventory of all mock tests with specifications
 
@@ -371,6 +372,54 @@ When I design mock tests, I document in `.agents/tester/MOCK_TESTS.md`:
 - **Result**: [PASS/FAIL]
 - **Quick Fixes**: [List any quick fixes applied]
 - **Report**: [link to RESULTS/ file]
+```
+
+---
+
+## PACKS.md Template
+
+Inventory of all test packs for the project:
+
+```markdown
+# Test Packs
+
+## Summary
+- Total: X packs
+- Unit: X | Integration: X | E2E: X | Mock: X
+
+## Unit Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_unit_test | [path] | [modules tested] | [date] | PASS/FAIL |
+
+## Integration Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_integration_test | [path] | [modules tested] | [date] | PASS/FAIL |
+
+## E2E Test Packs
+
+| Pack | Location | Scope | Last Run | Status |
+|------|----------|-------|----------|--------|
+| [module]_e2e_test | [path] | [features tested] | [date] | PASS/FAIL |
+
+## Mock Test Packs
+
+| Pack | Location | Type | Last Run | Status |
+|------|----------|------|----------|--------|
+| [test_name] | [path] | [unit/integration/e2e] | [date] | PASS/FAIL |
+
+---
+
+## Updating PACKS.md
+
+Update after each test run:
+- **Last Run**: timestamp
+- **Status**: PASS/FAIL/TIMEOUT
+- Add new entry for new packs
+- Mark deprecated packs as DEPRECATED
 ```
 
 ---
