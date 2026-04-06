@@ -94,15 +94,25 @@ All message submissions return **immediately** with a confirmation:
 
 The daemon continues processing in the background. Use `/wait` to retrieve results when ready.
 
-### Retrieving Results with `/wait`
+### Retrieving Results
+
+**Single Session (`/wait`):**
 The `/wait` command retrieves results from the daemon:
 - **Blocking**: Waits up to 10 minutes for completion
 - **Non-blocking alternative**: Use `/status` to check if results are ready
 
-**To check for results:**
 ```bash
 opencode_skill <PROJECT> <SESSION_NAME> /wait
 ```
+
+**Multiple Sessions (`wait_any`):**
+For parallel sessions, use `wait_any` to retrieve results from the first completed session:
+
+```bash
+# Wait for first session to complete among multiple parallel sessions
+opencode_skill wait_any <PROJECT> <SESSION1> [<SESSION2> ...]
+```
+</sector>
 
 ### Available Commands
 
@@ -132,6 +142,9 @@ opencode_skill myapp feature-A /status
 # Wait for result (blocking, up to 10 min)
 opencode_skill myapp feature-A /wait
 
+# Wait for any session to complete (for parallel work)
+opencode_skill wait_any myapp task-1 task-2 task-3
+
 # Resume a timed-out session
 opencode_skill myapp feature-A /resume
 
@@ -143,7 +156,7 @@ opencode_skill --sync --quiet myapp feature-A "Your request here"
 ```
 
 ### Interactive Questions
-If the Orchestrator asks a question, the wrapper will prompt you:
+If the Orchestrator asks a question, it will prompt you:
 ```text
 [?] Request ID: ...
     Which linter should I use?
@@ -173,33 +186,28 @@ opencode_skill <PROJECT> <SESSION_NAME> /answer "ESLint" "Jest"
 
 The Orchestrator handles planning, execution, and cleanup automatically.
 
-## Parallel Sessions Workflow (Async).
-Recommended for Independent Tasks
+## Parallel Sessions Workflow (Async)
 
-Run up to **3 sessions in parallel** to improve efficiency.
+Run up to **3 sessions in parallel** for independent tasks.
 
-> **⚠️ IMPORTANT: Only use for tasks with NO dependencies between them.** Parallel sessions must not rely on each other's output or modify the same files.
+> **⚠️ IMPORTANT: Only use for tasks with NO dependencies.** Parallel sessions must not rely on each other's output or modify the same files.
 
-Use async mode (no `--sync`) with `&` and `wait`:
-
+**Basic pattern:**
 ```bash
-# Step 1: Initialize all sessions
-opencode_skill init-session myapp task-1 /path/to/project &
-opencode_skill init-session myapp task-2 /path/to/project &
-opencode_skill init-session myapp task-3 /path/to/project &
-wait
+# Initialize sessions in parallel
+opencode_skill init-session myapp task-1 /path & opencode_skill init-session myapp task-2 /path & opencode_skill init-session myapp task-3 /path & wait
 
-# Step 2: Send requests (async)
-opencode_skill myapp task-1 "Add unit tests for auth" &
-opencode_skill myapp task-2 "Fix login button styling" &
-opencode_skill myapp task-3 "Update API docs" &
-wait
+# Send requests (async)
+opencode_skill myapp task-1 "Task 1" & opencode_skill myapp task-2 "Task 2" & opencode_skill myapp task-3 "Task 3" & wait
 
-# Step 3: Wait for all results
-opencode_skill myapp task-1 /wait &
-opencode_skill myapp task-2 /wait &
-opencode_skill myapp task-3 /wait &
-wait
+# Wait for any session to complete
+opencode_skill wait_any myapp task-1 task-2 task-3
+
+# When one session is complete (ex: task-1), you can start new one (ex: task-4)
+opencode_skill myapp task-4 "Task 4"
+
+# Use wait_any again to get the next completed session
+opencode_skill wait_any myapp task-2 task-3 task-4
 ```
 
 ## Error Handling
@@ -210,5 +218,3 @@ wait
 # Resume a timed-out session
 opencode_skill <PROJECT> <SESSION_NAME> /resume
 ```
-
-## Tips: Limit to 3 sessions • Use for independent tasks only • Check status with `/status`
