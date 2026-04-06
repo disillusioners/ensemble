@@ -41,6 +41,24 @@ opencode_skill [flags] <PROJECT> <SESSION_NAME> <MESSAGE>
     - `--sync`: Send prompt AND wait for result in a single command (blocking).
     - `--quiet`: Suppress informational messages (keeps errors visible).
 
+### Long Message Input via @file
+
+For long or complex prompts, use `@file` syntax to read from a file:
+
+**Path format:** `/tmp/opencode_skill/prompt_files/{project_name}/{session_name}_prompt.txt`
+
+**Example:**
+```bash
+# Create input file with the task
+cat > /tmp/opencode_skill/prompt_files/myapp/feature-login_prompt.txt << 'EOF'
+Implement user login with email and password.
+Include session management and logout functionality.
+EOF
+
+# Send using @file syntax
+opencode_skill --sync myapp feature-login @/tmp/opencode_skill/prompt_files/myapp/feature-login_prompt.txt
+```
+
 ### Sync Mode (`--sync`)
 The `--sync` flag combines sending a prompt and waiting for results into a single command:
 
@@ -155,7 +173,7 @@ The Orchestrator handles planning, execution, and cleanup automatically.
 ## Parallel Sessions Workflow (Async).
 Recommended for Independent Tasks
 
-Run up to **3 sessions in parallel** to improve development efficiency.
+Run up to **3 sessions in parallel** to improve efficiency.
 
 > **⚠️ IMPORTANT: Only use for tasks with NO dependencies between them.** Parallel sessions must not rely on each other's output or modify the same files.
 
@@ -181,4 +199,8 @@ opencode_skill myapp task-3 /wait &
 wait
 ```
 
-**Tips:** Check status with `/status`
+## Error Handling
+
+**"The operation timed out"**: Resume the session once. If it times out again, split into smaller tasks.
+
+## Tips: Limit to 3 sessions • Use for independent tasks only • Check status with `/status`
