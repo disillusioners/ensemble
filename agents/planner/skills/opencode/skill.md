@@ -132,6 +132,9 @@ opencode_skill myapp feature-A /status
 # Wait for result (blocking, up to 10 min)
 opencode_skill myapp feature-A /wait
 
+# Resume a timed-out session
+opencode_skill myapp feature-A /resume
+
 # Sync mode - send and wait in one command (flags first!)
 opencode_skill --sync myapp feature-A "Your request here"
 
@@ -201,6 +204,11 @@ wait
 
 ## Error Handling
 
-**"The operation timed out"**: Resume the session once. If it times out again, split into smaller tasks.
+**"The operation timed out"**: Run `/resume` once. If it times out again, split into smaller tasks.
+
+```bash
+# Resume a timed-out session
+opencode_skill <PROJECT> <SESSION_NAME> /resume
+```
 
 ## Tips: Limit to 3 sessions • Use for independent tasks only • Check status with `/status`

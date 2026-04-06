@@ -190,6 +190,7 @@ def create_agent_node(
     graph_ref=None,
     config=None,
     llm_config=None,
+    retry_config=None,
 ):
     """Create the agent node function with optional reactive compaction.
     
@@ -200,14 +201,14 @@ def create_agent_node(
         graph_ref: Optional list for late-bound graph reference.
         config: Optional config for compaction.
         llm_config: Optional LLM config for compaction context.
+        retry_config: Optional retry configuration for logging.
     """
     
     async def agent_node(state):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
         max_retries = retry_config.get('max_retries', 3) if retry_config else 3
-        thread_id = config.get("configurable", {}).get("thread_id", "?") if config else "?"
-        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (max_retries={max_retries}, thread={thread_id[:8]}...)')
+        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (max_retries={max_retries})')
         
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -219,10 +220,10 @@ def create_agent_node(
             )
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
-                logger.warning(f'[LLM] Context length exceeded (no compactor), thread={thread_id[:8]}...')
+                logger.warning('[LLM] Context length exceeded (no compactor available)')
                 raise
             
-            logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages, thread={thread_id[:8]}...')
+            logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
             
             graph = graph_ref[0]
             thread_config = config or {}
@@ -250,7 +251,7 @@ def create_agent_node(
             if result.compacted_at:
                 await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
             
-            logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type}), thread={thread_id[:8]}...')
+            logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
             
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
@@ -262,17 +263,18 @@ def create_agent_node(
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError, 
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
-            logger.error(f"[LLM] All retries exhausted after {retry_config.get('max_retries', 3) if retry_config else 'N/A'} attempts: {type(e).__name__}: {e}, thread={thread_id[:8]}...")
+            max_retries = retry_config.get('max_retries', 3) if retry_config else 'N/A'
+            logger.error(f"[LLM] All retries exhausted after {max_retries} attempts: {type(e).__name__}: {e}")
             raise
         except Exception as e:
-            logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}, thread={thread_id[:8]}...")
+            logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}")
             raise
         
         tool_info = ''
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
             tool_info = f', tools: {tool_names}'
-        logger.info(f'[LLM] Response: {response.content[:80] if response.content else "empty"}...{tool_info}, thread={thread_id[:8]}...')
+        logger.info(f'[LLM] Response: {response.content[:80] if response.content else "empty"}...{tool_info}')
         return {'messages': [response]}
     
     return agent_node
@@ -324,6 +326,7 @@ def build_instance_graph(
         graph_ref=graph_ref,
         config=graph_config,
         llm_config=llm_config_with_headers,
+        retry_config=retry_config,
     ))
     graph.add_node("tools", ToolNode(tools))
     
