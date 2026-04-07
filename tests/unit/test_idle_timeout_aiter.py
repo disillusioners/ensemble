@@ -210,8 +210,8 @@ async def test_unittest_mock_timeout_error():
 
 
 @pytest.mark.asyncio
-async def test_tool_executing_callback_extends_timeout():
-    """Verify tool_executing_callback uses request_timeout during tool execution.
+async def test_tool_timeout_check_extends_timeout():
+    """Verify tool_timeout_check uses request_timeout when armed.
     
     This tests the fix for the issue where idle timeout fires during tool execution
     (when no events flow from graph.astream). Tool execution time should be excluded
@@ -220,18 +220,20 @@ async def test_tool_executing_callback_extends_timeout():
     timeout = 0.1  # Short timeout for normal operation
     request_timeout = 1.0  # Longer timeout for tool execution
     
-    # Track if callback returns True (tools executing)
-    tools_executing = True
+    # Track armed state
+    tool_timeout_armed = {"armed": True}
     
-    async def tool_executing_callback():
-        return tools_executing
+    async def tool_timeout_check():
+        result = tool_timeout_armed["armed"]
+        tool_timeout_armed["armed"] = False  # Auto-clear after check
+        return result
     
     # Item takes longer than normal timeout but shorter than request_timeout
     slow_aiter = SlowAsyncIterator(items=["item"], delays=[request_timeout * 0.5])
     
     result = []
     async for item in InstanceManager._idle_timeout_aiter(
-        slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+        slow_aiter, timeout, request_timeout=request_timeout, tool_timeout_check=tool_timeout_check
     ):
         result.append(item)
     
@@ -240,12 +242,12 @@ async def test_tool_executing_callback_extends_timeout():
 
 
 @pytest.mark.asyncio
-async def test_tool_executing_callback_returns_false_uses_normal_timeout():
+async def test_tool_timeout_check_returns_false_uses_normal_timeout():
     """Verify normal timeout applies when callback returns False (tools not executing)."""
     timeout = 0.1
     request_timeout = 10.0  # Should not be used
     
-    async def tool_executing_callback():
+    async def tool_timeout_check():
         return False  # Tools not executing
     
     # Item takes longer than normal timeout
@@ -254,13 +256,13 @@ async def test_tool_executing_callback_returns_false_uses_normal_timeout():
     with pytest.raises(StreamIdleTimeoutError):
         result = []
         async for item in InstanceManager._idle_timeout_aiter(
-            slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+            slow_aiter, timeout, request_timeout=request_timeout, tool_timeout_check=tool_timeout_check
         ):
             result.append(item)
 
 
 @pytest.mark.asyncio
-async def test_tool_executing_callback_dynamic_state():
+async def test_tool_timeout_check_dynamic_state():
     """Verify timeout behavior changes based on callback returning different values."""
     timeout = 0.1
     request_timeout = 1.0
@@ -268,7 +270,7 @@ async def test_tool_executing_callback_dynamic_state():
     # Simulate: tools start executing after first item
     call_count = 0
     
-    async def tool_executing_callback():
+    async def tool_timeout_check():
         nonlocal call_count
         call_count += 1
         # First call returns False (normal timeout), then True (request_timeout)
@@ -279,9 +281,69 @@ async def test_tool_executing_callback_dynamic_state():
     
     result = []
     async for item in InstanceManager._idle_timeout_aiter(
-        slow_aiter, timeout, request_timeout=request_timeout, tool_executing_callback=tool_executing_callback
+        slow_aiter, timeout, request_timeout=request_timeout, tool_timeout_check=tool_timeout_check
     ):
         result.append(item)
     
     # Both items should come through - second one uses request_timeout
     assert result == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_armed_extends_timeout():
+    """Verify tool_timeout_armed uses request_timeout when armed.
+    
+    This tests the fix for the race condition where the idle timeout could fire
+    during tool execution because the tools_executing flag wasn't set yet.
+    The tool_timeout_armed dict allows the consumer to preemptively arm request_timeout.
+    """
+    timeout = 0.1  # Short timeout for normal operation
+    request_timeout = 1.0  # Longer timeout for tool execution
+    
+    # Item takes longer than normal timeout but shorter than request_timeout
+    slow_aiter = SlowAsyncIterator(items=["item"], delays=[request_timeout * 0.5])
+    
+    # Arm the flag - this should make the iterator use request_timeout
+    tool_timeout_armed = {"armed": True}
+    
+    async def tool_timeout_check():
+        result = tool_timeout_armed["armed"]
+        tool_timeout_armed["armed"] = False  # Auto-clear after check
+        return result
+    
+    result = []
+    async for item in InstanceManager._idle_timeout_aiter(
+        slow_aiter, timeout, request_timeout=request_timeout, tool_timeout_check=tool_timeout_check
+    ):
+        result.append(item)
+    
+    # Item should come through because flag was armed (uses request_timeout)
+    assert result == ["item"]
+    # Flag should be cleared after receiving the event
+    assert tool_timeout_armed["armed"] == False
+
+
+@pytest.mark.asyncio
+async def test_tool_timeout_not_armed_uses_normal_timeout():
+    """Verify normal timeout applies when tool_timeout_armed is not armed."""
+    timeout = 0.1
+    request_timeout = 10.0  # Should not be used
+    
+    # Item takes longer than normal timeout
+    slow_aiter = SlowAsyncIterator(items=["item"], delays=[timeout * 5])
+    
+    # Flag not armed
+    tool_timeout_armed = {"armed": False}
+    
+    async def tool_timeout_check():
+        result = tool_timeout_armed["armed"]
+        tool_timeout_armed["armed"] = False  # Auto-clear after check
+        return result
+    
+    with pytest.raises(StreamIdleTimeoutError):
+        result = []
+        async for item in InstanceManager._idle_timeout_aiter(
+            slow_aiter, timeout, request_timeout=request_timeout, tool_timeout_check=tool_timeout_check
+        ):
+            result.append(item)
+
