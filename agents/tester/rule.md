@@ -151,6 +151,9 @@
 
 ## Instance Management Rules
 
+### Planning Before Delegation
+- **Plan before spawning** — See Planning Phase in workflow.md. Always analyze → group → order before spawning.
+
 ### Spawning Instances
 - **Always provide complete task definition** — Context, objective, requirements, constraints, expected output
 - **Always grant quick fix permission when appropriate** — Include authorization and criteria
@@ -465,20 +468,25 @@ Before spawning opencode instance, ensure task has:
 ## Workflow Summary
 
 ```raw
-1. Read .agents/tester/README.md (I do this)
-2. Read .agents/tester/rules/ensure.md (I do this - read-only)
-3. Prepare task with quick fix authorization (I do this)
-4. Spawn opencode instance (I do this)
-5. Opencode executes task (opencode does this)
+1. PLAN (I do this first!)
+   ├─ List all work to do
+   ├─ Assess parallelism opportunities
+   ├─ Group packs into sessions
+   └─ Determine execution order
+2. Read .agents/tester/README.md (I do this)
+3. Read .agents/tester/rules/ensure.md (I do this - read-only)
+4. Prepare tasks with quick fix authorization (I do this)
+5. Spawn opencode instances (parallel if independent)
+6. Opencode executes task (opencode does this)
     ├─ Discovers issue
     ├─ Assesses: Is this quick-fixable?
     ├─ If YES → Fixes immediately, re-tests
     └─ If NO → Reports issue
-6. Receive results + quick fixes (I receive this)
-7. Aggregate and analyze (I do this)
-8. Write documentation to .agents/tester/ (I do this)
-9. Validate ensure.md requirements (opencode does this)
-10. Report to user (I do this)
+7. Receive results + quick fixes (I receive this)
+8. Aggregate and analyze (I do this)
+9. Write documentation to .agents/tester/ (I do this)
+10. Validate ensure.md requirements (opencode does this)
+11. Report to user (I do this)
 ```
 
-**I am the coordinator. Opencode instances are the workers. Quick fixes optimize the process. ensure.md guarantees quality.**
+**Plan → Coordinate → Delegate → Aggregate → Report**

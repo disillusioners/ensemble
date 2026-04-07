@@ -6,6 +6,83 @@
 
 ---
 
+## Planning Phase (Do This First!)
+
+**Before spawning any sessions, plan how to execute the work.**
+
+### Why Plan First?
+- Avoids spawning too many/few sessions
+- Enables parallel execution when appropriate
+- Reduces total testing time
+- Prevents wasted capacity
+
+### Planning Checklist
+
+1. **Identify all work to do**
+   - List all test packs that need execution
+   - Note any dependencies between packs
+   - Identify ensure.md validations needed
+
+2. **Assess parallelism**
+   - **Independent?** → Can run in parallel (different modules, no shared state)
+   - **Dependent?** → Must run sequentially (shared resources, order matters)
+   - **Parallelizable?** → 2+ independent groups of packs
+
+3. **Determine execution strategy**
+
+   | Scenario | Strategy |
+   |----------|----------|
+   | 1 independent pack | 1 session |
+   | 2-3 small packs (same module) | 1 session (grouped) |
+   | 3+ independent packs (different modules) | Multiple sessions in parallel |
+   | Mixed dependencies | Parallel + sequential |
+
+4. **Group packs into sessions**
+   - Group by: module, test type, or execution environment
+   - Keep unrelated packs in separate sessions
+   - Consider quick fix context (reuse same module)
+
+5. **Set execution order**
+   - Order dependent packs
+   - Launch independent groups simultaneously
+   - Note which validations run after tests pass
+
+### Planning Rules
+- **Never skip planning** — Always analyze before spawning
+- **Parallel when safe** — Independent packs benefit from parallelism
+- **Group related packs** — Same module = same session (better context)
+- **When in doubt, split** — Separate sessions are safer than mis-grouped ones
+- **Plan for aggregations** — Know how you'll combine results from multiple sessions
+
+### Execution Strategy Examples
+
+**Example 1: Multiple independent unit test packs**
+```
+Packs: auth_unit_test, api_unit_test, db_unit_test
+Plan: Spawn 3 sessions in parallel (one per pack)
+Expected: 10 min total instead of 30 min sequential
+```
+
+**Example 2: Phase-scoped testing with some skipped**
+```
+Context: Changes in auth/ module only
+Packs: auth_unit_test, api_unit_test, db_unit_test
+Plan: Run auth_unit_test only (others irrelevant)
+Sessions: 1 session for 1 pack
+```
+
+**Example 3: Unit tests + mock tests**
+```
+Packs: core_unit_test, api_unit_test
+Mock tests: api_mock_test (needs unit tests first)
+Plan: 
+  - Session 1: core_unit_test + api_unit_test (parallel)
+  - Session 2: api_mock_test (sequential, after Session 1)
+Sessions: 2 (1 parallel group, 1 sequential)
+```
+
+---
+
 ## Initial Project Setup
 
 When starting with a new project:
@@ -163,6 +240,15 @@ Return: Structured test results + any quick fixes applied
 ## Test Pack Execution Workflow
 
 **All tests run through self-contained packs with timeout enforcement. When working on a phase, prefer running only relevant test packs.**
+
+### ⚠️ Planning Step (Do This First!)
+
+1. **List all packs to run** — Based on phase context or full test request
+2. **Assess parallelism** — Which packs are independent?
+3. **Group into sessions** — Related packs together, unrelated packs separate
+4. **Determine spawn order** — Sequential for dependent, parallel for independent
+
+**See Planning Phase (above) for full guidance.**
 
 ### Phase-Scoped Testing (Productivity Optimization)
 
@@ -340,6 +426,12 @@ Spawn opencode session (can reuse if same testing area), monitor execution.
 ## Complete Testing Workflow
 
 **Full testing cycle from start to finish. When testing a phase, scope tests to changed code only.**
+
+### Step 0: Plan (Do This First!)
+1. **Identify all work** — List test packs, ensure.md validations, mock tests needed
+2. **Assess parallelism** — Which tasks are independent?
+3. **Group into sessions** — Related packs together, unrelated packs separate
+4. **Determine spawn order** — Sequential for dependent, parallel for independent
 
 ### Step 1: Setup
 1. Read `.agents/tester/README.md`
@@ -681,6 +773,7 @@ Session IDs: [list of opencode session IDs used]
 
 ## Decision Points
 
+- **Starting testing work?** → PLAN FIRST: Analyze work, assess parallelism, group packs into sessions
 - **No `.agents/tester/` directory?** → Create it with README.md (I do this)
 - **No ensure.md?** → Inform user they need to create `.agents/tester/rules/ensure.md` with their requirements
 - **Need to run tests?** → Spawn opencode session with quick fix permission
