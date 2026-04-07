@@ -128,19 +128,21 @@ def mock_llm_tracker(tracker):
     original_generate = graph.ThinkingChatOpenAI._generate
     
     def tracked_generate(self, messages, stop=None, run_manager=None, **kwargs):
-        # Sync wrapper for async tracking
-        # Note: This runs in a thread pool executor, so we need to handle
-        # the case where there's no event loop in Python 3.12+
-        try:
-            # Try to get the running loop first (preferred in Python 3.10+)
-            loop = asyncio.get_running_loop()
-            # We're in async context, schedule tracking
-            asyncio.create_task(tracker.track(messages, stop=stop, **kwargs))
-        except RuntimeError:
-            # No running loop in this thread - we're in a thread pool executor
-            # Call tracking synchronously (don't block, just skip tracking)
-            # The original_generate will still work
-            pass
+        # Track synchronously - this works in both async and thread pool contexts
+        # We use call_count directly since we're in a sync function
+        tracker.call_count += 1
+        tracker.call_details.append({
+            'call_number': tracker.call_count,
+            'timestamp': datetime.now().isoformat(),
+            'message_count': len(messages) if messages else 0,
+            'stack': ''.join(traceback.format_stack()[-8:-1])
+        })
+        
+        # Log the call
+        logger.info(f"═══════════════════════════════════════════════════════════════")
+        logger.info(f"[LLM TRACKER] ⚡ Invocation #{tracker.call_count}")
+        logger.info(f"═══════════════════════════════════════════════════════════════")
+        
         return original_generate(self, messages, stop=stop, run_manager=run_manager, **kwargs)
     
     with patch.object(graph.ThinkingChatOpenAI, '_generate', tracked_generate):
@@ -162,15 +164,15 @@ def integration_config():
 
 
 @pytest.fixture
-def test_db_path():
-    """Return a test database path and cleanup after."""
-    project_root = Path(__file__).parent.parent.parent
-    db_path = project_root / "test_e2e_queue.db"
-    db_path.unlink(missing_ok=True)
-    yield db_path
-    # Cleanup
-    if db_path.exists():
-        db_path.unlink()
+def test_db_path(tmp_path):
+    """Return a unique test database path per test and cleanup after."""
+    import uuid
+    # Use unique path per test to avoid database corruption between tests
+    db_path = tmp_path / f"test_queue_{uuid.uuid4().hex[:8]}.db"
+    # Also set checkpointer db path to avoid conflicts
+    checkpointer_path = tmp_path / f"test_checkpoints_{uuid.uuid4().hex[:8]}.db"
+    yield db_path, checkpointer_path
+    # Cleanup is automatic with tmp_path
 
 
 @pytest.mark.asyncio
@@ -193,8 +195,12 @@ async def test_single_message_no_duplicate_llm_calls(
     
     tracker = mock_llm_tracker
     
+    # Unpack unique db paths
+    db_path, checkpointer_path = test_db_path
+    
     # Modify the persistence config for test isolation
-    integration_config.persistence.db_path = str(test_db_path)
+    integration_config.persistence.db_path = str(db_path)
+    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
     
     # Create manager
     logger.info("=" * 60)
@@ -342,8 +348,12 @@ async def test_sse_events_count(
     
     tracker = mock_llm_tracker
     
+    # Unpack unique db paths
+    db_path, checkpointer_path = test_db_path
+    
     # Modify the persistence config for test isolation
-    integration_config.persistence.db_path = str(test_db_path)
+    integration_config.persistence.db_path = str(db_path)
+    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
     
     manager = InstanceManager(integration_config)
     await manager.initialize()
@@ -463,7 +473,11 @@ async def test_debug_llm_invocation_count(
     logging.getLogger('daemon.graph').addHandler(handler)
     
     try:
-        integration_config.persistence.db_path = str(test_db_path)
+        # Unpack unique db paths
+        db_path, checkpointer_path = test_db_path
+        
+        integration_config.persistence.db_path = str(db_path)
+        integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
         manager = InstanceManager(integration_config)
         await manager.initialize()
         manager.broadcaster.set_main_loop(asyncio.get_running_loop())

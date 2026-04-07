@@ -189,6 +189,10 @@ async def test_instance_title_generation_e2e(
     # Wait for event collection to finish
     await collect_task
     
+    # Wait for fire-and-forget title generation to complete (happens after completed event)
+    # Title generation has a 30s timeout, so wait up to 35s for it
+    await asyncio.sleep(35)
+    
     # =================================================================
     # VERIFY RESULTS
     # =================================================================

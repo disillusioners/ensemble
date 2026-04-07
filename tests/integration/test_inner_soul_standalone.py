@@ -219,7 +219,8 @@ async def _run_remember_test(config, agent_dir: str):
     memories_before = list(memories_dir.glob("*.md"))
     print(f"Memories before: {len(memories_before)}")
     
-    # Create instance manager with mocked registry
+    # Patch at the manager module level where get_registry is imported
+    # This is the correct target because manager imports get_registry via `from .registry import get_registry`
     with patch("daemon.manager.get_registry", return_value=mock_registry):
         manager = InstanceManager(config=config)
         
@@ -251,6 +252,9 @@ Call inner_soul with intent="remember" and the content above."""
             memory_file = new_memories[0]
             print(f"\nMemory file created: {memory_file.name}")
             print(f"Content:\n{memory_file.read_text()[:500]}...")
+        
+        # Cleanup
+        manager.terminate_instance(instance_id)
         
         # Cleanup
         manager.terminate_instance(instance_id)
@@ -310,6 +314,7 @@ async def _run_workflow_test(config, agent_dir: str):
     mock_registry.resolve_to_id.return_value = "test_agent"
     mock_registry.get.return_value = agent_metadata
     
+    # Patch at the manager module level where get_registry is imported
     with patch("daemon.manager.get_registry", return_value=mock_registry):
         manager = InstanceManager(config=config)
         instance_id = manager.spawn_instance(agent_id="test_agent")
