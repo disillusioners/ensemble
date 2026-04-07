@@ -105,10 +105,6 @@ class QueueConfig(BaseSettings):
     llm_max_retries: int = Field(default=3)
     llm_retry_delay_seconds: float = Field(default=10.0)
     llm_retry_exponential_base: float = Field(default=2.0)
-    llm_stream_idle_timeout_seconds: int = Field(
-        default=120,
-        description="Max seconds to wait for a streaming event before treating as hung/idle. 0 = disabled."
-    )
 
 
 class AgentsConfig(BaseSettings):
