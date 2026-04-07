@@ -633,3 +633,146 @@ class TestJobQueueServiceFullWorkflow:
         next_job = await job_queue_service.trigger_next_job("test-project")
         # No pending jobs, so None
         assert next_job is None
+
+
+class TestGetJobByInstance:
+    """Tests for get_job_by_instance() public method."""
+    
+    @pytest.mark.asyncio
+    async def test_returns_correct_job_for_instance(self, job_queue_service, sample_job_data_service):
+        """get_job_by_instance returns the job associated with given instance_id."""
+        # Enqueue job (starts processing, gets instance_id)
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        # Look up by instance_id
+        found = await job_queue_service.get_job_by_instance(job.instance_id)
+        assert found is not None
+        assert found.job_id == job.job_id
+        assert found.instance_id == job.instance_id
+    
+    @pytest.mark.asyncio
+    async def test_returns_none_for_nonexistent_instance(self, job_queue_service):
+        """get_job_by_instance returns None for unknown instance_id."""
+        result = await job_queue_service.get_job_by_instance("nonexistent-instance")
+        assert result is None
+    
+    def test_sync_returns_correct_job(self, job_queue_service, sample_job_data_service):
+        """get_job_by_instance_sync returns the job for given instance_id."""
+        import asyncio
+        job = asyncio.run(job_queue_service.enqueue(**sample_job_data_service))
+        found = job_queue_service.get_job_by_instance_sync(job.instance_id)
+        assert found is not None
+        assert found.job_id == job.job_id
+    
+    def test_sync_returns_none_for_nonexistent(self, job_queue_service):
+        """get_job_by_instance_sync returns None for unknown instance_id."""
+        result = job_queue_service.get_job_by_instance_sync("nonexistent")
+        assert result is None
+
+
+class TestCompleteJobWithResultSummary:
+    """Tests for complete_job() with result_summary parameter."""
+    
+    @pytest.mark.asyncio
+    async def test_complete_with_custom_result_summary(self, job_queue_service, sample_job_data_service):
+        """complete_job stores custom result_summary."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        completed = await job_queue_service.complete_job(
+            job.job_id, success=True, result_summary="Custom summary here"
+        )
+        assert completed is not None
+        assert completed.status == "completed"
+        assert completed.result_summary == "Custom summary here"
+    
+    @pytest.mark.asyncio
+    async def test_complete_with_default_result_summary(self, job_queue_service, sample_job_data_service):
+        """complete_job uses default summary when none provided."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        completed = await job_queue_service.complete_job(job.job_id)
+        assert completed is not None
+        assert completed.result_summary == "Job completed successfully"
+    
+    @pytest.mark.asyncio
+    async def test_complete_job_sync_with_result_summary(self, job_queue_service, sample_job_data_service):
+        """complete_job_sync stores result_summary synchronously."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        completed = job_queue_service.complete_job_sync(
+            job.job_id, success=True, result_summary="Sync summary"
+        )
+        assert completed is not None
+        assert completed.result_summary == "Sync summary"
+    
+    @pytest.mark.asyncio
+    async def test_complete_job_sync_failure(self, job_queue_service, sample_job_data_service):
+        """complete_job_sync marks job as failed when success=False."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        completed = job_queue_service.complete_job_sync(
+            job.job_id, success=False, error="Sync error"
+        )
+        assert completed is not None
+        assert completed.status == "failed"
+        assert completed.error_message == "Sync error"
+    
+    @pytest.mark.asyncio
+    async def test_complete_job_sync_returns_none_for_nonexistent(self, job_queue_service):
+        """complete_job_sync returns None for unknown job_id."""
+        result = job_queue_service.complete_job_sync("nonexistent", success=True)
+        assert result is None
+    
+    @pytest.mark.asyncio
+    async def test_complete_job_sync_handles_valueerror(self, job_queue_service, sample_job_data_service):
+        """complete_job_sync returns None when job already completed (ValueError)."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        # Complete once
+        job_queue_service.complete_job_sync(job.job_id, success=True)
+        # Try again - should return None (not raise ValueError)
+        result = job_queue_service.complete_job_sync(job.job_id, success=True)
+        assert result is None
+
+
+class TestTriggerNextJobSync:
+    """Tests for trigger_next_job_sync() synchronous method."""
+    
+    @pytest.mark.asyncio
+    async def test_starts_pending_job(self, job_queue_service, sample_job_data_service):
+        """trigger_next_job_sync starts next pending job."""
+        import asyncio
+        # Enqueue two jobs for same project
+        job1 = await job_queue_service.enqueue(**sample_job_data_service)
+        job2 = await job_queue_service.enqueue(**sample_job_data_service)
+        assert job2.status == "pending"
+        
+        # Complete job1
+        job_queue_service.complete_job_sync(job1.job_id, success=True)
+        
+        # Trigger next
+        next_job = job_queue_service.trigger_next_job_sync("test-project")
+        assert next_job is not None
+        assert next_job.job_id == job2.job_id
+        assert next_job.status == "processing"
+    
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_pending(self, job_queue_service, sample_job_data_service):
+        """trigger_next_job_sync returns None when no pending jobs."""
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        job_queue_service.complete_job_sync(job.job_id, success=True)
+        
+        result = job_queue_service.trigger_next_job_sync("test-project")
+        assert result is None
+
+
+class TestNextJobTriggeredAfterCompletion:
+    """Tests verifying next job is triggered after job completion."""
+    
+    @pytest.mark.asyncio
+    async def test_next_job_started_after_complete(self, job_queue_service, sample_job_data_service):
+        """After completing a job, trigger_next_job starts the next queued job."""
+        job1 = await job_queue_service.enqueue(**sample_job_data_service)
+        job2 = await job_queue_service.enqueue(**sample_job_data_service)
+        assert job2.status == "pending"
+        
+        await job_queue_service.complete_job(job1.job_id)
+        next_job = await job_queue_service.trigger_next_job("test-project")
+        
+        assert next_job is not None
+        assert next_job.job_id == job2.job_id
+        assert next_job.status == "processing"
