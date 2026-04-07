@@ -8,7 +8,7 @@ export interface Job {
   job_id: string;
   agent_id: string;
   message?: string;
-  source: JobSource;
+  source?: JobSource;
   project_id: string | null;
   priority: number; // 1-10
   status: JobStatus;
@@ -18,7 +18,7 @@ export interface Job {
   instance_id: string | null;
   error_message: string | null;
   result_summary: string | null;
-  job_metadata: Record<string, any>;
+  job_metadata?: Record<string, any> | null;
   cancelled_at: string | null;
   position?: number; // queue position if pending
 }
