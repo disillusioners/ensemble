@@ -476,6 +476,44 @@ class InstanceManager:
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
         logger.info("JobQueueService connected to SessionManager")
 
+    async def _complete_job_for_instance(
+        self,
+        instance_id: str,
+        success: bool,
+        error: str | None = None,
+        result_summary: str | None = None,
+    ) -> None:
+        """Update job status when instance completes.
+        
+        Looks up the job associated with this instance and marks it
+        as completed or failed based on success parameter.
+        Also triggers the next pending job for the same project.
+        """
+        if self._job_queue_service is None:
+            return
+        
+        try:
+            job = await self._job_queue_service.get_job_by_instance(instance_id)
+            if job is None:
+                return  # No job associated with this instance
+            
+            if success:
+                await self._job_queue_service.complete_job(
+                    job.job_id, success=True, error=None,
+                    result_summary=result_summary,
+                )
+            else:
+                await self._job_queue_service.complete_job(
+                    job.job_id, success=False, error=error or "Instance failed"
+                )
+            
+            # Trigger next pending job for this project
+            if job.project_id:
+                await self._job_queue_service.trigger_next_job(job.project_id)
+                
+        except Exception as e:
+            logger.warning(f"Failed to update job status for instance {instance_id}: {e}")
+
     def spawn_instance(
         self, 
         agent_id: str,
@@ -1023,6 +1061,12 @@ class InstanceManager:
                             }
                         ))
                     
+                    await self._complete_job_for_instance(
+                        instance_id=instance_id,
+                        success=True,
+                        result_summary=result.content[:500] if result and result.content else None,
+                    )
+                    
                     # Fire-and-forget title generation - don't block the completed event
                     if is_first_message:
                         asyncio.create_task(
@@ -1076,6 +1120,11 @@ class InstanceManager:
                                 "retry_count": msg.retry_count
                             }
                         ))
+                        await self._complete_job_for_instance(
+                            instance_id=instance_id,
+                            success=False,
+                            error=f"Max retries exceeded: {e}",
+                        )
                         # Send error report to parent if this is a child instance
                         await self._send_error_report(
                             instance_id=instance_id,
@@ -2080,6 +2129,18 @@ Title:"""
                     )
             except Exception as e:
                 logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
+
+        # 7. Mark any associated job as failed
+        if self._job_queue_service is not None:
+            try:
+                job = self._job_queue_service.get_job_by_instance_sync(instance_id)
+                if job is not None and job.status == "processing":
+                    self._job_queue_service.complete_job_sync(
+                        job.job_id, success=False, error="Instance terminated",
+                        result_summary=None,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to mark job as failed on terminate: {e}")
 
         return True
 

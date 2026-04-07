@@ -127,6 +127,30 @@ class JobQueueService:
         """
         return await asyncio.to_thread(self._repository.get, job_id)
     
+    async def get_job_by_instance(self, instance_id: str) -> Optional[JobItem]:
+        """Get job by instance ID.
+        
+        Args:
+            instance_id: Instance identifier.
+            
+        Returns:
+            JobItem if found, None otherwise.
+        """
+        return await asyncio.to_thread(self._repository.get_by_instance, instance_id)
+    
+    def get_job_by_instance_sync(self, instance_id: str) -> Optional[JobItem]:
+        """Get job by instance ID (synchronous version).
+        
+        For use from synchronous callers like terminate_instance().
+        
+        Args:
+            instance_id: Instance identifier.
+            
+        Returns:
+            JobItem if found, None otherwise.
+        """
+        return self._repository.get_by_instance(instance_id)
+    
     async def update_job(self, job_id: str, **updates) -> Optional[JobItem]:
         """Update job fields.
         
@@ -408,6 +432,7 @@ class JobQueueService:
         job_id: str,
         success: bool = True,
         error: Optional[str] = None,
+        result_summary: Optional[str] = None,
     ) -> Optional[JobItem]:
         """Mark job as completed or failed and release lock.
         
@@ -415,6 +440,7 @@ class JobQueueService:
             job_id: The job ID to complete.
             success: True to mark as completed, False to mark as failed.
             error: Error message if success=False.
+            result_summary: Optional summary text for completed jobs.
             
         Returns:
             Updated JobItem if completed successfully, None if
@@ -431,12 +457,52 @@ class JobQueueService:
         # Mark job based on success/failure
         try:
             if success:
-                return await asyncio.to_thread(self._repository.complete_job, job_id, result_summary="Job queued successfully")
+                summary = result_summary or "Job queued successfully"
+                return await asyncio.to_thread(self._repository.complete_job, job_id, result_summary=summary)
             else:
                 return await asyncio.to_thread(self._repository.fail_job, job_id, error_message=error or "Unknown error")
         except ValueError:
             # Job state changed (already completed/cancelled)
             return None
+    
+    def complete_job_sync(
+        self,
+        job_id: str,
+        success: bool,
+        error: Optional[str] = None,
+        result_summary: Optional[str] = None,
+    ) -> Optional[JobItem]:
+        """Mark job as completed or failed and release lock (synchronous version).
+        
+        This is the synchronous counterpart to complete_job(), used when
+        async context is not available (e.g., from terminate_instance).
+        
+        Args:
+            job_id: The job ID to complete.
+            success: True to mark as completed, False to mark as failed.
+            error: Error message if success=False.
+            result_summary: Optional summary of the job result (for success=True).
+            
+        Returns:
+            Updated JobItem if completed successfully, None if
+            job not found or not in a processable state.
+            
+        Raises:
+            ValueError: If job is already completed or cancelled.
+        """
+        job = self._repository.get(job_id)
+        if job is None:
+            return None
+        
+        # Release the lock first
+        if job.project_id:
+            self._lock_manager.release_sync(job.project_id, job_id)
+        
+        # Mark job based on success/failure
+        if success:
+            return self._repository.complete_job(job_id, result_summary=result_summary)
+        else:
+            return self._repository.fail_job(job_id, error_message=error or "Unknown error")
     
     async def trigger_next_job(self, project_id: str) -> Optional[JobItem]:
         """Trigger the next pending job for a project.

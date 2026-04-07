@@ -143,10 +143,6 @@ class JobProcessor:
                 result_summary="Job enqueued for processing"
             )
             logger.info(f"Job {job.job_id} queued successfully for instance {instance_id}")
-            
-            # Trigger next job for this project (if any)
-            if job.project_id:
-                await self._queue_service.trigger_next_job(job.project_id)
                 
         except Exception as e:
             logger.exception(f"Failed to process job {job.job_id}: {e}")
