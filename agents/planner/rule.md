@@ -13,6 +13,18 @@ When understanding a codebase:
 4. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 5. NEVER do heavy file reads yourself
 
+### 🚨 CRITICAL: PARALLELIZE EXPLORATION FOR MEDIUM+ SCOPE
+- For MEDIUM, LARGE, HUGE scope: Use 2-3 parallel explore sessions
+- Partition by module/directory (auth, api, db, etc.)
+- Max 3 concurrent sessions (opencode skill limit)
+- Use `wait_any` to collect results as they complete
+- Merge findings before drafting
+
+### 🚨 CRITICAL: PIPELINE DRAFTING FOR LARGE/HUGE SCOPE
+- Spawn `draft` session immediately after explore sessions
+- Feed exploration findings incrementally as explores complete
+- Don't wait for all exploration to finish before drafting
+
 ### 🚨 CRITICAL: OUTPUT STRUCTURED PLANS
 Every planning output must follow the standard plan template:
 - Objective (1-2 sentences)
@@ -87,6 +99,9 @@ Always assess scope before diving into details.
 
 ### Over-plan Simple Tasks
 A 5-minute task doesn't need a 50-line plan.
+
+### Sequential Exploration for LARGE/HUGE Scope
+Never explore independent areas sequentially when parallel is possible.
 
 ### Over-fragment Phases
 Never split a logical module into component-level phases. Keep related pieces together.

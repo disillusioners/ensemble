@@ -12,15 +12,12 @@
 
 ## Instance Naming Convention
 
-Use simple, consistent instance names:
-
-| Instance Name | Purpose | Example |
-|--------------|---------|---------|
-| `explore` | Understand codebase structure | Explore auth module |
-| `draft` | Draft and refine plan content | Draft feature plan |
-| `track` | Monitor execution progress | Check task status |
-
-**Note**: Project is set during instance initialization, no need to include in instance name.
+| Instance | Purpose | Count | Example |
+|---------|---------|-------|---------|
+| `explore` | Single-area exploration (SMALL) | 1 | Explore auth module |
+| `explore-<area>` | Parallel exploration (MEDIUM+) | 1-3 | explore-auth, explore-api |
+| `draft` | Draft and refine plan content | 1 | Draft feature plan |
+| `track` | Monitor execution progress | 1 | Check task status |
 
 ---
 
@@ -86,13 +83,41 @@ Use simple, consistent instance names:
    | HUGE | Multi-project, week+ | Multi-phase roadmap |
 
 3. **Explore Codebase** (via opencode)
-   - Initialize opencode session: `opencode_skill init-session <project> plan-explore <working_dir>`
-   - Explore relevant code areas
-   - Identify existing patterns and constraints
+   - For SMALL scope: Initialize single `explore` session
+   - For MEDIUM+ scope: Initialize 2-3 parallel `explore-<area>` sessions (max 3)
+   - Partition by module/directory (e.g., auth, api, db)
+   - Use `wait_any` to collect results as they complete
+   - Merge findings before drafting
+
+### Exploration Strategy
+
+| Scope | Strategy |
+|-------|----------|
+| SMALL (1 area) | Single `explore` session |
+| MEDIUM+ (2-3 areas) | Parallel `explore-<area>` sessions |
+
+### Pipeline Drafting (LARGE/HUGE scope)
+1. Spawn explore sessions (parallel)
+2. Immediately spawn `draft` session with skeleton
+3. Feed findings to draft as each explore completes
+4. Finalize plan after all explores done
 
 ---
 
 ## Phase 2: Plan Creation
+
+### With Parallel Exploration
+1. Merge findings from all explore sessions
+2. Identify module boundaries and phase structure
+3. Create plan-overview.md skeleton
+4. Spawn `draft` session with complete findings
+
+### With Pipeline Drafting (LARGE/HUGE)
+1. Draft session started during exploration phase
+2. Incremental findings fed as explores complete
+3. Finalize all phase files after all explores done
+
+---
 
 ### 🚨 Phase Granularity & Multi-File Output (CRITICAL)
 
