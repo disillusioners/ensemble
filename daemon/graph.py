@@ -175,11 +175,26 @@ class SessionState(MessagesState):
 
 
 def should_continue(state: MessagesState) -> str:
-    """Determine if we should continue or end."""
+    """Determine if we should continue or end.
+    
+    Continues if:
+    - LLM returned tool_calls (normal flow)
+    - LLM text ends with ':' (promised action but no tool_call emitted - "ghost promise" detection)
+    """
     messages = state["messages"]
     last_message = messages[-1]
+    
+    # Normal case: LLM made tool calls
     if getattr(last_message, 'tool_calls', None):
         return "tools"
+    
+    # Ghost promise detection: LLM promised action but didn't emit tool_call
+    # Common pattern: "Now let me write the document:" (ends with ':')
+    content = getattr(last_message, 'content', '') or ''
+    if isinstance(content, str) and content.rstrip().endswith(':'):
+        logger.warning(f"[Graph] Ghost promise detected, LLM text ends with ':': {content[:100]}...")
+        return "tools"
+    
     return END
 
 
