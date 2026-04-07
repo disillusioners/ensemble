@@ -107,10 +107,12 @@ class TestComposeSystemPrompt:
         assert "\n\n---\n\n" in result
 
     def test_compose_system_prompt_empty_dict(self, tmp_path):
-        """Test compose_system_prompt with empty dict."""
+        """Test compose_system_prompt with empty dict returns DONE_INSTRUCTION."""
         prompts = {}
         result = compose_system_prompt(prompts)
-        assert result == ""
+        # DONE_INSTRUCTION is always appended
+        assert "Task Completion" in result
+        assert "done()" in result
 
 
 class TestEstimateTokens:

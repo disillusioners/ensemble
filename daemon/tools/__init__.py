@@ -9,6 +9,7 @@ from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
 from .access_memory import create_access_memory_tool
+from .done import done
 
 __all__ = [
     "bash",
@@ -25,4 +26,5 @@ __all__ = [
     "create_project_tools",
     "create_help_tool",
     "create_access_memory_tool",
+    "done",
 ]

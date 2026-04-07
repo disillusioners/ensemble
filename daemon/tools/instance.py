@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, model_validator
 from .bash import bash
 from .filesystem import list_directory, read_file, glob_files, write_file, grep_files, edit_file
 from .time import time
+from .done import done
 from .inner_soul import create_inner_soul_tool
 from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
@@ -183,6 +184,7 @@ Returns:
         grep_files,
         edit_file,
         time,
+        done,
         # Instance management tools
         spawn_instance,
         send_message,

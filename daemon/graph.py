@@ -183,6 +183,17 @@ def should_continue(state: MessagesState) -> str:
     return END
 
 
+def should_end(state: MessagesState) -> str:
+    """Check if done() was called in the last assistant message."""
+    messages = state["messages"]
+    for msg in reversed(messages):
+        if hasattr(msg, 'tool_calls') and msg.tool_calls:
+            if any(tc.get("name") == "done" for tc in msg.tool_calls):
+                return END
+            break  # found tool calls but no done()
+    return "agent"
+
+
 def create_agent_node(
     llm_with_tools,
     system_prompt: str,
@@ -333,7 +344,7 @@ def build_instance_graph(
     # Add edges
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
-    graph.add_edge("tools", "agent")
+    graph.add_conditional_edges("tools", should_end, {"agent": "agent", END: END})
     
     compiled = graph.compile(checkpointer=checkpointer)
     

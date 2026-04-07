@@ -8,6 +8,12 @@ from typing import Any
 COMMON_TOOLS_FILE = Path(__file__).parent.parent / "agents" / "tools_common.md"
 PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
 
+DONE_INSTRUCTION = """
+## Task Completion
+
+When your task is complete, call `done()` in the SAME response turn as your final output. Do not send a text-only message to indicate completion.
+""".strip()
+
 
 def load_common_tools() -> str:
     """Load common tools documentation shared by all agents.
@@ -187,6 +193,8 @@ def compose_system_prompt(
     # 8. Add project experience section (shared .agents directory usage)
     if project_experience.strip():
         sections.append(f"## Project Experience\n\n{project_experience.strip()}")
+    
+    sections.append(DONE_INSTRUCTION)
     
     return "\n\n---\n\n".join(sections)
 
