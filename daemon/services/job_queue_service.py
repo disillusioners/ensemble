@@ -457,7 +457,7 @@ class JobQueueService:
         # Mark job based on success/failure
         try:
             if success:
-                summary = result_summary or "Job queued successfully"
+                summary = result_summary or "Job completed successfully"
                 return await asyncio.to_thread(self._repository.complete_job, job_id, result_summary=summary)
             else:
                 return await asyncio.to_thread(self._repository.fail_job, job_id, error_message=error or "Unknown error")
@@ -499,10 +499,14 @@ class JobQueueService:
             self._lock_manager.release_sync(job.project_id, job_id)
         
         # Mark job based on success/failure
-        if success:
-            return self._repository.complete_job(job_id, result_summary=result_summary)
-        else:
-            return self._repository.fail_job(job_id, error_message=error or "Unknown error")
+        try:
+            if success:
+                return self._repository.complete_job(job_id, result_summary=result_summary)
+            else:
+                return self._repository.fail_job(job_id, error_message=error or "Unknown error")
+        except ValueError:
+            # Job state changed (already completed/cancelled)
+            return None
     
     async def trigger_next_job(self, project_id: str) -> Optional[JobItem]:
         """Trigger the next pending job for a project.
@@ -521,6 +525,59 @@ class JobQueueService:
             return None
         
         return await self.start_job(next_job.job_id)
+    
+    def trigger_next_job_sync(self, project_id: str) -> Optional[JobItem]:
+        """Trigger the next pending job for a project (synchronous version).
+        
+        Called after a job completes to process any waiting jobs
+        for the same project.
+        
+        Args:
+            project_id: The project to trigger next job for.
+            
+        Returns:
+            The next JobItem started, or None if no pending jobs.
+        """
+        # Get next pending job for project
+        pending = self._repository.list_pending_by_project(project_id)
+        next_job = pending[0] if pending else None
+        if next_job is None:
+            return None
+        
+        # Get the job
+        job = self._repository.get(next_job.job_id)
+        if job is None:
+            return None
+        
+        # Check if job is still pending
+        if job.status != JobStatus.PENDING.value:
+            return None
+        
+        # Generate new instance ID for this job
+        instance_id = str(uuid.uuid4())
+        
+        # If no project_id, start immediately without locking
+        if job.project_id is None:
+            try:
+                return self._repository.start_job(next_job.job_id, instance_id)
+            except ValueError:
+                return None
+        
+        # Try to acquire lock
+        acquired = self._lock_manager.acquire_sync(
+            project_id=job.project_id,
+            job_id=next_job.job_id,
+            instance_id=instance_id,
+        )
+        
+        if not acquired:
+            return None
+        
+        try:
+            return self._repository.start_job(next_job.job_id, instance_id)
+        except ValueError:
+            self._lock_manager.release_sync(job.project_id, next_job.job_id)
+            return None
     
     async def release_lock_by_instance(self, instance_id: str) -> list[str]:
         """Release any locks held by an instance.

@@ -1083,7 +1083,12 @@ class InstanceManager:
                         message_id=msg.message_id,
                         data={"reason": e.reason.value}
                     ))
-                    
+                    await self._complete_job_for_instance(
+                        instance_id=instance_id,
+                        success=False,
+                        error=f"Cancelled: {e.reason.value}",
+                    )
+
                 except asyncio.CancelledError:
                     logger.info(f"Message {msg.message_id[:8]}... task was cancelled")
                     raise  # Re-raise to properly handle task cancellation
@@ -2139,6 +2144,9 @@ Title:"""
                         job.job_id, success=False, error="Instance terminated",
                         result_summary=None,
                     )
+                    # Trigger next pending job for this project
+                    if job.project_id:
+                        self._job_queue_service.trigger_next_job_sync(job.project_id)
             except Exception as e:
                 logger.warning(f"Failed to mark job as failed on terminate: {e}")
 
