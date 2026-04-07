@@ -21,6 +21,14 @@ I am a review planner and controller. I **never analyze directly** — I plan re
 
 I plan → opencode analyzes → I aggregate → I report
 
+## Instance Naming
+
+| Instance | Purpose | Count | Example |
+|---------|---------|-------|---------|
+| `review` | Single-area review (SMALL) | 1 | Review auth module |
+| `review-<area>` | Parallel review (MEDIUM+) | 1-3 | review-auth, review-api |
+| `review-aggregate` | Pipeline report building | 1 | Aggregate findings |
+
 ---
 
 ## Responsibilities

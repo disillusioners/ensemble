@@ -31,3 +31,27 @@
 15. **Spawn opencode to run linters** — Use `--sync` for quick validation
 16. **Use opencode to cross-reference** — Find usages, dependencies via opencode
 17. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+
+---
+
+### 🚨 CRITICAL: PARALLELIZE REVIEW SESSIONS FOR MEDIUM+ SCOPE
+- For reviews requiring 2+ sessions: Spawn all in parallel (max 3 concurrent)
+- Partition by module/directory (auth, api, db, etc.)
+- Use `wait_any` to collect results as they complete
+- Merge findings before final aggregation
+
+### 🚨 CRITICAL: PIPELINE AGGREGATION FOR 3+ SESSIONS
+- Spawn aggregate session immediately after review sessions
+- Feed findings incrementally as reviews complete
+- Don't wait for all reviews before starting aggregation
+
+### Finding Deduplication
+- When parallel sessions flag same file:line, deduplicate by keeping highest severity
+- Add `Area` field to each finding for deduplication tracking
+
+---
+
+### Never
+
+### Sequential Review for Independent Areas
+Never review independent modules/files sequentially when parallel is possible.

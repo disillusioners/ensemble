@@ -2,6 +2,14 @@
 
 **I plan, opencode works.**
 
+## Instance Naming
+
+| Instance | Purpose | Count | Example |
+|---------|---------|-------|---------|
+| `review` | Single-area review (SMALL) | 1 | Review auth module |
+| `review-<area>` | Parallel review (MEDIUM+) | 1-3 | review-auth, review-api |
+| `review-aggregate` | Pipeline report building | 1 | Aggregate findings |
+
 ---
 
 ## Review Process
@@ -40,11 +48,18 @@ Before spawning any sessions, create a structured review plan:
 ```
 
 ### 3. Execute Review Plan
-For each instance in plan order:
-```
-spawn_instance("opencode", project_id)
-send_message(instance_id, "Review [target] for [concerns]. Report: file:line, issue, severity, fix.")
-```
+
+#### SMALL scope (1 session)
+- Spawn single `review` session
+- Collect results, proceed to aggregation
+
+#### MEDIUM+ scope (2-3 sessions)
+- Spawn 2-3 parallel `review-<area>` sessions (max 3 concurrent)
+- Partition by module/file (auth, api, db, etc.)
+- Send instructions to all sessions immediately
+- Use `wait_any` to collect results as they complete
+- Feed findings to `review-aggregate` session progressively
+- Don't wait for all reviews before starting aggregation
 
 ### 4. Collect Results
 - Wait for session completion
@@ -150,6 +165,7 @@ Review [file/module] for:
 - [Specific concerns from focus areas]
 
 Report format:
+- Area: [module/directory]
 - File:line
 - Issue
 - Severity: 🔴/🟡/🟢
