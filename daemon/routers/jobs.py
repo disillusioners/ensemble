@@ -73,14 +73,17 @@ def _job_to_response(
         agent_id=job.agent_id,
         agent_dir=job.agent_dir,
         project_id=job.project_id,
-            instance_id=job.instance_id,
+        instance_id=job.instance_id,
         created_at=job.created_at,
         started_at=job.started_at,
         completed_at=job.completed_at,
         result_summary=job.result_summary,
         error_message=job.error_message,
+        source=job.source,
+        job_metadata=job.job_metadata,
+        cancelled_at=job.cancelled_at,
         position=position,
-        message=message,
+        message=message or job.message,
     )
 
 
@@ -150,18 +153,7 @@ async def create_job(
     # Determine response based on job status
     if job.status == JobStatus.PROCESSING.value:
         # Job started immediately - return 200
-        return JobResponse(
-            job_id=job.job_id,
-            status=job.status,
-            priority=job.priority,
-            agent_id=job.agent_id,
-            agent_dir=job.agent_dir,
-            project_id=job.project_id,
-        instance_id=job.instance_id,
-            created_at=job.created_at,
-            started_at=job.started_at,
-            message="Job started immediately",
-        )
+        return _job_to_response(job, message="Job started immediately")
     else:
         # Job is pending (queued) - return 202
         position = None
@@ -171,17 +163,7 @@ async def create_job(
             except Exception:
                 pass  # Best effort - position is optional
         
-        response = JobResponse(
-            job_id=job.job_id,
-            status=job.status,
-            priority=job.priority,
-            agent_id=job.agent_id,
-            agent_dir=job.agent_dir,
-            project_id=job.project_id,
-            created_at=job.created_at,
-            position=position,
-            message="Job queued, waiting for project lock",
-        )
+        response = _job_to_response(job, position=position, message="Job queued, waiting for project lock")
         return JSONResponse(
             status_code=202,
             content=response.model_dump()

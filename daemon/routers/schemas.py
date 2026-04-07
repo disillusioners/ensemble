@@ -57,6 +57,9 @@ class JobResponse(BaseModel):
     error_message: Optional[str] = Field(default=None, description="Error message if job failed")
     position: Optional[int] = Field(default=None, description="Queue position if job is pending")
     message: Optional[str] = Field(default=None, description="Status message")
+    source: Optional[str] = Field(default=None, description="Source of the job (api, telegram, scheduler)")
+    job_metadata: Optional[dict[str, Any]] = Field(default=None, description="Job metadata dictionary")
+    cancelled_at: Optional[str] = Field(default=None, description="Timestamp when job was cancelled")
     
     model_config = {
         "json_schema_extra": {
