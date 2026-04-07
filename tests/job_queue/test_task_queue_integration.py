@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import JobRepository
@@ -21,18 +21,23 @@ from daemon.services.job_queue_service import JobQueueService
 
 
 @pytest.fixture
-def integration_engine():
-    """Create in-memory SQLite engine for integration tests.
+def integration_engine(tmp_path):
+    """Create SQLite engine for integration tests.
     
-    Uses StaticPool to reuse the same connection across threads.
-    Required because asyncio.to_thread() runs workers in different threads,
-    and SQLite in-memory databases are per-thread by default.
+    Uses QueuePool with size=1 to serialize all database connections.
+    This is required because asyncio.to_thread() runs workers in different
+    threads, and SQLite connections must be properly synchronized.
     """
+    db_file = tmp_path / "test_integration.db"
+    
     engine = create_engine(
-        "sqlite:///:memory:",
+        f"sqlite:///{db_file}",
         connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
     )
+    
     SQLModel.metadata.create_all(engine)
     yield engine
     engine.dispose()
