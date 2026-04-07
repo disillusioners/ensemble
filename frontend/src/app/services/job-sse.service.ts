@@ -18,7 +18,6 @@ export class JobSseService {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private currentJobId: string | null = null;
   private eventSubject = new Subject<JobEvent>();
-  private currentObserver: Observer<JobEvent> | null = null;
   private errorDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastErrorShown: string | null = null;
 
@@ -248,13 +247,4 @@ export class JobSseService {
     this.latestError.set(null);
     this.lastErrorShown = null;
   }
-}
-
-/**
- * Minimal Observer interface for RxJS Subject
- */
-interface Observer<T> {
-  next: (value: T) => void;
-  error: (err: any) => void;
-  complete: () => void;
 }
