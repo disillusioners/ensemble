@@ -212,7 +212,7 @@ opencode_skill wait_any myapp task-2 task-3 task-4
 
 ## Error Handling
 
-**"The operation timed out"**: Run `/resume` once. If it times out again, split into smaller tasks.
+**"The operation timed out" (timeout errors type)**: Run `/resume` one or two times. If it times out repeatedly, this means the task is too large and should be split into smaller tasks.
 
 ```bash
 # Resume a timed-out session
