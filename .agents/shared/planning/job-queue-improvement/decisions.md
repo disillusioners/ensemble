@@ -2,7 +2,7 @@
 
 ## Decision 1: Completion Callback Approach (Callback vs Polling vs Event-Based)
 
-**Decision**: Callback pattern — add a helper method to InstanceManager that calls JobQueueService directly.
+**Decision**: Callback pattern — add a helper method to InstanceManager that calls JobQueueService directly via public methods.
 
 **Alternatives Considered**:
 
@@ -15,27 +15,26 @@
 
 **Rationale**: The `_job_queue_service` is already injected into InstanceManager (via `set_job_queue_service()`). Adding a direct callback method is the simplest, most maintainable approach. The coupling is already there (lock release on terminate), we're just extending it.
 
+**Important**: The helper must use public methods only (`get_job_by_instance()`), not access private fields (`_repository`). This maintains proper encapsulation boundaries.
+
 ---
 
 ## Decision 2: Sync vs Async in `terminate_instance()`
 
-**Decision**: Add a `complete_job_sync()` method to JobQueueService that wraps the async operations using the event loop.
+**Decision**: Use sync `get_job_by_instance_sync()` for lookup + `asyncio.run_coroutine_threadsafe()` to schedule the async completion.
 
-**Context**: `terminate_instance()` is a synchronous method. The `release_locks_by_instance_sync()` already exists as a sync wrapper. We need the same pattern for job completion.
+**Context**: `terminate_instance()` is a synchronous method. The `release_locks_by_instance_sync()` already exists as a sync wrapper pattern. We follow the same pattern.
 
 **Implementation**:
 ```python
-def complete_job_sync(self, job_id: str, success: bool, error: str | None = None) -> Optional[JobItem]:
-    """Sync wrapper for complete_job() — used by sync callers like terminate_instance()."""
-    try:
-        loop = asyncio.get_running_loop()
-        return asyncio.run_coroutine_threadsafe(
-            self.complete_job(job_id, success, error), loop
-        ).result(timeout=5.0)
-    except RuntimeError:
-        # No running loop — should not happen in daemon context
-        logger.warning(f"Cannot complete job {job_id} synchronously: no event loop")
-        return None
+# In terminate_instance()
+job = self._job_queue_service.get_job_by_instance_sync(instance_id)
+if job and job.status == "processing":
+    loop = self.broadcaster._main_loop
+    asyncio.run_coroutine_threadsafe(
+        self._complete_job_for_instance(instance_id, success=False, error="Instance terminated"),
+        loop,
+    )
 ```
 
 **Alternative**: Make `terminate_instance()` async. **Rejected** — too many callers to update (API router, tools, registry).
@@ -55,6 +54,8 @@ def complete_job_sync(self, job_id: str, success: bool, error: str | None = None
 
 **Rationale**: The last assistant message is already available in the `_process_queue()` flow (the `result.content` variable). Truncating to 500 chars prevents unbounded storage. An LLM summary can be added later as an enhancement.
 
+**Implementation**: Add `result_summary` parameter to `complete_job()` instead of the hardcoded `"Job queued successfully"`. The helper passes `result.content[:500]` directly.
+
 ---
 
 ## Decision 4: Schema Extension Strategy
@@ -71,7 +72,15 @@ def complete_job_sync(self, job_id: str, success: bool, error: str | None = None
 
 ---
 
-## Decision 5: Frontend Test Framework
+## Decision 5: Inline `JobResponse` → Shared Helper
+
+**Decision**: Replace inline `JobResponse` constructions in `create_job()` with calls to `_job_to_response()`.
+
+**Rationale**: The inline constructions were missing multiple fields (not just the 3 new ones — also `result_summary`, `error_message`, `completed_at` on some paths). Using the shared helper ensures all endpoints return complete, consistent data. Future field additions only need to update `_job_to_response()` in one place.
+
+---
+
+## Decision 6: Frontend Test Framework
 
 **Decision**: Jest (via `jest-preset-angular`)
 
@@ -84,9 +93,11 @@ def complete_job_sync(self, job_id: str, success: bool, error: str | None = None
 
 **Rationale**: Angular 17+ recommends Jest. It's faster and simpler. The project should adopt it regardless of this feature.
 
+**Note**: Check `package.json` for existing Karma scripts that may conflict. Update `"test"` script from `"ng test"` to `"jest"` if needed.
+
 ---
 
-## Decision 6: Phase Execution Order
+## Decision 7: Phase Execution Order
 
 **Decision**: Phases 1 and 2 in parallel, then 3, 4, 5 can overlap.
 
@@ -106,3 +117,17 @@ Or sequential:
 ```
 Phase 1 + Phase 2 (parallel) → Phase 3 → Phase 4 → Phase 5
 ```
+
+---
+
+## Known Patterns (Not Changed, Documented)
+
+### Lock Release: `release_sync()` vs `release()` inconsistency
+`JobQueueService` uses two different lock release methods:
+- `_complete_job()` and `_fail_job()` use `self._lock_manager.release_sync()` (sync, called within `asyncio.to_thread` context)
+- `complete_job()` uses `await self._lock_manager.release()` (async)
+
+Both work correctly in their respective contexts. This inconsistency existed before this change and is not introduced by it. Unifying these is a future cleanup task, not in scope.
+
+### Orphaned PROCESSING Jobs
+If the daemon crashes while a job is PROCESSING, the job stays in PROCESSING status in the database forever. The in-memory lock is lost (asyncio.Lock doesn't persist), so the next daemon start won't have the lock — but the job status won't be cleaned up either. This is a pre-existing limitation. A future enhancement could add startup recovery logic that resets orphaned PROCESSING jobs to PENDING.

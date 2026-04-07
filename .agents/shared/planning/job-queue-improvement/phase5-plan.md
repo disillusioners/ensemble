@@ -24,11 +24,13 @@ Angular 17+ defaults to Jest. Given the project's modern Angular setup, **Jest**
 - No browser needed
 - Simpler configuration
 
+**Note on package.json scripts**: If `package.json` has existing Karma scripts (e.g., `"test": "ng test"`), they should be updated to use Jest (e.g., `"test": "jest"`). Check for conflicts before setting up.
+
 ## Tasks
 
 | # | Task | Details | Key Files |
 |---|------|---------|-----------|
-| 1 | Set up Jest test runner | Install jest, configure `jest.config.js`, update `angular.json` | `frontend/` root |
+| 1 | Set up Jest test runner | Install jest, configure `jest.config.js`, update `angular.json`, update `package.json` scripts if needed | `frontend/` root |
 | 2 | Create test utilities | Mock HTTP backend, SSE mock, test data factories | `frontend/src/testing/` (new) |
 | 3 | Test `job.service.ts` | HTTP methods: create, get, list, cancel, retry | `frontend/src/app/services/job.service.spec.ts` (new) |
 | 4 | Test `job-sse.service.ts` | SSE connection, reconnection, event parsing | `frontend/src/app/services/job-sse.service.spec.ts` (new) |
@@ -41,7 +43,7 @@ Angular 17+ defaults to Jest. Given the project's modern Angular setup, **Jest**
 **Install**:
 ```bash
 cd frontend
-npm install --save-dev jest @types/jest jest-environment-jsdom ts-jest
+npm install --save-dev jest @types/jest jest-environment-jsdom ts-jest jest-preset-angular
 ```
 
 **Configuration** (`frontend/jest.config.js`):
@@ -64,7 +66,20 @@ module.exports = {
 import 'jest-preset-angular/setup-jest';
 ```
 
-**Update `angular.json`**: Change `skipTests` default to `false` for future schematics (optional).
+**Update `package.json` scripts** (check and update if needed):
+```json
+{
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  }
+}
+```
+
+**Note**: If `package.json` has existing `"test": "ng test"` (Karma), replace it with the Jest command. Remove Karma dependencies if present to avoid conflicts.
+
+**Update `angular.json`** (optional): Change `skipTests` default to `false` for future schematics.
 
 ### Task 2: Test Utilities
 
@@ -105,6 +120,45 @@ export function createMockJobList(count: number): Job[] {
 }
 ```
 
+**SSE Mock** (`frontend/src/testing/mock-event-source.ts`):
+```typescript
+export class MockEventSource {
+  url: string;
+  onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: ((e: Event) => void) | null = null;
+  onopen: ((e: Event) => void) | null = null;
+  private listeners: Map<string, Function[]> = new Map();
+  
+  constructor(url: string) { this.url = url; }
+  
+  addEventListener(type: string, handler: Function) {
+    if (!this.listeners.has(type)) this.listeners.set(type, []);
+    this.listeners.get(type)!.push(handler);
+  }
+  
+  removeEventListener(type: string, handler: Function) {
+    const list = this.listeners.get(type);
+    if (list) {
+      const idx = list.indexOf(handler);
+      if (idx >= 0) list.splice(idx, 1);
+    }
+  }
+  
+  close() { this.listeners.clear(); }
+  
+  // Test helpers
+  emit(type: string, data: any) {
+    const event = { data: JSON.stringify(data) } as MessageEvent;
+    (this.listeners.get(type) || []).forEach(h => h(event));
+    if (this.onmessage && type === 'message') this.onmessage(event);
+  }
+  
+  simulateError() {
+    if (this.onerror) this.onerror(new Event('error'));
+  }
+}
+```
+
 ### Task 3: `job.service.ts` Tests
 
 **File**: `frontend/src/app/services/job.service.spec.ts` (new)
@@ -122,6 +176,7 @@ describe('JobService', () => {
     it('should POST to /api/jobs with correct payload');
     it('should return 200 for immediate processing');
     it('should return 202 for queued jobs');
+    it('should include metadata in request when provided');
   });
 
   describe('getJob', () => {
@@ -133,6 +188,7 @@ describe('JobService', () => {
     it('should GET /api/jobs with query params');
     it('should support status filter');
     it('should support project_id filter');
+    it('should support limit parameter');
   });
 
   describe('cancelJob', () => {
@@ -168,19 +224,13 @@ describe('JobSseService', () => {
 });
 ```
 
-**Note**: Testing SSE requires mocking `EventSource`. Use a library like `mock-event-source` or create a simple mock:
+**Note**: Testing SSE requires mocking `EventSource`. Use the `MockEventSource` from test utilities. You may need to patch `globalThis.EventSource` in the test setup:
 
 ```typescript
-class MockEventSource {
-  url: string;
-  onmessage: ((e: MessageEvent) => void) | null = null;
-  onerror: ((e: Event) => void) | null = null;
-  onopen: ((e: Event) => void) | null = null;
-  
-  constructor(url: string) { this.url = url; }
-  close() {}
-  addEventListener(type: string, handler: (e: MessageEvent) => void) {}
-}
+beforeEach(() => {
+  // Replace global EventSource with mock
+  spyOn(globalThis, 'EventSource').and.returnValue(new MockEventSource(''));
+});
 ```
 
 ### Task 5: `jobs.component.ts` Tests
@@ -217,7 +267,8 @@ describe('JobsComponent', () => {
 ## Key Files
 - `frontend/jest.config.js` — New: Jest configuration
 - `frontend/setup-jest.ts` — New: Jest setup
-- `frontend/src/testing/job-test-helpers.ts` — New: Test utilities
+- `frontend/src/testing/job-test-helpers.ts` — New: Test data factories
+- `frontend/src/testing/mock-event-source.ts` — New: SSE mock
 - `frontend/src/app/services/job.service.spec.ts` — New: Service tests
 - `frontend/src/app/services/job-sse.service.spec.ts` — New: SSE service tests
 - `frontend/src/app/pages/jobs/jobs.component.spec.ts` — New: Component tests
@@ -228,10 +279,13 @@ describe('JobsComponent', () => {
 - Component tests require Angular TestBed setup
 - No real HTTP calls — all via HttpClientTestingModule
 - Tests should run in < 10 seconds total
+- Check and update `package.json` test scripts to avoid Karma/Jest conflicts
+- Use function/method names as primary references (line numbers are approximate)
 
 ## Deliverables
 - [ ] Jest configured and running (`npm test` works)
-- [ ] Test helpers for creating mock jobs
+- [ ] `package.json` scripts updated for Jest (no Karma conflicts)
+- [ ] Test helpers for creating mock jobs and SSE mock
 - [ ] `job.service.ts` tests: all HTTP methods
 - [ ] `job-sse.service.ts` tests: connection, events, reconnection
 - [ ] `jobs.component.ts` tests: initialization, filters, actions

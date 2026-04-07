@@ -7,8 +7,8 @@ Wire the instance completion lifecycle into the job queue so that jobs transitio
 - **Depends on**: None
 - **Coupling type**: independent
 - **Shared files with other phases**: None
-- **Shared APIs/interfaces**: `JobQueueService.complete_job()` — existing method, no signature changes needed
-- **Why this coupling**: This phase adds calls to an existing API. No interface changes.
+- **Shared APIs/interfaces**: `JobQueueService.complete_job()` — existing method, signature extended with `result_summary` param
+- **Why this coupling**: This phase calls existing public APIs on JobQueueService and adds one new public method. No interface changes affect other phases.
 
 ## Context
 
@@ -23,40 +23,94 @@ When a job is submitted and processed:
 6. **Result**: Jobs stay in PROCESSING state forever
 
 ### The Existing Infrastructure (Good News)
-- `self._job_queue_service` is already wired into `InstanceManager` (line 472, set via `set_job_queue_service()`)
-- `JobQueueService.complete_job(job_id, success, error)` already exists and works (lines 406-439)
-- It releases locks, updates status, and returns the updated job
-- `JobRepository.get_by_instance(instance_id)` already exists (line 89-101) — finds job by instance_id
-- `JobQueueService.trigger_next_job(project_id)` already exists (line 441) — dequeues next pending job
+- `self._job_queue_service` is already wired into `InstanceManager` (set via `set_job_queue_service()`)
+- `JobQueueService.complete_job(job_id, success, error)` already exists and works — handles lock release + status update
+- `JobRepository.get_by_instance(instance_id)` already exists — finds job by instance_id
+- `JobQueueService.trigger_next_job(project_id)` already exists — dequeues next pending job
 - The only missing piece is **calling these methods from the right places**
 
-### Lock Not Released on Failure (Additional Bug)
-In `_fail_job()` (job_queue_service.py:286-298), the job is marked FAILED but the lock is NOT released. Compare with `_complete_job()` which releases the lock. This means failed jobs block the project queue.
+### What Already Works Correctly
+- **`_fail_job()` DOES release locks** — confirmed at `job_queue_service.py` `_fail_job()` method: `self._lock_manager.release_sync(job.project_id, job.job_id)` is called before marking failed
+- **`_complete_job()` DOES release locks** — same pattern, confirmed working
+- **`complete_job()` DOES release locks** — via `self._lock_manager.release()` at line 429
+
+### Issue with Premature `trigger_next_job()`
+In `job_processor.py` `_process_next_job()`, `trigger_next_job()` is called immediately after enqueuing the message — BEFORE the current job completes. For same-project jobs, this silently fails because the lock is already held. This call should be removed; triggering the next job should happen only from the completion callback (Phase 1 Task 5).
 
 ## Tasks
 
 | # | Task | Details | Key Files |
 |---|------|---------|-----------|
-| 1 | Add job completion on successful message processing | After the message is processed successfully in `_process_queue()`, look up any job associated with the instance and call `complete_job(success=True)` | `daemon/manager.py:~1025` |
-| 2 | Add job failure on max retries exceeded | When max retries are exceeded in `_process_queue()`, look up job and call `complete_job(success=False, error=...)` | `daemon/manager.py:~1065` |
-| 3 | Add job failure on instance termination | In `terminate_instance()`, after releasing locks, also mark the associated job as FAILED | `daemon/manager.py:~2150` |
-| 4 | Fix lock release on job failure | In `JobQueueService._fail_job()`, release the lock before marking failed (matching `_complete_job()` pattern) | `daemon/services/job_queue_service.py:286-298` |
-| 5 | Trigger next job after completion | After `complete_job()` in manager.py, call `trigger_next_job(project_id)` to dequeue the next pending job for that project | `daemon/manager.py:~1025, ~1065` |
-| 6 | Add result_summary from instance output | When completing a job successfully, capture the last assistant message as `result_summary` instead of the generic "Job queued successfully" | `daemon/manager.py`, `daemon/services/job_queue_service.py` |
+| 1 | Add public `get_job_by_instance()` to `JobQueueService` | New public method wrapping `_repository.get_by_instance()` — avoids private field access from manager | `daemon/services/job_queue_service.py` |
+| 2 | Add `result_summary` parameter to `complete_job()` | Extend `complete_job()` signature to accept optional `result_summary` instead of hardcoding `"Job queued successfully"` | `daemon/services/job_queue_service.py` `complete_job()` |
+| 3 | Add `_complete_job_for_instance()` helper to InstanceManager | New method that uses public `get_job_by_instance()` to find and complete the job associated with an instance | `daemon/manager.py` |
+| 4 | Wire helper into `_process_queue()` — success and failure paths | Call helper after successful message processing AND after max retries exceeded | `daemon/manager.py` `_process_queue()` |
+| 5 | Wire helper into `terminate_instance()` | Mark associated job as FAILED when instance is terminated | `daemon/manager.py` `terminate_instance()` |
+| 6 | Remove premature `trigger_next_job()` from `job_processor.py` | Remove the no-op `trigger_next_job()` call that fires before job completes | `daemon/services/job_processor.py` `_process_next_job()` |
 
 ## Detailed Implementation
 
-### Task 1: Job Completion on Successful Processing
+### Task 1: Add `get_job_by_instance()` to JobQueueService
 
-**Location**: `daemon/manager.py` — `_process_queue()` method, around line 1025 (after successful message broadcast)
+**File**: `daemon/services/job_queue_service.py`
 
-**Approach**: Add a helper method `_complete_job_for_instance()` to InstanceManager that:
-1. Checks if `_job_queue_service` is available
-2. Calls `repository.get_by_instance(instance_id)` to find the job
-3. If found and in PROCESSING state, calls `complete_job(job_id, success=True, result_summary=...)`
-4. Calls `trigger_next_job(project_id)` if project_id exists
+**Add new public method**:
+```python
+async def get_job_by_instance(self, instance_id: str) -> Optional[JobItem]:
+    """Look up a job by its associated instance ID.
+    
+    Used by InstanceManager to find jobs when instances complete.
+    
+    Args:
+        instance_id: The instance ID to search for.
+        
+    Returns:
+        JobItem if found, None otherwise.
+    """
+    return await asyncio.to_thread(self._repository.get_by_instance, instance_id)
+```
 
-**New helper method** (add to InstanceManager):
+This provides a clean public API — no private `_repository` access from outside the service.
+
+### Task 2: Add `result_summary` Parameter to `complete_job()`
+
+**File**: `daemon/services/job_queue_service.py` — `complete_job()` method
+
+**Current signature**:
+```python
+async def complete_job(
+    self,
+    job_id: str,
+    success: bool = True,
+    error: Optional[str] = None,
+) -> Optional[JobItem]:
+```
+
+**Updated signature**:
+```python
+async def complete_job(
+    self,
+    job_id: str,
+    success: bool = True,
+    error: Optional[str] = None,
+    result_summary: Optional[str] = None,
+) -> Optional[JobItem]:
+```
+
+**Updated success path** (inside `complete_job()`):
+```python
+if success:
+    summary = result_summary or "Job completed successfully"
+    return await asyncio.to_thread(self._repository.complete_job, job_id, result_summary=summary)
+```
+
+This replaces the hardcoded `"Job queued successfully"` with a caller-provided summary or a sensible default.
+
+### Task 3: Add `_complete_job_for_instance()` Helper
+
+**File**: `daemon/manager.py`
+
+**New helper method** on InstanceManager:
 ```python
 async def _complete_job_for_instance(
     self,
@@ -67,60 +121,69 @@ async def _complete_job_for_instance(
 ) -> None:
     """Update job status when instance completes.
     
-    Looks up the job associated with this instance and marks it
-    as completed or failed based on success parameter.
+    Looks up the job associated with this instance using the public
+    get_job_by_instance() API and marks it as completed or failed.
     Also triggers the next pending job for the same project.
+    
+    Args:
+        instance_id: The instance that has completed.
+        success: True if instance completed successfully.
+        error: Error message if success=False.
+        result_summary: Optional summary of the result.
     """
     if self._job_queue_service is None:
         return
     
     try:
-        job = await asyncio.to_thread(
-            self._job_queue_service._repository.get_by_instance, instance_id
-        )
+        job = await self._job_queue_service.get_job_by_instance(instance_id)
         if job is None:
             return  # No job associated with this instance
         
-        if success:
-            summary = result_summary or "Job completed successfully"
-            await self._job_queue_service.complete_job(
-                job.job_id, success=True, error=None
-            )
-            # Update result_summary separately if provided
-            if result_summary:
-                await asyncio.to_thread(
-                    self._job_queue_service._repository.update,
-                    job.job_id,
-                    {"result_summary": result_summary}
-                )
-        else:
-            await self._job_queue_service.complete_job(
-                job.job_id, success=False, error=error or "Instance failed"
-            )
+        if job.status not in ("processing", "pending"):
+            return  # Already in terminal state — idempotent guard
+        
+        # Complete or fail the job (handles lock release internally)
+        updated = await self._job_queue_service.complete_job(
+            job.job_id,
+            success=success,
+            error=error,
+            result_summary=result_summary,
+        )
         
         # Trigger next pending job for this project
-        if job.project_id:
+        if updated and job.project_id:
             await self._job_queue_service.trigger_next_job(job.project_id)
             
     except Exception as e:
-        logger.warning(f"Failed to update job status for instance {instance_id}: {e}")
+        logger.warning(
+            f"Failed to update job status for instance {instance_id[:8]}...: {e}"
+        )
 ```
 
-**Integration point 1** — after successful message processing (after line ~1024):
+**Key design decisions**:
+- Uses **public** `get_job_by_instance()` — no private `_repository` access
+- Passes `result_summary` directly to `complete_job()` — no two-step workaround
+- Idempotent guard: checks job status before updating
+- Handles "no job" case silently (not all instances come from the job queue)
+- Triggers next job only on successful completion (not on failure, since `complete_job()` already handles lock release)
+
+### Task 4: Wire Helper into `_process_queue()` Success and Failure
+
+**File**: `daemon/manager.py` — `_process_queue()` method
+
+**Integration point A — after successful message processing** (in the block where the "completed" event is broadcast):
 ```python
 # After broadcasting the "completed" event for the message
 await self._complete_job_for_instance(
     instance_id=instance_id,
     success=True,
-    result_summary=result.content[:500] if result.content else None,  # Truncate
+    result_summary=result.content[:500] if result.content else None,
 )
 ```
 
-### Task 2: Job Failure on Max Retries
-
-**Integration point 2** — in the max retries exceeded block (after line ~1078):
+**Integration point B — after max retries exceeded** (in the except block where max retries are exceeded):
 ```python
-# After marking message as failed and broadcasting error
+# After marking message as failed and broadcasting error event
 await self._complete_job_for_instance(
     instance_id=instance_id,
     success=False,
@@ -128,79 +191,71 @@ await self._complete_job_for_instance(
 )
 ```
 
-### Task 3: Job Failure on Termination
+### Task 5: Wire Helper into `terminate_instance()`
 
-**Integration point 3** — in `terminate_instance()` (after line ~2152, after releasing locks):
+**File**: `daemon/manager.py` — `terminate_instance()` method
+
+`terminate_instance()` is synchronous. The helper is async. We need to schedule it properly.
+
+**Option A** (preferred — fire-and-forget):
 ```python
-# After releasing locks for the instance
-# Mark any associated job as failed
+# After releasing locks (existing code at terminate_instance)
 if self._job_queue_service is not None:
     try:
-        # Must be sync since terminate_instance is sync
-        job = self._job_queue_service._repository.get_by_instance(instance_id)
+        job = self._job_queue_service.get_job_by_instance_sync(instance_id)
         if job and job.status == "processing":
-            self._job_queue_service.complete_job_sync(
-                job.job_id, success=False, error="Instance terminated"
+            # Schedule async completion
+            loop = self.broadcaster._main_loop  # Already stored during set_main_loop()
+            asyncio.run_coroutine_threadsafe(
+                self._complete_job_for_instance(
+                    instance_id, success=False, error="Instance terminated"
+                ),
+                loop,
             )
     except Exception as e:
         logger.warning(f"Failed to mark job as failed on terminate: {e}")
 ```
 
-**Note**: `terminate_instance()` is a sync method. We need either:
-- A sync version of `complete_job()` (add `complete_job_sync()` to JobQueueService)
-- Or run the async call via `asyncio.run_coroutine_threadsafe()`
-
-### Task 4: Fix Lock Release on Failure
-
-**File**: `daemon/services/job_queue_service.py` — `_fail_job()` method (lines 286-298)
-
-**Current code** (broken):
+This requires also adding `get_job_by_instance_sync()` to JobQueueService — a thin sync wrapper:
 ```python
-async def _fail_job(self, job: JobItem, error_message: str) -> None:
-    """Mark a job as failed and release its lock."""
-    # Mark job as failed
-    await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
-    # NOTE: Lock is NOT released here — BUG!
+def get_job_by_instance_sync(self, instance_id: str) -> Optional[JobItem]:
+    """Sync version of get_job_by_instance()."""
+    return self._repository.get_by_instance(instance_id)
 ```
 
-**Fixed code**:
+### Task 6: Remove Premature `trigger_next_job()` from JobProcessor
+
+**File**: `daemon/services/job_processor.py` — `_process_next_job()` method
+
+**Remove these lines** (after the `update_job()` call):
 ```python
-async def _fail_job(self, job: JobItem, error_message: str) -> None:
-    """Mark a job as failed and release its lock."""
-    # Release the lock first (matching _complete_job pattern)
-    if job.project_id:
-        await self._lock_manager.release(job.project_id, job.job_id)
-    # Mark job as failed
-    await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
+            # Trigger next job for this project (if any)
+            if job.project_id:
+                await self._queue_service.trigger_next_job(job.project_id)
 ```
 
-### Task 5: Trigger Next Job
-
-Already covered in the helper method above. The `_complete_job_for_instance()` helper calls `trigger_next_job(project_id)` after completing the current job.
-
-### Task 6: Result Summary
-
-The `complete_job()` method currently uses a hardcoded `result_summary="Job queued successfully"`. This is misleading for completed jobs. 
-
-**Fix**: Pass the actual result content as `result_summary`. The helper method extracts the last assistant message content from the instance execution result.
+**Why remove it**: This call fires immediately after enqueuing a message — the job hasn't completed yet. For same-project jobs, `trigger_next_job()` will try to acquire the lock, fail silently (lock already held by the current job), and do nothing. The correct place to trigger the next job is in the completion callback (Task 5 above), which fires when the current job actually finishes and releases the lock.
 
 ## Key Files
-- `daemon/manager.py` — Main changes: new helper method + 3 integration points (~lines 1025, 1078, 2152)
-- `daemon/services/job_queue_service.py` — Fix `_fail_job()` lock release, add `complete_job_sync()` for sync callers
-- `daemon/repositories/job_queue/repository.py` — `get_by_instance()` already exists (line 89-101)
+- `daemon/manager.py` — New `_complete_job_for_instance()` helper + integration points in `_process_queue()` and `terminate_instance()`
+- `daemon/services/job_queue_service.py` — New `get_job_by_instance()` + `get_job_by_instance_sync()`, extended `complete_job()` signature
+- `daemon/services/job_processor.py` — Remove premature `trigger_next_job()` call
+- `daemon/repositories/job_queue/repository.py` — No changes (uses existing `get_by_instance()`)
 
 ## Constraints
-- `terminate_instance()` is synchronous — need sync-compatible path for job completion
+- `terminate_instance()` is synchronous — need sync-compatible path for job lookup, async for completion
 - Must handle case where instance has NO associated job (not all instances come from job queue)
 - Must be idempotent — `complete_job()` already handles `ValueError` for already-completed jobs
 - Must not block the message processing loop — all job operations should be fast DB updates
-- Must handle race between `_process_queue` completion and `terminate_instance` — both might try to complete the same job
+- Must handle race between `_process_queue` completion and `terminate_instance` — both might try to complete the same job. The idempotent guard (checking job status first) handles this.
+- Must NOT access `self._job_queue_service._repository` — use public methods only
 
 ## Deliverables
-- [ ] `_complete_job_for_instance()` helper method added to InstanceManager
-- [ ] Helper called from 3 integration points (success, failure, termination)
-- [ ] Lock released on job failure in `_fail_job()`
-- [ ] `complete_job_sync()` added for sync callers
-- [ ] Result summary captured from instance output
-- [ ] Next pending job triggered after completion
+- [ ] `get_job_by_instance()` public method added to JobQueueService
+- [ ] `get_job_by_instance_sync()` sync wrapper added to JobQueueService
+- [ ] `complete_job()` accepts optional `result_summary` parameter
+- [ ] `_complete_job_for_instance()` helper added to InstanceManager (uses public API only)
+- [ ] Helper called from success and failure paths in `_process_queue()`
+- [ ] Helper called from `terminate_instance()` (via event loop scheduling)
+- [ ] Premature `trigger_next_job()` removed from `job_processor.py`
 - [ ] No regressions in existing message processing
