@@ -193,7 +193,7 @@ def should_continue(state: MessagesState) -> str:
     content = getattr(last_message, 'content', '') or ''
     if isinstance(content, str) and content.rstrip().endswith(':'):
         logger.warning(f"[Graph] Ghost promise detected, LLM text ends with ':': {content[:100]}...")
-        return "tools"
+        return "agent"  # Re-invoke agent to produce actual tool_call
     
     return END
 
@@ -347,7 +347,11 @@ def build_instance_graph(
     
     # Add edges
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    graph.add_conditional_edges("agent", should_continue, {
+        "tools": "tools",  # Normal: LLM made tool calls
+        "agent": "agent",  # Ghost promise: LLM promised but no tool_call, retry
+        END: END,
+    })
     graph.add_edge("tools", "agent")
     
     compiled = graph.compile(checkpointer=checkpointer)
