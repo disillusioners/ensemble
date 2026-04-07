@@ -28,9 +28,12 @@ def validate_llm_response(response: AIMessage) -> None:
     common failure modes. Raises LLMResponseValidationError for invalid responses.
 
     Validation checks (in order):
-    1. Empty content: content is empty or whitespace-only with no tool_calls
-    2. Truncated response: finish_reason is "length"
-    3. Missing tool call data: tool_calls with empty function.name or function.arguments
+    1. Truncated response: finish_reason is "length"
+    2. Missing tool call data: tool_calls with empty function.name or function.arguments
+
+    Note: Empty content is intentionally NOT validated here. An empty response
+    (no content, no tool_calls) is valid — it means the model is done speaking.
+    The graph's should_continue() routing handles this correctly by ending the loop.
 
     Fail-open: If response structure is unexpected or validation cannot determine
     validity (e.g., missing response_metadata field), logs a warning but does NOT raise.
@@ -42,64 +45,19 @@ def validate_llm_response(response: AIMessage) -> None:
     Raises:
         LLMResponseValidationError: If the response fails any structural validation check.
     """
-    # Check 1: Empty content (when no tool_calls present)
-    if _is_empty_content(response):
-        raise LLMResponseValidationError(
-            "Response has empty content and no tool calls",
-            response=response,
-        )
-
-    # Check 2: Truncated response (finish_reason == "length")
+    # Check 1: Truncated response (finish_reason == "length")
     if _is_truncated_response(response):
         raise LLMResponseValidationError(
             "Response was truncated (finish_reason=length)",
             response=response,
         )
 
-    # Check 3: Malformed tool calls (empty function.name or function.arguments)
+    # Check 2: Malformed tool calls (empty function.name or function.arguments)
     if _has_malformed_tool_calls(response):
         raise LLMResponseValidationError(
             "Response has tool calls with empty function name or arguments",
             response=response,
         )
-
-
-def _is_empty_content(response: AIMessage) -> bool:
-    """Check if response has empty content and no tool calls.
-
-    A response is considered empty if:
-    - content is empty string or whitespace-only
-    - AND no tool_calls are present
-
-    Note: AIMessage validation requires content to be a string, so None
-    content cannot exist in a properly constructed AIMessage.
-
-    Returns:
-        True if content is empty and no tool_calls present.
-    """
-    content = getattr(response, "content", None)
-    tool_calls = getattr(response, "tool_calls", None)
-
-    # If there are tool_calls, content can be empty - this is valid
-    if tool_calls:
-        return False
-
-    # No tool_calls, check if content is empty
-    if content is None:
-        # This shouldn't happen with properly constructed AIMessage,
-        # but treat it as empty
-        return True
-
-    if isinstance(content, str):
-        return content.strip() == ""
-
-    # Content is not a string (e.g., list of content blocks)
-    # This is an unexpected structure - fail open
-    logger.warning(
-        f"Unexpected content type: {type(content).__name__}. "
-        "Cannot determine if content is empty. Passing validation."
-    )
-    return False
 
 
 def _is_truncated_response(response: AIMessage) -> bool:

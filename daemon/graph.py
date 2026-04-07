@@ -5,7 +5,7 @@ from langchain_openai.chat_models.base import (
     BaseChatOpenAI,
     _convert_delta_to_message_chunk as _base_convert_delta_to_message_chunk,
 )
-from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChunk, SystemMessage
+from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChunk, HumanMessage, SystemMessage
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from typing import Any, Mapping, Optional, cast
@@ -177,9 +177,11 @@ class SessionState(MessagesState):
 def should_continue(state: MessagesState) -> str:
     """Determine if we should continue or end.
     
-    Continues if:
-    - LLM returned tool_calls (normal flow)
-    - LLM text ends with ':' (promised action but no tool_call emitted - "ghost promise" detection)
+    Routes:
+    - "tools": LLM returned tool_calls (normal flow)
+    - "agent": Ghost promise — LLM text ends with ':' but no tool_call
+    - "nudge": Empty response after tool execution — inject prompt to continue
+    - END: LLM returned actual content with no tool_calls (done speaking)
     """
     messages = state["messages"]
     last_message = messages[-1]
@@ -195,7 +197,49 @@ def should_continue(state: MessagesState) -> str:
         logger.warning(f"[Graph] Ghost promise detected, LLM text ends with ':': {content[:100]}...")
         return "agent"  # Re-invoke agent to produce actual tool_call
     
+    # Empty response after tool execution: model ACK'd but didn't continue
+    # Inject a nudge so the model either continues working or finishes properly
+    if _is_empty_content(content) and _has_recent_tool_result(messages):
+        logger.info("[Graph] Empty response after tool execution, nudging agent to continue")
+        return "nudge"
+    
     return END
+
+
+def _is_empty_content(content) -> bool:
+    """Check if content is empty or whitespace-only."""
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return content.strip() == ""
+    return False
+
+
+def _has_recent_tool_result(messages: list) -> bool:
+    """Check if there's a ToolMessage in the recent message history.
+    
+    Looks back through messages (skipping the last empty AIMessage) to find
+    a ToolMessage. Stops at the first HumanMessage to avoid false positives
+    from tool results in earlier turns.
+    """
+    # Skip the last message (the empty AI response we're deciding on)
+    for msg in reversed(messages[:-1]):
+        msg_type = getattr(msg, 'type', None)
+        if msg_type == 'tool':
+            return True
+        # Stop searching at human message boundary
+        if msg_type == 'human':
+            break
+    return False
+
+
+# Message injected when LLM returns empty after tool execution
+NUDGE_MESSAGE = "Continue with your task, or provide your final response if you are finished."
+
+
+def nudge_node(state):
+    """Inject a nudge message to prompt the agent to continue or finish."""
+    return {'messages': [HumanMessage(content=NUDGE_MESSAGE)]}
 
 
 def create_agent_node(
@@ -344,15 +388,18 @@ def build_instance_graph(
         retry_config=retry_config,
     ))
     graph.add_node("tools", ToolNode(tools))
+    graph.add_node("nudge", nudge_node)
     
     # Add edges
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_continue, {
         "tools": "tools",  # Normal: LLM made tool calls
         "agent": "agent",  # Ghost promise: LLM promised but no tool_call, retry
+        "nudge": "nudge",  # Empty after tool: inject prompt to continue
         END: END,
     })
     graph.add_edge("tools", "agent")
+    graph.add_edge("nudge", "agent")
     
     compiled = graph.compile(checkpointer=checkpointer)
     

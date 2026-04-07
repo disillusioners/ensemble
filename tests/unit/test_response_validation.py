@@ -58,21 +58,24 @@ class TestLLMResponseValidationError:
 
 
 class TestEmptyContentValidation:
-    """Tests for empty content validation (raises LLMResponseValidationError)."""
+    """Tests for empty content validation.
 
-    def test_empty_string_content_raises(self):
-        """Test that empty string content raises validation error."""
+    Empty content is valid — the graph's should_continue() handles routing
+    to END when the model has nothing more to say. Validation does NOT reject
+    empty responses.
+    """
+
+    def test_empty_string_content_passes(self):
+        """Test that empty string content passes validation (not an error)."""
         response = make_ai_message(content="")
-        with pytest.raises(LLMResponseValidationError) as exc_info:
-            validate_llm_response(response)
-        assert "empty content" in str(exc_info.value).lower()
+        # Should NOT raise — empty content is valid
+        validate_llm_response(response)
 
-    def test_whitespace_only_content_raises(self):
-        """Test that whitespace-only content raises validation error."""
+    def test_whitespace_only_content_passes(self):
+        """Test that whitespace-only content passes validation (not an error)."""
         response = make_ai_message(content="   \n\t  ")
-        with pytest.raises(LLMResponseValidationError) as exc_info:
-            validate_llm_response(response)
-        assert "empty content" in str(exc_info.value).lower()
+        # Should NOT raise — empty content is valid
+        validate_llm_response(response)
 
     def test_empty_content_with_tool_calls_passes(self):
         """Test that empty content WITH tool_calls is valid (does not raise)."""
@@ -323,15 +326,6 @@ class TestValidResponses:
 
 class TestErrorResponseAttribute:
     """Tests that LLMResponseValidationError properly stores the response."""
-
-    def test_empty_content_error_stores_response(self):
-        """Test that empty content error stores the response object."""
-        response = make_ai_message(content="")
-        try:
-            validate_llm_response(response)
-            pytest.fail("Expected LLMResponseValidationError to be raised")
-        except LLMResponseValidationError as e:
-            assert e.response is response
 
     def test_truncated_error_stores_response(self):
         """Test that truncation error stores the response object."""
