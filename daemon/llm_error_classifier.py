@@ -46,26 +46,6 @@ class ContextLengthExceededError(Exception):
         )
 
 
-class StreamIdleTimeoutError(Exception):
-    """Raised when graph.astream() produces no events within the configured idle timeout.
-    
-    This indicates a hung or half-open connection where the server has stopped
-    sending data without closing the connection. Retried by queue-level retry
-    in _process_queue.
-    
-    This is distinct from openai.APITimeoutError which fires at the HTTP level
-    (request_timeout=660s). StreamIdleTimeoutError fires at the event level
-    when no graph events arrive within llm_stream_idle_timeout_seconds.
-    """
-    
-    def __init__(self, timeout_seconds: float, context: str = "stream"):
-        self.timeout_seconds = timeout_seconds
-        super().__init__(
-            f"Stream idle timeout: no event received within {timeout_seconds}s "
-            f"during {context}"
-        )
-
-
 # Exceptions that with_retry should catch and retry
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # Wrapper exception from classifier for retryable status codes
