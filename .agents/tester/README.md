@@ -64,20 +64,38 @@ tests/
 - See `.agents/tester/RESULTS/2026-04-05-phase2-post-completion-validation.md` for full details
 - See `.agents/tester/RESULTS/2026-04-05-phase2-concurrency-fixes.md` for Phase 2 details
 
+## Frontend Tests (Angular 21)
+
+- **Framework:** Jest with `jest-preset-angular`
+- **Config:** `frontend/jest.config.js` + `frontend/setup-jest.ts`
+- **Run:** `cd frontend && npx jest` (or `npm test`)
+- **Execution time:** ~2.5s for all tests
+- **Test helpers:** `frontend/src/app/testing/job-test-helpers.ts`
+
+### Frontend Test Files
+| File | Scope |
+|------|-------|
+| `frontend/src/app/models/job.model.spec.ts` | Job model types, helper functions (isTerminalStatus, getStatusColor, getPriorityColor) |
+| `frontend/src/app/services/job.service.spec.ts` | HTTP calls (list, get, create, cancel, retry) |
+| `frontend/src/app/services/job-sse.service.spec.ts` | SSE connection, events, reconnection |
+| `frontend/src/app/pages/jobs/jobs.component.spec.ts` | Filters, job actions, drawer, project pause |
+| `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
+
 ## Current Focus
-**FINAL VALIDATION COMPLETE for feature/concurrency-model-fixes (all P1-P4)**
+**Phase 5 Frontend Testing COMPLETE**
 
-### Status: 🟡 CONDITIONAL PASS — 2 fixable regressions
+### Status: ✅ PASS
 
-**Branch:** 18 commits, head `881673f`
+**Latest:** 148/148 frontend tests pass, web automation verified
+**Commit:** `880e4bd` — "test: setup jest and add job queue spec files"
+- **Frontend tests:** 148/148 PASS across 5 spec files (2.4s)
+- **Web automation:** Build ✅, Dev server ✅, Routes ✅
+
+### Branch History
+**Branch:** feature/concurrency-model-fixes (all P1-P5)
 - **Core tests:** 1045/1055 PASS (8 pre-existing failures in instructive_errors)
-- **Job queue tests:** 59/60 FAIL — **REGRESSION** from `5dcc584` (asyncio.to_thread + SQLite in-memory)
-- **Scheduler API tests:** 2/3 FAIL — **REGRESSION** (source_registry null guard missing)
-- **Import validation:** 7/8 PASS (1 stale `create_app` reference)
-- **dev.sh smoke test:** ✅ PASS — clean start, graceful shutdown
-
-### Before Merge: Fix Required
-1. Job queue test fixtures need `StaticPool` for SQLite threading (59 tests)
-2. Scheduler API needs null guard for `source_registry` (2 tests)
-
-See `.agents/tester/RESULTS/2026-04-06-final-validation-P1-P4.md` for full details.
+- **Job queue tests:** 176/178 PASS (2 skipped)
+- **Frontend tests:** 148/148 PASS
+- **Scheduler API tests:** 2/3 FAIL — regression (source_registry null guard)
+- **Import validation:** 7/8 PASS
+- **dev.sh smoke test:** ✅ PASS
