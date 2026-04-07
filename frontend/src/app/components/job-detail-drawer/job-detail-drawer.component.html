@@ -47,7 +47,9 @@
       @if (job().source) {
         <div class="detail-item">
           <span class="label">Source</span>
-          <span class="value">{{ job().source }}</span>
+          <span class="value">
+            <span class="badge badge-source">{{ job().source }}</span>
+          </span>
         </div>
       }
       @if (job().project_id) {
@@ -79,6 +81,12 @@
         <div class="detail-item">
           <span class="label">Completed At</span>
           <span class="value">{{ formatDate(job().completed_at) }}</span>
+        </div>
+      }
+      @if (job().cancelled_at) {
+        <div class="detail-item">
+          <span class="label">Cancelled At</span>
+          <span class="value">{{ formatDate(job().cancelled_at) }}</span>
         </div>
       }
       @if (duration()) {

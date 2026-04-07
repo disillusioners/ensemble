@@ -41,25 +41,6 @@ export class ProjectService {
   }
 
   /**
-   * PATCH /api/projects/{id}/queue-status
-   */
-  setQueuePaused(projectId: string, paused: boolean): Observable<Project> {
-    return this.http.patch<Project>(`${this.API_BASE}/${encodeURIComponent(projectId)}/queue-status`, { paused }).pipe(
-      tap((updatedProject) => {
-        this.projects.update((projects) =>
-          projects.map((project) =>
-            project.project_id === projectId ? updatedProject : project
-          )
-        );
-      }),
-      catchError((err) => {
-        this.error.set(err.message || 'Failed to update queue status');
-        throw err;
-      })
-    );
-  }
-
-  /**
    * POST /api/projects/{id}/pause-queue
    */
   pauseJobQueue(projectId: string): Observable<Project> {
