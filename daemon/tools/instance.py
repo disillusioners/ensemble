@@ -54,7 +54,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     logger = logging.getLogger(__name__)
     
     @tool(args_schema=SpawnInstanceInput)
-    def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection.")] = None) -> str:
+    def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
         
         IMPORTANT: After spawning, you MUST use send_message(instance_id, message) 
@@ -63,21 +63,49 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         
         Args:
             agent_id: Agent ID to spawn (e.g., 'coder', 'leader').
-            project_id: Optional project ID for context injection.
+            project_id: Optional project ID for context injection. Use None or 'null' if no project context is needed.
         
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
         """
-        new_instance_id = manager.spawn_instance(
-            agent_id=agent_id,
-            instance_id=None,
-            parent_id=current_instance_id,
-            project_id=project_id,
-        )
-        return (
-            f"Successfully spawned instance: {new_instance_id}\n"
-            f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
-        )
+        try:
+            new_instance_id = manager.spawn_instance(
+                agent_id=agent_id,
+                instance_id=None,
+                parent_id=current_instance_id,
+                project_id=project_id,
+            )
+            return (
+                f"Successfully spawned instance: {new_instance_id}\n"
+                f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
+            )
+        except ValueError as e:
+            # Return text guidance instead of raising - agent can self-correct
+            error_msg = str(e)
+            if "Agent not found" in error_msg:
+                return (
+                    f"ERROR: {error_msg}\n"
+                    f"Available agents can be found using: list_agents()"
+                )
+            elif "not found" in error_msg.lower() and "project" in error_msg.lower():
+                return (
+                    f"ERROR: {error_msg}\n"
+                    f"HINT: If you don't need a project context, pass project_id=None or project_id='null'"
+                )
+            elif "Max instances" in error_msg:
+                return (
+                    f"ERROR: {error_msg}\n"
+                    f"HINT: Wait for existing instances to complete, or terminate unused instances with terminate_instance()"
+                )
+            elif "Max children" in error_msg:
+                return (
+                    f"ERROR: {error_msg}\n"
+                    f"HINT: The parent instance has too many child instances. Consider a different approach."
+                )
+            else:
+                return f"ERROR: {error_msg}"
+        except Exception as e:
+            return f"ERROR: Failed to spawn instance: {str(e)}"
     
     @tool
     async def send_message(instance_id: str, message: str) -> str:

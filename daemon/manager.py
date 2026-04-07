@@ -500,6 +500,10 @@ class InstanceManager:
             ValueError: If max_instances or max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
+        # Normalize project_id: accept "null" string (from LLM JSON) as None
+        if project_id is not None and str(project_id).lower() in ("null", "none", ""):
+            project_id = None
+
         # Resolve agent
         registry = get_registry()
         resolved_agent_id = registry.resolve_to_id(agent_id) or agent_id
