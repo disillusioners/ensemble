@@ -91,16 +91,16 @@ class TestJobQueueCreateRequest:
             JobQueueCreateRequest(queue_name="System_Parallel_Queue")
 
     def test_create_request_fifo_concurrency_forced_to_1(self):
-        """Test FIFO queue concurrency_limit is automatically set to 1."""
-        request = JobQueueCreateRequest(
-            queue_name="my-queue",
-            queue_type="fifo",
-            concurrency_limit=10,  # Invalid for FIFO, should be forced to 1
-        )
-        
-        # The model_validator forces concurrency to 1 for FIFO
-        assert request.queue_type == "fifo"
-        assert request.concurrency_limit == 1
+        """Test FIFO queue with concurrency_limit > 1 raises ValidationError."""
+        # W6 fix: FIFO queues must have concurrency_limit=1, raise ValueError instead of silent overwrite
+        with pytest.raises(ValidationError) as exc_info:
+            JobQueueCreateRequest(
+                queue_name="my-queue",
+                queue_type="fifo",
+                concurrency_limit=10,  # Invalid for FIFO, raises ValueError
+            )
+
+        assert "FIFO" in str(exc_info.value) and "concurrency_limit" in str(exc_info.value).lower()
 
     def test_create_request_parallel_allows_higher_concurrency(self):
         """Test parallel queue allows higher concurrency values."""
