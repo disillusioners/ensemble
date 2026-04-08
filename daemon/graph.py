@@ -190,6 +190,15 @@ def should_continue(state: MessagesState) -> str:
     if getattr(last_message, 'tool_calls', None):
         return "tools"
     
+    # Check if model is still outputting thinking/reasoning content.
+    # If reasoning_content is present in additional_kwargs, the model is still
+    # processing internally and hasn't produced its final answer yet.
+    if hasattr(last_message, 'additional_kwargs'):
+        reasoning = last_message.additional_kwargs.get('reasoning_content')
+        if reasoning:
+            logger.debug(f"[Graph] Model still outputting thinking, continuing...")
+            return "agent"  # Re-invoke agent to continue processing
+    
     # Ghost promise detection: LLM promised action but didn't emit tool_call
     # Common pattern: "Now let me write the document:" (ends with ':')
     content = getattr(last_message, 'content', '') or ''
