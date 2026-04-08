@@ -54,15 +54,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-05 Post-Completion)
-- **1108+ unit/functional/integration tests pass** on feature/concurrency-model-fixes branch
-- 8 pre-existing failures (instructive error tests — feature never implemented on this branch)
-- 2 collection errors (missing `croniter` dependency)
-- 14 skipped (integration tests requiring mock LLM server)
-- **0 NEW failures** — Phase 2 concurrency changes confirmed clean
+## Test Results (Latest: 2026-04-08 Phase 3 Post-Review Re-Test)
+- **1492 tests pass** (22 skipped, 0 failed) excluding integration on feature/job-queue-management branch
+- **402 job_queue tests pass** (14 skipped, 0 failed) — all Phase 1+2+3 tests pass
+- **35 queue router API tests pass** — Phase 3 queue CRUD, IDOR, start/stop endpoints
+- **197 frontend tests pass** (10 test suites) — including new queue service/model tests
 - dev.sh validated and working (ensure.md: PASS)
-- See `.agents/tester/RESULTS/2026-04-05-phase2-post-completion-validation.md` for full details
-- See `.agents/tester/RESULTS/2026-04-05-phase2-concurrency-fixes.md` for Phase 2 details
+- Review fix commit `98a6e7a` — all 7 fixes verified, no regressions, no test updates needed
+- Integration tests have pre-existing failures (require OPENAI_API_KEY) — not Phase issues
+- See `.agents/tester/RESULTS/2026-04-08-phase3-post-review-retest.md` for re-test details
+- See `.agents/tester/RESULTS/2026-04-08-phase3-api-frontend-integration.md` for original Phase 3 details
 
 ## Frontend Tests (Angular 21)
 
@@ -76,26 +77,40 @@ tests/
 | File | Scope |
 |------|-------|
 | `frontend/src/app/models/job.model.spec.ts` | Job model types, helper functions (isTerminalStatus, getStatusColor, getPriorityColor) |
+| `frontend/src/app/models/job-queue.model.spec.ts` | Queue model types, helper functions (getQueueStatusColor, getQueueTypeIcon, etc.) |
 | `frontend/src/app/services/job.service.spec.ts` | HTTP calls (list, get, create, cancel, retry) |
 | `frontend/src/app/services/job-sse.service.spec.ts` | SSE connection, events, reconnection |
+| `frontend/src/app/services/queue.service.spec.ts` | Queue HTTP calls (list, create, get, update, delete, start, stop) |
 | `frontend/src/app/pages/jobs/jobs.component.spec.ts` | Filters, job actions, drawer, project pause |
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 5 Frontend Testing COMPLETE**
+**Phase 3 Job Queue Management — API + Frontend + Integration Testing COMPLETE**
 
 ### Status: ✅ PASS
 
-**Latest:** 148/148 frontend tests pass, web automation verified
-**Commit:** `880e4bd` — "test: setup jest and add job queue spec files"
-- **Frontend tests:** 148/148 PASS across 5 spec files (2.4s)
-- **Web automation:** Build ✅, Dev server ✅, Routes ✅
+**Latest:** 1492 backend tests + 197 frontend tests pass, dev.sh validated
+**Phase 3 Commits:**
+- `5220045` — "test(job-queues): add frontend tests for queue service and model"
+- `c1943ca` — "test(job-queues): add API endpoint tests for queue router"
+
+### Phase 3 Test Files (3 new frontend + 1 new backend)
+- **test_queue_routers.py** (NEW): 35 tests — Queue CRUD API, IDOR protection, system queue protection, start/stop
+- **queue.service.spec.ts** (NEW): QueueService tests — list, create, get, update, delete, start, stop, refresh
+- **job-queue.model.spec.ts** (NEW): Model helpers — getQueueStatusColor, getQueueStatusLabel, getQueueTypeIcon, getQueueTypeLabel
+- **queue-test-helpers.ts** (NEW): createMockQueue, createMockQueueList helpers
+
+### Phase 3 Coverage
+- Queue Router: 7 endpoints tested (list, create, get, update, delete, start, stop)
+- IDOR protection: Cross-project access returns 404
+- System queue protection: Cannot delete system queues (403)
+- PROCESSING jobs: Cannot delete queue with active jobs (409)
+- Frontend build: `ng build` succeeds
+- Frontend service: All HTTP methods tested
+- Frontend model: All helper functions tested
 
 ### Branch History
-**Branch:** feature/concurrency-model-fixes (all P1-P5)
-- **Core tests:** 1045/1055 PASS (8 pre-existing failures in instructive_errors)
-- **Job queue tests:** 176/178 PASS (2 skipped)
-- **Frontend tests:** 148/148 PASS
-- **Scheduler API tests:** 2/3 FAIL — regression (source_registry null guard)
-- **Import validation:** 7/8 PASS
-- **dev.sh smoke test:** ✅ PASS
+**Branch:** feature/job-queue-management
+- **Phase 3 (current):** 1492 backend + 197 frontend passed ✅
+- **Phase 2:** 367 passed, 14 skipped ✅
+- **Phase 1:** 245 passed, 2 skipped ✅
