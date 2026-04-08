@@ -15,6 +15,7 @@ class JobCreateRequest(BaseModel):
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     message: str = Field(..., description="Job message/content")
     project_id: Optional[str] = Field(default=None, description="Optional project ID for job serialization")
+    queue_id: Optional[str] = Field(default=None, description="Optional queue ID to assign job to a specific queue")
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
     source: str = Field(default="api", description="Source of the job")
     metadata: Optional[dict[str, Any]] = Field(default=None, description="Optional metadata dictionary")
@@ -49,6 +50,7 @@ class JobResponse(BaseModel):
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
     project_id: Optional[str] = Field(default=None, description="Project ID if job is serialized")
+    queue_id: Optional[str] = Field(default=None, description="Queue ID this job is assigned to")
     instance_id: Optional[str] = Field(default=None, description="Instance ID if job is processing/processed")
     created_at: str = Field(..., description="Job creation timestamp")
     started_at: Optional[str] = Field(default=None, description="Job start timestamp")
@@ -240,6 +242,8 @@ class JobQueueCreateRequest(BaseModel):
     @classmethod
     def validate_queue_name(cls, v: str) -> str:
         v = v.strip()
+        if not v:
+            raise ValueError("Queue name cannot be empty or whitespace-only")
         reserved = ("system_fifo_queue", "system_parallel_queue")
         if v.lower() in reserved:
             raise ValueError(f"'{v}' is a reserved queue name")
@@ -247,8 +251,8 @@ class JobQueueCreateRequest(BaseModel):
     
     @model_validator(mode="after")
     def validate_fifo_concurrency(self) -> "JobQueueCreateRequest":
-        if self.queue_type == "fifo":
-            self.concurrency_limit = 1
+        if self.queue_type == "fifo" and self.concurrency_limit != 1:
+            raise ValueError("FIFO queues must have concurrency_limit=1")
         return self
     
     model_config = {
@@ -267,19 +271,37 @@ class JobQueueUpdateRequest(BaseModel):
     """Request body for updating a job queue."""
     
     queue_name: Optional[str] = Field(default=None, min_length=1, max_length=100, description="New queue name")
+    queue_type: Optional[str] = Field(default=None, description="Queue type: 'fifo' or 'parallel'")
     concurrency_limit: Optional[int] = Field(default=None, ge=1, le=20, description="New concurrency limit")
     is_paused: Optional[bool] = Field(default=None, description="Pause/unpause the queue")
     description: Optional[str] = Field(default=None, max_length=500, description="New description")
+    
+    @field_validator("queue_type")
+    @classmethod
+    def validate_queue_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("fifo", "parallel"):
+            raise ValueError("queue_type must be 'fifo' or 'parallel'")
+        return v
     
     @field_validator("queue_name")
     @classmethod
     def validate_queue_name(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
             v = v.strip()
+            if not v:
+                raise ValueError("Queue name cannot be empty or whitespace-only")
             reserved = ("system_fifo_queue", "system_parallel_queue")
             if v.lower() in reserved:
                 raise ValueError(f"'{v}' is a reserved queue name")
         return v
+    
+    @model_validator(mode="after")
+    def validate_fifo_concurrency(self) -> "JobQueueUpdateRequest":
+        # Only validate when BOTH queue_type AND concurrency_limit are explicitly provided
+        if self.queue_type is not None and self.concurrency_limit is not None:
+            if self.queue_type == "fifo" and self.concurrency_limit != 1:
+                raise ValueError("FIFO queues must have concurrency_limit=1")
+        return self
     
     model_config = {
         "json_schema_extra": {

@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS job_queues (
     queue_name_lower  TEXT NOT NULL,
     queue_type        TEXT NOT NULL DEFAULT 'fifo'
                       CHECK(queue_type IN ('fifo', 'parallel')),
-    concurrency_limit INTEGER NOT NULL DEFAULT 1,
+    concurrency_limit INTEGER NOT NULL DEFAULT 1
+                      CHECK(concurrency_limit >= 1 AND concurrency_limit <= 20),
     is_paused         BOOLEAN NOT NULL DEFAULT 0,
     is_system         BOOLEAN NOT NULL DEFAULT 0,
     description       TEXT,
@@ -50,8 +51,8 @@ SELECT
     0,
     1,
     'System FIFO queue - default, one job at a time',
-    datetime('now'),
-    datetime('now')
+    strftime('%Y-%m-%dT%H:%M:%S', 'now'),
+    strftime('%Y-%m-%dT%H:%M:%S', 'now')
 FROM projects;
 
 -- System parallel queue (configurable concurrency)
@@ -70,8 +71,8 @@ SELECT
     0,
     1,
     'System parallel queue - configurable concurrency',
-    datetime('now'),
-    datetime('now')
+    strftime('%Y-%m-%dT%H:%M:%S', 'now'),
+    strftime('%Y-%m-%dT%H:%M:%S', 'now')
 FROM projects;
 
 -- DOWN

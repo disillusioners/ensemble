@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import Column, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
@@ -41,6 +41,7 @@ class JobQueue(SQLModel, table=True):
     """Named job queue for per-project job isolation."""
     __tablename__ = "job_queues"
     __table_args__ = (
+        CheckConstraint("queue_type IN ('fifo', 'parallel')", name="ck_job_queues_queue_type"),
         Index("idx_job_queues_project", "project_id"),
         UniqueConstraint("project_id", "queue_name_lower", name="uq_job_queues_project_name"),
     )
@@ -58,7 +59,7 @@ class JobQueue(SQLModel, table=True):
     queue_type: str = Field(default=QueueType.FIFO.value)  # "fifo" or "parallel"
     
     # Queue configuration
-    concurrency_limit: int = Field(default=1, ge=1)
+    concurrency_limit: int = Field(default=1, ge=1, le=20)
     is_system: bool = Field(default=False)
     is_paused: bool = Field(default=False)
     description: Optional[str] = None
