@@ -59,13 +59,40 @@ def integration_lock_manager():
 
 @pytest.fixture
 def integration_queue_repository(integration_engine):
-    """Create queue repository with fresh database."""
-    return JobQueueRepository(integration_engine)
+    """Create queue repository with fresh database and system queues."""
+    repo = JobQueueRepository(integration_engine)
+    # Pre-provision system queues for multiple projects
+    # Add enough for concurrent test scenarios
+    for project_num in range(0, 11):  # project-0 through project-10
+        repo.create(
+            project_id=f"project-{project_num}",
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
+    repo.create(
+        project_id="test-project",
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
+    # Add queues for specific project names used in tests
+    for project_name in ["backend-api", "frontend-web"]:
+        repo.create(
+            project_id=project_name,
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
+    return repo
 
 
 @pytest.fixture
 def integration_service(integration_repository, integration_lock_manager, integration_queue_repository):
-    """Create service with fresh dependencies."""
+    """Create service with fresh dependencies and system queues."""
     return JobQueueService(integration_repository, integration_lock_manager, integration_queue_repository)
 
 
@@ -318,9 +345,14 @@ class TestIntegrationDifferentProjectsParallel:
 
     @pytest.mark.asyncio
     async def test_different_projects_run_parallel(
-        self, integration_service
+        self, integration_service, integration_queue_repository
     ):
         """Test that jobs for different projects run in parallel."""
+        # Get queue IDs for projects
+        queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
+        queue2 = integration_queue_repository.get_by_name("project-2", "system_fifo_queue")
+        queue3 = integration_queue_repository.get_by_name("project-3", "system_fifo_queue")
+        
         job1 = await integration_service.enqueue(
             agent_id="coder",
             message="Job for project 1",
@@ -345,34 +377,34 @@ class TestIntegrationDifferentProjectsParallel:
         assert job3.status == JobStatus.PENDING.value
         
         # Locks should NOT be held yet
-        assert await integration_service._lock_manager.is_locked("project-1") is False
-        assert await integration_service._lock_manager.is_locked("project-2") is False
-        assert await integration_service._lock_manager.is_locked("project-3") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is False
         
         # Start all jobs (JobProcessor normally does this)
         started_job1 = await integration_service.start_job(job1.job_id)
         started_job2 = await integration_service.start_job(job2.job_id)
         started_job3 = await integration_service.start_job(job3.job_id)
         
-        # All should be processing now
+        # All should be processing
         assert started_job1.status == JobStatus.PROCESSING.value
         assert started_job2.status == JobStatus.PROCESSING.value
         assert started_job3.status == JobStatus.PROCESSING.value
         
-        # All locks should be held now
-        assert await integration_service._lock_manager.is_locked("project-1") is True
-        assert await integration_service._lock_manager.is_locked("project-2") is True
-        assert await integration_service._lock_manager.is_locked("project-3") is True
+        # All locks should be held (different projects = different queues)
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is True
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is True
         
-        # Complete all
+        # Complete all jobs
         await integration_service.complete_job(job1.job_id)
         await integration_service.complete_job(job2.job_id)
         await integration_service.complete_job(job3.job_id)
         
-        # All locks released
-        assert await integration_service._lock_manager.is_locked("project-1") is False
-        assert await integration_service._lock_manager.is_locked("project-2") is False
-        assert await integration_service._lock_manager.is_locked("project-3") is False
+        # All locks should be released
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is False
 
     @pytest.mark.asyncio
     async def test_mixed_projects_serialization_and_parallelism(
@@ -442,9 +474,11 @@ class TestIntegrationCrashRecovery:
 
     @pytest.mark.asyncio
     async def test_recovery_from_lock_manager_crash(
-        self, integration_service, integration_lock_manager
+        self, integration_service, integration_lock_manager, integration_queue_repository
     ):
         """Test recovery when lock manager state is lost (simulated crash)."""
+        queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
+        
         # Enqueue and start a job
         job = await integration_service.enqueue(
             agent_id="coder",
@@ -454,17 +488,17 @@ class TestIntegrationCrashRecovery:
         
         # Job is PENDING, need to start it
         assert job.status == JobStatus.PENDING.value
-        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
         
         started_job = await integration_service.start_job(job.job_id)
         assert started_job.status == JobStatus.PROCESSING.value
-        assert await integration_service._lock_manager.is_locked("project-1") is True
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
         
         # Simulate crash: clear lock manager
         integration_lock_manager.clear()
         
         # Lock should be released (simulating crash recovery)
-        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
         
         # The job is still in PROCESSING state in database
         # but the lock is gone - this is crash recovery state
@@ -615,9 +649,12 @@ class TestIntegrationConcurrentOperations:
 
     @pytest.mark.asyncio
     async def test_concurrent_enqueue_same_project(
-        self, integration_service
+        self, integration_service, integration_queue_repository
     ):
         """Test concurrent enqueue operations for same project."""
+        # Get queue ID for project-1
+        queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
+        
         async def enqueue_job(i: int):
             return await integration_service.enqueue(
                 agent_id="coder",
@@ -637,11 +674,11 @@ class TestIntegrationConcurrentOperations:
         # Start the first job
         started_first = await integration_service.start_job(results[0].job_id)
         assert started_first.status == JobStatus.PROCESSING.value
-        assert await integration_service._lock_manager.is_locked("project-1") is True
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
         
         # Complete the first job
         await integration_service.complete_job(results[0].job_id)
-        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
         
         # Start the next job
         started_second = await integration_service.start_job(results[1].job_id)
@@ -727,9 +764,14 @@ class TestIntegrationInstanceManagement:
 
     @pytest.mark.asyncio
     async def test_release_locks_by_instance(
-        self, integration_service
+        self, integration_service, integration_queue_repository
     ):
         """Test that releasing by instance releases all locks for that instance."""
+        # Get queue IDs for projects
+        queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
+        queue2 = integration_queue_repository.get_by_name("project-2", "system_fifo_queue")
+        queue3 = integration_queue_repository.get_by_name("project-3", "system_fifo_queue")
+        
         # Create jobs for different projects (each gets own instance)
         job1 = await integration_service.enqueue(
             agent_id="coder",
@@ -755,9 +797,9 @@ class TestIntegrationInstanceManagement:
         assert job3.status == JobStatus.PENDING.value
         
         # No locks should be held yet
-        assert await integration_service._lock_manager.is_locked("project-1") is False
-        assert await integration_service._lock_manager.is_locked("project-2") is False
-        assert await integration_service._lock_manager.is_locked("project-3") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is False
         
         # Start all jobs (this acquires locks)
         started_job1 = await integration_service.start_job(job1.job_id)
@@ -765,18 +807,18 @@ class TestIntegrationInstanceManagement:
         started_job3 = await integration_service.start_job(job3.job_id)
         
         # Verify all locks are held
-        assert await integration_service._lock_manager.is_locked("project-1") is True
-        assert await integration_service._lock_manager.is_locked("project-2") is True
-        assert await integration_service._lock_manager.is_locked("project-3") is True
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is True
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is True
         
         # Release all locks for job1's instance (only project-1)
         released = await integration_service.release_lock_by_instance(started_job1.instance_id)
         assert "project-1" in released
         
         # Only project-1 lock should be released
-        assert await integration_service._lock_manager.is_locked("project-1") is False
-        assert await integration_service._lock_manager.is_locked("project-2") is True
-        assert await integration_service._lock_manager.is_locked("project-3") is True
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is True
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is True
         
         # Release job2's instance
         released = await integration_service.release_lock_by_instance(started_job2.instance_id)
@@ -787,15 +829,17 @@ class TestIntegrationInstanceManagement:
         assert "project-3" in released
         
         # All locks should be released
-        assert await integration_service._lock_manager.is_locked("project-1") is False
-        assert await integration_service._lock_manager.is_locked("project-2") is False
-        assert await integration_service._lock_manager.is_locked("project-3") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-2", queue2.queue_id) is False
+        assert await integration_service._lock_manager.is_queue_locked("project-3", queue3.queue_id) is False
 
     @pytest.mark.asyncio
     async def test_instance_cleanup_releases_project_lock(
-        self, integration_service
+        self, integration_service, integration_queue_repository
     ):
         """Test that instance cleanup releases project lock."""
+        queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
+        
         job = await integration_service.enqueue(
             agent_id="coder",
             message="Job",
@@ -804,18 +848,18 @@ class TestIntegrationInstanceManagement:
         
         # Job is PENDING
         assert job.status == JobStatus.PENDING.value
-        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
         
         # Start job to acquire lock
         started_job = await integration_service.start_job(job.job_id)
         assert started_job.status == JobStatus.PROCESSING.value
-        assert await integration_service._lock_manager.is_locked("project-1") is True
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
         
         # Cleanup by instance
         released = await integration_service.release_lock_by_instance(started_job.instance_id)
         
         assert "project-1" in released
-        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False
 
 
 class TestIntegrationPriorityQueue:
@@ -976,7 +1020,7 @@ class TestIntegrationEndToEnd:
         assert await integration_service._lock_manager.is_locked("frontend-web") is False
 
     @pytest.mark.asyncio
-    async def test_high_load_scenario(self, integration_service):
+    async def test_high_load_scenario(self, integration_service, integration_queue_repository):
         """Test with high load of jobs."""
         # Create many jobs across multiple projects
         num_projects = 3
@@ -1003,7 +1047,9 @@ class TestIntegrationEndToEnd:
         for project_id in range(num_projects):
             started = await integration_service.start_job(all_jobs[project_id][0].job_id)
             assert started.status == JobStatus.PROCESSING.value
-            assert await integration_service._lock_manager.is_locked(f"project-{project_id}") is True
+            # Get queue_id for this project
+            queue = integration_queue_repository.get_by_name(f"project-{project_id}", "system_fifo_queue")
+            assert await integration_service._lock_manager.is_queue_locked(f"project-{project_id}", queue.queue_id) is True
         
         # Complete all jobs per project - get processing job, complete it, trigger next
         for project_id in range(num_projects):

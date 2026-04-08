@@ -291,14 +291,6 @@ class JobQueueMgmtService:
         if queue.is_system:
             raise ValueError("Cannot delete system queue")
         
-        # Check for PROCESSING jobs
-        counts = await asyncio.to_thread(
-            self._queue_repo.count_jobs_by_status,
-            queue_id,
-        )
-        if counts.get(JobStatus.PROCESSING.value, 0) > 0:
-            raise ValueError("Queue has processing jobs")
-        
         # Get system FIFO queue for reassignment
         system_fifo = await asyncio.to_thread(
             self._queue_repo.get_by_name,
@@ -308,13 +300,23 @@ class JobQueueMgmtService:
         if system_fifo is None:
             raise ValueError("System FIFO queue not found")
         
-        # Reassign PENDING jobs
+        # Reassign PENDING jobs first (atomic operation only affects PENDING jobs)
         reassigned_count = await asyncio.to_thread(
             self._queue_repo.reassign_pending_jobs_atomic,
             queue_id,
             system_fifo.queue_id,
             [JobStatus.PENDING.value],
         )
+        
+        # Check for PROCESSING jobs AFTER reassignment
+        # This prevents TOCTOU: jobs transitioning PENDING→PROCESSING during
+        # reassignment are caught here and block deletion
+        counts = await asyncio.to_thread(
+            self._queue_repo.count_jobs_by_status,
+            queue_id,
+        )
+        if counts.get(JobStatus.PROCESSING.value, 0) > 0:
+            raise ValueError("Queue has processing jobs")
         
         # Delete the queue
         await asyncio.to_thread(self._queue_repo.delete, queue_id)

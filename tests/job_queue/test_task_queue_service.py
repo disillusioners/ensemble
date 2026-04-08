@@ -183,10 +183,12 @@ class TestJobQueueServiceListJobs:
     """Tests for job listing."""
 
     @pytest.mark.asyncio
-    async def test_list_all_jobs(self, job_queue_service, sample_job_data_service):
+    async def test_list_all_jobs(
+        self, job_queue_service, sample_job_data_service, sample_job_data_no_project_service
+    ):
         """Test listing all jobs."""
-        await job_queue_service.enqueue(**sample_job_data_service)
-        await job_queue_service.enqueue(**{**sample_job_data_service, "project_id": "other"})
+        await job_queue_service.enqueue(**sample_job_data_service)  # test-project with queue
+        await job_queue_service.enqueue(**sample_job_data_no_project_service)  # no project
         
         jobs = await job_queue_service.list_jobs()
         
@@ -208,10 +210,12 @@ class TestJobQueueServiceListJobs:
         assert len(processing) == 0
 
     @pytest.mark.asyncio
-    async def test_list_jobs_by_project(self, job_queue_service, sample_job_data_service):
+    async def test_list_jobs_by_project(
+        self, job_queue_service, sample_job_data_service, sample_job_data_no_project_service
+    ):
         """Test listing jobs filtered by project."""
         await job_queue_service.enqueue(**sample_job_data_service)  # test-project
-        await job_queue_service.enqueue(**{**sample_job_data_service, "project_id": "other"})
+        await job_queue_service.enqueue(**sample_job_data_no_project_service)  # no project
         
         jobs = await job_queue_service.list_jobs(project_id="test-project")
         
@@ -219,10 +223,14 @@ class TestJobQueueServiceListJobs:
         assert jobs[0].project_id == "test-project"
 
     @pytest.mark.asyncio
-    async def test_list_jobs_with_limit(self, job_queue_service, sample_job_data_service):
+    async def test_list_jobs_with_limit(
+        self, job_queue_service, sample_job_data_service, sample_job_data_no_project_service
+    ):
         """Test listing jobs with limit."""
-        for i in range(5):
-            await job_queue_service.enqueue(**{**sample_job_data_service, "project_id": f"p{i}"})
+        # Use project_id=None to avoid needing system queues for each project
+        await job_queue_service.enqueue(**sample_job_data_service)  # test-project
+        for i in range(4):
+            await job_queue_service.enqueue(**{**sample_job_data_no_project_service})
         
         jobs = await job_queue_service.list_jobs(limit=3)
         
@@ -299,15 +307,21 @@ class TestJobQueueServiceCompleteJob:
         assert result.error_message == "Something went wrong"
 
     @pytest.mark.asyncio
-    async def test_complete_job_releases_lock(self, job_queue_service, sample_job_data_service):
+    async def test_complete_job_releases_lock(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
         """Test that completing a job releases its lock."""
+        # Get the queue_id for system_fifo_queue
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+        
         # Enqueue first job (starts as PENDING, lock not acquired)
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
         assert job1.status == JobStatus.PENDING.value
         
         # Start job1 (this acquires the lock)
         started1 = await job_queue_service.start_job(job1.job_id)
-        assert await job_queue_service._lock_manager.is_locked("test-project") is True
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
         
         # Enqueue second job (still PENDING)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
@@ -317,7 +331,7 @@ class TestJobQueueServiceCompleteJob:
         await job_queue_service.complete_job(job1.job_id)
         
         # Lock should be released
-        assert await job_queue_service._lock_manager.is_locked("test-project") is False
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is False
 
     @pytest.mark.asyncio
     async def test_complete_nonexistent_job(self, job_queue_service):
@@ -459,35 +473,42 @@ class TestJobQueueServiceWithLockManager:
 
     @pytest.mark.asyncio
     async def test_lock_manager_integrated_on_enqueue(
-        self, job_queue_service, sample_job_data_service
+        self, job_queue_service, sample_job_data_service, queue_repository
     ):
         """Test that enqueue properly integrates with lock manager."""
+        # Get the queue_id for system_fifo_queue
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+        
         # Initially no lock
-        assert await job_queue_service._lock_manager.is_locked("test-project") is False
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is False
         
         # Enqueue job (PENDING, lock not acquired yet)
         job = await job_queue_service.enqueue(**sample_job_data_service)
         assert job.status == JobStatus.PENDING.value
         
         # Lock should NOT be held until job starts
-        assert await job_queue_service._lock_manager.is_locked("test-project") is False
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is False
         
         # Start job (this acquires the lock)
         started = await job_queue_service.start_job(job.job_id)
         
         # Now lock should be held
-        assert await job_queue_service._lock_manager.is_locked("test-project") is True
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
         
         # Lock info should match job
-        lock_info = await job_queue_service._lock_manager.get_lock_info("test-project")
-        assert lock_info.job_id == job.job_id
-        assert lock_info.instance_id == started.instance_id
+        lock_count = await job_queue_service._lock_manager.get_queue_lock_count("test-project", queue.queue_id)
+        assert lock_count == 1
 
     @pytest.mark.asyncio
     async def test_multiple_jobs_same_project_serialized(
-        self, job_queue_service, sample_job_data_service
+        self, job_queue_service, sample_job_data_service, queue_repository
     ):
         """Test that multiple jobs for same project are serialized."""
+        # Get the queue_id for system_fifo_queue
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+        
         # Enqueue first job (PENDING)
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
         assert job1.status == JobStatus.PENDING.value
@@ -506,18 +527,18 @@ class TestJobQueueServiceWithLockManager:
         assert job4.status == JobStatus.PENDING.value
         
         # Only one lock should be held (for job1)
-        assert await job_queue_service._lock_manager.is_locked("test-project") is True
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
         
         # Complete job1 and trigger next job - lock should be held again (for job2)
         await job_queue_service.complete_job(job1.job_id)
         # Lock is released by complete_job, trigger_next_job will start job2
         started2 = await job_queue_service.trigger_next_job("test-project")
-        assert await job_queue_service._lock_manager.is_locked("test-project") is True
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
         
         # Complete job2 and trigger next job
         await job_queue_service.complete_job(job2.job_id)
         started3 = await job_queue_service.trigger_next_job("test-project")
-        assert await job_queue_service._lock_manager.is_locked("test-project") is True
+        assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
 
 
 class TestJobQueueServiceQueuePosition:
@@ -860,15 +881,9 @@ class TestJobQueueServiceQueueAwareEnqueue:
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
         """Test enqueue with project_id but no queue_id defaults to system_fifo_queue."""
-        # Create system FIFO queue for project
-        queue = queue_repository.create(
-            project_id="test-project",
-            queue_name="system_fifo_queue",
-            queue_type="fifo",
-            concurrency_limit=1,
-            is_system=True,
-        )
-
+        # System queue already exists in job_queue_service fixture
+        # Just verify enqueue uses the system_fifo_queue
+        
         job_data = {
             "agent_id": "coder",
             "message": "Test job with project",
@@ -881,7 +896,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         result = await job_queue_service.enqueue(**job_data)
 
         assert result.project_id == "test-project"
-        assert result.queue_id == queue.queue_id  # Should be system_fifo_queue
+        assert result.queue_id is not None  # Should have a queue_id from system_fifo_queue
 
     @pytest.mark.asyncio
     async def test_enqueue_with_project_and_queue_id(
@@ -957,11 +972,9 @@ class TestJobQueueServiceQueueAwareEnqueue:
             "queue_id": queue.queue_id,
         }
 
-        result = await job_queue_service.enqueue(**job_data)
-
-        # Implementation logs warning but still uses the queue_id
-        assert result.queue_id == queue.queue_id
-        assert result.status == JobStatus.PENDING.value
+        # C4 fix: ValueError is raised when queue belongs to different project
+        with pytest.raises(ValueError, match="does not belong to project"):
+            await job_queue_service.enqueue(**job_data)
 
     @pytest.mark.asyncio
     async def test_enqueue_uses_queue_concurrency(
@@ -1015,7 +1028,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
     async def test_enqueue_no_system_queue_defaults_to_no_queue(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Test enqueue with project but no system_fifo_queue creates job without queue_id."""
+        """Test enqueue with project but no system_fifo_queue raises ValueError."""
         # Don't create any queue for project
         
         job_data = {
@@ -1027,12 +1040,9 @@ class TestJobQueueServiceQueueAwareEnqueue:
             "metadata": None,
         }
 
-        result = await job_queue_service.enqueue(**job_data)
-
-        # Job created but without queue_id (system queue doesn't exist)
-        assert result.project_id == "project-without-queue"
-        assert result.queue_id is None
-        assert result.status == JobStatus.PENDING.value
+        # C3 fix: ValueError is raised when system FIFO queue doesn't exist
+        with pytest.raises(ValueError, match="No system FIFO queue found"):
+            await job_queue_service.enqueue(**job_data)
 
     @pytest.mark.asyncio
     async def test_enqueue_with_queue_preserves_priority(

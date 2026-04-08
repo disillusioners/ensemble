@@ -57,9 +57,50 @@ def queue_repository(engine):
 
 
 @pytest.fixture
-def job_queue_service(repository, lock_manager, queue_repository):
-    """Create JobQueueService with repository, lock manager, and queue repo."""
-    return JobQueueService(repository, lock_manager, queue_repository)
+def queue_repository_with_system_queues(engine):
+    """Create JobQueueRepository with system queues pre-provisioned."""
+    repo = JobQueueRepository(engine)
+    # Pre-provision system queues for test-project
+    repo.create(
+        project_id="test-project",
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
+    repo.create(
+        project_id="test-project",
+        queue_name="system_parallel_queue",
+        queue_type="parallel",
+        concurrency_limit=3,
+        is_system=True,
+    )
+    # Also set up for project-1 and project-2 used in some tests
+    repo.create(
+        project_id="project-1",
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
+    repo.create(
+        project_id="project-2",
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
+    yield repo
+
+
+@pytest.fixture
+def job_queue_service(repository, lock_manager, queue_repository_with_system_queues):
+    """Create JobQueueService with system queues pre-provisioned.
+    
+    This fixture sets up system queues for test-project, project-1, and project-2
+    so that tests with project_id can properly route jobs to their queues.
+    """
+    return JobQueueService(repository, lock_manager, queue_repository_with_system_queues)
 
 
 @pytest.fixture

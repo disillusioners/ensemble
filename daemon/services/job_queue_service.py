@@ -47,6 +47,15 @@ class JobQueueService:
         self._repository = repository
         self._lock_manager = lock_manager
         self._queue_repo = queue_repo
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+    
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Store the event loop for sync→async operations.
+        
+        Args:
+            loop: The running event loop to use for async operations.
+        """
+        self._loop = loop
     
     # ========== Public API ==========
     
@@ -102,11 +111,10 @@ class JobQueueService:
             if queue is not None:
                 resolved_queue_id = queue.queue_id
             else:
-                # System queue doesn't exist - log warning and continue without queue
-                logger.warning(
-                    f"System queue 'system_fifo_queue' not found for project '{project_id}'. "
-                    f"Job will be queued without per-queue locking. "
-                    f"Consider provisioning system queues for this project."
+                # C3: System queue doesn't exist - raise error, don't silently continue
+                raise ValueError(
+                    f"No system FIFO queue found for project {project_id}. "
+                    f"Ensure system queues are provisioned."
                 )
         elif queue_id and project_id:
             # Validate queue exists and belongs to project
@@ -117,11 +125,10 @@ class JobQueueService:
                 )
                 resolved_queue_id = None
             elif queue.project_id != project_id:
-                logger.warning(
-                    f"Queue '{queue_id}' belongs to different project '{queue.project_id}', "
-                    f"job project is '{project_id}'"
+                # C4: Queue belongs to different project - reject the request
+                raise ValueError(
+                    f"Queue {queue_id} does not belong to project {project_id}"
                 )
-                # Still use the queue_id as specified
         
         # Create job with PENDING status - JobProcessor will handle the rest
         job = await asyncio.to_thread(
@@ -207,14 +214,10 @@ class JobQueueService:
         # Can abort PROCESSING jobs (release lock)
         if job.status == JobStatus.PROCESSING.value:
             # Release the per-queue lock held by this job's instance
+            # W8: release_by_instance() handles all lock cleanup for the instance,
+            # no need for separate release_queue_lock() call
             if job.instance_id:
                 await self._lock_manager.release_by_instance(job.instance_id)
-            
-            # Release queue lock if job has queue_id
-            if job.queue_id and job.project_id:
-                await self._lock_manager.release_queue_lock(
-                    job.project_id, job.queue_id, job.job_id
-                )
             
             # Use update() instead of cancel_job() since PROCESSING jobs
             # can't be cancelled via cancel_job() (raises ValueError)
@@ -251,11 +254,13 @@ class JobQueueService:
         
         # Create a new job and use enqueue logic to determine if it should
         # start immediately or be queued
+        # W13: Carry over the original queue_id to preserve queue routing
         new_job = await self.enqueue(
             agent_id=job.agent_id,
             message=job.message,
             source=job.source,
             project_id=job.project_id,
+            queue_id=job.queue_id,  # Carry over the original queue
             priority=job.priority,
             metadata=job.job_metadata,
         )
@@ -501,15 +506,22 @@ class JobQueueService:
     async def start_job(self, job_id: str) -> Optional[JobItem]:
         """Mark job as processing and acquire lock.
         
-        Attempts to acquire the lock for the job's queue and mark
-        the job as PROCESSING atomically.
+        C1 Fix: Attempts to start the job atomically FIRST, then acquires
+        the lock. This prevents phantom locks where a worker acquires a
+        concurrency slot but fails to start the job, wasting capacity.
+        
+        The flow is:
+        1. Get job → check PENDING
+        2. Call start_job_atomic() FIRST (only one worker can succeed)
+        3. If start succeeds → THEN acquire lock
+        4. If lock fails → roll back job status to PENDING
         
         Args:
             job_id: The job ID to start.
             
         Returns:
             Updated JobItem if started successfully, None if
-            job not found, cancelled, or lock acquisition failed.
+            job not found, cancelled, or start/lock acquisition failed.
         """
         job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
@@ -522,11 +534,21 @@ class JobQueueService:
         # Generate new instance ID for this job
         instance_id = str(uuid.uuid4())
         
-        # If job has queue_id, use per-queue locking with concurrency limit
+        # C1: Try to start job atomically FIRST
+        # This is the source of truth - only one worker can transition PENDING→PROCESSING
+        try:
+            started_job = await asyncio.to_thread(
+                self._repository.start_job_atomic, job_id, instance_id
+            )
+        except ValueError:
+            # Job state changed (already started/cancelled) - not an error
+            return None
+        
+        # Start succeeded - now acquire the lock
+        # If lock fails, roll back the job status
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
             
-            # Try to acquire queue lock
             acquired = await self._lock_manager.acquire_queue_lock(
                 project_id=job.project_id,
                 queue_id=job.queue_id,
@@ -536,20 +558,19 @@ class JobQueueService:
             )
             
             if not acquired:
-                # Queue is at capacity
+                # Lock acquisition failed - roll back job status
+                logger.warning(
+                    f"Lock acquisition failed for job {job_id}, rolling back to PENDING"
+                )
+                await asyncio.to_thread(
+                    self._repository.update,
+                    job_id,
+                    status=JobStatus.PENDING.value,
+                    instance_id=None,
+                )
                 return None
             
-            try:
-                # Atomically start the job
-                return await asyncio.to_thread(
-                    self._repository.start_job_atomic, job_id, instance_id
-                )
-            except ValueError:
-                # Job state changed between check and start
-                await self._lock_manager.release_queue_lock(
-                    job.project_id, job.queue_id, job_id
-                )
-                return None
+            return started_job
         
         # If job has project_id but no queue_id, use backward-compatible project-based locking
         if job.project_id:
@@ -560,23 +581,22 @@ class JobQueueService:
             )
             
             if not acquired:
+                # Lock acquisition failed - roll back job status
+                logger.warning(
+                    f"Project-level lock acquisition failed for job {job_id}, rolling back"
+                )
+                await asyncio.to_thread(
+                    self._repository.update,
+                    job_id,
+                    status=JobStatus.PENDING.value,
+                    instance_id=None,
+                )
                 return None
             
-            try:
-                return await asyncio.to_thread(
-                    self._repository.start_job_atomic, job_id, instance_id
-                )
-            except ValueError:
-                await self._lock_manager.release(job.project_id, job_id)
-                return None
+            return started_job
         
-        # No project_id - start immediately without locking
-        try:
-            return await asyncio.to_thread(
-                self._repository.start_job_atomic, job_id, instance_id
-            )
-        except ValueError:
-            return None
+        # No project_id - started successfully without locking
+        return started_job
     
     async def complete_job(
         self,
@@ -634,11 +654,9 @@ class JobQueueService:
     ) -> Optional[JobItem]:
         """Mark job as completed or failed and release lock (synchronous version).
         
-        NOTE: This is a legacy method. The lock manager is now fully async.
-        For new code, use the async complete_job() method instead.
-        
-        This is the synchronous counterpart to complete_job(), used when
-        async context is not available (e.g., from terminate_instance).
+        W6 Fix: Uses asyncio.run_coroutine_threadsafe() to properly release
+        per-queue locks from synchronous context by scheduling the async
+        release on the stored event loop.
         
         Args:
             job_id: The job ID to complete.
@@ -649,24 +667,31 @@ class JobQueueService:
         Returns:
             Updated JobItem if completed successfully, None if
             job not found or not in a processable state.
-            
-        Raises:
-            ValueError: If job is already completed or cancelled.
         """
         job = self._repository.get(job_id)
         if job is None:
             return None
         
-        # NOTE: Lock release must be done asynchronously in production code.
-        # This sync method cannot properly release per-queue locks.
-        # TODO: Migrate all callers to async complete_job()
-        if job.queue_id and job.project_id:
-            logger.warning(
-                f"complete_job_sync called for job {job_id} with queue_id. "
-                "Lock release will not work properly. Use async complete_job() instead."
-            )
+        # W6: Properly release locks from sync context using event loop
+        if job.project_id and job.queue_id:
+            # Use asyncio.run_coroutine_threadsafe to release queue lock
+            if self._loop and self._loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._lock_manager.release_queue_lock(
+                        job.project_id, job.queue_id, job_id
+                    ),
+                    self._loop,
+                )
+                try:
+                    future.result(timeout=5)  # Wait up to 5s for lock release
+                except Exception as e:
+                    logger.error(f"Failed to release queue lock for job {job_id}: {e}")
+            else:
+                logger.warning(
+                    f"Cannot release queue lock for job {job_id} - no event loop available"
+                )
         elif job.project_id:
-            # Use synchronous release for backward compatibility
+            # Legacy project-level lock (backward compatibility)
             self._lock_manager.release_sync(job.project_id, job_id)
         
         # Mark job based on success/failure

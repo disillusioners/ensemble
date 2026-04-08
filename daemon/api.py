@@ -155,6 +155,7 @@ start_time: float = None
 credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
 job_processor: JobProcessor = None
+job_queue_mgmt_service: JobQueueMgmtService = None
 
 # SSE connection tracking: {connection_id: {instance_id, connected_at, task}}
 _sse_connections: dict[str, dict] = {}
@@ -164,7 +165,7 @@ SSE_CONNECTION_TTL_SECONDS = 3600  # 1 hour max connection lifetime
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time, job_queue_service, job_processor
+    global manager, start_time, job_queue_service, job_processor, job_queue_mgmt_service
     config = load_config()
     manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
@@ -194,6 +195,9 @@ async def lifespan(app: FastAPI):
         lock_manager=job_lock_manager,
         queue_repo=queue_repo,
     )
+    
+    # W6: Store the event loop for sync→async operations in complete_job_sync()
+    job_queue_service.set_event_loop(asyncio.get_running_loop())
     
     # Set up dependency injection for jobs router
     from daemon.routers.jobs import set_job_queue_service

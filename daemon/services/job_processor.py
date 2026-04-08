@@ -189,6 +189,35 @@ class JobProcessor:
                         )
                     except Exception:
                         pass
+        
+        # C5: Fallback - handle any orphaned jobs without project_id (defensive)
+        # These shouldn't exist in normal flow since project_id is required,
+        # but this prevents permanent orphaning of any edge-case jobs
+        orphan_pending = await asyncio.to_thread(
+            self._queue_service._repository.list_all_pending
+        )
+        orphan_pending = [j for j in orphan_pending if j.project_id is None]
+        if orphan_pending:
+            job = orphan_pending[0]
+            try:
+                started_job = await self._queue_service.start_job(job.job_id)
+                if started_job:
+                    instance_id = self._instance_manager.spawn_instance(
+                        agent_id=job.agent_id,
+                        instance_id=started_job.instance_id,
+                    )
+                    await self._instance_manager.enqueue_message(
+                        instance_id=instance_id,
+                        message=job.message,
+                        source=job.source,
+                    )
+                    logger.info(f"Orphan job {job.job_id} queued for instance {instance_id}")
+            except Exception as e:
+                logger.error(f"Failed to process orphan job {job.job_id}: {e}")
+                try:
+                    await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
+                except Exception:
+                    pass
 
 
 # Backward compatibility alias
