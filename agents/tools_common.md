@@ -9,7 +9,7 @@ Use `tool_help("tool_name")` for full docs. Common tools:
 
 ## File Operations
 
-```
+```raw
 read_file(path, workdir)                     # Read file with line numbers
 write_file(content, path, workdir)           # Write or append to file
 edit_file(path, old_string, new_string, workdir, replace_all=False)  # Replace text
@@ -18,11 +18,13 @@ glob_files(pattern, workdir, path=".")       # Find files by pattern
 grep_files(pattern, workdir, path=".", include="", case_sensitive=False, whole_word=False)  # Search
 ```
 
-**Rules**: `path` is always relative to `workdir`. Never use absolute paths.
+**Rules**: 
+- Important: `workdir` parameters are mandatory for all file operations. Always specify them to avoid errors.
+- `path` is always relative to `workdir`. Never use absolute paths.
 
 ## Shell
 
-```
+```raw
 bash(command, timeout=120, workdir)          # Execute shell command (workdir required)
 time(format_type="iso")                      # Get current time
 ```
@@ -31,7 +33,7 @@ time(format_type="iso")                      # Get current time
 
 ## Instance Management
 
-```
+```raw
 spawn_instance(agent_dir, instance_id=None)  # Spawn new agent
 send_message(instance_id, message)           # Send to instance queue
 terminate_instance(instance_id)              # Kill instance
@@ -41,7 +43,7 @@ get_instance_info(instance_id)               # Get instance details
 
 ## Project Management
 
-```
+```raw
 project_create(name, project_type="general", main_directory=None, tags=[], metadata={})
 project_get(project_id=None, name=None, shortname=None)  # Get by ID, name, or shortname
 project_list(status=None, tags=[], limit=50)
@@ -56,13 +58,13 @@ project_delete(project_id)
 
 ## Self-Modification
 
-```
+```raw
 inner_soul(intent, content)               # intent: remember|learn|change
 ```
 
 ## Help
 
-```
+```raw
 tool_help()                                # List all tools
 tool_help("tool_name")                     # Detailed docs for tool
 tool_help(category="project")              # List by category
