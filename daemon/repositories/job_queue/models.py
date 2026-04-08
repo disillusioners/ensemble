@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel
-from sqlalchemy import Column, Index
+from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
@@ -31,6 +31,59 @@ class JobStatus(str, enum.Enum):
         return status in cls._value2member_map_
 
 
+class QueueType(str, enum.Enum):
+    """Queue type enum."""
+    FIFO = "fifo"
+    PARALLEL = "parallel"
+
+
+class JobQueue(SQLModel, table=True):
+    """Named job queue for per-project job isolation."""
+    __tablename__ = "job_queues"
+    __table_args__ = (
+        Index("idx_job_queues_project", "project_id"),
+        UniqueConstraint("project_id", "queue_name_lower", name="uq_job_queues_project_name"),
+    )
+
+    # Primary identification
+    queue_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        primary_key=True
+    )
+    
+    # Queue identity
+    project_id: str  # NOT NULL, FK target (no foreign_key= param)
+    queue_name: str = Field(default="default", max_length=100)
+    queue_name_lower: str = Field(default="default", max_length=100)  # For case-insensitive uniqueness
+    queue_type: str = Field(default=QueueType.FIFO.value)  # "fifo" or "parallel"
+    
+    # Queue configuration
+    concurrency_limit: int = Field(default=1, ge=1)
+    is_system: bool = Field(default=False)
+    is_paused: bool = Field(default=False)
+    description: Optional[str] = None
+    
+    # Timestamps
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "queue_id": self.queue_id,
+            "project_id": self.project_id,
+            "queue_name": self.queue_name,
+            "queue_name_lower": self.queue_name_lower,
+            "queue_type": self.queue_type,
+            "concurrency_limit": self.concurrency_limit,
+            "is_system": self.is_system,
+            "is_paused": self.is_paused,
+            "description": self.description,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
 class JobItem(SQLModel, table=True):
     """Job queue item - persisted for crash recovery.
     
@@ -42,6 +95,7 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_status", "status"),
         Index("idx_job_queue_instance", "instance_id"),
         Index("idx_job_queue_project", "project_id"),
+        Index("idx_job_queue_items_queue", "queue_id"),
     )
 
     # Primary identification
@@ -58,6 +112,7 @@ class JobItem(SQLModel, table=True):
 
     # Project queuing (None = skip queue, execute immediately)
     project_id: Optional[str] = Field(default=None)
+    queue_id: Optional[str] = Field(default=None, foreign_key="job_queues.queue_id")
 
     # Scheduling
     priority: int = Field(default=5, ge=1, le=10)  # 1=lowest, 10=highest
@@ -91,6 +146,7 @@ class JobItem(SQLModel, table=True):
             "message": self.message,
             "source": self.source,
             "project_id": self.project_id,
+            "queue_id": self.queue_id,
             "priority": self.priority,
             "status": self.status,
             "created_at": self.created_at,

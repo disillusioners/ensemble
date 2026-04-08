@@ -151,6 +151,164 @@ TaskValidationError = JobValidationError
 TaskNotFoundResponse = JobNotFoundResponse
 
 
+# ==================== Job Queue Management Schemas ====================
+
+
+class JobQueueResponse(BaseModel):
+    """Response for a single job queue."""
+    
+    queue_id: str = Field(..., description="Unique queue identifier")
+    project_id: str = Field(..., description="Project ID this queue belongs to")
+    queue_name: str = Field(..., description="Queue name")
+    queue_type: str = Field(..., description="Queue type: 'fifo' or 'parallel'")
+    concurrency_limit: int = Field(..., description="Maximum concurrent jobs")
+    is_system: bool = Field(..., description="Whether this is a system queue")
+    is_paused: bool = Field(..., description="Whether the queue is paused")
+    description: Optional[str] = Field(default=None, description="Queue description")
+    created_at: str = Field(..., description="Queue creation timestamp")
+    updated_at: str = Field(..., description="Queue last update timestamp")
+    active_jobs: int = Field(default=0, description="Number of currently active jobs")
+    pending_jobs: int = Field(default=0, description="Number of pending jobs")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "queue_id": "queue-uuid",
+                "project_id": "project-uuid",
+                "queue_name": "default",
+                "queue_type": "fifo",
+                "concurrency_limit": 1,
+                "is_system": False,
+                "is_paused": False,
+                "description": "Default job queue",
+                "created_at": "2025-03-15T10:00:00",
+                "updated_at": "2025-03-15T10:00:00",
+                "active_jobs": 0,
+                "pending_jobs": 5
+            }
+        }
+    }
+
+
+class JobQueueListResponse(BaseModel):
+    """Response for listing job queues."""
+    
+    queues: list[JobQueueResponse] = Field(default_factory=list, description="List of job queues")
+    total: int = Field(..., description="Total number of queues")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "queues": [
+                    {
+                        "queue_id": "queue-uuid-1",
+                        "project_id": "project-uuid",
+                        "queue_name": "default",
+                        "queue_type": "fifo",
+                        "concurrency_limit": 1,
+                        "is_system": False,
+                        "is_paused": False,
+                        "description": "Default job queue",
+                        "created_at": "2025-03-15T10:00:00",
+                        "updated_at": "2025-03-15T10:00:00",
+                        "active_jobs": 0,
+                        "pending_jobs": 3
+                    }
+                ],
+                "total": 1
+            }
+        }
+    }
+
+
+class JobQueueCreateRequest(BaseModel):
+    """Request body for creating a new job queue."""
+    
+    queue_name: str = Field(..., min_length=1, max_length=100, description="Queue name")
+    queue_type: str = Field(default="fifo", description="Queue type: 'fifo' or 'parallel'")
+    concurrency_limit: int = Field(default=1, ge=1, le=20, description="Max concurrent jobs")
+    description: Optional[str] = Field(default=None, max_length=500, description="Queue description")
+    
+    @field_validator("queue_type")
+    @classmethod
+    def validate_queue_type(cls, v: str) -> str:
+        if v not in ("fifo", "parallel"):
+            raise ValueError("queue_type must be 'fifo' or 'parallel'")
+        return v
+    
+    @field_validator("queue_name")
+    @classmethod
+    def validate_queue_name(cls, v: str) -> str:
+        v = v.strip()
+        reserved = ("system_fifo_queue", "system_parallel_queue")
+        if v.lower() in reserved:
+            raise ValueError(f"'{v}' is a reserved queue name")
+        return v
+    
+    @model_validator(mode="after")
+    def validate_fifo_concurrency(self) -> "JobQueueCreateRequest":
+        if self.queue_type == "fifo":
+            self.concurrency_limit = 1
+        return self
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "queue_name": "my-queue",
+                "queue_type": "parallel",
+                "concurrency_limit": 3,
+                "description": "Custom parallel processing queue"
+            }
+        }
+    }
+
+
+class JobQueueUpdateRequest(BaseModel):
+    """Request body for updating a job queue."""
+    
+    queue_name: Optional[str] = Field(default=None, min_length=1, max_length=100, description="New queue name")
+    concurrency_limit: Optional[int] = Field(default=None, ge=1, le=20, description="New concurrency limit")
+    is_paused: Optional[bool] = Field(default=None, description="Pause/unpause the queue")
+    description: Optional[str] = Field(default=None, max_length=500, description="New description")
+    
+    @field_validator("queue_name")
+    @classmethod
+    def validate_queue_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            reserved = ("system_fifo_queue", "system_parallel_queue")
+            if v.lower() in reserved:
+                raise ValueError(f"'{v}' is a reserved queue name")
+        return v
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "queue_name": "updated-queue",
+                "concurrency_limit": 5,
+                "is_paused": False,
+                "description": "Updated queue description"
+            }
+        }
+    }
+
+
+class JobQueueNotFoundResponse(BaseModel):
+    """Not found error response for job queues."""
+    
+    error: str = Field(default="Job queue not found", description="Error type")
+    queue_id: str = Field(..., description="The queue ID that was not found")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "error": "Job queue not found",
+                "queue_id": "invalid-uuid"
+            }
+        }
+    }
+
+
 # ==================== Project Schemas ====================
 
 
