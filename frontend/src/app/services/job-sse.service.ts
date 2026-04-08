@@ -131,9 +131,8 @@ export class JobSseService {
           const errorMessage = data.error_message || 'Unknown error occurred';
           this.latestError.set(errorMessage);
         } catch (err) {
-          console.error('[JobSse] Failed to parse error event:', err);
-          // Handle case where error data is not valid JSON
-          this.latestError.set('Connection error occurred');
+          console.warn('[JobSse] Failed to parse error event:', err);
+          // Do not set latestError - actual connection errors are handled by onerror handler
         }
       });
     });
