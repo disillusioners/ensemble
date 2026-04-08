@@ -80,9 +80,9 @@
           [value]="filters().agent_id || 'all'"
           (selectionChange)="onAgentFilterChange($event.value)">
           <mat-option value="all">All Agents</mat-option>
-          @for (agent of agents(); track agent.agent_id) {
-            <mat-option [value]="agent.agent_id">
-              {{ getAgentDisplayName(agent.agent_id) }}
+          @for (agent of agents(); track agent.id) {
+            <mat-option [value]="agent.id">
+              {{ getAgentDisplayName(agent.id) }}
             </mat-option>
           }
         </mat-select>

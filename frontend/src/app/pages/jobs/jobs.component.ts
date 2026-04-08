@@ -433,7 +433,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected getAgentDisplayName(agentId: string): string {
-    const agent = this.agents().find(a => a.agent_id === agentId);
+    const agent = this.agents().find(a => a.id === agentId);
     return agent ? `${agent.icon} ${agent.name}` : agentId;
   }
 
