@@ -211,6 +211,60 @@ $accent-blue: #3b82f6;
   font-size: 0.875rem;
 }
 
+// Project Select with Search (nz-select)
+.project-nz-select {
+  width: 100%;
+
+  &.ant-select {
+    .ant-select-selector {
+      background-color: $bg-primary !important;
+      border-color: $border-color !important;
+      border-radius: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      min-height: 42px;
+
+      &:hover, &:focus {
+        border-color: $accent-cyan !important;
+      }
+    }
+
+    &.ant-select-focused {
+      .ant-select-selector {
+        border-color: $accent-cyan !important;
+        box-shadow: 0 0 0 2px rgba($accent-cyan, 0.2) !important;
+      }
+    }
+
+    .ant-select-selection-placeholder,
+    .ant-select-selection-search-input {
+      color: $text-muted;
+    }
+
+    .ant-select-selection-item {
+      color: $text-primary;
+    }
+  }
+
+  .ant-select-dropdown {
+    background-color: $bg-card;
+    border: 1px solid $border-color;
+    border-radius: 0.5rem;
+
+    .ant-select-item {
+      color: $text-primary;
+
+      &.ant-select-item-option-active {
+        background-color: $bg-card-hover;
+      }
+
+      &.ant-select-item-option-selected {
+        background-color: rgba($accent-cyan, 0.2);
+        font-weight: 500;
+      }
+    }
+  }
+}
+
 // Priority Slider
 .slider-container {
   display: flex;

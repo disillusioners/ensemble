@@ -1,6 +1,9 @@
 // Angular Material Theming (M3)
 @use '@angular/material' as mat;
 
+// ng-zorro-antd dark theme
+@import 'ng-zorro-antd/ng-zorro-antd.dark.css';
+
 html {
   color-scheme: dark;
   

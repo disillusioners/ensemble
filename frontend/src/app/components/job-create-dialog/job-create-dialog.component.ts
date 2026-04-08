@@ -5,12 +5,14 @@ import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/materia
 import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSelectModule } from '@angular/material/select';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
-import { Inject } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { NzSelectModule } from 'ng-zorro-antd/select';
 import { ApiService } from '../../services/api.service';
+import { ProjectService } from '../../services/project.service';
 import type { Agent } from '../../models';
+import type { Project } from '../../models/project.model';
 
 export interface JobCreateDialogData {
   editMode?: boolean;
@@ -36,13 +38,14 @@ export interface JobCreateDialogResult {
   imports: [
     CommonModule,
     ReactiveFormsModule,
+    FormsModule,
     MatDialogModule,
     MatButtonModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSelectModule,
     MatSliderModule,
-    MatSnackBarModule
+    MatSnackBarModule,
+    NzSelectModule
   ],
   templateUrl: './job-create-dialog.html',
   styleUrl: './job-create-dialog.scss'
@@ -50,6 +53,7 @@ export interface JobCreateDialogResult {
 export class JobCreateDialogComponent implements OnInit {
   private readonly fb = inject(FormBuilder);
   private readonly api = inject(ApiService);
+  protected readonly projectService = inject(ProjectService);
   private readonly snackBar = inject(MatSnackBar);
   
   protected readonly dialogRef = inject(MatDialogRef<JobCreateDialogComponent>);
@@ -76,6 +80,7 @@ export class JobCreateDialogComponent implements OnInit {
 
   ngOnInit(): void {
     this.loadAgents();
+    this.loadProjects();
     
     // Pre-fill form if editing
     if (this.data?.editMode && this.data.agentId) {
@@ -104,6 +109,14 @@ export class JobCreateDialogComponent implements OnInit {
           panelClass: 'error-snackbar'
         });
         this.agentsLoading.set(false);
+      }
+    });
+  }
+
+  private loadProjects(): void {
+    this.projectService.listProjects().subscribe({
+      error: (err) => {
+        console.error('Failed to load projects:', err);
       }
     });
   }
