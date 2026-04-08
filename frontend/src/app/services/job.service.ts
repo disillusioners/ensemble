@@ -21,7 +21,7 @@ export class JobService {
   readonly error = signal<string | null>(null);
 
   /**
-   * GET /api/jobs?status=...&source=...&agent_id=...
+   * GET /api/jobs?status=...&source=...&agent_id=...&queue_id=...
    */
   listJobs(filters?: JobFilters): Observable<Job[]> {
     let params = new HttpParams();
@@ -30,6 +30,7 @@ export class JobService {
       if (filters.source) params = params.set('source', filters.source);
       if (filters.agent_id) params = params.set('agent_id', filters.agent_id);
       if (filters.project_id) params = params.set('project_id', filters.project_id);
+      if (filters.queue_id) params = params.set('queue_id', filters.queue_id);
     }
 
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(

@@ -70,23 +70,46 @@
       <!-- Project Selector (optional) -->
       <div class="form-group">
         <label class="form-label">Project</label>
-        <nz-select
+        <select
           formControlName="project_id"
-          class="project-nz-select"
-          nzAllowClear
-          nzShowSearch
-          nzPlaceHolder="Select a project (optional)"
-          [nzServerSearch]="false"
+          class="form-select"
         >
+          <option value="">No project</option>
           @for (project of projectService.projects(); track project.project_id) {
-            <nz-option
-              [nzValue]="project.project_id"
-              [nzLabel]="project.name + ' (' + project.project_id + ')'"
-            ></nz-option>
+            <option [value]="project.project_id">
+              {{ project.name }} ({{ project.project_id }})
+            </option>
           }
-        </nz-select>
+        </select>
         <p class="form-hint">Optional: Select a project for job serialization</p>
       </div>
+
+      <!-- Queue Selector (optional, shown when project is selected) -->
+      @if (form.get('project_id')?.value) {
+        <div class="form-group">
+          <label class="form-label">Queue</label>
+          @if (queuesLoading()) {
+            <div class="loading-placeholder">Loading queues...</div>
+          } @else if (queues().length === 0) {
+            <select class="form-select" disabled>
+              <option value="">No queues available</option>
+            </select>
+          } @else {
+            <select
+              formControlName="queue_id"
+              class="form-select"
+            >
+              <option value="">Default queue</option>
+              @for (queue of queues(); track queue.queue_id) {
+                <option [value]="queue.queue_id">
+                  {{ queue.queue_name }} ({{ queue.queue_type }})
+                </option>
+              }
+            </select>
+          }
+          <p class="form-hint">Optional: Select a specific queue for this job</p>
+        </div>
+      }
 
       <!-- Priority Slider -->
       <div class="form-group">

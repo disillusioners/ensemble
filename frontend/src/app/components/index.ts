@@ -8,3 +8,5 @@ export * from './source-list/source-list.component';
 export * from './source-card/source-card.component';
 export * from './add-source-modal/add-source-modal.component';
 export * from './schedule-detail-drawer/schedule-detail-drawer.component';
+export * from './queue-list/queue-list.component';
+export * from './queue-create-dialog/queue-create-dialog.component';

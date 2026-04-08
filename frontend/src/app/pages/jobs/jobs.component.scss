@@ -241,9 +241,22 @@
 }
 
 // Drawer Container
+.jobs-main-layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.jobs-main-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 .jobs-drawer-container {
   flex: 1;
-  height: calc(100% - 140px);
+  height: 100%;
   background: var(--background-color, #1e1e1e);
 }
 

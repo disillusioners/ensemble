@@ -73,6 +73,7 @@ def _job_to_response(
         agent_id=job.agent_id,
         agent_dir=job.agent_dir,
         project_id=job.project_id,
+        queue_id=job.queue_id,
         instance_id=job.instance_id,
         created_at=job.created_at,
         started_at=job.started_at,
@@ -133,6 +134,7 @@ async def create_job(
             project_id=request.project_id,
             priority=request.priority,
             metadata=request.metadata,
+            queue_id=request.queue_id,
         )
     except ValidationError as e:
         raise HTTPException(
@@ -210,6 +212,7 @@ async def get_job(
 async def list_jobs(
     status: Optional[str] = None,
     project_id: Optional[str] = None,
+    queue_id: Optional[str] = None,
     limit: int = 50,
     service: JobQueueService = Depends(get_job_queue_service),
 ) -> JobListResponse:
@@ -218,6 +221,7 @@ async def list_jobs(
     Query params:
         - status: Filter by status (pending, processing, completed, failed, cancelled)
         - project_id: Filter by project ID
+        - queue_id: Filter by queue ID
         - limit: Maximum number of jobs to return (default: 50)
     
     Returns:
@@ -242,6 +246,7 @@ async def list_jobs(
         status=job_status,
         project_id=project_id,
         limit=limit,
+        queue_id=queue_id,
     )
     
     # Convert to response format
@@ -455,6 +460,7 @@ async def stream_job_events(
                     "job_id": job_id,
                     "status": job.status,
                     "instance_id": job.instance_id,
+                    "queue_id": job.queue_id,
                 })
             }
             logger.info(f"SSE connected to job {job_id}, initial status: {job.status}")
@@ -468,6 +474,7 @@ async def stream_job_events(
                         "status": job.status,
                         "result_summary": job.result_summary,
                         "error_message": job.error_message,
+                        "queue_id": job.queue_id,
                     })
                 }
                 logger.info(f"Job {job_id} already in terminal state: {job.status}")
@@ -504,6 +511,7 @@ async def stream_job_events(
                             "status": current_job.status,
                             "instance_id": current_job.instance_id,
                             "previous_status": previous_status,
+                            "queue_id": current_job.queue_id,
                         })
                     }
                     logger.debug(f"Job {job_id} status changed to: {current_job.status}")
@@ -517,6 +525,7 @@ async def stream_job_events(
                                 "status": current_job.status,
                                 "result_summary": current_job.result_summary,
                                 "error_message": current_job.error_message,
+                                "queue_id": current_job.queue_id,
                             })
                         }
                         logger.info(f"Job {job_id} completed with status: {current_job.status}")

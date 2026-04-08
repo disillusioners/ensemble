@@ -27,9 +27,17 @@
   </div>
 
   <mat-card-content class="job-card-content">
-    <div class="agent-dir">
-      <mat-icon class="dir-icon">folder</mat-icon>
-      <span class="dir-text">{{ job().agent_id }}</span>
+    <div class="job-meta-row">
+      <div class="agent-dir">
+        <mat-icon class="dir-icon">folder</mat-icon>
+        <span class="dir-text">{{ job().agent_id }}</span>
+      </div>
+      @if (hasQueue()) {
+        <div class="queue-badge" [matTooltip]="'Queue: ' + job().queue_id">
+          <mat-icon class="queue-icon">queue</mat-icon>
+          <span class="queue-id">{{ queueBadge() }}</span>
+        </div>
+      }
     </div>
 
     <p class="message-preview">{{ messagePreview() }}</p>

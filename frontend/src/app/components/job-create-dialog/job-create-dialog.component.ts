@@ -1,18 +1,19 @@
-import { Component, inject, signal, OnInit } from '@angular/core';
+import { Component, inject, signal, OnInit, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
-import { MatSliderModule } from '@angular/material/slider';
+import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { FormsModule } from '@angular/forms';
-import { NzSelectModule } from 'ng-zorro-antd/select';
 import { ApiService } from '../../services/api.service';
 import { ProjectService } from '../../services/project.service';
+import { QueueService } from '../../services/queue.service';
 import type { Agent } from '../../models';
 import type { Project } from '../../models/project.model';
+import { JobQueue } from '../../models/job-queue.model';
 
 export interface JobCreateDialogData {
   editMode?: boolean;
@@ -30,6 +31,7 @@ export interface JobCreateDialogResult {
   project_id?: string;
   priority: number;
   source: string;
+  queue_id?: string;
 }
 
 @Component({
@@ -43,9 +45,8 @@ export interface JobCreateDialogResult {
     MatButtonModule,
     MatFormFieldModule,
     MatInputModule,
-    MatSliderModule,
-    MatSnackBarModule,
-    NzSelectModule
+    MatSelectModule,
+    MatSnackBarModule
   ],
   templateUrl: './job-create-dialog.html',
   styleUrl: './job-create-dialog.scss'
@@ -54,6 +55,7 @@ export class JobCreateDialogComponent implements OnInit {
   private readonly fb = inject(FormBuilder);
   private readonly api = inject(ApiService);
   protected readonly projectService = inject(ProjectService);
+  protected readonly queueService = inject(QueueService);
   private readonly snackBar = inject(MatSnackBar);
   
   protected readonly dialogRef = inject(MatDialogRef<JobCreateDialogComponent>);
@@ -62,11 +64,14 @@ export class JobCreateDialogComponent implements OnInit {
   protected readonly agents = signal<Agent[]>([]);
   protected readonly isLoading = signal(false);
   protected readonly agentsLoading = signal(true);
+  protected readonly queues = signal<JobQueue[]>([]);
+  protected readonly queuesLoading = signal(false);
 
   protected readonly form: FormGroup = this.fb.group({
     agent_id: ['', Validators.required],
     message: ['', [Validators.required, Validators.minLength(10)]],
     project_id: [''],
+    queue_id: [''],
     priority: [5, [Validators.required, Validators.min(1), Validators.max(10)]],
     source: ['api']
   });
@@ -77,6 +82,18 @@ export class JobCreateDialogComponent implements OnInit {
     { value: 'scheduler', label: 'Scheduler' },
     { value: 'webhook', label: 'Webhook' }
   ];
+
+  constructor() {
+    // Load queues when project_id changes
+    effect(() => {
+      const projectId = this.form.get('project_id')?.value;
+      if (projectId) {
+        this.loadQueues(projectId);
+      } else {
+        this.queues.set([]);
+      }
+    });
+  }
 
   ngOnInit(): void {
     this.loadAgents();
@@ -92,6 +109,21 @@ export class JobCreateDialogComponent implements OnInit {
         source: this.data.source || 'api'
       });
     }
+  }
+
+  private loadQueues(projectId: string): void {
+    this.queuesLoading.set(true);
+    
+    this.queueService.listQueues(projectId).subscribe({
+      next: (queues) => {
+        this.queues.set(queues);
+        this.queuesLoading.set(false);
+      },
+      error: (err) => {
+        console.error('Failed to load queues:', err);
+        this.queuesLoading.set(false);
+      }
+    });
   }
 
   private loadAgents(): void {
@@ -125,7 +157,7 @@ export class JobCreateDialogComponent implements OnInit {
     this.dialogRef.close();
   }
 
-  protected async handleSubmit(): Promise<void> {
+  protected handleSubmit(): void {
     if (this.form.invalid) {
       this.form.markAllAsTouched();
       return;
@@ -139,7 +171,8 @@ export class JobCreateDialogComponent implements OnInit {
         message: this.form.value.message,
         project_id: this.form.value.project_id || undefined,
         priority: this.form.value.priority,
-        source: this.form.value.source
+        source: this.form.value.source,
+        queue_id: this.form.value.queue_id || undefined
       };
 
       this.dialogRef.close(result);

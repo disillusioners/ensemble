@@ -1,0 +1,140 @@
+<div class="queue-list-panel">
+  <!-- Header -->
+  <div class="queue-list-header">
+    <div class="header-title">
+      <mat-icon>queue</mat-icon>
+      <span>Queues</span>
+    </div>
+    <button 
+      mat-icon-button
+      (click)="onRefresh()"
+      [disabled]="loading()"
+      class="refresh-btn"
+      matTooltip="Refresh queues">
+      <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+    </button>
+  </div>
+
+  <!-- Content -->
+  <div class="queue-list-content">
+    @if (!projectId()) {
+      <!-- No project selected -->
+      <div class="empty-state">
+        <mat-icon>info</mat-icon>
+        <p>Select a project to view queues</p>
+      </div>
+    } @else if (loading() && queues().length === 0) {
+      <!-- Loading -->
+      <div class="loading-state">
+        <mat-progress-spinner mode="indeterminate" diameter="32"></mat-progress-spinner>
+      </div>
+    } @else if (error()) {
+      <!-- Error -->
+      <div class="error-state">
+        <mat-icon>error_outline</mat-icon>
+        <p>{{ error() }}</p>
+        <button mat-button (click)="onRefresh()">Retry</button>
+      </div>
+    } @else {
+      <!-- Queue List -->
+      <div class="queue-items">
+        <!-- All Jobs option -->
+        <div 
+          class="queue-item"
+          [class.selected]="!selectedQueueId()"
+          (click)="queueSelected.emit(null)">
+          <div class="queue-info">
+            <mat-icon class="queue-icon">list</mat-icon>
+            <span class="queue-name">All Jobs</span>
+          </div>
+        </div>
+
+        <!-- Queue items -->
+        @for (queue of queues(); track queue.queue_id) {
+          <div 
+            class="queue-item"
+            [class.selected]="isSelected(queue)"
+            [class.system]="queue.is_system"
+            (click)="onQueueClick(queue)">
+            <div class="queue-info">
+              <mat-icon class="queue-icon">{{ getTypeIcon(queue.queue_type) }}</mat-icon>
+              <div class="queue-details">
+                <div class="queue-name-row">
+                  <span class="queue-name">{{ queue.queue_name }}</span>
+                  <span class="type-badge">{{ getTypeLabel(queue.queue_type) }}</span>
+                </div>
+                <div class="queue-meta">
+                  <span 
+                    class="status-indicator"
+                    [style.backgroundColor]="getStatusColor(queue.is_paused)"
+                    [matTooltip]="getStatusLabel(queue.is_paused)">
+                  </span>
+                  <span class="status-text">{{ getStatusLabel(queue.is_paused) }}</span>
+                  @if (queue.is_system) {
+                    <span class="system-badge">System</span>
+                  }
+                </div>
+              </div>
+            </div>
+            
+            <div class="queue-actions">
+              <!-- Start/Stop button -->
+              @if (!queue.is_system) {
+                <button 
+                  mat-icon-button
+                  class="action-btn"
+                  [disabled]="isQueueOperating(queue.queue_id)"
+                  [matTooltip]="queue.is_paused ? 'Start queue' : 'Pause queue'"
+                  (click)="queue.is_paused ? onStartQueue(queue, $event) : onStopQueue(queue, $event)">
+                  @if (isQueueOperating(queue.queue_id)) {
+                    <mat-progress-spinner mode="indeterminate" diameter="16"></mat-progress-spinner>
+                  } @else {
+                    <mat-icon>{{ queue.is_paused ? 'play_arrow' : 'pause' }}</mat-icon>
+                  }
+                </button>
+              }
+
+              <!-- Delete button (custom queues only) -->
+              @if (canDeleteQueue(queue)) {
+                <button 
+                  mat-icon-button
+                  class="action-btn delete-btn"
+                  [disabled]="isQueueOperating(queue.queue_id)"
+                  matTooltip="Delete queue"
+                  (click)="onDeleteQueue(queue, $event)">
+                  <mat-icon>delete</mat-icon>
+                </button>
+              }
+            </div>
+
+            <!-- Job counts -->
+            <div class="queue-counts">
+              @if (queue.active_jobs > 0) {
+                <span class="count-badge active">
+                  {{ queue.active_jobs }} active
+                </span>
+              }
+              @if (queue.pending_jobs > 0) {
+                <span class="count-badge pending">
+                  {{ queue.pending_jobs }} pending
+                </span>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    }
+  </div>
+
+  <!-- Footer -->
+  <div class="queue-list-footer">
+    <button 
+      mat-flat-button
+      class="add-queue-btn"
+      [disabled]="!projectId()"
+      (click)="onCreateQueue()">
+      <mat-icon>add</mat-icon>
+      Add Queue
+    </button>
+  </div>
+</div>

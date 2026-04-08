@@ -1,0 +1,137 @@
+<div class="modal-container">
+  <!-- Backdrop -->
+  <div class="modal-backdrop" (click)="handleClose()"></div>
+  
+  <!-- Modal -->
+  <div class="modal-content animate-fade-in">
+    <!-- Header -->
+    <div class="modal-header">
+      <h2 class="font-display text-xl font-semibold text-dark-50">
+        Create New Queue
+      </h2>
+      <button
+        (click)="handleClose()"
+        class="close-btn"
+        type="button">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- Form -->
+    <form [formGroup]="form" (ngSubmit)="handleSubmit()" class="modal-form">
+      <!-- Queue Name -->
+      <div class="form-group">
+        <label class="form-label">
+          Queue Name <span class="text-accent-rose">*</span>
+        </label>
+        <input
+          type="text"
+          formControlName="queue_name"
+          placeholder="my-custom-queue"
+          class="form-input"
+          [class.ng-invalid]="form.get('queue_name')?.invalid"
+          [class.ng-touched]="form.get('queue_name')?.touched"
+        />
+        @if (form.get('queue_name')?.touched && form.get('queue_name')?.errors?.['required']) {
+          <p class="form-error">Queue name is required</p>
+        }
+        @if (form.get('queue_name')?.touched && form.get('queue_name')?.errors?.['maxlength']) {
+          <p class="form-error">Queue name must be at most 100 characters</p>
+        }
+        @if (form.get('queue_name')?.touched && form.get('queue_name')?.errors?.['reservedName']) {
+          <p class="form-error">This name is reserved. Please choose a different name.</p>
+        }
+      </div>
+
+      <!-- Queue Type -->
+      <div class="form-group">
+        <label class="form-label">
+          Queue Type <span class="text-accent-rose">*</span>
+        </label>
+        <mat-form-field appearance="outline" class="full-width">
+          <mat-select formControlName="queue_type">
+            @for (type of queueTypes; track type.value) {
+              <mat-option [value]="type.value">
+                {{ type.label }}
+              </mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+        <p class="form-hint">
+          @if (selectedQueueType === 'fifo') {
+            FIFO queues process jobs in order, one at a time.
+          } @else {
+            Parallel queues can process multiple jobs concurrently.
+          }
+        </p>
+      </div>
+
+      <!-- Concurrency Limit (only for parallel queues) -->
+      @if (selectedQueueType === 'parallel') {
+        <div class="form-group concurrency-group">
+          <label class="form-label">
+            Concurrency Limit <span class="text-accent-rose">*</span>
+          </label>
+          <mat-form-field appearance="outline" class="full-width">
+            <input
+              matInput
+              type="number"
+              formControlName="concurrency_limit"
+              min="1"
+              max="20"
+              step="1"
+            />
+          </mat-form-field>
+          <p class="form-hint">Maximum number of jobs that can run simultaneously (1-20)</p>
+          @if (form.get('concurrency_limit')?.touched && form.get('concurrency_limit')?.errors?.['min']) {
+            <p class="form-error">Concurrency limit must be at least 1</p>
+          }
+          @if (form.get('concurrency_limit')?.touched && form.get('concurrency_limit')?.errors?.['max']) {
+            <p class="form-error">Concurrency limit cannot exceed 20</p>
+          }
+        </div>
+      }
+
+      <!-- Description -->
+      <div class="form-group">
+        <label class="form-label">Description</label>
+        <textarea
+          formControlName="description"
+          placeholder="Optional description for this queue..."
+          rows="3"
+          class="form-textarea"
+          [class.ng-invalid]="form.get('description')?.invalid"
+          [class.ng-touched]="form.get('description')?.touched"
+        ></textarea>
+        @if (form.get('description')?.touched && form.get('description')?.errors?.['maxlength']) {
+          <p class="form-error">Description must be at most 500 characters</p>
+        }
+      </div>
+
+      <!-- Actions -->
+      <div class="form-actions">
+        <button
+          type="button"
+          (click)="handleClose()"
+          class="cancel-btn"
+          [disabled]="isLoading()">
+          Cancel
+        </button>
+        <button
+          type="submit"
+          [disabled]="isSubmitDisabled()"
+          class="submit-btn">
+          @if (isLoading()) {
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          }
+          Create Queue
+        </button>
+      </div>
+    </form>
+  </div>
+</div>

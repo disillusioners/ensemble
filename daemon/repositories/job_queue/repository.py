@@ -111,6 +111,7 @@ class JobRepository:
         self,
         status: Optional[str] = None,
         project_id: Optional[str] = None,
+        queue_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[JobItem], int]:
@@ -119,6 +120,7 @@ class JobRepository:
         Args:
             status: Optional status filter.
             project_id: Optional project ID filter.
+            queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
             offset: Number of jobs to skip.
             
@@ -132,6 +134,8 @@ class JobRepository:
                 count_stmt = count_stmt.where(JobItem.status == status)
             if project_id:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
+            if queue_id:
+                count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
             total = db_session.exec(count_stmt).one()
 
             # Build list query with filters
@@ -140,6 +144,8 @@ class JobRepository:
                 stmt = stmt.where(JobItem.status == status)
             if project_id:
                 stmt = stmt.where(JobItem.project_id == project_id)
+            if queue_id:
+                stmt = stmt.where(JobItem.queue_id == queue_id)
             
             stmt = stmt.order_by(
                 col(JobItem.priority).desc(),

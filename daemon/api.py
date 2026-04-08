@@ -207,6 +207,10 @@ async def lifespan(app: FastAPI):
     from daemon.routers.projects import set_project_repository
     set_project_repository(manager._project_repository)
     
+    # Set up dependency injection for queues router
+    from daemon.routers.queues import set_job_queue_mgmt_service
+    set_job_queue_mgmt_service(job_queue_mgmt_service)
+    
     # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
@@ -1989,8 +1993,10 @@ async def receive_webhook(source_id: str, request: Request):
 # Include API router with /api prefix (must be after all routes are defined)
 from daemon.routers.jobs import router as jobs_router
 from daemon.routers.projects import router as projects_router
+from daemon.routers.queues import router as queues_router
 api_router.include_router(jobs_router)
 api_router.include_router(projects_router)
+api_router.include_router(queues_router)
 app.include_router(api_router)
 
 

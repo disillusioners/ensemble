@@ -16,11 +16,14 @@ import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
+import { QueueService } from '../../services/queue.service';
 import { ApiService } from '../../services/api.service';
 import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
+import { QueueListComponent } from '../../components/queue-list/queue-list.component';
 import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
+import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 
@@ -41,7 +44,8 @@ import { Agent } from '../../models';
     MatSlideToggleModule,
     MatTooltipModule,
     JobCardComponent,
-    JobDetailDrawerComponent
+    JobDetailDrawerComponent,
+    QueueListComponent
   ],
   templateUrl: './jobs.component.html',
   styleUrl: './jobs.component.scss'
@@ -51,6 +55,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly jobService = inject(JobService);
   private readonly jobSseService = inject(JobSseService);
   private readonly projectService = inject(ProjectService);
+  private readonly queueService = inject(QueueService);
   private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
@@ -66,6 +71,10 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = this.projectService.projects;
+  
+  // Queue sidebar signals
+  readonly selectedQueueId = signal<string | null>(null);
+  readonly selectedProjectId = computed(() => this.filters().project_id ?? null);
   
   // Filter signals
   readonly filters = signal<JobFilters>({});
@@ -109,9 +118,20 @@ export class JobsComponent implements OnInit, OnDestroy {
       }));
   });
 
+  // Queue name map for job cards (queue_id -> queue_name)
+  readonly queueNameMap = computed(() => {
+    const map = new Map<string, string>();
+    const queues = this.queueService.queues();
+    for (const queue of queues) {
+      map.set(queue.queue_id, queue.queue_name);
+    }
+    return map;
+  });
+
   // Computed values
   readonly filteredJobs = computed(() => {
     const currentFilters = this.filters();
+    const queueId = this.selectedQueueId();
     let filtered = this.jobs();
 
     if (currentFilters.status) {
@@ -122,6 +142,9 @@ export class JobsComponent implements OnInit, OnDestroy {
     }
     if (currentFilters.agent_id) {
       filtered = filtered.filter(job => job.agent_id === currentFilters.agent_id);
+    }
+    if (queueId) {
+      filtered = filtered.filter(job => job.queue_id === queueId);
     }
 
     return filtered;
@@ -304,8 +327,30 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.loadJobs();
   }
 
+  protected onProjectFilterChange(projectId: string): void {
+    this.filters.update(filters => ({
+      ...filters,
+      project_id: projectId === 'all' ? undefined : projectId
+    }));
+    this.loadJobs();
+  }
+
   protected onClearFilters(): void {
     this.filters.set({});
+    this.selectedQueueId.set(null);
+    this.loadJobs();
+  }
+
+  protected onQueueSelected(queueId: string | null): void {
+    this.selectedQueueId.set(queueId);
+    this.filters.update(filters => ({
+      ...filters,
+      queue_id: queueId || undefined
+    }));
+    this.loadJobs();
+  }
+
+  protected onQueueChanged(): void {
     this.loadJobs();
   }
 
@@ -329,7 +374,8 @@ export class JobsComponent implements OnInit, OnDestroy {
       message: data.message,
       project_id: data.project_id,
       priority: data.priority,
-      source: data.source as JobSource
+      source: data.source as JobSource,
+      queue_id: data.queue_id
     }).subscribe({
       next: (job) => {
         this.snackBar.open('Job created successfully', 'Close', {
@@ -444,7 +490,7 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   protected hasActiveFilters(): boolean {
     const filters = this.filters();
-    return !!(filters.status || filters.source || filters.agent_id);
+    return !!(filters.status || filters.source || filters.agent_id || filters.queue_id);
   }
 
   protected onToggleProjectPause(project: Project): void {

@@ -271,6 +271,7 @@ class JobQueueService:
         self,
         status: Optional[JobStatus] = None,
         project_id: Optional[str] = None,
+        queue_id: Optional[str] = None,
         limit: int = 50,
     ) -> list[JobItem]:
         """List jobs with optional filters.
@@ -278,6 +279,7 @@ class JobQueueService:
         Args:
             status: Optional status filter.
             project_id: Optional project ID filter.
+            queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
             
         Returns:
@@ -288,6 +290,7 @@ class JobQueueService:
             self._repository.list,
             status=status_value,
             project_id=project_id,
+            queue_id=queue_id,
             limit=limit,
         )
         return jobs

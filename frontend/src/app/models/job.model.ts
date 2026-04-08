@@ -19,6 +19,7 @@ export interface Job {
   error_message: string | null;
   result_summary: string | null;
   job_metadata?: Record<string, any> | null;
+  queue_id?: string | null; // queue this job belongs to
   cancelled_at: string | null;
   position?: number; // queue position if pending
 }
@@ -29,6 +30,7 @@ export interface JobCreate {
   project_id?: string;
   priority?: number;
   source?: JobSource;
+  queue_id?: string;
   metadata?: Record<string, any>;
 }
 
@@ -37,6 +39,7 @@ export interface JobFilters {
   source?: JobSource;
   agent_id?: string;
   project_id?: string;
+  queue_id?: string;
 }
 
 export interface JobEventPayload {
@@ -46,6 +49,7 @@ export interface JobEventPayload {
   instance_id?: string;
   result_summary?: string;
   error_message?: string;
+  queue_id?: string | null;
 }
 
 export interface JobEvent {

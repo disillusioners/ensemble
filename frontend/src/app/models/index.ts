@@ -189,3 +189,6 @@ export interface DeleteResponse {
   deleted?: boolean;
   terminated?: boolean;
 }
+
+// Job Queue types
+export * from './job-queue.model';

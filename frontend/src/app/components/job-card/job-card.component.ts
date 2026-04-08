@@ -26,6 +26,7 @@ import { Job, JobStatus, getPriorityColor, getStatusColor } from '../../models/j
 export class JobCardComponent {
   job = input.required<Job>();
   projectPaused = input<boolean>(false);
+  queueMap = input<Map<string, string>>(new Map());
 
   // Action outputs
   cancel = output<void>();
@@ -87,6 +88,16 @@ export class JobCardComponent {
   showPausedBadge = computed(() => {
     return this.job().status === 'pending' && this.projectPaused();
   });
+
+  queueBadge = computed(() => {
+    const queueId = this.job().queue_id;
+    if (!queueId) return null;
+    // Look up queue name from map, fall back to truncated ID
+    const queueName = this.queueMap().get(queueId);
+    return queueName || queueId.substring(0, 8);
+  });
+
+  hasQueue = computed(() => !!this.job().queue_id);
 
   protected onCancel(): void {
     this.cancel.emit();

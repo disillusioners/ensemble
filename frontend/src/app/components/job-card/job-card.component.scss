@@ -95,6 +95,37 @@
   }
 }
 
+.job-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.queue-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: rgba(16, 167, 247, 0.15);
+  border-radius: 4px;
+  cursor: help;
+
+  .queue-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    color: var(--accent-cyan, #10a7f7);
+  }
+
+  .queue-id {
+    font-size: 11px;
+    font-family: 'Courier New', monospace;
+    color: var(--accent-cyan, #10a7f7);
+    font-weight: 500;
+  }
+}
+
 .message-preview {
   font-size: 13px;
   color: rgba(255, 255, 255, 0.7);
