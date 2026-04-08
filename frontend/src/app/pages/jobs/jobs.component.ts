@@ -20,7 +20,7 @@ import { ApiService } from '../../services/api.service';
 import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
-import { Job, JobFilters, JobStatus, JobSource, JobEventPayload } from '../../models/job.model';
+import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatus } from '../../models/job.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
 
@@ -397,6 +397,11 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onViewJobDetails(job: Job): void {
     this.selectedJob.set(job);
     this.drawerOpen.set(true);
+
+    // Don't connect to SSE for terminal jobs - no live updates needed
+    if (isTerminalStatus(job.status)) {
+      return;
+    }
 
     // Connect to SSE for real-time updates on this job
     this.jobSseService.disconnect();
