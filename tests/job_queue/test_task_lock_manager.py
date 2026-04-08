@@ -627,6 +627,291 @@ class TestLockInfo:
         assert lock_info.locked_at == info.locked_at
 
 
+class TestLockManagerPerQueueLocking:
+    """Tests for per-queue locking with configurable concurrency limits."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_queue_lock_success(self, lock_manager):
+        """Test successful acquisition of a queue lock."""
+        result = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=1,
+        )
+        assert result is True
+        assert await lock_manager.is_queue_locked("project-1", "queue-1") is True
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+
+    @pytest.mark.asyncio
+    async def test_acquire_queue_lock_respects_concurrency_limit(self, lock_manager):
+        """Test that queue lock respects concurrency_limit (e.g., limit=2 allows 2 concurrent locks)."""
+        # First job acquires lock
+        result1 = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=2,
+        )
+        assert result1 is True
+
+        # Second job also acquires (limit=2)
+        result2 = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-2",
+            instance_id="instance-2",
+            concurrency_limit=2,
+        )
+        assert result2 is True
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+    @pytest.mark.asyncio
+    async def test_acquire_queue_lock_exceeds_concurrency(self, lock_manager):
+        """Test that acquiring lock fails when concurrency_limit is reached."""
+        # Acquire first two slots (limit=2)
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-2",
+            instance_id="instance-2",
+            concurrency_limit=2,
+        )
+
+        # Third job should fail (limit exceeded)
+        result = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-3",
+            instance_id="instance-3",
+            concurrency_limit=2,
+        )
+        assert result is False
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+    @pytest.mark.asyncio
+    async def test_release_queue_lock_frees_slot(self, lock_manager):
+        """Test that releasing a queue lock frees the slot for next job."""
+        # Acquire two slots (limit=2)
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-2",
+            instance_id="instance-2",
+            concurrency_limit=2,
+        )
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+        # Release first job
+        released = await lock_manager.release_queue_lock("project-1", "queue-1", "job-1")
+        assert released is True
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+
+        # Now third job can acquire
+        result = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-3",
+            instance_id="instance-3",
+            concurrency_limit=2,
+        )
+        assert result is True
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+    @pytest.mark.asyncio
+    async def test_different_queues_independent(self, lock_manager):
+        """Test that locks on different queues don't interfere."""
+        # Acquire full capacity on queue-1 (limit=1)
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=1,
+        )
+
+        # Acquire lock on different queue - should succeed
+        result = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-2",
+            job_id="job-2",
+            instance_id="instance-2",
+            concurrency_limit=1,
+        )
+        assert result is True
+
+        # Both queues should have 1 lock each
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-2") == 1
+
+        # Release from queue-1 doesn't affect queue-2
+        await lock_manager.release_queue_lock("project-1", "queue-1", "job-1")
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 0
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-2") == 1
+
+    @pytest.mark.asyncio
+    async def test_acquire_queue_lock_concurrent_safety(self, lock_manager):
+        """Test that multiple concurrent acquires don't exceed the concurrency limit."""
+        acquired_count = 0
+
+        async def try_acquire(job_id: str):
+            nonlocal acquired_count
+            result = await lock_manager.acquire_queue_lock(
+                project_id="project-1",
+                queue_id="queue-1",
+                job_id=job_id,
+                instance_id=f"instance-{job_id}",
+                concurrency_limit=2,
+            )
+            if result:
+                acquired_count += 1
+            return result
+
+        # Run many concurrent acquisitions with limit=2
+        results = await asyncio.gather(
+            try_acquire("job-1"),
+            try_acquire("job-2"),
+            try_acquire("job-3"),
+            try_acquire("job-4"),
+            try_acquire("job-5"),
+        )
+
+        # Only 2 should succeed due to concurrency limit
+        assert acquired_count == 2
+        assert results.count(True) == 2
+        assert results.count(False) == 3
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+
+class TestLockManagerQueueHelpers:
+    """Tests for queue helper methods."""
+
+    @pytest.mark.asyncio
+    async def test_is_queue_locked_true(self, lock_manager):
+        """Test is_queue_locked returns True when queue has locks."""
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=1,
+        )
+        assert await lock_manager.is_queue_locked("project-1", "queue-1") is True
+
+    @pytest.mark.asyncio
+    async def test_is_queue_locked_false(self, lock_manager):
+        """Test is_queue_locked returns False when no locks exist."""
+        assert await lock_manager.is_queue_locked("project-1", "queue-1") is False
+
+    @pytest.mark.asyncio
+    async def test_get_queue_lock_count(self, lock_manager):
+        """Test get_queue_lock_count returns correct count."""
+        # Initially 0
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 0
+
+        # Add locks
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-1",
+            concurrency_limit=3,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-2",
+            instance_id="instance-2",
+            concurrency_limit=3,
+        )
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 2
+
+        # Release one
+        await lock_manager.release_queue_lock("project-1", "queue-1", "job-1")
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+
+    def test_get_default_queue_id(self, lock_manager):
+        """Test _get_default_queue_id returns consistent ID format."""
+        result = lock_manager._get_default_queue_id("my-project")
+        assert result == "project:my-project"
+
+        result2 = lock_manager._get_default_queue_id("another-project")
+        assert result2 == "project:another-project"
+
+
+class TestLockManagerReleaseByInstanceQueueAware:
+    """Tests for instance-based lock release with queue-aware returns."""
+
+    @pytest.mark.asyncio
+    async def test_release_by_instance_returns_queue_ids(self, lock_manager):
+        """Test release_by_instance returns list of (project_id, queue_id) tuples."""
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-x",
+            concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="project-2",
+            queue_id="queue-2",
+            job_id="job-2",
+            instance_id="instance-x",
+            concurrency_limit=2,
+        )
+
+        released = await lock_manager.release_by_instance("instance-x")
+
+        assert len(released) == 2
+        released_keys = set(released)
+        assert ("project-1", "queue-1") in released_keys
+        assert ("project-2", "queue-2") in released_keys
+
+    @pytest.mark.asyncio
+    async def test_release_by_instance_frees_queue_slots(self, lock_manager):
+        """Test that after release_by_instance, queue slots are available."""
+        # Acquire full capacity
+        await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-1",
+            instance_id="instance-x",
+            concurrency_limit=1,
+        )
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+
+        # Release by instance
+        released = await lock_manager.release_by_instance("instance-x")
+        assert len(released) == 1
+
+        # Slot should be freed - new job can acquire
+        result = await lock_manager.acquire_queue_lock(
+            project_id="project-1",
+            queue_id="queue-1",
+            job_id="job-2",
+            instance_id="instance-y",
+            concurrency_limit=1,
+        )
+        assert result is True
+        assert await lock_manager.get_queue_lock_count("project-1", "queue-1") == 1
+
+
 class TestLockManagerEdgeCases:
     """Tests for edge cases and error conditions."""
 

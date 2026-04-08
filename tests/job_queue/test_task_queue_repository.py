@@ -613,3 +613,281 @@ class TestJobItem:
         assert job_dict["message"] == job.message
         assert job_dict["status"] == job.status
         assert job_dict["metadata"] == job.job_metadata
+
+
+class TestRepositoryListPendingByQueue:
+    """Tests for listing pending jobs by queue."""
+
+    def test_list_pending_by_queue_returns_only_queue_jobs(self, repository, queue_repository):
+        """Test list_pending_by_queue returns only jobs for specified queue."""
+        # Create two queues
+        queue1 = queue_repository.create(project_id="test-project", queue_name="queue1")
+        queue2 = queue_repository.create(project_id="test-project", queue_name="queue2")
+        
+        # Create jobs in queue1 and queue2
+        job1 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job1",
+            project_id="test-project", queue_id=queue1.queue_id
+        )
+        job2 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job2",
+            project_id="test-project", queue_id=queue1.queue_id
+        )
+        job3 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job3",
+            project_id="test-project", queue_id=queue2.queue_id
+        )
+        
+        # List pending jobs for queue1 only
+        pending = repository.list_pending_by_queue(queue1.queue_id)
+        
+        assert len(pending) == 2
+        job_ids = [j.job_id for j in pending]
+        assert job1.job_id in job_ids
+        assert job2.job_id in job_ids
+        assert job3.job_id not in job_ids
+
+    def test_list_pending_by_queue_excludes_other_queues(self, repository, queue_repository):
+        """Test list_pending_by_queue does not include jobs from other queues."""
+        # Create queues for different projects
+        queue_a = queue_repository.create(project_id="project-a", queue_name="default")
+        queue_b = queue_repository.create(project_id="project-b", queue_name="default")
+        
+        # Create jobs for each queue
+        job_a = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job-a",
+            project_id="project-a", queue_id=queue_a.queue_id
+        )
+        repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job-b",
+            project_id="project-b", queue_id=queue_b.queue_id
+        )
+        
+        # Only queue_a jobs should be returned
+        pending = repository.list_pending_by_queue(queue_a.queue_id)
+        
+        assert len(pending) == 1
+        assert pending[0].job_id == job_a.job_id
+
+    def test_list_pending_by_queue_ordered_by_priority(self, repository, queue_repository):
+        """Test list_pending_by_queue returns jobs ordered by priority descending."""
+        queue = queue_repository.create(project_id="test-project", queue_name="priority-queue")
+        
+        # Create jobs with different priorities (out of order)
+        repository.create(
+            agent_id="test-agent", agent_dir="/test", message="low-priority",
+            project_id="test-project", priority=1, queue_id=queue.queue_id
+        )
+        repository.create(
+            agent_id="test-agent", agent_dir="/test", message="high-priority",
+            project_id="test-project", priority=10, queue_id=queue.queue_id
+        )
+        repository.create(
+            agent_id="test-agent", agent_dir="/test", message="medium-priority",
+            project_id="test-project", priority=5, queue_id=queue.queue_id
+        )
+        
+        pending = repository.list_pending_by_queue(queue.queue_id)
+        
+        assert len(pending) == 3
+        assert pending[0].message == "high-priority"  # priority=10
+        assert pending[1].message == "medium-priority"  # priority=5
+        assert pending[2].message == "low-priority"  # priority=1
+
+
+class TestRepositoryListByQueue:
+    """Tests for listing jobs by queue with filters."""
+
+    def test_list_by_queue_basic(self, repository, queue_repository):
+        """Test list_by_queue returns all jobs for a queue."""
+        queue = queue_repository.create(project_id="test-project", queue_name="list-queue")
+        
+        # Create 3 jobs with that queue_id
+        job1 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job1",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        job2 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job2",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        job3 = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="job3",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        
+        jobs, total = repository.list_by_queue(queue.queue_id)
+        
+        assert total == 3
+        assert len(jobs) == 3
+        job_ids = [j.job_id for j in jobs]
+        assert job1.job_id in job_ids
+        assert job2.job_id in job_ids
+        assert job3.job_id in job_ids
+
+    def test_list_by_queue_with_status_filter(self, repository, queue_repository):
+        """Test list_by_queue filters by status correctly."""
+        queue = queue_repository.create(project_id="test-project", queue_name="filter-queue")
+        
+        # Create jobs in PENDING and PROCESSING states
+        pending_job = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="pending",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        processing_job = repository.create(
+            agent_id="test-agent", agent_dir="/test", message="processing",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        repository.create(
+            agent_id="test-agent", agent_dir="/test", message="another-pending",
+            project_id="test-project", queue_id=queue.queue_id
+        )
+        
+        # Start one job to make it PROCESSING
+        repository.start_job(processing_job.job_id, "test-instance")
+        
+        # Filter by PENDING status
+        pending_jobs, pending_total = repository.list_by_queue(
+            queue.queue_id, status=JobStatus.PENDING.value
+        )
+        assert pending_total == 2
+        assert len(pending_jobs) == 2
+        
+        # Filter by PROCESSING status
+        processing_jobs, processing_total = repository.list_by_queue(
+            queue.queue_id, status=JobStatus.PROCESSING.value
+        )
+        assert processing_total == 1
+        assert len(processing_jobs) == 1
+        assert processing_jobs[0].job_id == processing_job.job_id
+
+    def test_list_by_queue_with_limit(self, repository, queue_repository):
+        """Test list_by_queue respects limit and offset parameters."""
+        queue = queue_repository.create(project_id="test-project", queue_name="limit-queue")
+        
+        # Create 5 jobs
+        jobs = []
+        for i in range(5):
+            job = repository.create(
+                agent_id="test-agent", agent_dir="/test", message=f"job-{i}",
+                project_id="test-project", priority=i + 1, queue_id=queue.queue_id
+            )
+            jobs.append(job)
+        
+        # Request only 2 jobs
+        result_jobs, total = repository.list_by_queue(queue.queue_id, limit=2)
+        
+        assert total == 5  # Total count should be 5
+        assert len(result_jobs) == 2  # But only 2 returned
+        
+        # Verify offset works - get jobs at offset 2
+        page2, _ = repository.list_by_queue(queue.queue_id, limit=2, offset=2)
+        assert len(page2) == 2
+
+
+class TestRepositoryStartJobAtomic:
+    """Tests for atomic job starting."""
+
+    def test_start_job_atomic_success(self, repository, sample_job_data):
+        """Test start_job_atomic successfully starts a PENDING job."""
+        job = repository.create(**sample_job_data)
+        
+        assert job.status == JobStatus.PENDING.value
+        
+        started = repository.start_job_atomic(job.job_id, "test-instance")
+        
+        assert started is not None
+        assert started.status == JobStatus.PROCESSING.value
+        assert started.instance_id == "test-instance"
+        assert started.started_at is not None
+
+    def test_start_job_atomic_wrong_status(self, repository, sample_job_data):
+        """Test start_job_atomic raises ValueError for non-PENDING job."""
+        job = repository.create(**sample_job_data)
+        # Start the job first
+        repository.start_job(job.job_id, "instance-1")
+        
+        # Try to start again - should fail
+        with pytest.raises(ValueError) as exc_info:
+            repository.start_job_atomic(job.job_id, "instance-2")
+        
+        assert "Cannot start job" in str(exc_info.value)
+        assert "processing" in str(exc_info.value)
+
+    def test_start_job_atomic_concurrent_safety(self, repository, sample_job_data):
+        """Test start_job_atomic ensures only one concurrent start succeeds."""
+        job = repository.create(**sample_job_data)
+        
+        assert job.status == JobStatus.PENDING.value
+        
+        # First call should succeed
+        first_started = repository.start_job_atomic(job.job_id, "instance-1")
+        assert first_started is not None
+        assert first_started.status == JobStatus.PROCESSING.value
+        assert first_started.instance_id == "instance-1"
+        
+        # Second call should raise ValueError (job no longer pending)
+        with pytest.raises(ValueError) as exc_info:
+            repository.start_job_atomic(job.job_id, "instance-2")
+        
+        assert "Cannot start job" in str(exc_info.value)
+        assert "processing" in str(exc_info.value)
+        
+        # Verify only one job was started
+        retrieved = repository.get(job.job_id)
+        assert retrieved.instance_id == "instance-1"
+
+
+class TestRepositoryDeleteByProject:
+    """Tests for delete_by_project method."""
+
+    def test_delete_by_project_removes_jobs(self, repository, sample_job_data):
+        """Test delete_by_project removes all jobs for specified project."""
+        # Create jobs for multiple projects
+        job1 = repository.create(**sample_job_data)  # test-project
+        job2 = repository.create(**sample_job_data)  # test-project
+        other_job = repository.create(
+            **{**sample_job_data, "project_id": "other-project"}
+        )
+        
+        # Delete all jobs for test-project
+        deleted_count = repository.delete_by_project("test-project")
+        
+        assert deleted_count == 2
+        assert repository.get(job1.job_id) is None
+        assert repository.get(job2.job_id) is None
+        # Other project's job should remain
+        assert repository.get(other_job.job_id) is not None
+
+    def test_delete_by_project_returns_count(self, repository, sample_job_data):
+        """Test delete_by_project returns the number of deleted jobs."""
+        # Create multiple jobs for same project
+        repository.create(**sample_job_data)  # job 1
+        repository.create(**sample_job_data)  # job 2
+        repository.create(**sample_job_data)  # job 3
+        
+        deleted_count = repository.delete_by_project("test-project")
+        
+        assert deleted_count == 3
+
+    def test_delete_by_project_other_projects_unaffected(self, repository, sample_job_data):
+        """Test delete_by_project does not affect jobs from other projects."""
+        # Create jobs for different projects
+        project_a_job = repository.create(
+            **{**sample_job_data, "project_id": "project-a"}
+        )
+        project_b_job = repository.create(
+            **{**sample_job_data, "project_id": "project-b"}
+        )
+        project_c_job = repository.create(
+            **{**sample_job_data, "project_id": "project-c"}
+        )
+        
+        # Delete only project-a's jobs
+        deleted_count = repository.delete_by_project("project-a")
+        
+        assert deleted_count == 1
+        assert repository.get(project_a_job.job_id) is None
+        # Other projects' jobs should be unaffected
+        assert repository.get(project_b_job.job_id) is not None
+        assert repository.get(project_c_job.job_id) is not None

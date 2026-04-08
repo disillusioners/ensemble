@@ -831,6 +831,238 @@ class TestTriggerNextJobSync:
         assert result is None
 
 
+class TestJobQueueServiceQueueAwareEnqueue:
+    """Tests for queue-aware job enqueueing."""
+
+    @pytest.mark.asyncio
+    async def test_enqueue_no_project_no_queue(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue without project_id results in queue_id=None."""
+        # No queue repository setup needed - job without project
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job without project",
+            "source": "api",
+            "project_id": None,
+            "priority": 5,
+            "metadata": None,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        assert result.project_id is None
+        assert result.queue_id is None
+        assert result.status == JobStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_project_no_queue_id(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue with project_id but no queue_id defaults to system_fifo_queue."""
+        # Create system FIFO queue for project
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
+
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job with project",
+            "source": "api",
+            "project_id": "test-project",
+            "priority": 5,
+            "metadata": None,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        assert result.project_id == "test-project"
+        assert result.queue_id == queue.queue_id  # Should be system_fifo_queue
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_project_and_queue_id(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue with explicit queue_id uses that queue."""
+        # Create custom queue
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="custom_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=False,
+        )
+
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job with custom queue",
+            "source": "api",
+            "project_id": "test-project",
+            "priority": 5,
+            "metadata": None,
+            "queue_id": queue.queue_id,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        assert result.queue_id == queue.queue_id
+
+    @pytest.mark.asyncio
+    async def test_enqueue_invalid_queue_id(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue with non-existent queue_id logs warning but creates job."""
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job with invalid queue",
+            "source": "api",
+            "project_id": "test-project",
+            "priority": 5,
+            "metadata": None,
+            "queue_id": "nonexistent-queue-id",
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        # Job should still be created but with queue_id=None
+        assert result.queue_id is None
+        assert result.status == JobStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_enqueue_queue_from_wrong_project(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue with queue_id from different project logs warning but uses queue."""
+        # Create queue for project-2
+        queue = queue_repository.create(
+            project_id="project-2",
+            queue_name="project2_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=False,
+        )
+
+        # Try to use queue-2's queue_id with project-1
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job with cross-project queue",
+            "source": "api",
+            "project_id": "project-1",  # Different from queue's project
+            "priority": 5,
+            "metadata": None,
+            "queue_id": queue.queue_id,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        # Implementation logs warning but still uses the queue_id
+        assert result.queue_id == queue.queue_id
+        assert result.status == JobStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_enqueue_uses_queue_concurrency(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test that starting jobs uses queue's concurrency_limit."""
+        # Create queue with concurrency_limit=2
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="parallel_queue",
+            queue_type="parallel",
+            concurrency_limit=2,
+            is_system=False,
+        )
+
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job",
+            "source": "api",
+            "project_id": "test-project",
+            "priority": 5,
+            "metadata": None,
+            "queue_id": queue.queue_id,
+        }
+
+        # Enqueue two jobs
+        job1 = await job_queue_service.enqueue(**job_data)
+        job2 = await job_queue_service.enqueue(**job_data)
+
+        # Both jobs should be pending
+        assert job1.queue_id == queue.queue_id
+        assert job2.queue_id == queue.queue_id
+
+        # Start first job - should succeed
+        started1 = await job_queue_service.start_job(job1.job_id)
+        assert started1 is not None
+        assert started1.status == JobStatus.PROCESSING.value
+
+        # Start second job - should also succeed (queue allows 2 concurrent)
+        started2 = await job_queue_service.start_job(job2.job_id)
+        assert started2 is not None
+        assert started2.status == JobStatus.PROCESSING.value
+
+        # Both locks should be held
+        count = await job_queue_service._lock_manager.get_queue_lock_count(
+            "test-project", queue.queue_id
+        )
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_enqueue_no_system_queue_defaults_to_no_queue(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test enqueue with project but no system_fifo_queue creates job without queue_id."""
+        # Don't create any queue for project
+        
+        job_data = {
+            "agent_id": "coder",
+            "message": "Test job without system queue",
+            "source": "api",
+            "project_id": "project-without-queue",
+            "priority": 5,
+            "metadata": None,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        # Job created but without queue_id (system queue doesn't exist)
+        assert result.project_id == "project-without-queue"
+        assert result.queue_id is None
+        assert result.status == JobStatus.PENDING.value
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_queue_preserves_priority(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Test that priority is preserved when using queue-aware enqueue."""
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="priority_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=False,
+        )
+
+        job_data = {
+            "agent_id": "coder",
+            "message": "High priority job",
+            "source": "api",
+            "project_id": "test-project",
+            "priority": 10,
+            "metadata": None,
+            "queue_id": queue.queue_id,
+        }
+
+        result = await job_queue_service.enqueue(**job_data)
+
+        assert result.priority == 10
+        assert result.queue_id == queue.queue_id
+
+
 class TestNextJobTriggeredAfterCompletion:
     """Tests verifying next job is triggered after job completion."""
     
