@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -50,9 +50,16 @@ def lock_manager():
 
 
 @pytest.fixture
-def job_queue_service(repository, lock_manager):
-    """Create JobQueueService with repository and lock manager."""
-    return JobQueueService(repository, lock_manager)
+def queue_repository(engine):
+    """Create JobQueueRepository instance with fresh database."""
+    repo = JobQueueRepository(engine)
+    yield repo
+
+
+@pytest.fixture
+def job_queue_service(repository, lock_manager, queue_repository):
+    """Create JobQueueService with repository, lock manager, and queue repo."""
+    return JobQueueService(repository, lock_manager, queue_repository)
 
 
 @pytest.fixture

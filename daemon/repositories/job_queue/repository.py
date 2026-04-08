@@ -36,6 +36,7 @@ class JobRepository:
         project_id: Optional[str] = None,
         priority: int = 5,
         job_metadata: Optional[dict[str, Any]] = None,
+        queue_id: Optional[str] = None,
     ) -> JobItem:
         """Create a new job queue item.
         
@@ -47,6 +48,7 @@ class JobRepository:
             project_id: Optional project ID for job serialization.
             priority: Job priority (1-10, default 5).
             job_metadata: Optional metadata dictionary.
+            queue_id: Optional queue ID for job routing.
             
         Returns:
             Created JobItem object.
@@ -61,6 +63,7 @@ class JobRepository:
                 priority=priority,
                 status=JobStatus.PENDING.value,
                 job_metadata=job_metadata or {},
+                queue_id=queue_id,
             )
 
             db_session.add(job)
@@ -181,6 +184,65 @@ class JobRepository:
             jobs = list(db_session.exec(stmt))
             return jobs
 
+    def list_pending_by_queue(self, queue_id: str) -> list[JobItem]:
+        """List pending jobs for a specific queue, ordered by priority.
+        
+        Args:
+            queue_id: Queue identifier.
+            
+        Returns:
+            List of pending JobItem objects for the queue.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.queue_id == queue_id)
+                .where(JobItem.status == JobStatus.PENDING.value)
+                .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
+            )
+            jobs = list(db_session.exec(stmt))
+            return jobs
+
+    def list_by_queue(
+        self,
+        queue_id: str,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[JobItem], int]:
+        """List jobs for a specific queue with optional filters and pagination.
+        
+        Args:
+            queue_id: Queue identifier.
+            status: Optional status filter.
+            limit: Maximum number of jobs to return.
+            offset: Number of jobs to skip.
+            
+        Returns:
+            Tuple of (list of jobs, total count).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # Build count query
+            count_stmt = select(func.count()).select_from(JobItem)
+            count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
+            if status:
+                count_stmt = count_stmt.where(JobItem.status == status)
+            total = db_session.exec(count_stmt).one()
+
+            # Build list query with filters
+            stmt = select(JobItem).where(JobItem.queue_id == queue_id)
+            if status:
+                stmt = stmt.where(JobItem.status == status)
+            
+            stmt = stmt.order_by(
+                col(JobItem.priority).desc(),
+                col(JobItem.created_at).asc()
+            ).offset(offset).limit(limit)
+            
+            jobs = list(db_session.exec(stmt))
+            
+            return jobs, total
+
     # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
@@ -244,6 +306,51 @@ class JobRepository:
             started_at=datetime.utcnow().isoformat(),
             instance_id=instance_id,
         )
+
+    def start_job_atomic(
+        self,
+        job_id: str,
+        instance_id: str,
+    ) -> Optional[JobItem]:
+        """Atomically mark a job as processing (started) within a single session.
+        
+        This method performs the PENDING->PROCESSING transition atomically
+        by using a single SQLModel session. This prevents race conditions
+        where multiple workers might try to start the same job.
+        
+        Can only be called on PENDING jobs.
+        
+        Args:
+            job_id: Job identifier.
+            instance_id: Instance ID that is processing this job.
+            
+        Returns:
+            Updated JobItem if found, None otherwise.
+            
+        Raises:
+            ValueError: If job is not in PENDING state.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # SELECT and verify in the same session
+            job = db_session.get(JobItem, job_id)
+            if job is None:
+                return None
+            
+            if job.status != JobStatus.PENDING.value:
+                raise ValueError(
+                    f"Cannot start job in '{job.status}' state, must be PENDING"
+                )
+            
+            # UPDATE within the same session
+            now = datetime.utcnow().isoformat()
+            job.status = JobStatus.PROCESSING.value
+            job.started_at = now
+            job.instance_id = instance_id
+            
+            db_session.commit()
+            db_session.refresh(job)
+            
+            return job
 
     def complete_job(
         self,

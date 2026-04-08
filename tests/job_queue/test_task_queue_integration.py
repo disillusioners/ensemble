@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import QueuePool
 from sqlmodel import SQLModel
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -58,9 +58,15 @@ def integration_lock_manager():
 
 
 @pytest.fixture
-def integration_service(integration_repository, integration_lock_manager):
+def integration_queue_repository(integration_engine):
+    """Create queue repository with fresh database."""
+    return JobQueueRepository(integration_engine)
+
+
+@pytest.fixture
+def integration_service(integration_repository, integration_lock_manager, integration_queue_repository):
     """Create service with fresh dependencies."""
-    return JobQueueService(integration_repository, integration_lock_manager)
+    return JobQueueService(integration_repository, integration_lock_manager, integration_queue_repository)
 
 
 class TestIntegrationBasicWorkflow:

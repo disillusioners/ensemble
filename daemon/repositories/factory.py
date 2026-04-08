@@ -14,6 +14,7 @@ from .instance.repository import SQLModelInstanceRepository
 from .message_queue.repository import SQLModelMessageQueueRepository
 from .source.repository import SQLModelSourceRepository
 from .job_queue.repository import JobRepository
+from .job_queue.queue_repository import JobQueueRepository
 
 
 @dataclass
@@ -387,6 +388,36 @@ def create_job_repository(
     # Legacy Python migrations (run_migrations) are disabled.
     
     return JobRepository(engine)
+
+
+def create_job_queue_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> JobQueueRepository:
+    """Create a JobQueueRepository from configuration or shared engine.
+    
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured JobQueueRepository instance.
+    
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return JobQueueRepository(engine)
 
 
 # Backward compatibility alias

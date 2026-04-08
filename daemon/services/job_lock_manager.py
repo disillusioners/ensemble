@@ -1,15 +1,14 @@
-"""Job Lock Manager - Per-project job serialization using in-memory locks.
+"""Job Lock Manager - Per-queue job serialization using in-memory locks.
 
-This module provides the lock management layer that controls per-project job
-serialization using in-memory locks with waiter notification.
+This module provides the lock management layer that controls per-queue job
+serialization with concurrency support using in-memory locks.
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Optional
+from typing import Any
 
 from daemon.repositories.job_queue.models import JobLockInfo
 
@@ -21,6 +20,7 @@ class LockInfo:
     """
     job_id: str
     project_id: str
+    queue_id: str
     instance_id: str
     locked_at: datetime
     
@@ -28,386 +28,433 @@ class LockInfo:
         self,
         job_id: str,
         project_id: str,
+        queue_id: str,
         instance_id: str,
         locked_at: datetime | None = None
     ) -> None:
         self.job_id = job_id
         self.project_id = project_id
+        self.queue_id = queue_id
         self.instance_id = instance_id
-        self.locked_at = locked_at or datetime.utcnow()
+        self.locked_at = locked_at or datetime.now(UTC)
     
     def to_lock_info(self) -> JobLockInfo:
         """Convert to JobLockInfo model for external use."""
         return JobLockInfo(
             job_id=self.job_id,
             project_id=self.project_id,
+            queue_id=self.queue_id,
             instance_id=self.instance_id,
-            locked_at=self.locked_at
+            locked_at=self.locked_at,
         )
 
 
 class JobLockManager:
-    """Manages per-project locks for job execution.
+    """Manages per-queue locks for job execution.
     
-    Provides in-memory lock management with waiter notification for
-    per-project job serialization. This ensures only one job runs
-    per project at a time.
+    Provides in-memory lock management for per-queue job serialization with
+    concurrency support. Multiple jobs can run concurrently on a queue up to
+    the configured concurrency_limit.
     
     Attributes:
-        _locks: Dictionary mapping project_id to LockInfo
-        _waiters: Dictionary mapping project_id to list of (job_id, event) tuples
+        _queue_locks: Dictionary mapping (project_id, queue_id) to list of LockInfo
         _lock: asyncio.Lock for thread-safe operations on internal state
-        _max_waiters: Maximum number of waiters per project (0 = unlimited)
     """
     
-    def __init__(self, max_waiters: int = 0) -> None:
-        """Initialize the JobLockManager.
-        
-        Args:
-            max_waiters: Maximum number of waiters per project. 
-                        0 means unlimited (default).
-        """
-        self._locks: dict[str, LockInfo] = {}
-        # Using list instead of Queue for O(n) removal on timeout
-        self._waiters: dict[str, list[tuple[str, asyncio.Event]]] = {}
+    def __init__(self) -> None:
+        """Initialize the JobLockManager."""
+        self._queue_locks: dict[tuple[str, str], list[LockInfo]] = {}
         self._lock = asyncio.Lock()
-        self._max_waiters = max_waiters
     
-    async def acquire(
+    async def acquire_queue_lock(
         self,
         project_id: str,
+        queue_id: str,
         job_id: str,
-        instance_id: str
+        instance_id: str,
+        concurrency_limit: int,
     ) -> bool:
-        """Try to acquire lock for project.
+        """Try to acquire lock for queue with concurrency check.
+        
+        Capacity check and lock acquisition happen atomically under asyncio.Lock.
         
         Args:
-            project_id: The project to lock
+            project_id: The project owning the queue
+            queue_id: The queue to lock
             job_id: The job acquiring the lock
             instance_id: The instance running the job
+            concurrency_limit: Maximum concurrent jobs allowed for this queue
             
         Returns:
-            True if lock acquired, False if already held
+            True if lock acquired, False if at capacity
         """
+        key = (project_id, queue_id)
+        
         async with self._lock:
-            if project_id in self._locks:
+            current_locks = self._queue_locks.get(key, [])
+            
+            if len(current_locks) >= concurrency_limit:
                 return False
             
-            self._locks[project_id] = LockInfo(
+            lock_info = LockInfo(
                 job_id=job_id,
                 project_id=project_id,
+                queue_id=queue_id,
                 instance_id=instance_id,
                 locked_at=datetime.now(UTC)
             )
+            
+            if key not in self._queue_locks:
+                self._queue_locks[key] = []
+            
+            self._queue_locks[key].append(lock_info)
             return True
     
-    def acquire_sync(
+    async def release_queue_lock(
         self,
         project_id: str,
+        queue_id: str,
         job_id: str,
-        instance_id: str
     ) -> bool:
-        """Synchronous version of acquire for non-async contexts.
-        
-        Note: Not thread-safe for concurrent access. Use async acquire()
-        in async contexts.
-        """
-        if project_id in self._locks:
-            return False
-        
-        self._locks[project_id] = LockInfo(
-            job_id=job_id,
-            project_id=project_id,
-            instance_id=instance_id,
-            locked_at=datetime.now(UTC)
-        )
-        return True
-    
-    async def release(self, project_id: str, job_id: str) -> bool:
-        """Release lock if held by specified job.
+        """Release lock for queue if held by specified job.
         
         Args:
-            project_id: The project to unlock
+            project_id: The project owning the queue
+            queue_id: The queue to unlock
             job_id: The job that holds the lock
             
         Returns:
             True if released, False if not held by this job
         """
+        key = (project_id, queue_id)
+        
         async with self._lock:
-            if project_id not in self._locks:
+            if key not in self._queue_locks:
                 return False
             
-            if self._locks[project_id].job_id != job_id:
-                return False
+            current_locks = self._queue_locks[key]
             
-            del self._locks[project_id]
-        
-        # Notify next waiter (outside the lock to avoid deadlock)
-        await self._notify_waiter(project_id)
-        return True
+            for i, lock_info in enumerate(current_locks):
+                if lock_info.job_id == job_id:
+                    current_locks.pop(i)
+                    
+                    # Clean up empty queue lock entries
+                    if not current_locks:
+                        del self._queue_locks[key]
+                    
+                    return True
+            
+            return False
     
-    def release_sync(self, project_id: str, job_id: str) -> bool:
-        """Synchronous version of release for non-async contexts.
+    async def is_queue_locked(self, project_id: str, queue_id: str) -> bool:
+        """Check if queue has any active locks.
         
-        Note: Not thread-safe. Use async release() in async contexts.
+        Args:
+            project_id: The project owning the queue
+            queue_id: The queue to check
+            
+        Returns:
+            True if any locks exist, False otherwise
         """
-        if project_id not in self._locks:
-            return False
+        key = (project_id, queue_id)
         
-        if self._locks[project_id].job_id != job_id:
-            return False
-        
-        del self._locks[project_id]
-        
-        # Note: Can't notify waiters synchronously
-        # This should be called in async context
-        return True
+        async with self._lock:
+            return key in self._queue_locks and len(self._queue_locks[key]) > 0
     
-    async def release_by_instance(self, instance_id: str) -> list[str]:
+    async def get_queue_lock_count(self, project_id: str, queue_id: str) -> int:
+        """Get number of active locks for queue.
+        
+        Args:
+            project_id: The project owning the queue
+            queue_id: The queue to check
+            
+        Returns:
+            Number of active locks
+        """
+        key = (project_id, queue_id)
+        
+        async with self._lock:
+            if key not in self._queue_locks:
+                return 0
+            return len(self._queue_locks[key])
+    
+    async def release_by_instance(self, instance_id: str) -> list[tuple[str, str]]:
         """Release any locks held by an instance.
         
         Args:
             instance_id: The instance to release locks for
             
         Returns:
-            List of project_ids that were released
+            List of (project_id, queue_id) tuples that were released
         """
-        async with self._lock:
-            released = []
-            for project_id, info in list(self._locks.items()):
-                if info.instance_id == instance_id:
-                    del self._locks[project_id]
-                    released.append(project_id)
+        released: list[tuple[str, str]] = []
         
-        # Notify waiters outside the lock
-        for project_id in released:
-            await self._notify_waiter(project_id)
+        async with self._lock:
+            keys_to_check = list(self._queue_locks.keys())
+            
+            for key in keys_to_check:
+                project_id, queue_id = key
+                current_locks = self._queue_locks[key]
+                
+                # Filter out locks for this instance
+                remaining = [
+                    lock for lock in current_locks
+                    if lock.instance_id != instance_id
+                ]
+                
+                if len(remaining) != len(current_locks):
+                    if remaining:
+                        self._queue_locks[key] = remaining
+                    else:
+                        del self._queue_locks[key]
+                    released.append(key)
         
         return released
     
-    def release_by_instance_sync(self, instance_id: str) -> list[str]:
-        """Synchronous version of release_by_instance.
-        
-        Note: Not thread-safe for concurrent access. Use async release_by_instance()
-        in async contexts. Waiter notification is scheduled via the event loop.
-        """
-        released = []
-        for project_id, info in list(self._locks.items()):
-            if info.instance_id == instance_id:
-                del self._locks[project_id]
-                released.append(project_id)
-        
-        # Notify waiters via the event loop since we can't await directly
-        for project_id in released:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule notification on the event loop
-                    loop.call_soon_threadsafe(
-                        lambda pid=project_id: asyncio.create_task(self._notify_waiter(pid))
-                    )
-            except RuntimeError:
-                # No event loop available, skip waiter notification
-                pass
-        
-        return released
-    
-    async def is_locked(self, project_id: str) -> bool:
-        """Check if project is currently locked.
-        
-        Args:
-            project_id: The project to check
-            
-        Returns:
-            True if locked, False otherwise
-        """
-        async with self._lock:
-            return project_id in self._locks
-    
-    async def get_lock_info(self, project_id: str) -> Optional[JobLockInfo]:
-        """Get lock info for project.
-        
-        Args:
-            project_id: The project to get info for
-            
-        Returns:
-            JobLockInfo if locked, None otherwise
-        """
-        async with self._lock:
-            lock_info = self._locks.get(project_id)
-            return lock_info.to_lock_info() if lock_info else None
-    
-    async def get_all_locks(self) -> dict[str, JobLockInfo]:
-        """Get all current locks.
+    async def get_all_locks(self) -> dict[str, list[JobLockInfo]]:
+        """Get all current locks grouped by queue.
         
         Returns:
-            Dictionary mapping project_id to JobLockInfo
+            Dictionary mapping "project_id:queue_id" to list of JobLockInfo
         """
         async with self._lock:
-            return {
-                project_id: info.to_lock_info()
-                for project_id, info in self._locks.items()
-            }
-    
-    async def wait_for_lock(
-        self,
-        project_id: str,
-        job_id: str,
-        instance_id: str,
-        timeout: Optional[float] = None
-    ) -> bool:
-        """Wait for lock to become available and acquire it.
-        
-        This method atomically checks if the lock is free and if not,
-        adds itself to the waiter queue to avoid race conditions.
-        
-        Args:
-            project_id: The project to lock
-            job_id: The job that will acquire the lock
-            instance_id: The instance running the job
-            timeout: Maximum time to wait in seconds. None means wait forever.
+            result: dict[str, list[JobLockInfo]] = {}
             
-        Returns:
-            True if lock acquired (either immediately or after waiting),
-            False if timeout occurred or max waiters reached
-        """
-        event = asyncio.Event()
-        
-        # Atomic: check if lock is free, if not add to waiter queue
-        async with self._lock:
-            if project_id not in self._locks:
-                # Lock is free, acquire it immediately
-                self._locks[project_id] = LockInfo(
-                    job_id=job_id,
-                    project_id=project_id,
-                    instance_id=instance_id,
-                    locked_at=datetime.now(UTC)
-                )
-                return True
+            for (project_id, queue_id), locks in self._queue_locks.items():
+                key = f"{project_id}:{queue_id}"
+                result[key] = [
+                    lock.to_lock_info() for lock in locks
+                ]
             
-            # Lock is held, need to wait
-            # Check max waiters limit
-            if self._max_waiters > 0:
-                current_waiters = len(self._waiters.get(project_id, []))
-                if current_waiters >= self._max_waiters:
-                    return False
-            
-            # Ensure waiter list exists and add ourselves
-            if project_id not in self._waiters:
-                self._waiters[project_id] = []
-            self._waiters[project_id].append((job_id, event))
-        
-        # Wait for notification (outside the lock)
-        try:
-            if timeout is not None:
-                await asyncio.wait_for(event.wait(), timeout=timeout)
-            else:
-                await event.wait()
-        except asyncio.TimeoutError:
-            # Remove ourselves from the waiter list
-            async with self._lock:
-                if project_id in self._waiters:
-                    self._waiters[project_id] = [
-                        (jid, evt) for jid, evt in self._waiters[project_id]
-                        if jid != job_id
-                    ]
-                    # Clean up empty waiter lists
-                    if not self._waiters[project_id]:
-                        del self._waiters[project_id]
-            return False
-        
-        # We were notified - try to acquire the lock
-        # Note: There's a small race here where another job could acquire
-        # before us. This is acceptable behavior - we'll return False.
-        async with self._lock:
-            if project_id not in self._locks:
-                self._locks[project_id] = LockInfo(
-                    job_id=job_id,
-                    project_id=project_id,
-                    instance_id=instance_id,
-                    locked_at=datetime.now(UTC)
-                )
-                return True
-            
-            # Lock was grabbed by someone else
-            return False
-    
-    async def _notify_waiter(self, project_id: str) -> None:
-        """Notify next waiting job that lock is available.
-        
-        Args:
-            project_id: The project whose lock was released
-        """
-        async with self._lock:
-            if project_id not in self._waiters:
-                return
-            
-            if not self._waiters[project_id]:
-                # Empty waiter list, clean up
-                del self._waiters[project_id]
-                return
-            
-            # Pop the first waiter (FIFO order)
-            _, event = self._waiters[project_id].pop(0)
-            
-            # Clean up empty waiter lists
-            if not self._waiters[project_id]:
-                del self._waiters[project_id]
-        
-        # Set event outside the lock
-        event.set()
-    
-    async def get_waiter_count(self, project_id: str) -> int:
-        """Get the number of waiters for a project.
-        
-        Args:
-            project_id: The project to check
-            
-        Returns:
-            Number of waiting jobs
-        """
-        async with self._lock:
-            return len(self._waiters.get(project_id, []))
-    
-    @asynccontextmanager
-    async def lock_context(
-        self,
-        project_id: str,
-        job_id: str,
-        instance_id: str,
-        timeout: Optional[float] = None
-    ):
-        """Context manager for automatic lock acquisition and release.
-        
-        Args:
-            project_id: The project to lock
-            job_id: The job acquiring the lock
-            instance_id: The instance running the job
-            timeout: Maximum time to wait for lock
-            
-        Yields:
-            True if lock acquired, False if not (timeout or failed)
-            
-        Example:
-            async with manager.lock_context(project_id, job_id, instance_id) as acquired:
-                if acquired:
-                    # Do work
-                    pass
-        """
-        acquired = await self.wait_for_lock(project_id, job_id, instance_id, timeout)
-        try:
-            yield acquired
-        finally:
-            if acquired:
-                await self.release(project_id, job_id)
+            return result
     
     def clear(self) -> None:
-        """Clear all locks and waiters.
+        """Clear all locks.
         
         Warning: This should only be used for testing or cleanup.
         """
-        self._locks.clear()
-        self._waiters.clear()
+        self._queue_locks.clear()
+    
+    # ========== Backward Compatibility Methods ==========
+    # These methods provide backward compatibility with project-based locking
+    # for jobs that don't have a queue_id assigned.
+    
+    def _get_default_queue_id(self, project_id: str) -> str:
+        """Get the default queue ID for a project.
+        
+        Used by backward compatibility methods to handle jobs without explicit queue_id.
+        
+        Args:
+            project_id: The project ID.
+            
+        Returns:
+            Default queue ID in format "project:{project_id}"
+        """
+        return f"project:{project_id}"
+    
+    def _acquire_sync_internal(
+        self,
+        project_id: str,
+        job_id: str,
+        instance_id: str,
+    ) -> bool:
+        """Internal synchronous lock acquisition without async context.
+        
+        This modifies internal state directly without async operations.
+        Used by acquire_sync() when asyncio.run() is not available.
+        
+        Args:
+            project_id: The project to lock.
+            job_id: The job acquiring the lock.
+            instance_id: The instance running the job.
+            
+        Returns:
+            True if lock acquired, False if at capacity
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        key = (project_id, queue_id)
+        
+        current_locks = self._queue_locks.get(key, [])
+        
+        # Default concurrency of 1 for project-based locks
+        if len(current_locks) >= 1:
+            return False
+        
+        lock_info = LockInfo(
+            job_id=job_id,
+            project_id=project_id,
+            queue_id=queue_id,
+            instance_id=instance_id,
+            locked_at=datetime.now(UTC)
+        )
+        
+        if key not in self._queue_locks:
+            self._queue_locks[key] = []
+        
+        self._queue_locks[key].append(lock_info)
+        return True
+    
+    def _release_sync_internal(self, project_id: str, job_id: str) -> bool:
+        """Internal synchronous lock release without async context.
+        
+        This modifies internal state directly without async operations.
+        Used by release_sync() when asyncio.run() is not available.
+        
+        Args:
+            project_id: The project owning the lock.
+            job_id: The job that holds the lock.
+            
+        Returns:
+            True if released, False if not held by this job
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        key = (project_id, queue_id)
+        
+        if key not in self._queue_locks:
+            return False
+        
+        current_locks = self._queue_locks[key]
+        
+        for i, lock_info in enumerate(current_locks):
+            if lock_info.job_id == job_id:
+                current_locks.pop(i)
+                
+                if not current_locks:
+                    del self._queue_locks[key]
+                
+                return True
+        
+        return False
+    
+    async def acquire(
+        self,
+        project_id: str,
+        job_id: str,
+        instance_id: str,
+    ) -> bool:
+        """Acquire lock for project (backward compatibility).
+        
+        This method is for backward compatibility with project-based locking.
+        Uses a default queue derived from the project_id.
+        
+        Args:
+            project_id: The project to lock.
+            job_id: The job acquiring the lock.
+            instance_id: The instance running the job.
+            
+        Returns:
+            True if lock acquired, False if at capacity (default: 1)
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        return await self.acquire_queue_lock(
+            project_id=project_id,
+            queue_id=queue_id,
+            job_id=job_id,
+            instance_id=instance_id,
+            concurrency_limit=1,  # Default concurrency for project-based locks
+        )
+    
+    def acquire_sync(
+        self,
+        project_id: str,
+        job_id: str,
+        instance_id: str,
+    ) -> bool:
+        """Acquire lock for project synchronously (backward compatibility).
+        
+        This method modifies internal state directly to work from any context.
+        Note: Not fully thread-safe. Use async acquire() when possible.
+        
+        Args:
+            project_id: The project to lock.
+            job_id: The job acquiring the lock.
+            instance_id: The instance running the job.
+            
+        Returns:
+            True if lock acquired, False if at capacity
+        """
+        return self._acquire_sync_internal(project_id, job_id, instance_id)
+    
+    async def release(self, project_id: str, job_id: str) -> bool:
+        """Release lock for project (backward compatibility).
+        
+        This method is for backward compatibility with project-based locking.
+        
+        Args:
+            project_id: The project owning the lock.
+            job_id: The job that holds the lock.
+            
+        Returns:
+            True if released, False if not held by this job
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        return await self.release_queue_lock(project_id, queue_id, job_id)
+    
+    def release_sync(self, project_id: str, job_id: str) -> bool:
+        """Release lock for project synchronously (backward compatibility).
+        
+        This method modifies internal state directly to work from any context.
+        Note: Not fully thread-safe. Use async release() when possible.
+        
+        Args:
+            project_id: The project owning the lock.
+            job_id: The job that holds the lock.
+            
+        Returns:
+            True if released, False if not held by this job
+        """
+        return self._release_sync_internal(project_id, job_id)
+    
+    async def is_locked(self, project_id: str) -> bool:
+        """Check if project has any active locks (backward compatibility).
+        
+        Args:
+            project_id: The project to check.
+            
+        Returns:
+            True if any locks exist for the project, False otherwise
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        return await self.is_queue_locked(project_id, queue_id)
+    
+    async def get_lock_info(self, project_id: str) -> JobLockInfo | None:
+        """Get lock info for project (backward compatibility).
+        
+        Args:
+            project_id: The project to get lock info for.
+            
+        Returns:
+            JobLockInfo if a lock exists, None otherwise
+        """
+        queue_id = self._get_default_queue_id(project_id)
+        key = (project_id, queue_id)
+        
+        async with self._lock:
+            locks = self._queue_locks.get(key, [])
+            if locks:
+                return locks[0].to_lock_info()
+            return None
+    
+    async def get_waiter_count(self, queue_id: str) -> int:
+        """Get count of waiters for a queue.
+        
+        This is an approximation - counts active locks which represents
+        slots in use, not actual waiters.
+        
+        Args:
+            queue_id: The queue to check. If starts with "project:", uses project-based lock.
+            
+        Returns:
+            Number of waiters (approximated by active locks)
+        """
+        # Extract project_id if queue_id is in project: format
+        if queue_id.startswith("project:"):
+            project_id = queue_id[len("project:"):]
+            return await self.get_queue_lock_count(project_id, queue_id)
+        
+        # For other queue_ids, we'd need the project_id
+        # This is a limitation - return 0 as fallback
+        return 0
 
 
 # Backward compatibility alias

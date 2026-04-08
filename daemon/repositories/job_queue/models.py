@@ -164,10 +164,11 @@ class JobItem(SQLModel, table=True):
 class JobLockInfo(BaseModel):
     """In-memory lock tracking for active jobs.
     
-    Tracks which instance is currently processing a job for a project.
+    Tracks which instance is currently processing a job for a queue.
     This is not persisted - only used during runtime.
     """
     job_id: str
     project_id: str
+    queue_id: str
     instance_id: str
     locked_at: datetime

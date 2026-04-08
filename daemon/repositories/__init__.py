@@ -18,7 +18,8 @@ from .source.models import SourceConfig, InstanceMapping, ProcessedMessage, Sour
 
 # Job queue repository
 from .job_queue.repository import JobRepository
-from .job_queue.models import JobItem, JobStatus, JobLockInfo
+from .job_queue.queue_repository import JobQueueRepository
+from .job_queue.models import JobItem, JobStatus, JobLockInfo, JobQueue, QueueType
 
 # Factory functions
 from .factory import (
@@ -29,6 +30,7 @@ from .factory import (
     create_message_queue_repository,
     create_source_repository,
     create_job_repository,
+    create_job_queue_repository,
     run_migrations,
 )
 
@@ -55,9 +57,12 @@ __all__ = [
     "SourceStatus",
     # Job queue
     "JobRepository",
+    "JobQueueRepository",
     "JobItem",
     "JobStatus",
     "JobLockInfo",
+    "JobQueue",
+    "QueueType",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -66,5 +71,6 @@ __all__ = [
     "create_message_queue_repository",
     "create_source_repository",
     "create_job_repository",
+    "create_job_queue_repository",
     "run_migrations",
 ]

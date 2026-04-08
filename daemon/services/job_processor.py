@@ -8,6 +8,7 @@ from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.manager import InstanceManager
 from daemon.repositories import SQLModelProjectRepository
+from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +16,22 @@ logger = logging.getLogger(__name__)
 class JobProcessor:
     """Background worker that processes queued jobs.
     
-    Continuously polls for pending jobs and processes them one at a time
-    per worker instance. Acquires project locks before processing and
-    releases them when complete. Skips jobs for projects with paused queues.
+    Continuously polls for pending jobs across all queues and processes them.
+    Uses two-level pause checks: project-level (job_queue_paused) and queue-level
+    (is_paused) to control job processing.
+    
+    The processing order is:
+    1. Iterate through all projects
+    2. Skip if project.job_queue_paused is True (master pause)
+    3. For each active queue in the project, skip if queue.is_paused is True
+    4. Get next pending job for the queue
+    5. Acquire per-queue lock and start job
     
     Attributes:
         _queue_service: JobQueueService instance for job operations.
         _instance_manager: InstanceManager instance for spawning instances.
         _project_repo: SQLModelProjectRepository for checking project pause state.
+        _queue_repo: JobQueueRepository for listing queues and their pause state.
         _poll_interval: Time in seconds between poll cycles.
         _running: Flag to control the processing loop.
     """
@@ -32,6 +41,7 @@ class JobProcessor:
         queue_service: JobQueueService,
         instance_manager: InstanceManager,
         project_repo: SQLModelProjectRepository,
+        queue_repo: JobQueueRepository,
         poll_interval: float = 2.0,
     ):
         """Initialize the JobProcessor.
@@ -40,11 +50,13 @@ class JobProcessor:
             queue_service: JobQueueService for job operations.
             instance_manager: InstanceManager for spawning instances.
             project_repo: SQLModelProjectRepository for checking project pause state.
+            queue_repo: JobQueueRepository for listing queues and checking pause state.
             poll_interval: Seconds between poll cycles (default: 2.0).
         """
         self._queue_service = queue_service
         self._instance_manager = instance_manager
         self._project_repo = project_repo
+        self._queue_repo = queue_repo
         self._poll_interval = poll_interval
         self._running = False
         self._job: Optional[asyncio.Task] = None
@@ -88,65 +100,95 @@ class JobProcessor:
             await asyncio.sleep(self._poll_interval)
     
     async def _process_next_job(self) -> None:
-        """Get the next pending job and process it."""
-        # Get next pending job (highest priority, oldest first)
-        job = await self._queue_service.get_next_pending_job()
-        if job is None:
-            return
+        """Get the next pending job from any active queue and process it.
         
-        # Check if project's queue is paused before processing
-        if job.project_id:
-            project = await asyncio.to_thread(self._project_repo.get, job.project_id)
-            if project and project.job_queue_paused:
-                logger.info(
-                    f"Skipping job {job.job_id} - project {job.project_id} queue is paused"
-                )
-                return
+        Implements two-level pause checking:
+        1. Project-level pause (job_queue_paused) - master override that stops ALL queues
+        2. Queue-level pause (is_paused) - individual queue control
         
-        logger.info(f"Processing job {job.job_id} for project {job.project_id}")
+        Processing order:
+        1. Get all projects
+        2. Skip if project.job_queue_paused is True (master pause)
+        3. Get all queues for the project
+        4. Skip if queue.is_paused is True (individual queue pause)
+        5. Get next pending job for the queue
+        6. Acquire per-queue lock and start job
+        """
+        # Get all projects
+        projects = await asyncio.to_thread(self._project_repo.list_projects)
         
-        try:
-            # Acquire lock and start job
-            started_job = await self._queue_service.start_job(job.job_id)
-            if started_job is None:
-                # Lock acquisition failed or job was cancelled
-                logger.warning(f"Could not start job {job.job_id} - may be cancelled or lock held")
-                return
+        for project in projects:
+            # Level 1 pause check: Master pause (project-level)
+            # This is the master override that stops ALL queues for a project
+            if project.job_queue_paused:
+                continue
             
-            # Spawn instance for this job
-            try:
-                instance_id = self._instance_manager.spawn_instance(
-                    agent_id=job.agent_id,
-                    instance_id=started_job.instance_id,
-                )
-            except Exception as e:
-                logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
-                await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
-                return
-            
-            # Send the job message to the instance
-            try:
-                await self._instance_manager.enqueue_message(
-                    instance_id=instance_id,
-                    message=job.message,
-                    source=job.source,
-                )
-            except Exception as e:
-                logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
-                await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
-                return
-            
-            # Mark job as being processed (not yet complete - instance does the work)
-            await self._queue_service.update_job(
-                job.job_id,
-                status="processing",
-                result_summary="Job enqueued for processing"
+            # Get all queues for this project
+            queues = await asyncio.to_thread(
+                self._queue_repo.list_by_project, project.project_id
             )
-            logger.info(f"Job {job.job_id} queued successfully for instance {instance_id}")
+            
+            for queue in queues:
+                # Level 2 pause check: Individual queue pause
+                # This allows pausing specific queues while others continue
+                if queue.is_paused:
+                    continue
                 
-        except Exception as e:
-            logger.exception(f"Failed to process job {job.job_id}: {e}")
-            await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
+                # Get next pending job for this specific queue
+                pending = await asyncio.to_thread(
+                    self._queue_service._repository.list_pending_by_queue, queue.queue_id
+                )
+                if not pending:
+                    continue
+                
+                job = pending[0]
+                
+                # Try to start the job (acquires per-queue lock internally)
+                try:
+                    started_job = await self._queue_service.start_job(job.job_id)
+                    if started_job is None:
+                        # Lock acquisition failed or job was cancelled
+                        continue
+                    
+                    # Spawn instance for this job
+                    try:
+                        instance_id = self._instance_manager.spawn_instance(
+                            agent_id=job.agent_id,
+                            instance_id=started_job.instance_id,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
+                        await self._queue_service.complete_job(
+                            job.job_id, success=False, error=str(e)
+                        )
+                        continue
+                    
+                    # Send the job message to the instance
+                    try:
+                        await self._instance_manager.enqueue_message(
+                            instance_id=instance_id,
+                            message=job.message,
+                            source=job.source,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
+                        await self._queue_service.complete_job(
+                            job.job_id, success=False, error=str(e)
+                        )
+                        continue
+                    
+                    logger.info(
+                        f"Job {job.job_id} queued for instance {instance_id} "
+                        f"on queue {queue.queue_name}"
+                    )
+                except Exception as e:
+                    logger.exception(f"Failed to process job {job.job_id}: {e}")
+                    try:
+                        await self._queue_service.complete_job(
+                            job.job_id, success=False, error=str(e)
+                        )
+                    except Exception:
+                        pass
 
 
 # Backward compatibility alias
