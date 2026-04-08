@@ -71,7 +71,7 @@ class TestIntegrationBasicWorkflow:
         self, integration_service
     ):
         """Test the complete enqueue -> process -> complete workflow."""
-        # Step 1: Enqueue job
+        # Step 1: Enqueue job (starts as PENDING)
         job = await integration_service.enqueue(
             agent_id="coder",
             message="Process this job",
@@ -81,8 +81,13 @@ class TestIntegrationBasicWorkflow:
         )
         
         assert job is not None
-        assert job.status == JobStatus.PROCESSING.value
-        assert job.instance_id is not None
+        assert job.status == JobStatus.PENDING.value
+        assert job.instance_id is None
+        
+        # Step 1b: Start the job (JobProcessor normally does this)
+        started_job = await integration_service.start_job(job.job_id)
+        assert started_job.status == JobStatus.PROCESSING.value
+        assert started_job.instance_id is not None
         
         # Step 2: Verify job is in database
         retrieved = await integration_service.get_job(job.job_id)
@@ -107,7 +112,7 @@ class TestIntegrationBasicWorkflow:
     async def test_enqueue_without_project_skips_queue(
         self, integration_service
     ):
-        """Test that jobs without project_id skip the queue entirely."""
+        """Test that jobs without project_id are created as PENDING."""
         job = await integration_service.enqueue(
             agent_id="coder",
             message="No project job",
@@ -116,11 +121,13 @@ class TestIntegrationBasicWorkflow:
             priority=5
         )
         
-        # Should be processing immediately
-        assert job.status == JobStatus.PROCESSING.value
-        assert job.instance_id is not None
+        # Jobs are now always PENDING - JobProcessor handles starting
+        assert job.status == JobStatus.PENDING.value
+        assert job.instance_id is None
         
-        # Complete the job
+        # Start and complete the job
+        started = await integration_service.start_job(job.job_id)
+        assert started.status == JobStatus.PROCESSING.value
         completed = await integration_service.complete_job(job.job_id)
         assert completed.status == JobStatus.COMPLETED.value
 
@@ -133,7 +140,7 @@ class TestIntegrationSameProjectSerialization:
         self, integration_service
     ):
         """Test that multiple jobs for the same project are serialized."""
-        # Enqueue multiple jobs for the same project
+        # Enqueue multiple jobs for the same project (all PENDING)
         job1 = await integration_service.enqueue(
             agent_id="coder",
             message="Job 1",
@@ -155,13 +162,17 @@ class TestIntegrationSameProjectSerialization:
             priority=5
         )
         
-        # Only first job should be processing
-        assert job1.status == JobStatus.PROCESSING.value
+        # All jobs should be PENDING (JobProcessor handles starting)
+        assert job1.status == JobStatus.PENDING.value
         assert job2.status == JobStatus.PENDING.value
         assert job3.status == JobStatus.PENDING.value
         
-        # Lock should be held
-        assert await integration_service._lock_manager.is_locked("project-1") is True
+        # Lock should not be held yet (only acquired when job starts)
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        # Start job 1 (JobProcessor normally does this)
+        started1 = await integration_service.start_job(job1.job_id)
+        assert started1.status == JobStatus.PROCESSING.value
         
         # Complete job 1
         await integration_service.complete_job(job1.job_id)
@@ -198,7 +209,7 @@ class TestIntegrationSameProjectSerialization:
         self, integration_service
     ):
         """Test that jobs are processed by priority for same project."""
-        # Enqueue in reverse priority order
+        # Enqueue in reverse priority order (all PENDING)
         job_low = await integration_service.enqueue(
             agent_id="coder",
             message="Low priority",
@@ -220,8 +231,15 @@ class TestIntegrationSameProjectSerialization:
             priority=5
         )
         
-        # First job (low priority) is processing
-        assert job_low.status == JobStatus.PROCESSING.value
+        # All jobs should be PENDING (locks not acquired yet)
+        assert job_low.status == JobStatus.PENDING.value
+        assert job_high.status == JobStatus.PENDING.value
+        assert job_medium.status == JobStatus.PENDING.value
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        # Start first job (low priority - enqueued first)
+        started_low = await integration_service.start_job(job_low.job_id)
+        assert started_low.status == JobStatus.PROCESSING.value
         
         # Complete low priority job
         await integration_service.complete_job(job_low.job_id)
@@ -266,8 +284,17 @@ class TestIntegrationSameProjectSerialization:
             project_id="project-1"
         )
         
+        # All jobs are PENDING
+        assert job1.status == JobStatus.PENDING.value
+        assert job2.status == JobStatus.PENDING.value
+        assert job3.status == JobStatus.PENDING.value
+        
         # Cancel job 2
         await integration_service.cancel_job(job2.job_id)
+        
+        # Start job 1 (JobProcessor normally does this)
+        started_job1 = await integration_service.start_job(job1.job_id)
+        assert started_job1.status == JobStatus.PROCESSING.value
         
         # Complete job 1
         await integration_service.complete_job(job1.job_id)
@@ -306,12 +333,27 @@ class TestIntegrationDifferentProjectsParallel:
             project_id="project-3"
         )
         
-        # All should be processing
-        assert job1.status == JobStatus.PROCESSING.value
-        assert job2.status == JobStatus.PROCESSING.value
-        assert job3.status == JobStatus.PROCESSING.value
+        # All jobs should be PENDING (locks not acquired until start_job called)
+        assert job1.status == JobStatus.PENDING.value
+        assert job2.status == JobStatus.PENDING.value
+        assert job3.status == JobStatus.PENDING.value
         
-        # All locks should be held
+        # Locks should NOT be held yet
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_locked("project-2") is False
+        assert await integration_service._lock_manager.is_locked("project-3") is False
+        
+        # Start all jobs (JobProcessor normally does this)
+        started_job1 = await integration_service.start_job(job1.job_id)
+        started_job2 = await integration_service.start_job(job2.job_id)
+        started_job3 = await integration_service.start_job(job3.job_id)
+        
+        # All should be processing now
+        assert started_job1.status == JobStatus.PROCESSING.value
+        assert started_job2.status == JobStatus.PROCESSING.value
+        assert started_job3.status == JobStatus.PROCESSING.value
+        
+        # All locks should be held now
         assert await integration_service._lock_manager.is_locked("project-1") is True
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
@@ -351,9 +393,22 @@ class TestIntegrationDifferentProjectsParallel:
             project_id="project-2"
         )
         
+        # All jobs should be PENDING
+        assert job1_p1.status == JobStatus.PENDING.value
+        assert job2_p1.status == JobStatus.PENDING.value
+        assert job_p2.status == JobStatus.PENDING.value
+        
+        # No locks held yet
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_locked("project-2") is False
+        
+        # Start first jobs for each project
+        started_p1_job1 = await integration_service.start_job(job1_p1.job_id)
+        started_p2_job = await integration_service.start_job(job_p2.job_id)
+        
         # Both projects should have processing jobs
-        assert job1_p1.status == JobStatus.PROCESSING.value
-        assert job_p2.status == JobStatus.PROCESSING.value
+        assert started_p1_job1.status == JobStatus.PROCESSING.value
+        assert started_p2_job.status == JobStatus.PROCESSING.value
         
         # Project 1 should have one pending
         assert job2_p1.status == JobStatus.PENDING.value
@@ -391,7 +446,12 @@ class TestIntegrationCrashRecovery:
             project_id="project-1"
         )
         
-        assert job.status == JobStatus.PROCESSING.value
+        # Job is PENDING, need to start it
+        assert job.status == JobStatus.PENDING.value
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        started_job = await integration_service.start_job(job.job_id)
+        assert started_job.status == JobStatus.PROCESSING.value
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
         # Simulate crash: clear lock manager
@@ -403,15 +463,15 @@ class TestIntegrationCrashRecovery:
         # The job is still in PROCESSING state in database
         # but the lock is gone - this is crash recovery state
         
-        # New job should be able to acquire lock
+        # New job should be able to be enqueued (starts PENDING)
         new_job = await integration_service.enqueue(
             agent_id="coder",
             message="Job after crash",
             project_id="project-1"
         )
         
-        # Should acquire lock and start processing
-        assert new_job.status == JobStatus.PROCESSING.value
+        # Should be PENDING (not acquire lock during enqueue)
+        assert new_job.status == JobStatus.PENDING.value
         
         # The old job is now orphaned - depends on application logic to handle
 
@@ -427,6 +487,9 @@ class TestIntegrationCrashRecovery:
                 message=f"Job {i}",
                 project_id="project-1"
             )
+            # Start and complete the job
+            started = await integration_service.start_job(job.job_id)
+            assert started.status == JobStatus.PROCESSING.value
             await integration_service.complete_job(job.job_id)
         
         # Verify all are completed
@@ -454,11 +517,17 @@ class TestIntegrationCrashRecovery:
             project_id="project-1"
         )
         
-        # Simulate crash: clear lock but leave job in PROCESSING
-        await integration_service._lock_manager.release_by_instance(job.instance_id)
+        # Job is PENDING, start it
+        assert job.status == JobStatus.PENDING.value
+        started_job = await integration_service.start_job(job.job_id)
+        assert started_job.status == JobStatus.PROCESSING.value
         
-        # Job is still in PROCESSING state
-        assert job.status == JobStatus.PROCESSING.value
+        # Simulate crash: clear lock but leave job in PROCESSING
+        await integration_service._lock_manager.release_by_instance(started_job.instance_id)
+        
+        # Job is still in PROCESSING state (re-fetch from DB)
+        current_job = await integration_service.get_job(job.job_id)
+        assert current_job.status == JobStatus.PROCESSING.value
         
         # We should be able to cancel it
         cancelled = await integration_service.cancel_job(job.job_id)
@@ -480,7 +549,11 @@ class TestIntegrationCrashRecovery:
             project_id="project-1"
         )
         
-        assert new_job.status == JobStatus.PROCESSING.value
+        # New job is PENDING
+        assert new_job.status == JobStatus.PENDING.value
+        # Need to start it to get PROCESSING
+        started_new = await integration_service.start_job(new_job.job_id)
+        assert started_new.status == JobStatus.PROCESSING.value
 
     @pytest.mark.asyncio
     async def test_recovery_with_multiple_queued_jobs(
@@ -507,7 +580,8 @@ class TestIntegrationCrashRecovery:
         )
         
         # Simulate crash during job1 processing
-        await integration_service._lock_manager.release_by_instance(job1.instance_id)
+        started_job1 = await integration_service.start_job(job1.job_id)
+        await integration_service._lock_manager.release_by_instance(started_job1.instance_id)
         
         # Cancel the orphaned job1
         await integration_service.cancel_job(job1.job_id)
@@ -550,27 +624,33 @@ class TestIntegrationConcurrentOperations:
             enqueue_job(i) for i in range(5)
         ])
         
-        # Only one should be processing
-        processing_count = sum(
-            1 for j in results if j.status == JobStatus.PROCESSING.value
-        )
-        pending_count = sum(
-            1 for j in results if j.status == JobStatus.PENDING.value
-        )
+        # All should be PENDING (locks not acquired until start_job called)
+        all_pending = all(j.status == JobStatus.PENDING.value for j in results)
+        assert all_pending, "All jobs should be PENDING after enqueue"
         
-        assert processing_count == 1
-        assert pending_count == 4
+        # Start the first job
+        started_first = await integration_service.start_job(results[0].job_id)
+        assert started_first.status == JobStatus.PROCESSING.value
+        assert await integration_service._lock_manager.is_locked("project-1") is True
         
-        # Complete all in order
-        for job in results:
-            await integration_service.complete_job(job.job_id)
-            # After each completion, next pending becomes processing
-            # Check remaining pending
-            remaining_pending = await integration_service.list_jobs(
-                status=JobStatus.PENDING,
-                project_id="project-1"
-            )
-            # Can verify ordering
+        # Complete the first job
+        await integration_service.complete_job(results[0].job_id)
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        # Start the next job
+        started_second = await integration_service.start_job(results[1].job_id)
+        assert started_second is not None
+        assert started_second.status == JobStatus.PROCESSING.value
+        
+        # Complete the second job
+        await integration_service.complete_job(results[1].job_id)
+        
+        # Complete remaining jobs (they're already in PENDING)
+        for job in results[2:]:
+            started = await integration_service.start_job(job.job_id)
+            if started is not None:
+                assert started.status == JobStatus.PROCESSING.value
+                await integration_service.complete_job(job.job_id)
 
     @pytest.mark.asyncio
     @pytest.mark.skip(reason="SQLite does not support true concurrent writes - known limitation")
@@ -663,13 +743,28 @@ class TestIntegrationInstanceManagement:
             project_id="project-3"
         )
         
+        # All jobs are PENDING (locks not acquired yet)
+        assert job1.status == JobStatus.PENDING.value
+        assert job2.status == JobStatus.PENDING.value
+        assert job3.status == JobStatus.PENDING.value
+        
+        # No locks should be held yet
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        assert await integration_service._lock_manager.is_locked("project-2") is False
+        assert await integration_service._lock_manager.is_locked("project-3") is False
+        
+        # Start all jobs (this acquires locks)
+        started_job1 = await integration_service.start_job(job1.job_id)
+        started_job2 = await integration_service.start_job(job2.job_id)
+        started_job3 = await integration_service.start_job(job3.job_id)
+        
         # Verify all locks are held
         assert await integration_service._lock_manager.is_locked("project-1") is True
         assert await integration_service._lock_manager.is_locked("project-2") is True
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
         # Release all locks for job1's instance (only project-1)
-        released = await integration_service.release_lock_by_instance(job1.instance_id)
+        released = await integration_service.release_lock_by_instance(started_job1.instance_id)
         assert "project-1" in released
         
         # Only project-1 lock should be released
@@ -678,11 +773,11 @@ class TestIntegrationInstanceManagement:
         assert await integration_service._lock_manager.is_locked("project-3") is True
         
         # Release job2's instance
-        released = await integration_service.release_lock_by_instance(job2.instance_id)
+        released = await integration_service.release_lock_by_instance(started_job2.instance_id)
         assert "project-2" in released
         
         # Release job3's instance
-        released = await integration_service.release_lock_by_instance(job3.instance_id)
+        released = await integration_service.release_lock_by_instance(started_job3.instance_id)
         assert "project-3" in released
         
         # All locks should be released
@@ -701,10 +796,17 @@ class TestIntegrationInstanceManagement:
             project_id="project-1"
         )
         
+        # Job is PENDING
+        assert job.status == JobStatus.PENDING.value
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        # Start job to acquire lock
+        started_job = await integration_service.start_job(job.job_id)
+        assert started_job.status == JobStatus.PROCESSING.value
         assert await integration_service._lock_manager.is_locked("project-1") is True
         
         # Cleanup by instance
-        released = await integration_service.release_lock_by_instance(job.instance_id)
+        released = await integration_service.release_lock_by_instance(started_job.instance_id)
         
         assert "project-1" in released
         assert await integration_service._lock_manager.is_locked("project-1") is False
@@ -731,8 +833,13 @@ class TestIntegrationPriorityQueue:
             )
             jobs.append((priority, job))
         
-        # First job (priority 5) should be processing
-        assert jobs[0][1].status == JobStatus.PROCESSING.value
+        # All jobs are PENDING (locks not acquired yet)
+        assert all(j.status == JobStatus.PENDING.value for _, j in jobs)
+        assert await integration_service._lock_manager.is_locked("project-1") is False
+        
+        # Start first job (priority 5, enqueued first)
+        started_first = await integration_service.start_job(jobs[0][1].job_id)
+        assert started_first.status == JobStatus.PROCESSING.value
         
         # Get the pending jobs - should be ordered by priority (desc)
         pending = integration_service._repository.list_pending_by_project("project-1")
@@ -773,6 +880,13 @@ class TestIntegrationPriorityQueue:
             jobs.append(job)
             # Small delay to ensure different created_at
             await asyncio.sleep(0.01)
+        
+        # All jobs are PENDING
+        assert all(j.status == JobStatus.PENDING.value for j in jobs)
+        
+        # Start first job
+        started_first = await integration_service.start_job(jobs[0].job_id)
+        assert started_first.status == JobStatus.PROCESSING.value
         
         # Complete first job
         await integration_service.complete_job(jobs[0].job_id)
@@ -817,10 +931,21 @@ class TestIntegrationEndToEnd:
             priority=6
         )
         
-        # 2. Verify initial states
-        assert job1.status == JobStatus.PROCESSING.value
+        # 2. Verify initial states (all PENDING)
+        assert job1.status == JobStatus.PENDING.value
         assert job2.status == JobStatus.PENDING.value
-        assert job3.status == JobStatus.PROCESSING.value
+        assert job3.status == JobStatus.PENDING.value
+        
+        # No locks held yet
+        assert await integration_service._lock_manager.is_locked("backend-api") is False
+        assert await integration_service._lock_manager.is_locked("frontend-web") is False
+        
+        # Start first jobs for each project
+        started_job1 = await integration_service.start_job(job1.job_id)
+        started_job3 = await integration_service.start_job(job3.job_id)
+        
+        assert started_job1.status == JobStatus.PROCESSING.value
+        assert started_job3.status == JobStatus.PROCESSING.value
         
         # 3. Complete job3 (frontend-web, independent)
         await integration_service.complete_job(job3.job_id)
@@ -864,15 +989,19 @@ class TestIntegrationEndToEnd:
                 project_jobs.append(job)
             all_jobs.append(project_jobs)
         
-        # Verify initial state: 1 processing, rest pending per project
+        # Verify initial state: all PENDING, locks not held
         for project_jobs in all_jobs:
-            assert project_jobs[0].status == JobStatus.PROCESSING.value
-            for job in project_jobs[1:]:
-                assert job.status == JobStatus.PENDING.value
+            assert all(j.status == JobStatus.PENDING.value for j in project_jobs)
+        
+        # Start first job for each project
+        for project_id in range(num_projects):
+            started = await integration_service.start_job(all_jobs[project_id][0].job_id)
+            assert started.status == JobStatus.PROCESSING.value
+            assert await integration_service._lock_manager.is_locked(f"project-{project_id}") is True
         
         # Complete all jobs per project - get processing job, complete it, trigger next
         for project_id in range(num_projects):
-            for _ in range(jobs_per_project):
+            for i in range(jobs_per_project):
                 # Get current processing job from repository and complete it
                 processing, _ = integration_service._repository.list(
                     status=JobStatus.PROCESSING.value,
@@ -880,7 +1009,14 @@ class TestIntegrationEndToEnd:
                 )
                 if processing:
                     await integration_service.complete_job(processing[0].job_id)
-                await integration_service.trigger_next_job(f"project-{project_id}")
+                # Start next job if there is one
+                if i + 1 < jobs_per_project:
+                    next_pending, _ = integration_service._repository.list(
+                        status=JobStatus.PENDING.value,
+                        project_id=f"project-{project_id}"
+                    )
+                    if next_pending:
+                        await integration_service.start_job(next_pending[0].job_id)
         
         # Verify all jobs are completed
         final_jobs = await integration_service.list_jobs()
@@ -905,6 +1041,13 @@ class TestIntegrationEndToEnd:
                 project_id="project-1"
             )
             jobs.append(job)
+        
+        # All jobs are PENDING
+        assert all(j.status == JobStatus.PENDING.value for j in jobs)
+        
+        # Start first job
+        started_first = await integration_service.start_job(jobs[0].job_id)
+        assert started_first.status == JobStatus.PROCESSING.value
         
         # Cancel middle jobs
         await integration_service.cancel_job(jobs[1].job_id)

@@ -54,9 +54,9 @@ class JobQueueService:
     ) -> JobItem:
         """Submit a job for processing.
         
-        If project_id is None: create PROCESSING job immediately.
-        If project_id provided and lock available: acquire lock, create PROCESSING job.
-        If project_id provided and lock held: create PENDING job with queue position.
+        Jobs are always created as PENDING. The JobProcessor picks up pending
+        jobs, transitions them to PROCESSING, spawns instances, and enqueues
+        messages for processing.
         
         Args:
             agent_id: Agent ID (e.g., 'coder').
@@ -67,7 +67,7 @@ class JobQueueService:
             metadata: Optional metadata dictionary.
             
         Returns:
-            JobItem with status and (if immediate) instance_id.
+            JobItem with PENDING status.
         """
         # Derive agent_dir from agent_id using registry
         registry = get_registry()
@@ -76,7 +76,7 @@ class JobQueueService:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)
         
-        # Create job once (status defaults to PENDING in repository)
+        # Create job with PENDING status - JobProcessor will handle the rest
         job = await asyncio.to_thread(
             self._repository.create,
             agent_id=agent_id,
@@ -88,32 +88,6 @@ class JobQueueService:
             job_metadata=metadata,
         )
         
-        # If no project_id, execute immediately without locking
-        if project_id is None:
-            instance_id = str(uuid.uuid4())
-            started_job = await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
-            assert started_job is not None, f"Failed to start job {job.job_id}"
-            return started_job
-        
-        # Try to acquire lock for this project
-        instance_id = str(uuid.uuid4())
-        acquired = await self._lock_manager.acquire(
-            project_id=project_id,
-            job_id=job.job_id,
-            instance_id=instance_id,
-        )
-        
-        if acquired:
-            try:
-                started_job = await asyncio.to_thread(self._repository.start_job, job.job_id, instance_id)
-                assert started_job is not None, f"Failed to start job {job.job_id}"
-                return started_job
-            except Exception:
-                # Release lock on error and re-raise
-                await self._lock_manager.release(project_id, job.job_id)
-                raise
-        
-        # Lock is held by another job - keep job as PENDING
         return job
     
     async def get_job(self, job_id: str) -> Optional[JobItem]:

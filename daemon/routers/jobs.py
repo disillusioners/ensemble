@@ -92,9 +92,10 @@ def _job_to_response(
 
 @router.post(
     "",
+    response_model=JobResponse,
+    status_code=202,
     responses={
-        200: {"description": "Job started immediately"},
-        202: {"description": "Job queued"},
+        202: {"description": "Job queued for processing"},
         422: {"model": JobValidationError, "description": "Validation error"},
     },
 )
@@ -104,13 +105,11 @@ async def create_job(
 ):
     """Submit a new job for processing.
     
-    - If no project_id is provided, the job executes immediately
-    - If project_id is provided and no lock is held, job starts immediately
-    - If project_id is provided and a lock is held, job is queued
+    Jobs are queued and processed by the JobProcessor. The job starts
+    as PENDING and transitions to PROCESSING when picked up by the processor.
     
     Returns:
-        200 with status=processing if job started immediately
-        202 with status=pending if job was queued
+        202 with job details (status=pending)
         422 if validation errors
     """
     # Validate and resolve agent input
@@ -150,24 +149,19 @@ async def create_job(
             detail={"error": "Internal error", "message": str(e)}
         )
     
-    # Determine response based on job status
-    if job.status == JobStatus.PROCESSING.value:
-        # Job started immediately - return 200
-        return _job_to_response(job, message="Job started immediately")
-    else:
-        # Job is pending (queued) - return 202
-        position = None
-        if job.project_id:
-            try:
-                position = await service._get_queue_position(job.job_id, job.project_id)
-            except Exception:
-                pass  # Best effort - position is optional
-        
-        response = _job_to_response(job, position=position, message="Job queued, waiting for project lock")
-        return JSONResponse(
-            status_code=202,
-            content=response.model_dump()
-        )
+    # Job is always PENDING at creation - return position if project_id provided
+    position = None
+    if job.project_id:
+        try:
+            position = await service._get_queue_position(job.job_id, job.project_id)
+        except Exception:
+            pass  # Best effort - position is optional
+    
+    response = _job_to_response(job, position=position, message="Job queued for processing")
+    return JSONResponse(
+        status_code=202,
+        content=response.model_dump()
+    )
 
 
 @router.get(
