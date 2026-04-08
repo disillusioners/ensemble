@@ -477,7 +477,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected onStopInstance(): void {
     const instanceId = this.currentInstance()?.instance_id;
     if (instanceId) {
-      this.api.stopInstance(instanceId).subscribe();
+      this.api.stopInstance(instanceId).subscribe({ error: (err: any) => console.error('Stop failed:', err) });
     }
   }
 
