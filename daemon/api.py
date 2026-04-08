@@ -83,6 +83,7 @@ from .services.job_lock_manager import JobLockManager
 from .services.job_processor import JobProcessor
 from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
 from .registry import get_registry
+from .cancellation import CancellationReason
 
 
 def validate_agent_id(agent_id: str) -> tuple[str, Path]:
@@ -661,6 +662,17 @@ async def terminate_instance(instance_id: str):
     manager.terminate_instance(instance_id)
     
     return {"terminated": True}
+
+
+@api_router.post("/instances/{instance_id}/stop")
+async def stop_instance(instance_id: str) -> dict:
+    """Stop an instance by cancelling pending requests."""
+    try:
+        manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    cancelled_count = manager.cancel_instance_requests(instance_id, CancellationReason.USER_STOPPED)
+    return {"stopped": True, "cancelled_requests": cancelled_count}
 
 
 # 6. POST /instances/{instance_id}/messages - Send message

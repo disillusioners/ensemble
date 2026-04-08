@@ -12,19 +12,25 @@
       [class.active]="canSend"
     ></textarea>
     
-    <button
-      type="button"
-      [disabled]="!canSend"
-      class="send-button"
-      [style.backgroundColor]="canSend ? color : '#343541'"
-      [style.color]="canSend ? 'white' : '#6e6e80'"
-      [style.cursor]="canSend ? 'pointer' : 'not-allowed'"
-      (click)="handleSubmit()"
-    >
-      <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-      </svg>
-    </button>
+    @if (isStreaming) {
+        <button class="stop-button" (click)="stopInstance.emit()" title="Stop">
+            <i class="fa-solid fa-stop"></i>
+        </button>
+    } @else {
+        <button
+            type="button"
+            [disabled]="!canSend"
+            class="send-button"
+            [style.backgroundColor]="canSend ? color : '#343541'"
+            [style.color]="canSend ? 'white' : '#6e6e80'"
+            [style.cursor]="canSend ? 'pointer' : 'not-allowed'"
+            (click)="handleSubmit()"
+        >
+            <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+            </svg>
+        </button>
+    }
   </div>
   
   <p class="input-hint">

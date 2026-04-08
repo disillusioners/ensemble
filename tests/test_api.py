@@ -284,6 +284,36 @@ async def test_terminate_instance_not_found(client, mock_manager):
 
 
 @pytest.mark.asyncio
+async def test_stop_instance_endpoint_exists(client, mock_manager):
+    """Test that POST /instances/{instance_id}/stop endpoint works."""
+    # Test 1: Instance not found
+    mock_manager.get_instance.side_effect = KeyError("Instance not found")
+    
+    response = await client.post("/instances/nonexistent/stop")
+    assert response.status_code == 404
+    data = response.json()
+    assert data["detail"] == "Instance not found"
+    
+    # Test 2: Instance exists - should return success
+    mock_manager.get_instance.side_effect = None
+    mock_manager.get_instance.return_value = Mock()
+    mock_manager.cancel_instance_requests = Mock(return_value=3)
+    
+    response = await client.post("/instances/test-instance/stop")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["stopped"] == True
+    assert data["cancelled_requests"] == 3
+    
+    # Verify cancel_instance_requests was called with USER_STOPPED
+    from daemon.cancellation import CancellationReason
+    mock_manager.cancel_instance_requests.assert_called_once_with(
+        "test-instance", 
+        CancellationReason.USER_STOPPED
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_message_success(client, mock_manager):
     """Test POST /instances/{id}/messages."""
     response = await client.post(

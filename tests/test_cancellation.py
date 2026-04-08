@@ -65,7 +65,75 @@ class TestCancellationReason:
     def test_all_reasons_defined(self):
         """Ensure no missing reasons."""
         reasons = list(CancellationReason)
-        assert len(reasons) == 5
+        assert len(reasons) == 6
+
+    def test_user_stopped_reason(self):
+        """Verify USER_STOPPED enum exists and has correct value."""
+        assert CancellationReason.USER_STOPPED.value == "user_stopped"
+
+
+class TestRequestRegistryCancelByInstance:
+    """Tests for request_registry.cancel_by_instance reason forwarding."""
+    
+    def test_cancel_by_instance_passes_reason(self, request_registry):
+        """Verify cancel_by_instance passes the reason to individual cancels."""
+        # Register two requests for the same instance
+        request_registry.register("msg-1", "instance-1")
+        request_registry.register("msg-2", "instance-1")
+        
+        # Cancel by instance with USER_STOPPED reason
+        cancelled_count = request_registry.cancel_by_instance(
+            "instance-1", 
+            CancellationReason.USER_STOPPED
+        )
+        
+        # Should have cancelled both
+        assert cancelled_count == 2
+        
+        # Verify the tokens have the USER_STOPPED reason
+        req1 = request_registry.get_request("msg-1")
+        req2 = request_registry.get_request("msg-2")
+        assert req1.cancellation_source.token.reason == CancellationReason.USER_STOPPED
+        assert req2.cancellation_source.token.reason == CancellationReason.USER_STOPPED
+
+
+class TestManagerCancelInstanceRequests:
+    """Tests for manager.cancel_instance_requests."""
+    
+    def test_cancel_instance_requests_returns_count(self):
+        """Verify cancel_instance_requests returns the count of cancelled."""
+        from unittest.mock import Mock, patch, MagicMock
+        from daemon.cancellation import CancellationReason
+        
+        # Mock the request_registry
+        with patch('daemon.manager.ActiveRequestRegistry') as mock_registry_class:
+            mock_registry = Mock()
+            mock_registry_class.return_value = mock_registry
+            
+            # Simulate 2 active requests for the instance
+            mock_registry._by_instance = {"instance-1": {"msg-1", "msg-2"}}
+            
+            # cancel returns True for each
+            mock_registry.cancel.return_value = True
+            
+            # Import manager after patching
+            from daemon.manager import InstanceManager
+            
+            # Create manager with mocked components
+            manager = InstanceManager.__new__(InstanceManager)
+            manager._request_registry = mock_registry
+            
+            result = manager.cancel_instance_requests(
+                "instance-1", 
+                CancellationReason.USER_STOPPED
+            )
+            
+            # Should have cancelled 2 requests
+            assert result == 2
+            # Verify cancel was called twice with the right reason
+            assert mock_registry.cancel.call_count == 2
+            mock_registry.cancel.assert_any_call("msg-1", CancellationReason.USER_STOPPED)
+            mock_registry.cancel.assert_any_call("msg-2", CancellationReason.USER_STOPPED)
 
 
 # =============================================================================

@@ -2072,6 +2072,27 @@ Title:"""
         except Exception:
             return False
 
+    def cancel(self, message_id: str, reason: CancellationReason) -> bool:
+        """Request cancellation of a specific message.
+        
+        Args:
+            message_id: The message ID to cancel.
+            reason: The cancellation reason.
+        
+        Returns:
+            True if cancellation was signalled, False if not found.
+        """
+        return self._request_registry.cancel(message_id, reason)
+
+    def cancel_instance_requests(self, instance_id: str, reason: CancellationReason) -> int:
+        """Cancel all active requests for an instance. Returns count of cancelled."""
+        message_ids = list(self._request_registry._by_instance.get(instance_id, set()))
+        count = 0
+        for msg_id in message_ids:
+            if self.cancel(msg_id, reason):
+                count += 1
+        return count
+
     def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an instance.
 
@@ -2527,6 +2548,17 @@ Title:"""
         
         self._consumer_tasks.clear()
         self._instance_queues.clear()
+    
+    def get_active_requests(self, instance_id: str) -> list[str]:
+        """Get list of active request message IDs for an instance.
+        
+        Args:
+            instance_id: The instance ID to check.
+        
+        Returns:
+            List of message IDs that are currently being processed.
+        """
+        return self._request_registry.get_active_for_instance(instance_id)
     
     @property
     def is_shutting_down(self) -> bool:

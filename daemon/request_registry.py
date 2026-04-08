@@ -115,20 +115,32 @@ class ActiveRequestRegistry:
         with self._lock:
             return self._requests.get(message_id)
     
-    def cancel_by_instance(self, instance_id: str) -> None:
+    def cancel_by_instance(
+        self,
+        instance_id: str,
+        reason: CancellationReason = CancellationReason.SESSION_TERMINATED,
+    ) -> int:
         """Cancel all active requests for an instance.
         
         Args:
             instance_id: The instance whose requests should be cancelled.
+            reason: The cancellation reason.
+        
+        Returns:
+            Number of messages that were cancelled.
         """
         with self._lock:
             message_ids = self._by_instance.get(instance_id, set()).copy()
         
+        cancelled = 0
         for message_id in message_ids:
-            self.cancel(message_id, CancellationReason.INSTANCE_TERMINATED)
+            if self.cancel(message_id, reason):
+                cancelled += 1
         
-        if message_ids:
-            logger.info(f"Cancelled {len(message_ids)} request(s) for instance {instance_id[:8]}...")
+        if cancelled:
+            logger.info(f"Cancelled {cancelled} request(s) for instance {instance_id[:8]}...")
+        
+        return cancelled
 
     def get_all_message_ids(self) -> list[str]:
         """Get snapshot of all active message IDs.

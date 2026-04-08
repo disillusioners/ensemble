@@ -13,6 +13,7 @@ class CancellationReason(Enum):
     MANUAL = "manual"
     SHUTDOWN = "shutdown"
     SESSION_TERMINATED = "session_terminated"
+    USER_STOPPED = "user_stopped"
 
 
 class OperationCancelledError(Exception):

@@ -71,6 +71,10 @@ export class ApiService {
     return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/instances/${instanceId}`);
   }
 
+  stopInstance(instanceId: string): Observable<{ stopped: boolean; cancelled_requests: number }> {
+    return this.http.post<{ stopped: boolean; cancelled_requests: number }>(`${this.API_BASE}/instances/${instanceId}/stop`, {});
+  }
+
   // Messages
   sendMessage(instanceId: string, content: string): Observable<MessageResponse> {
     return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, { content });

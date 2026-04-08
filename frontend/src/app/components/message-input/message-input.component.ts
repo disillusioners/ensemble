@@ -13,7 +13,9 @@ export class MessageInputComponent {
   
   @Input() disabled = false;
   @Input() agentColor = 'coder';
+  @Input() isStreaming = false;
   @Output() sendMessage = new EventEmitter<string>();
+  @Output() stopInstance = new EventEmitter<void>();
 
   message = signal('');
 

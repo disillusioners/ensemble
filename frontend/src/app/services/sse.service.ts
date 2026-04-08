@@ -313,6 +313,21 @@ export class SseService {
       });
     });
 
+    eventSource.addEventListener('cancelled', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!this.isValidInstanceEvent(data)) return;
+          if (data.type === 'cancelled') {
+            console.log('[SSE] Received cancelled event');
+            this.isStreaming.set(false);
+          }
+        } catch (err) {
+          console.error('Failed to parse cancelled event:', err);
+        }
+      });
+    });
+
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
