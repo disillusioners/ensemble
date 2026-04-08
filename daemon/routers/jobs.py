@@ -113,6 +113,13 @@ async def create_job(
         202 with job details (status=pending)
         422 if validation errors
     """
+    # Validate: queue_id requires project_id
+    if request.queue_id and not request.project_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Validation Error", "message": "project_id is required when queue_id is specified"}
+        )
+
     # Validate and resolve agent input
     try:
         from daemon.api import validate_agent_id
@@ -146,9 +153,10 @@ async def create_job(
             ).model_dump()
         )
     except Exception as e:
+        logger.error(f"Failed to enqueue job: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail={"error": "Internal error", "message": str(e)}
+            detail={"error": "Job submission failed", "message": "An internal error occurred while submitting the job"}
         )
     
     # Job is always PENDING at creation - return position if project_id provided
@@ -240,6 +248,30 @@ async def list_jobs(
     
     # Clamp limit
     limit = max(1, min(limit, 100))
+    
+    # Validate: queue_id requires project_id
+    if queue_id and not project_id:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "Validation Error", "message": "project_id is required when queue_id is specified"}
+        )
+    
+    # Validate queue belongs to project (IDOR protection)
+    if queue_id and project_id:
+        from daemon.routers.queues import get_mgmt_service
+        try:
+            mgmt = get_mgmt_service()
+            queue = await mgmt.get_queue(project_id, queue_id)
+            if queue is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": "Queue not found", "message": f"Queue {queue_id} not found for project {project_id}"}
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "Queue not found", "message": f"Queue {queue_id} not found for project {project_id}"}
+            )
     
     # List jobs
     jobs = await service.list_jobs(
@@ -541,7 +573,7 @@ async def stream_job_events(
             logger.exception(f"Error in job SSE stream for {job_id}: {e}")
             yield {
                 "event": "error",
-                "data": json.dumps({"error": "Stream error", "details": str(e)})
+                "data": json.dumps({"error": "Stream error", "details": "An internal error occurred in the stream"})
             }
 
     # Return EventSourceResponse with custom keepalive

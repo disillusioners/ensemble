@@ -3,10 +3,11 @@
 import asyncio
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 from daemon.repositories import SQLModelProjectRepository
-from .schemas import ProjectResponse, ProjectListResponse, ProjectNotFoundResponse
+from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
+from .schemas import ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -39,6 +40,33 @@ def set_project_repository(repo: SQLModelProjectRepository) -> None:
     _project_repo = repo
 
 
+# Dependency to get JobQueueMgmtService
+_job_queue_mgmt_service: Optional[JobQueueMgmtService] = None
+
+
+def get_queue_mgmt_service() -> JobQueueMgmtService:
+    """Get the JobQueueMgmtService instance.
+    
+    Returns:
+        JobQueueMgmtService instance.
+        
+    Raises:
+        HTTPException: If the service is not initialized.
+    """
+    if _job_queue_mgmt_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Queue management service not initialized"}
+        )
+    return _job_queue_mgmt_service
+
+
+def set_job_queue_mgmt_service(service: JobQueueMgmtService) -> None:
+    """Set the JobQueueMgmtService instance (called during app startup)."""
+    global _job_queue_mgmt_service
+    _job_queue_mgmt_service = service
+
+
 def _project_to_response(project) -> ProjectResponse:
     """Convert Project model to ProjectResponse."""
     return ProjectResponse(
@@ -62,6 +90,66 @@ def _project_to_response(project) -> ProjectResponse:
 
 
 # ==================== Endpoints ====================
+
+
+@router.post(
+    "",
+    response_model=ProjectResponse,
+    status_code=201,
+    responses={
+        201: {"description": "Project created"},
+        409: {"description": "Project with this name already exists"},
+    },
+)
+async def create_project(
+    body: ProjectCreateRequest,
+    background_tasks: BackgroundTasks,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> ProjectResponse:
+    """Create a new project with auto-provisioned system queues.
+    
+    Creates system queues (system_fifo_queue, system_parallel_queue) via
+    BackgroundTasks to avoid blocking the response.
+    
+    Request body:
+        - name: Project name (required, unique)
+        - project_type: Project type (default: "general")
+        - main_directory: Main directory path (optional)
+        - description: Project description (optional)
+        - tags: List of tags (optional)
+        
+    Returns:
+        201 with created project
+        409 if project name already exists
+    """
+    try:
+        project = await asyncio.to_thread(
+            repo.create,
+            name=body.name,
+            project_type=body.project_type,
+            main_directory=body.main_directory,
+            description=body.description,
+            tags=body.tags,
+        )
+    except ValueError as e:
+        if "already exists" in str(e):
+            raise HTTPException(
+                status_code=409,
+                detail={"error": str(e)}
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={"error": str(e)}
+        )
+    
+    # Auto-provision system queues in background
+    queue_mgmt = get_queue_mgmt_service()
+    background_tasks.add_task(
+        queue_mgmt.auto_provision_system_queues,
+        project.project_id
+    )
+    
+    return _project_to_response(project)
 
 
 @router.get(

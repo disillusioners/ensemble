@@ -419,3 +419,25 @@ class ProjectNotFoundResponse(BaseModel):
             }
         }
     }
+
+
+class ProjectCreateRequest(BaseModel):
+    """Request body for creating a new project."""
+    
+    name: str = Field(..., min_length=1, max_length=200, description="Project name (unique)")
+    project_type: str = Field(default="general", description="Project type")
+    main_directory: Optional[str] = Field(default=None, description="Main directory path")
+    description: Optional[str] = Field(default=None, max_length=1000, description="Project description")
+    tags: list[str] = Field(default_factory=list, description="Project tags")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "name": "My New Project",
+                "project_type": "software",
+                "main_directory": "/path/to/project",
+                "description": "A sample project",
+                "tags": ["python", "web"]
+            }
+        }
+    }

@@ -198,15 +198,15 @@ async def get_queue(
         200 with queue details
         404 if queue not found or not owned by project
     """
-    queue = await service.get_queue(project_id, queue_id)
+    queue_data = await service.get_queue_with_counts(project_id, queue_id)
     
-    if queue is None:
+    if queue_data is None:
         raise HTTPException(
             status_code=404,
             detail={"error": "Queue not found"}
         )
     
-    return _queue_to_response(queue)
+    return _queue_to_response(queue_data)
 
 
 @router.patch(
@@ -265,7 +265,9 @@ async def update_queue(
                 detail={"error": "Queue not found"}
             )
         
-        return _queue_to_response(queue)
+        # Get queue with actual job counts
+        queue_data = await service.get_queue_with_counts(project_id, queue_id)
+        return _queue_to_response(queue_data)
     except ValueError as e:
         raise HTTPException(
             status_code=400,
@@ -305,7 +307,7 @@ async def delete_queue(
     """
     try:
         result = await service.delete_queue(project_id, queue_id)
-        return {"deleted": True}
+        return result
     except ValueError as e:
         error_msg = str(e)
         if "Cannot delete system queue" in error_msg:
@@ -364,7 +366,9 @@ async def start_queue(
                 detail={"error": "Queue not found"}
             )
         
-        return _queue_to_response(queue)
+        # Get queue with actual job counts
+        queue_data = await service.get_queue_with_counts(project_id, queue_id)
+        return _queue_to_response(queue_data)
     except ValueError as e:
         # Ownership mismatch from service
         raise HTTPException(
@@ -408,7 +412,9 @@ async def stop_queue(
                 detail={"error": "Queue not found"}
             )
         
-        return _queue_to_response(queue)
+        # Get queue with actual job counts
+        queue_data = await service.get_queue_with_counts(project_id, queue_id)
+        return _queue_to_response(queue_data)
     except ValueError as e:
         # Ownership mismatch from service
         raise HTTPException(

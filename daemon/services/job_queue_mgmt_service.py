@@ -154,6 +154,38 @@ class JobQueueMgmtService:
         
         return queue
     
+    async def get_queue_with_counts(
+        self,
+        project_id: str,
+        queue_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Get a queue by ID with actual job counts.
+        
+        Args:
+            project_id: Project identifier for ownership validation.
+            queue_id: Queue identifier.
+            
+        Returns:
+            Dictionary with queue data and job counts, or None if not found.
+        """
+        queue = await asyncio.to_thread(self._queue_repo.get, queue_id)
+        
+        # IDOR protection: verify ownership
+        if queue is None or queue.project_id != project_id:
+            return None
+        
+        # Get job counts for this queue
+        counts = await asyncio.to_thread(
+            self._queue_repo.count_jobs_by_status,
+            queue.queue_id,
+        )
+        
+        queue_dict = queue.to_dict()
+        queue_dict["active_jobs"] = counts.get(JobStatus.PROCESSING.value, 0)
+        queue_dict["pending_jobs"] = counts.get(JobStatus.PENDING.value, 0)
+        
+        return queue_dict
+    
     async def get_queue(
         self,
         project_id: str,

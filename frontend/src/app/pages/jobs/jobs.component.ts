@@ -284,6 +284,7 @@ export class JobsComponent implements OnInit, OnDestroy {
           ? {
               ...job,
               status: status.status || job.status,
+              queue_id: status.queue_id ?? job.queue_id,
               instance_id: status.instance_id || job.instance_id,
               result_summary: status.result_summary || job.result_summary,
               error_message: status.error_message || job.error_message,
