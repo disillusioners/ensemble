@@ -171,6 +171,9 @@ async def lifespan(app: FastAPI):
     await manager.initialize()  # Initialize async checkpointer within async context
     # Set the main event loop for thread-safe broadcasting
     manager.broadcaster.set_main_loop(asyncio.get_running_loop())
+    
+    # Set up worker pool for message queue redesign
+    manager.setup_worker_pool(num_workers=4, use_worker_pool=True)
     start_time = time.time()
     
     # Initialize JobQueueService with shared engine from manager

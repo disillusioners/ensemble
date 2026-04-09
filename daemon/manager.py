@@ -51,6 +51,14 @@ from .cancellation import (
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor, CompactionContext
 
+# Worker pool imports (lazy import to avoid circular dependency)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .services.worker_pool import WorkerPool
+    from .services.task_processor import TaskProcessor
+    from .services.stale_task_recovery import StaleTaskRecovery
+
 logger = logging.getLogger(__name__)
 
 # UUID validation pattern (compiled once at module level)
@@ -427,6 +435,11 @@ class InstanceManager:
         # NEW: Optional JobQueueService reference (set via set_job_queue_service)
         self._job_queue_service: Any = None
 
+        # Worker pool for message queue redesign
+        self._worker_pool: WorkerPool | None = None
+        self._task_processor: TaskProcessor | None = None
+        self._stale_recovery: StaleTaskRecovery | None = None
+
         # Start watchdog
         self.watchdog.start()
         
@@ -475,6 +488,86 @@ class InstanceManager:
             self.source_registry._job_queue_service = service
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
         logger.info("JobQueueService connected to SessionManager")
+
+    def setup_worker_pool(
+        self,
+        num_workers: int = 4,
+        use_worker_pool: bool = True,
+    ) -> None:
+        """Set up the worker pool for message processing.
+        
+        This should be called after initialize() and before start_sources().
+        
+        Args:
+            num_workers: Number of worker threads.
+            use_worker_pool: If True, enable worker pool; if False, use existing consumer pattern.
+        """
+        import os
+        
+        # Check feature flag from environment (override parameter)
+        env_flag = os.environ.get("USE_WORKER_POOL", "").lower()
+        if env_flag in ("false", "0", "no"):
+            use_worker_pool = False
+        elif env_flag in ("true", "1", "yes"):
+            use_worker_pool = True
+        
+        if not use_worker_pool:
+            logger.info("Worker pool disabled (USE_WORKER_POOL=false)")
+            return
+        
+        from .services.main_loop_bridge import MainLoopBridge
+        from .services.worker_pool import WorkerPool
+        from .services.task_processor import TaskProcessor
+        from .services.stale_task_recovery import StaleTaskRecovery
+        
+        # Set the main loop reference for thread-safe async calls
+        if self._loop is not None:
+            MainLoopBridge.set_loop(self._loop)
+        
+        # Create repositories (use existing engine)
+        from .repositories.task.repository import TaskRepository
+        from .repositories.task.models import Task
+        from .repositories.event.repository import EventRepository
+        
+        task_repo = TaskRepository(engine=self._engine)
+        event_repo = EventRepository(engine=self._engine)
+        
+        # Run startup crash recovery
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repo,
+            message_repository=self._queue_repository,
+            event_repository=event_repo,
+        )
+        stale_recovery.recover_on_startup()
+        self._stale_recovery = stale_recovery
+        
+        # Create task processor with manager reference
+        self._task_processor = TaskProcessor(
+            task_repo=task_repo,
+            instance_manager=self,
+            event_repo=event_repo,
+        )
+        
+        # Create and start worker pool
+        self._worker_pool = WorkerPool(
+            task_processor=self._task_processor,
+            num_workers=num_workers,
+        )
+        self._worker_pool.start()
+        
+        logger.info(f"Worker pool started with {num_workers} workers")
+
+    def shutdown_worker_pool(self) -> None:
+        """Shut down the worker pool gracefully."""
+        if self._worker_pool is not None:
+            self._worker_pool.stop()
+            self._worker_pool = None
+            logger.info("Worker pool stopped")
+        
+        if self._stale_recovery is not None:
+            self._stale_recovery.stop()
+            self._stale_recovery = None
+            logger.info("Stale task recovery stopped")
 
     async def _complete_job_for_instance(
         self,
@@ -2474,6 +2567,7 @@ Title:"""
             ("cancel_consumers", self._cancel_consumers()),
             ("stop_watchdog", self._stop_watchdog()),
             ("shutdown_broadcaster", self.broadcaster.shutdown()),
+            ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
         ]
         
         for name, step_coro in steps:
