@@ -64,54 +64,72 @@ class ProcessMessageProcessor(BaseProcessor):
         self._message_repo = message_repository
 
     async def process(self, task: "Task") -> dict[str, Any]:
-        """Process a message task.
-
+        """Process a message task with full lifecycle.
+        
+        1. Get message content from repository
+        2. Call manager's _process_message_with_tracking (LangGraph execution)
+        3. On success: check child completion (may create parent task)
+        4. On failure: record error event
+        
         Args:
             task: The task with message_id to process.
-
+            
         Returns:
             Result dictionary with processing outcome.
         """
         if not task.message_id:
             raise ValueError(f"Task {task.id} has no message_id")
-
+        
         logger.info(
             f"Processing message task {task.id}: "
             f"message={task.message_id[:8]}..., instance={task.instance_id[:8]}..."
         )
-
+        
+        # Get message content via repository (thread-safe)
+        message = None
+        if self._message_repo:
+            message = await asyncio.to_thread(
+                self._message_repo.get, task.message_id
+            )
+        
+        if not message:
+            # Fallback: try task repo
+            message = await asyncio.to_thread(
+                self._task_repo.get_by_message, task.message_id
+            )
+        
+        if not message:
+            raise ValueError(
+                f"Message {task.message_id} not found for task {task.id}"
+            )
+        
+        message_content = message.content if message else ""
+        is_retry = message.retry_count > 0 if hasattr(message, 'retry_count') else False
+        
+        # Create processing_started event
+        if self._event_repo:
+            await asyncio.to_thread(
+                self._event_repo.create_event,
+                instance_id=task.instance_id,
+                kind="processing_started",
+                data={
+                    "task_id": task.id,
+                    "message_id": task.message_id,
+                    "worker_id": task.worker_id,
+                    "is_retry": is_retry,
+                },
+            )
+        
         try:
-            # Get message content for processing
-            # Use the task repo to get the message (thread-safe)
-            message = None
-            if task.message_id:
-                message = await asyncio.to_thread(
-                    self._task_repo.get_by_message, task.message_id
-                )
-
-            # Create processing_started event
-            if self._event_repo:
-                await asyncio.to_thread(
-                    self._event_repo.create_event,
-                    instance_id=task.instance_id,
-                    kind="processing_started",
-                    data={
-                        "task_id": task.id,
-                        "message_id": task.message_id,
-                        "worker_id": task.worker_id,
-                    },
-                )
-
-            # Process the message via the manager's existing logic
-            # This runs the LangGraph and handles all the complexity
+            # Process the message via manager's existing logic (LangGraph execution)
             result = await self._manager._process_message_with_tracking(
                 instance_id=task.instance_id,
-                message=message.content if message else "",
+                message=message_content,
                 message_id=task.message_id,
                 cancellation_token=None,
-                is_retry=False,
+                is_retry=is_retry,
             )
-
+            
             # Create processing_completed event
             if self._event_repo:
                 await asyncio.to_thread(
@@ -124,16 +142,28 @@ class ProcessMessageProcessor(BaseProcessor):
                         "success": True,
                     },
                 )
-
+            
+            # Check if this instance is a child that has completed all work
+            # This may create a completion report task for the parent
+            try:
+                if hasattr(self._manager, '_check_child_completion_v2'):
+                    await self._manager._check_child_completion_v2(task.instance_id)
+            except Exception as e:
+                logger.error(
+                    f"Error checking child completion for {task.instance_id[:8]}...: {e}",
+                    exc_info=True,
+                )
+                # Don't fail the task — the message was processed successfully
+            
             return {
                 "success": True,
                 "content": result.content if result else None,
                 "message_id": task.message_id,
             }
-
+            
         except Exception as e:
             logger.error(f"Failed to process message task {task.id}: {e}", exc_info=True)
-
+            
             # Create error event
             if self._event_repo:
                 await asyncio.to_thread(
@@ -146,7 +176,7 @@ class ProcessMessageProcessor(BaseProcessor):
                         "error": str(e),
                     },
                 )
-
+            
             raise
 
 

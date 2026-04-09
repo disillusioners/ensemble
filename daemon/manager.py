@@ -447,6 +447,22 @@ class InstanceManager:
         self._shutting_down = False
 
     @property
+    def use_worker_pool(self) -> bool:
+        """Check if worker pool message flow is enabled.
+        
+        Checks both config setting and USE_WORKER_POOL env var.
+        Environment variable takes precedence.
+        """
+        import os
+        env_flag = os.environ.get("USE_WORKER_POOL", "").lower()
+        if env_flag in ("true", "1", "yes"):
+            return True
+        if env_flag in ("false", "0", "no"):
+            return False
+        # Fall back to config setting
+        return getattr(self.config, 'use_worker_pool', False)
+
+    @property
     def checkpointer(self):
         """Get the async checkpointer instance.
         
@@ -568,6 +584,37 @@ class InstanceManager:
             self._stale_recovery.stop()
             self._stale_recovery = None
             logger.info("Stale task recovery stopped")
+
+    async def drain_old_consumers(self, timeout: float = 30.0) -> None:
+        """Wait for old in-memory consumers to finish before switching to worker pool.
+        
+        FIX: W3 — Explicit draining to prevent message loss during cutover.
+        
+        This should be called before fully switching to worker pool mode.
+        """
+        if not self._consumer_tasks:
+            return
+        
+        logger.info(f"Draining {len(self._consumer_tasks)} old consumers...")
+        
+        start_time = asyncio.get_event_loop().time()
+        while any(not t.done() for t in self._consumer_tasks.values()):
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed >= timeout:
+                logger.warning(
+                    f"Drain timeout after {timeout}s, {sum(1 for t in self._consumer_tasks.values() if not t.done())} "
+                    f"consumers still running"
+                )
+                break
+            await asyncio.sleep(0.5)
+        
+        # Clean up completed consumers
+        done_ids = [iid for iid, t in self._consumer_tasks.items() if t.done()]
+        for iid in done_ids:
+            self._consumer_tasks.pop(iid, None)
+            self._instance_queues.pop(iid, None)
+        
+        logger.info("Old consumers drained")
 
     async def _complete_job_for_instance(
         self,
@@ -874,6 +921,10 @@ class InstanceManager:
         if self.is_shutting_down:
             raise RuntimeError("Manager is shutting down, cannot accept new messages")
 
+        # FEATURE FLAG: Route to worker pool path if enabled
+        if self.use_worker_pool:
+            return await self.enqueue_message_v2(instance_id, message, source, priority)
+
         # Check instance exists
         self.get_instance(instance_id)  # raises KeyError if not found
         
@@ -938,6 +989,115 @@ class InstanceManager:
         
         # Trigger async processing via persistent consumer
         self._signal_consumer(instance_id)
+        
+        return AsyncMessageResult(
+            message_id=message_id,
+            instance_id=instance_id,
+            status="queued"
+        )
+
+    async def enqueue_message_v2(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+    ) -> AsyncMessageResult:
+        """Enqueue a message using the worker pool (DB-backed) path.
+        
+        This method creates BOTH a MessageQueue entry AND a Task entry atomically
+        in a single transaction. Workers poll the task table and process messages.
+        
+        This is the new path when use_worker_pool=True.
+        
+        Args:
+            instance_id: The ID of the target instance.
+            message: The message content.
+            source: Source identifier (e.g., "api", "web", "telegram:user:123").
+            priority: Message priority (0=system, 1=user).
+        
+        Returns:
+            AsyncMessageResult with message_id and status.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from sqlmodel import Session
+        from .repositories.task.models import Task, TaskType, TaskStatus
+        from .repositories.message_queue.models import MessageQueue, MessageType, MessageStatus
+        from .repositories.event.models import Event, EventKind
+        from .repositories.instance.models import Instance, InstanceStatus
+        
+        message_id = str(uuid.uuid4())
+        
+        # Determine message type based on source
+        if source.startswith("report:"):
+            msg_type = MessageType.COMPLETION_REPORT.value
+        elif source.startswith("error_report:"):
+            msg_type = MessageType.ERROR_REPORT.value
+        elif source.startswith("agent:"):
+            msg_type = MessageType.AGENT.value
+        else:
+            msg_type = MessageType.HUMAN.value
+        
+        with Session(self._engine) as session:
+            # 1. Insert the message
+            db_message = MessageQueue(
+                message_id=message_id,
+                instance_id=instance_id,
+                content=message,
+                source=source,
+                type=msg_type,
+                status=MessageStatus.READY.value,
+                priority=priority,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+            session.add(db_message)
+            
+            # 2. Create a task for the worker pool to pick up
+            task = Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance_id,
+                message_id=message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(task)
+            
+            # 3. Update instance status if IDLE (don't override WAITING_CHILDREN, etc.)
+            instance = session.get(Instance, instance_id)
+            if instance:
+                if instance.status == InstanceStatus.IDLE.value:
+                    instance.status = InstanceStatus.RUNNING.value
+                instance.last_activity_at = datetime.now(timezone.utc)
+                instance.version = (instance.version or 1) + 1
+            
+            # 4. Create event for the new message
+            event = Event(
+                instance_id=instance_id,
+                message_id=message_id,
+                kind=EventKind.MESSAGE_RECEIVED.value,
+                data={"source": source, "priority": priority},
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(event)
+            
+            session.commit()
+        
+        # Broadcast event asynchronously (fire and forget)
+        try:
+            await self.broadcaster.broadcast(Event(
+                type="message_queued",
+                instance_id=instance_id,
+                message_id=message_id,
+                data={
+                    "content": message,
+                    "source": source,
+                    "priority": priority,
+                    "status": "queued"
+                }
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to broadcast message_queued event: {e}")
         
         return AsyncMessageResult(
             message_id=message_id,
@@ -1794,6 +1954,218 @@ Provide a concise summary:"""
         # Trigger parent queue processing
         self._signal_consumer(parent_id)
 
+    async def _check_child_completion_v2(self, instance_id: str) -> None:
+        """Atomic check if child instance is done and should send completion report.
+        
+        CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
+        leaving the instance in COMPLETED state without a report if the fetch fails.
+        
+        This is the new path when use_worker_pool=True. It handles:
+        - Idempotency (won't send duplicate completion reports)
+        - Parent's waiting_for counter decrement
+        - Parent's children[] cache update (FIX: W6)
+        - Cascade: if parent's waiting_for reaches 0, transition parent to RUNNING
+        
+        Args:
+            instance_id: The child instance that may have completed.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from sqlmodel import Session
+        from sqlalchemy import func, select, delete as sql_delete
+        from .repositories.instance.models import Instance, InstanceStatus
+        from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
+        from .repositories.task.models import Task, TaskType, TaskStatus
+        from .repositories.event.models import Event, EventKind
+        
+        # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
+        last_content = await self._get_last_assistant_message(instance_id, agent_name="agent")
+        if last_content is None:
+            logger.warning(f"No content found for instance {instance_id[:8]}..., skipping completion check")
+            return
+        
+        with Session(self._engine) as session:
+            # Get instance metadata
+            instance = session.get(Instance, instance_id)
+            if instance is None:
+                return
+            
+            # Not a child? Nothing to do
+            if instance.parent_id is None:
+                logger.debug(f"Instance {instance_id[:8]}... has no parent, skipping completion check")
+                return
+            
+            # Check for pending/processing messages for this instance
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).one()
+            
+            if pending_count > 0:
+                logger.debug(
+                    f"Instance {instance_id[:8]}... has {pending_count} pending messages, "
+                    f"skipping completion check"
+                )
+                return
+            
+            # FIX C3 - Idempotency: Check if completion report already sent
+            existing_report = session.exec(
+                select(MessageQueue)
+                .where(MessageQueue.instance_id == instance.parent_id)
+                .where(MessageQueue.source == f"report:{instance_id}")
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.COMPLETED.value,
+                ]))
+            ).first()
+            
+            if existing_report is not None:
+                logger.debug(
+                    f"Completion report already queued for child {instance_id[:8]}..., "
+                    f"skipping duplicate"
+                )
+                return
+            
+            # ATOMIC: Instance completed — create completion report for parent
+            logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
+            
+            # Update child instance status to COMPLETED
+            instance.status = InstanceStatus.COMPLETED.value
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            
+            # Create completion report message for parent
+            report_message_id = str(uuid.uuid4())
+            report_message = MessageQueue(
+                message_id=report_message_id,
+                instance_id=instance.parent_id,
+                content=last_content,  # Already fetched before transaction
+                source=f"report:{instance_id}",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,  # System priority
+                enqueued_at=datetime.now(timezone.utc),
+            )
+            session.add(report_message)
+            
+            # Create task for parent to process the report
+            report_task = Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance.parent_id,
+                message_id=report_message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(report_task)
+            
+            # Get parent instance
+            parent = session.get(Instance, instance.parent_id)
+            if parent:
+                # Decrement parent's waiting_for counter
+                parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+                parent.last_activity_at = datetime.now(timezone.utc)
+                parent.version = (parent.version or 1) + 1
+                
+                # FIX W6: Update parent's children[] denormalized cache
+                # Note: instance_hierarchy is the canonical source; we update the cache here
+                if parent.children:
+                    try:
+                        import json
+                        children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
+                        if instance_id in children_list:
+                            children_list = [c for c in children_list if c != instance_id]
+                            parent.children = json.dumps(children_list)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
+                
+                # Update instance_hierarchy junction table (canonical source)
+                session.exec(
+                    sql_delete(Instance.__table__)
+                    .where(Instance.instance_id == instance_id)
+                )
+                # Actually use proper delete
+                session.execute(
+                    text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                    {"child_id": instance_id}
+                )
+                
+                # Cascade check: if parent is WAITING_CHILDREN and waiting_for is 0, transition to RUNNING
+                if (parent.waiting_for == 0 and 
+                    parent.status == InstanceStatus.WAITING_CHILDREN.value):
+                    
+                    # Check if parent has any pending messages
+                    parent_pending = session.exec(
+                        select(func.count())
+                        .select_from(MessageQueue)
+                        .where(MessageQueue.instance_id == parent.instance_id)
+                        .where(MessageQueue.status.in_([
+                            MessageStatus.READY.value,
+                            MessageStatus.PROCESSING.value,
+                            MessageStatus.RETRYING.value,
+                        ]))
+                    ).one()
+                    
+                    if parent_pending == 0:
+                        # No pending messages, parent is truly complete
+                        parent.status = InstanceStatus.COMPLETED.value
+                        parent.updated_at = datetime.now(timezone.utc).isoformat()
+                        logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+                    else:
+                        # Has pending messages, transition to RUNNING to process them
+                        parent.status = InstanceStatus.RUNNING.value
+                        logger.info(
+                            f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
+                            f"transitioning to RUNNING"
+                        )
+            
+            # Create completion event
+            completion_event = Event(
+                instance_id=instance_id,
+                kind=EventKind.INSTANCE_COMPLETED.value,
+                data={
+                    "parent_id": instance.parent_id,
+                    "report_message_id": report_message_id,
+                },
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(completion_event)
+            
+            # Also create event for parent about child completion
+            parent_event = Event(
+                instance_id=instance.parent_id,
+                message_id=report_message_id,
+                kind=EventKind.CHILD_COMPLETED.value,
+                data={
+                    "child_instance_id": instance_id,
+                    "waiting_for_remaining": (parent.waiting_for - 1) if parent else 0,
+                },
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(parent_event)
+            
+            session.commit()
+        
+        # Broadcast child completion event asynchronously
+        try:
+            await self.broadcaster.broadcast(Event(
+                type="status_changed",
+                instance_id=instance.parent_id,
+                data={
+                    "type": "completion_report",
+                    "child_instance_id": instance_id,
+                }
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to broadcast child completion event: {e}")
+
     async def _send_error_report(
         self, 
         instance_id: str, 
@@ -2223,12 +2595,13 @@ Title:"""
         # 2. Remove from processing set
         self._processing.discard(instance_id)
         
-        # 2b. Stop consumer for this instance
-        if instance_id in self._consumer_tasks:
-            task = self._consumer_tasks.pop(instance_id)
-            if not task.done():
-                task.cancel()
-            self._instance_queues.pop(instance_id, None)
+        # 2b. Stop consumer for this instance (only if not using worker pool)
+        if not self.use_worker_pool:
+            if instance_id in self._consumer_tasks:
+                task = self._consumer_tasks.pop(instance_id)
+                if not task.done():
+                    task.cancel()
+                self._instance_queues.pop(instance_id, None)
         
         # 3. Clean up event broadcaster
         self.broadcaster.cleanup_instance(instance_id)

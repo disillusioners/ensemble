@@ -106,6 +106,9 @@ class QueueConfig(BaseSettings):
     llm_retry_delay_seconds: float = Field(default=10.0)
     llm_retry_exponential_base: float = Field(default=2.0)
 
+    # Phase 3: Worker pool feature flag
+    use_worker_pool: bool = Field(default=False, description="Use worker pool for message processing (Phase 3)")
+
 
 class AgentsConfig(BaseSettings):
     """Agents directory configuration."""
