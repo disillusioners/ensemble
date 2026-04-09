@@ -2274,7 +2274,7 @@ Provide a concise summary:"""
                 f"Original error was: {error_type}: {error[:200]}"
             )
 
-    async def _get_last_assistant_message(self, instance_id: str, agent_name: str) -> str:
+    async def _get_last_assistant_message(self, instance_id: str, agent_name: str) -> str | None:
         """Get the last assistant message from instance history.
         
         This is the default/simple approach for completion reports - just
@@ -2300,9 +2300,7 @@ Provide a concise summary:"""
         
         if last_assistant_content:
             return f"{agent_name} has done, bellow is {agent_name} response:\n{last_assistant_content}"
-        else:
-            # Fallback if no assistant message found
-            return f"{agent_name} has done, bellow is {agent_name} response: Task completed (no response message)."
+        return None
 
         
     async def _generate_and_broadcast_title(
