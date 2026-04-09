@@ -28,6 +28,25 @@ if TYPE_CHECKING:
     from ..manager import InstanceManager
 
 
+def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> str | None:
+    """Get the project_id from a parent instance's metadata.
+    
+    Args:
+        manager: The InstanceManager instance
+        instance_id: The current instance ID
+    
+    Returns:
+        The project_id if found, None otherwise.
+    """
+    try:
+        instance_meta = manager._instance_repository.get(instance_id)
+        if instance_meta and instance_meta.instance_metadata:
+            return instance_meta.instance_metadata.get("project_id")
+    except Exception:
+        pass
+    return None
+
+
 def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | None:
     """Get the default workdir from the instance's project main_directory.
     
@@ -185,6 +204,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             The instance_id of the newly spawned instance. Use this with send_message().
         """
         try:
+            # Auto-inherit project_id from parent if not explicitly provided
+            if project_id is None:
+                project_id = _get_instance_project_id(manager, current_instance_id)
+            
             new_instance_id = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
