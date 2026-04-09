@@ -70,6 +70,16 @@ def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | 
     return None
 
 
+def _is_null_workdir(value: str | None) -> bool:
+    """Check if workdir value should be treated as null/empty.
+    
+    Handles various null representations: None, "", "null", "none", "None", etc.
+    """
+    if value is None:
+        return True
+    return str(value).strip().lower() in ("", "null", "none")
+
+
 def _make_workdir_aware(
     tool,  # Can be a function or StructuredTool
     get_default_workdir: Callable[[], str | None]
@@ -100,15 +110,15 @@ def _make_workdir_aware(
         if is_async:
             @wraps(original_func)
             async def wrapped_func(*args, **kwargs):
-                # Auto-fill workdir if not provided or empty
-                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                # Auto-fill workdir if not provided or null/empty
+                if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return await original_func(*args, **kwargs)
         else:
             @wraps(original_func)
             def wrapped_func(*args, **kwargs):
-                # Auto-fill workdir if not provided or empty
-                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                # Auto-fill workdir if not provided or null/empty
+                if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return original_func(*args, **kwargs)
         
@@ -137,13 +147,13 @@ def _make_workdir_aware(
         if is_async:
             @wraps(func)
             async def wrapped_func(*args, **kwargs):
-                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return await func(*args, **kwargs)
         else:
             @wraps(func)
             def wrapped_func(*args, **kwargs):
-                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return func(*args, **kwargs)
         
