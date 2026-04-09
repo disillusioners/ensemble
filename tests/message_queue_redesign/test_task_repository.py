@@ -117,8 +117,8 @@ class TestTaskClaiming:
         assert result is None
 
     def test_claim_pending_task_with_type_filter(self, repository):
-        """Test claiming tasks filtered by type."""
-        repository.create(
+        """Test claiming tasks - task_type filter was removed."""
+        task = repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="instance-1",
         )
@@ -127,13 +127,11 @@ class TestTaskClaiming:
             instance_id="instance-1",
         )
 
-        claimed = repository.claim_pending_task(
-            worker_id="worker-1",
-            task_type=TaskType.PROCESS_MESSAGE.value,
-        )
+        # task_type parameter was removed from claim_pending_task
+        claimed = repository.claim_pending_task(worker_id="worker-1")
 
         assert claimed is not None
-        assert claimed.task_type == TaskType.PROCESS_MESSAGE.value
+        assert claimed.id == task.id
 
     def test_claim_only_returns_pending(self, repository):
         """Test that claiming only returns pending tasks."""
