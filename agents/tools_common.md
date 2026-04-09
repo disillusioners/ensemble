@@ -17,10 +17,18 @@ list_directory(path, workdir, show_hidden=False)  # List dir contents
 glob_files(pattern, workdir, path=".")       # Find files by pattern
 grep_files(pattern, workdir, path=".", include="", case_sensitive=False, whole_word=False)  # Search
 ```
+**Rules**:
 
-**Rules**: 
-- Important: `workdir` parameters are mandatory for all file operations. Always specify them to avoid errors.
+- Important: `workdir` parameters are MUST for all file operations. Always specify them to avoid errors.
 - `path` is always relative to `workdir`. Never use absolute paths.
+
+Example read_file:
+```json
+{
+  "path": ".agents/shared/planning/<feature>/plan-overview.md",
+  "workdir": "/path_to/current/working/project/directory"
+}
+```
 
 ## Shell
 
