@@ -27,7 +27,6 @@ class MainLoopBridge:
     
     _instance: MainLoopBridge | None = None
     _loop: asyncio.AbstractEventLoop | None = None
-    _lock: asyncio.Lock | None = None
     
     def __new__(cls) -> MainLoopBridge:
         if cls._instance is None:
@@ -38,7 +37,6 @@ class MainLoopBridge:
     def set_loop(cls, loop: asyncio.AbstractEventLoop) -> None:
         """Set the main event loop reference. Call from main thread only."""
         cls._loop = loop
-        cls._lock = asyncio.Lock()
         logger.info(f"MainLoopBridge: event loop set to {loop}")
     
     @classmethod
@@ -119,5 +117,4 @@ class MainLoopBridge:
     def reset(cls) -> None:
         """Reset the singleton. For testing only."""
         cls._loop = None
-        cls._lock = None
         cls._instance = None

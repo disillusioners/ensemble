@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,7 @@ class ProcessMessageProcessor(BaseProcessor):
         instance_manager,
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
+        message_repository=None,
     ):
         """Initialize the message processor.
 
@@ -54,10 +56,12 @@ class ProcessMessageProcessor(BaseProcessor):
             instance_manager: InstanceManager for message processing.
             task_repo: TaskRepository for task operations.
             event_repo: Optional EventRepository for event creation.
+            message_repository: Optional MessageQueueRepository for message updates.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
+        self._message_repo = message_repository
 
     async def process(self, task: "Task") -> dict[str, Any]:
         """Process a message task.
@@ -77,26 +81,18 @@ class ProcessMessageProcessor(BaseProcessor):
         )
 
         try:
-            # Update message status to PROCESSING
-            from daemon.repositories.message_queue.models import MessageStatus
-            from daemon.repositories.message_queue.repository import MessageQueueRepository
-
-            # Get the message from MessageQueue repository (not Task)
-            # Note: We need the MessageQueueRepository instance from the manager
+            # Get message content for processing
+            # Use the task repo to get the message (thread-safe)
             message = None
-            if hasattr(self._manager, "_message_repo"):
-                message = self._manager._message_repo.get_by_id(task.message_id)
-            else:
-                # Fallback: try to get from task repo (legacy behavior)
-                message = self._task_repo.get_by_message(task.message_id)
-
-            if message:
-                message.status = MessageStatus.PROCESSING.value
-                message.processing_task_id = str(task.id) if task.id else None
+            if task.message_id:
+                message = await asyncio.to_thread(
+                    self._task_repo.get_by_message, task.message_id
+                )
 
             # Create processing_started event
             if self._event_repo:
-                self._event_repo.create_event(
+                await asyncio.to_thread(
+                    self._event_repo.create_event,
                     instance_id=task.instance_id,
                     kind="processing_started",
                     data={
@@ -118,7 +114,8 @@ class ProcessMessageProcessor(BaseProcessor):
 
             # Create processing_completed event
             if self._event_repo:
-                self._event_repo.create_event(
+                await asyncio.to_thread(
+                    self._event_repo.create_event,
                     instance_id=task.instance_id,
                     kind="processing_completed",
                     data={
@@ -139,7 +136,8 @@ class ProcessMessageProcessor(BaseProcessor):
 
             # Create error event
             if self._event_repo:
-                self._event_repo.create_event(
+                await asyncio.to_thread(
+                    self._event_repo.create_event,
                     instance_id=task.instance_id,
                     kind="error",
                     data={
@@ -179,14 +177,7 @@ class SendReportProcessor(BaseProcessor):
         """
         logger.info(f"Sending report for task {task.id}")
 
-        # TODO: Implement actual report sending logic
-        # For now, this is a placeholder
-
-        return {
-            "success": True,
-            "task_id": task.id,
-            "message": "Report sent (placeholder)",
-        }
+        raise NotImplementedError(f"SendReportProcessor.process() not yet implemented for task {task.id}")
 
 
 class CleanupProcessor(BaseProcessor):
@@ -216,14 +207,7 @@ class CleanupProcessor(BaseProcessor):
         """
         logger.info(f"Cleanup task {task.id} for instance {task.instance_id[:8]}...")
 
-        # TODO: Implement actual cleanup logic
-        # For now, this is a placeholder
-
-        return {
-            "success": True,
-            "task_id": task.id,
-            "message": "Cleanup completed (placeholder)",
-        }
+        raise NotImplementedError(f"CleanupProcessor.process() not yet implemented for task {task.id}")
 
 
 class TaskProcessor:
@@ -256,7 +240,8 @@ class TaskProcessor:
         # Create type-specific processors
         self._processors: dict[str, BaseProcessor] = {
             "process_message": ProcessMessageProcessor(
-                instance_manager, task_repo, event_repo
+                instance_manager, task_repo, event_repo,
+                message_repository=instance_manager._queue_repository,
             ),
             "send_report": SendReportProcessor(
                 instance_manager, task_repo, event_repo

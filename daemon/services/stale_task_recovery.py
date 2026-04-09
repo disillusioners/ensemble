@@ -107,15 +107,13 @@ class StaleTaskRecovery:
         if not stale_tasks:
             return 0
         
+        # Reset ALL stale tasks in ONE call (repository resets all matching tasks)
+        self._task_repo.reset_stale_tasks(threshold_minutes=self._threshold_minutes)
+        
         recovered_count = 0
         
         for task in stale_tasks:
             try:
-                # Reset task to pending
-                self._task_repo.reset_stale_tasks(
-                    threshold_minutes=self._threshold_minutes
-                )
-                
                 # Also reset the associated message
                 if task.message_id:
                     try:

@@ -110,7 +110,6 @@ class TaskRepository:
     def claim_pending_task(
         self,
         worker_id: str,
-        task_type: str | None = None,
     ) -> Task | None:
         """Atomically claim the next pending task.
 
@@ -119,7 +118,6 @@ class TaskRepository:
 
         Args:
             worker_id: ID of the worker claiming the task.
-            task_type: Optional task type filter.
 
         Returns:
             Claimed Task object or None if no pending tasks.
@@ -136,7 +134,6 @@ class TaskRepository:
                 WHERE id = (
                     SELECT id FROM task
                     WHERE status = :status_pending
-                    AND (:task_type IS NULL OR task_type = :task_type)
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
@@ -147,7 +144,6 @@ class TaskRepository:
                 "status_running": TaskStatus.RUNNING.value,
                 "status_pending": TaskStatus.PENDING.value,
                 "worker_id": worker_id,
-                "task_type": task_type,
                 "started_at": now,
             })
 
