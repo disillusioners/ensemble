@@ -1,13 +1,22 @@
 """Instance management tools for multi-agent orchestration."""
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING, Annotated
+from functools import partial
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
 
 from .bash import bash
-from .filesystem import list_directory, read_file, glob_files, write_file, grep_files, edit_file
+from .filesystem import (
+    list_directory,
+    read_file,
+    glob_files,
+    write_file,
+    grep_files,
+    edit_file,
+)
 from .time import time
 from .inner_soul import create_inner_soul_tool
 from .access_memory import create_access_memory_tool
@@ -17,6 +26,109 @@ from .help import create_help_tool
 
 if TYPE_CHECKING:
     from ..manager import InstanceManager
+
+
+def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | None:
+    """Get the default workdir from the instance's project main_directory.
+    
+    Args:
+        manager: The InstanceManager instance
+        instance_id: The current instance ID
+        
+    Returns:
+        The project's main_directory if found, None otherwise.
+    """
+    try:
+        instance_meta = manager._instance_repository.get(instance_id)
+        if instance_meta and instance_meta.instance_metadata:
+            project_id = instance_meta.instance_metadata.get("project_id")
+            if project_id:
+                project = manager._project_repository.get(project_id)
+                if project and project.main_directory:
+                    return project.main_directory
+    except Exception:
+        pass
+    return None
+
+
+def _make_workdir_aware(
+    tool,  # Can be a function or StructuredTool
+    get_default_workdir: Callable[[], str | None]
+):
+    """Wrap a tool to auto-populate workdir from project directory.
+    
+    Args:
+        tool: The tool to wrap (function or StructuredTool)
+        get_default_workdir: Callable that returns the default workdir
+        
+    Returns:
+        Wrapped tool with auto workdir support
+    """
+    from functools import wraps
+    from langchain_core.tools import StructuredTool
+    
+    # Check if it's a StructuredTool
+    if isinstance(tool, StructuredTool):
+        # Get the underlying function - @tool uses 'coroutine', from_function uses 'func'
+        original_func = getattr(tool, 'coroutine', None) or getattr(tool, 'func', None)
+        if original_func is None:
+            # Fallback - tool doesn't have a callable func, return as-is
+            return tool
+        
+        # Check if async
+        is_async = asyncio.iscoroutinefunction(original_func)
+        
+        if is_async:
+            @wraps(original_func)
+            async def wrapped_func(*args, **kwargs):
+                # Auto-fill workdir if not provided or empty
+                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                    kwargs['workdir'] = get_default_workdir()
+                return await original_func(*args, **kwargs)
+        else:
+            @wraps(original_func)
+            def wrapped_func(*args, **kwargs):
+                # Auto-fill workdir if not provided or empty
+                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                    kwargs['workdir'] = get_default_workdir()
+                return original_func(*args, **kwargs)
+        
+        # Create a new StructuredTool with the wrapped function
+        # Use coroutine for async tools, func for sync
+        if asyncio.iscoroutinefunction(wrapped_func):
+            return tool.__class__.from_function(
+                func=wrapped_func,
+                name=tool.name,
+                description=tool.description,
+                coroutine=wrapped_func,
+            )
+        else:
+            return tool.__class__.from_function(
+                func=wrapped_func,
+                name=tool.name,
+                description=tool.description,
+            )
+    else:
+        # It's a plain function - wrap it directly
+        func = tool
+        
+        # Check if async
+        is_async = asyncio.iscoroutinefunction(func)
+        
+        if is_async:
+            @wraps(func)
+            async def wrapped_func(*args, **kwargs):
+                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                    kwargs['workdir'] = get_default_workdir()
+                return await func(*args, **kwargs)
+        else:
+            @wraps(func)
+            def wrapped_func(*args, **kwargs):
+                if 'workdir' not in kwargs or not kwargs.get('workdir') or not str(kwargs.get('workdir', '')).strip():
+                    kwargs['workdir'] = get_default_workdir()
+                return func(*args, **kwargs)
+        
+        return wrapped_func
 
 
 class SpawnInstanceInput(BaseModel):
@@ -52,6 +164,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     """
     
     logger = logging.getLogger(__name__)
+    
+    # Create a closure to get the current instance's project workdir
+    def get_current_workdir() -> str | None:
+        return _get_project_workdir(manager, current_instance_id)
     
     @tool(args_schema=SpawnInstanceInput)
     def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None) -> str:
@@ -201,15 +317,25 @@ Returns:
     # Create project management tools (with instance context for creator tracking)
     project_tools = create_project_tools(manager.project_store, current_instance_id, agent_id)
     
-    # Base tools (available in all instances)
+    # Create workdir-aware wrappers for filesystem tools
+    # These auto-populate workdir from project's main_directory when not provided
+    bash_aware = _make_workdir_aware(bash, get_current_workdir)
+    list_directory_aware = _make_workdir_aware(list_directory, get_current_workdir)
+    read_file_aware = _make_workdir_aware(read_file, get_current_workdir)
+    write_file_aware = _make_workdir_aware(write_file, get_current_workdir)
+    glob_files_aware = _make_workdir_aware(glob_files, get_current_workdir)
+    grep_files_aware = _make_workdir_aware(grep_files, get_current_workdir)
+    edit_file_aware = _make_workdir_aware(edit_file, get_current_workdir)
+    
+    # Base tools (available in all instances) - with auto workdir support
     tools = [
-        bash,
-        list_directory,
-        read_file,
-        write_file,
-        glob_files,
-        grep_files,
-        edit_file,
+        bash_aware,
+        list_directory_aware,
+        read_file_aware,
+        write_file_aware,
+        glob_files_aware,
+        grep_files_aware,
+        edit_file_aware,
         time,
         # Instance management tools
         spawn_instance,
