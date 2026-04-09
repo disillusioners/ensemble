@@ -126,7 +126,8 @@ class TaskRepository:
         """
         now = datetime.now(timezone.utc)
 
-        with SQLModelSession(self.engine) as db_session:
+        # Use engine.begin() for explicit transaction to serialize concurrent claims
+        with self.engine.begin() as conn:
             stmt = text("""
                 UPDATE task
                 SET status = :status_running,
@@ -142,7 +143,7 @@ class TaskRepository:
                 RETURNING *
             """)
 
-            result = db_session.exec(stmt, params={
+            result = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
                 "status_pending": TaskStatus.PENDING.value,
                 "worker_id": worker_id,
@@ -151,7 +152,7 @@ class TaskRepository:
             })
 
             row = result.fetchone()
-            db_session.commit()
+            # Transaction auto-commits on successful exit
 
             if row is None:
                 return None
