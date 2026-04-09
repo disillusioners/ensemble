@@ -702,9 +702,5 @@ class SourceRegistry:
                 await adapter.start_typing(reply_chat_id)  # type: ignore
                 logger.debug(f"Started typing indicator for chat {reply_chat_id}")
             
-            # Trigger queue processing via persistent consumer
-            self._manager._signal_consumer(instance_id)
-            logger.debug(f"Triggered queue processing for instance {instance_id}")
-            
         except Exception as e:
             logger.error(f"❌ Error in _handle_message: {e}", exc_info=True)

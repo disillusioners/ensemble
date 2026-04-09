@@ -6,7 +6,6 @@ This module provides a tool_help() function that allows agents to:
 - List tools by category
 """
 
-from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ._tool_registry import (
@@ -15,9 +14,6 @@ from ._tool_registry import (
     list_tools_by_category,
     scan_tools_for_full_docs,
 )
-
-if TYPE_CHECKING:
-    import sqlite3
 
 
 def create_help_tool(all_tools: list):

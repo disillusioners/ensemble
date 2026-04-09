@@ -3,7 +3,6 @@
 import uuid
 import logging
 import asyncio
-import sqlite3
 import re
 import time
 import json
@@ -17,7 +16,6 @@ from langchain_core.outputs import LLMResult
 
 from .config import Config
 from .graph import build_instance_graph
-from .llm_error_classifier import ContextLengthExceededError
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
     get_instance_messages,

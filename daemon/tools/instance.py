@@ -282,9 +282,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             source=f"agent:{current_instance_id}"
         )
         
-        # Trigger queue processing via persistent consumer (non-blocking)
-        manager._signal_consumer(instance_id)
-        
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     
     send_message._full_doc_ = """Send a message to another instance's input queue.
