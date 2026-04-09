@@ -1003,6 +1003,10 @@ class InstanceManager:
                                 project_context = format_project_context(project)
                                 message_content = project_context + msg.content
                                 logger.debug(f"Injected inferred project context: {project.name}")
+                                # Save detected project to instance metadata for child inheritance
+                                await asyncio.to_thread(
+                                    self._instance_repository.set_metadata, instance_id, "project_id", project.project_id
+                                )
                     result = await self._process_message_with_tracking(
                         instance_id,
                         message_content,
