@@ -131,6 +131,21 @@ class CompactionConfig(BaseSettings):
     summarization_chunk_threshold: float = Field(default=0.60, description="Fraction of context window above which summarization uses chunking")
 
 
+class ServicesConfig(BaseSettings):
+    """Worker pool and background service configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="SERVICES_")
+
+    worker_poll_interval: float = Field(
+        default=0.5,
+        description="How often workers poll for tasks (seconds). Lower = more responsive but more CPU/DB load."
+    )
+    stale_task_recovery_interval: int = Field(
+        default=60,
+        description="How often to check for stale tasks and recover them (seconds)."
+    )
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -143,6 +158,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     queue: QueueConfig = Field(default_factory=QueueConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
+    services: ServicesConfig = Field(default_factory=ServicesConfig)
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -202,6 +218,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         config_dict["queue"] = processed_config["queue"]
     if "compaction" in processed_config:
         config_dict["compaction"] = processed_config["compaction"]
+    if "services" in processed_config:
+        config_dict["services"] = processed_config["services"]
 
     # Create and validate config
     return Config(**config_dict)

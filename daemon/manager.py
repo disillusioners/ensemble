@@ -462,11 +462,16 @@ class InstanceManager:
         task_repo = TaskRepository(engine=self._engine)
         event_repo = EventRepository(engine=self._engine)
         
+        # Get configurable poll intervals from config
+        worker_poll_interval = self.config.services.worker_poll_interval
+        stale_recovery_interval = self.config.services.stale_task_recovery_interval
+        
         # Run startup crash recovery
         stale_recovery = StaleTaskRecovery(
             task_repository=task_repo,
             message_repository=self._queue_repository,
             event_repository=event_repo,
+            check_interval_seconds=stale_recovery_interval,
         )
         stale_recovery.recover_on_startup()
         self._stale_recovery = stale_recovery
@@ -482,10 +487,11 @@ class InstanceManager:
         self._worker_pool = WorkerPool(
             task_processor=self._task_processor,
             num_workers=num_workers,
+            poll_interval=worker_poll_interval,
         )
         self._worker_pool.start()
         
-        logger.info(f"Worker pool started with {num_workers} workers")
+        logger.info(f"Worker pool started with {num_workers} workers (poll_interval={worker_poll_interval}s)")
 
     def shutdown_worker_pool(self) -> None:
         """Shut down the worker pool gracefully."""
