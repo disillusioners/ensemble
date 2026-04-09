@@ -37,11 +37,9 @@ from .repositories import (
 )
 from .registry import get_registry
 
-from .queue import InputMessageQueue, InstanceWatchdog, InstanceCircuitBreaker, QueuedMessage
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance
 from .tools import create_instance_tools
-from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.event_bus import EventBus
 from .cancellation import (
@@ -139,12 +137,18 @@ class ActivityCallbackHandler(BaseCallbackHandler):
     """Callback to update message activity during LLM/graph execution.
     
     This ensures long-running tasks are not incorrectly marked as "stuck"
-    by the watchdog, as long as there's recent activity.
+    by the worker pool health checks, as long as there's recent activity.
     """
     
-    def __init__(self, queue_or_repository, message_id: str, update_interval_seconds: float = 5.0):
-        """Initialize with either InputMessageQueue or SQLModelMessageQueueRepository."""
-        self.queue_or_repository = queue_or_repository
+    def __init__(self, queue_repository, message_id: str, update_interval_seconds: float = 5.0):
+        """Initialize with SQLModelMessageQueueRepository.
+        
+        Args:
+            queue_repository: The message queue repository for activity updates.
+            message_id: The message ID to update activity for.
+            update_interval_seconds: Minimum seconds between activity updates.
+        """
+        self.queue_repository = queue_repository
         self.message_id = message_id
         self.update_interval = update_interval_seconds
         self._last_update = time.monotonic()
@@ -154,7 +158,7 @@ class ActivityCallbackHandler(BaseCallbackHandler):
         now = time.monotonic()
         if now - self._last_update >= self.update_interval:
             try:
-                self.queue_or_repository.update_activity(self.message_id)
+                self.queue_repository.update_activity(self.message_id)
             except Exception as e:
                 logger.warning(f"Failed to update activity for {self.message_id}: {e}")
             self._last_update = now
@@ -332,83 +336,10 @@ class InstanceManager:
             count = self._queue_repository.clear_all()
             logger.info(f"Discarded {count} messages from queue (discard_on_startup=True)")
         
-        # NEW: Message queue system (uses repository internally)
-        self.queue = InputMessageQueue(self._queue_repository)
-        
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
         
-        # Callback for watchdog to notify about failed messages
-        def _on_watchdog_message_failed(instance_id: str, message_id: str, error: str) -> None:
-            """Handle watchdog message failure from sync thread.
-            
-            Schedules async error report using the stored event loop reference.
-            """
-            # Use stored loop reference (set during initialize())
-            loop = self._loop
-            if loop is None:
-                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop not initialized")
-                return
-            
-            if loop.is_closed():
-                logger.warning(f"Cannot send error report for {instance_id[:8]}...: event loop is closed")
-                return
-            
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._send_error_report(
-                        instance_id=instance_id,
-                        error=f"Watchdog timeout: {error}",
-                        error_type="watchdog_timeout",
-                        message_id=message_id
-                    ),
-                    loop
-                )
-                # Add timeout to prevent hanging if loop is shutting down
-                future.result(timeout=5.0)
-            except RuntimeError as e:
-                logger.warning(f"Cannot send error report for {instance_id[:8]}...: {e}")
-            except TimeoutError:
-                logger.warning(f"Error report timed out for {instance_id[:8]}...")
-            except Exception as e:
-                logger.error(f"Unexpected error sending error report for {instance_id[:8]}...: {e}")
-        
-        # Callback for watchdog to trigger re-processing of retry-ready messages
-        def _on_watchdog_retry_ready(instance_ids: list[str]) -> None:
-            """Handle retry-ready messages from watchdog sync thread.
-            
-            Signals consumers for each instance with retry-ready messages.
-            """
-            if not instance_ids:
-                return
-
-            # Signal consumers (thread-safe, no event loop needed)
-            for instance_id in instance_ids:
-                try:
-                    self._signal_consumer(instance_id)
-                except Exception as e:
-                    logger.warning(f"Cannot trigger retry for {instance_id[:8]}...: {e}")
-
-            logger.info(f"Signaled retry processing for {len(instance_ids)} instances")
-        
-        self.watchdog = InstanceWatchdog(
-            self._queue_repository,
-            request_registry=self._request_registry,
-            on_message_failed=_on_watchdog_message_failed,
-            on_retry_ready=_on_watchdog_retry_ready,
-        )
-        self.circuit_breaker = InstanceCircuitBreaker()
-        self._processing: set[str] = set()  # sessions currently processing
-        self._processing_lock = asyncio.Lock()
-        self._instance_queues: dict[str, asyncio.Queue] = {}
-        self._consumer_tasks: dict[str, asyncio.Task] = {}
-        
-        # NEW: Event broadcaster for real-time SSE updates
-        self.broadcaster = EventBroadcaster()
-
         # NEW: EventBus for hybrid event delivery (DB + streaming)
-        # Will be properly initialized with real event_repo in prepare()
-        self._event_bus: EventBus | None = None
 
         # NEW: Source repository for source config and session mapping management
         # Must be created before SourceRegistry
@@ -451,27 +382,8 @@ class InstanceManager:
         self._task_processor: TaskProcessor | None = None
         self._stale_recovery: StaleTaskRecovery | None = None
 
-        # Start watchdog
-        self.watchdog.start()
-        
         # Shutdown flag for graceful shutdown
         self._shutting_down = False
-
-    @property
-    def use_worker_pool(self) -> bool:
-        """Check if worker pool message flow is enabled.
-        
-        Checks both config setting and USE_WORKER_POOL env var.
-        Environment variable takes precedence.
-        """
-        import os
-        env_flag = os.environ.get("USE_WORKER_POOL", "").lower()
-        if env_flag in ("true", "1", "yes"):
-            return True
-        if env_flag in ("false", "0", "no"):
-            return False
-        # Fall back to config setting
-        return getattr(self.config, 'use_worker_pool', False)
 
     @property
     def checkpointer(self):
@@ -519,7 +431,6 @@ class InstanceManager:
     def setup_worker_pool(
         self,
         num_workers: int = 4,
-        use_worker_pool: bool = True,
     ) -> None:
         """Set up the worker pool for message processing.
         
@@ -527,18 +438,12 @@ class InstanceManager:
         
         Args:
             num_workers: Number of worker threads.
-            use_worker_pool: If True, enable worker pool; if False, use existing consumer pattern.
         """
         import os
         
-        # Check feature flag from environment (override parameter)
+        # Check feature flag from environment
         env_flag = os.environ.get("USE_WORKER_POOL", "").lower()
         if env_flag in ("false", "0", "no"):
-            use_worker_pool = False
-        elif env_flag in ("true", "1", "yes"):
-            use_worker_pool = True
-        
-        if not use_worker_pool:
             logger.info("Worker pool disabled (USE_WORKER_POOL=false)")
             return
         
@@ -595,37 +500,6 @@ class InstanceManager:
             self._stale_recovery.stop()
             self._stale_recovery = None
             logger.info("Stale task recovery stopped")
-
-    async def drain_old_consumers(self, timeout: float = 30.0) -> None:
-        """Wait for old in-memory consumers to finish before switching to worker pool.
-        
-        FIX: W3 — Explicit draining to prevent message loss during cutover.
-        
-        This should be called before fully switching to worker pool mode.
-        """
-        if not self._consumer_tasks:
-            return
-        
-        logger.info(f"Draining {len(self._consumer_tasks)} old consumers...")
-        
-        start_time = asyncio.get_event_loop().time()
-        while any(not t.done() for t in self._consumer_tasks.values()):
-            elapsed = asyncio.get_event_loop().time() - start_time
-            if elapsed >= timeout:
-                logger.warning(
-                    f"Drain timeout after {timeout}s, {sum(1 for t in self._consumer_tasks.values() if not t.done())} "
-                    f"consumers still running"
-                )
-                break
-            await asyncio.sleep(0.5)
-        
-        # Clean up completed consumers
-        done_ids = [iid for iid, t in self._consumer_tasks.items() if t.done()]
-        for iid in done_ids:
-            self._consumer_tasks.pop(iid, None)
-            self._instance_queues.pop(iid, None)
-        
-        logger.info("Old consumers drained")
 
     async def _complete_job_for_instance(
         self,
@@ -917,7 +791,10 @@ class InstanceManager:
         source: str = "api",
         priority: int = 1
     ) -> AsyncMessageResult:
-        """Enqueue a message for an instance (non-blocking).
+        """Enqueue a message using the worker pool (DB-backed) path.
+        
+        This method creates BOTH a MessageQueue entry AND a Task entry atomically
+        in a single transaction. Workers poll the task table and process messages.
         
         Args:
             instance_id: The ID of the target instance.
@@ -931,105 +808,7 @@ class InstanceManager:
         # Reject new messages during shutdown
         if self.is_shutting_down:
             raise RuntimeError("Manager is shutting down, cannot accept new messages")
-
-        # FEATURE FLAG: Route to worker pool path if enabled
-        if self.use_worker_pool:
-            return await self.enqueue_message_v2(instance_id, message, source, priority)
-
-        # Check instance exists
-        self.get_instance(instance_id)  # raises KeyError if not found
         
-        # Check if this is the first message for this instance
-        # If so, store the source as root_source in instance metadata
-        # This preserves the original external source for child instances that inherit it
-        instance_meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-        if instance_meta and instance_meta.instance_metadata is not None:
-            if "root_source" not in instance_meta.instance_metadata:
-                # First message for this instance - store the source as root_source
-                # Skip storing for internal agent sources (they start with "agent:")
-                if not source.startswith("agent:"):
-                    await asyncio.to_thread(
-                        self._instance_repository.set_metadata,
-                        instance_id=instance_id,
-                        key="root_source",
-                        value=source
-                    )
-                    logger.debug(f"Stored root_source='{source}' for instance {instance_id[:8]}...")
-                else:
-                    # For child instances spawned via agent tools, propagate root_source from parent
-                    # The parent instance's metadata should have root_source if it was from external source
-                    parent_meta = None
-                    if instance_meta.parent_id:
-                        parent_meta = await asyncio.to_thread(self._instance_repository.get, instance_meta.parent_id)
-                    
-                    if parent_meta and parent_meta.instance_metadata:
-                        parent_root = parent_meta.instance_metadata.get("root_source")
-                        if parent_root:
-                            await asyncio.to_thread(
-                                self._instance_repository.set_metadata,
-                                instance_id=instance_id,
-                                key="root_source",
-                                value=parent_root
-                            )
-                            logger.debug(f"Propagated root_source='{parent_root}' from parent for child instance {instance_id[:8]}...")
-        
-        # Enqueue the message using repository
-        msg = await asyncio.to_thread(
-            self._queue_repository.enqueue,
-            instance_id=instance_id,
-            content=message,
-            source=source,
-            priority=priority,
-        )
-        message_id = msg.message_id
-        
-        # Broadcast message_queued event
-        await self.broadcaster.broadcast(Event(
-            type="message_queued",
-            instance_id=instance_id,
-            message_id=message_id,
-            data={
-                "content": message,
-                "source": source,
-                "priority": priority,
-                "status": "queued"
-            }
-        ))
-        
-        logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
-        
-        # Trigger async processing via persistent consumer
-        self._signal_consumer(instance_id)
-        
-        return AsyncMessageResult(
-            message_id=message_id,
-            instance_id=instance_id,
-            status="queued"
-        )
-
-    async def enqueue_message_v2(
-        self,
-        instance_id: str,
-        message: str,
-        source: str = "api",
-        priority: int = 1,
-    ) -> AsyncMessageResult:
-        """Enqueue a message using the worker pool (DB-backed) path.
-        
-        This method creates BOTH a MessageQueue entry AND a Task entry atomically
-        in a single transaction. Workers poll the task table and process messages.
-        
-        This is the new path when use_worker_pool=True.
-        
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-        
-        Returns:
-            AsyncMessageResult with message_id and status.
-        """
         import uuid
         from datetime import datetime, timezone
         from sqlmodel import Session
@@ -1096,335 +875,21 @@ class InstanceManager:
         
         # Broadcast event asynchronously (fire and forget)
         try:
-            await self.broadcaster.broadcast(Event(
-                type="message_queued",
+            await self._event_bus.create_message_received_event(
                 instance_id=instance_id,
                 message_id=message_id,
-                data={
-                    "content": message,
-                    "source": source,
-                    "priority": priority,
-                    "status": "queued"
-                }
-            ))
+                content={"source": source, "priority": priority, "content": message}
+            )
         except Exception as e:
-            logger.warning(f"Failed to broadcast message_queued event: {e}")
+            logger.warning(f"Failed to broadcast message_received event: {e}")
+        
+        logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
         
         return AsyncMessageResult(
             message_id=message_id,
             instance_id=instance_id,
             status="queued"
         )
-
-    def _ensure_consumer(self, instance_id: str) -> None:
-        """Ensure a persistent consumer task exists for this instance. Thread-safe."""
-        # Guard: don't create consumers for terminated/non-existent instances
-        if instance_id not in self.instances:
-            return
-        if instance_id not in self._instance_queues:
-            self._instance_queues[instance_id] = asyncio.Queue(maxsize=100)
-        if instance_id not in self._consumer_tasks or self._consumer_tasks[instance_id].done():
-            # Use run_coroutine_threadsafe for thread-safety (watchdog calls from non-async thread)
-            loop = self._loop
-            if loop is None or loop.is_closed():
-                logger.warning(f"Cannot ensure consumer for {instance_id[:8]}...: event loop not available")
-                return
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._start_consumer(instance_id), loop
-                )
-            except RuntimeError as e:
-                logger.warning(f"Cannot ensure consumer for {instance_id[:8]}...: {e}")
-
-    async def _start_consumer(self, instance_id: str) -> None:
-        """Create the consumer task. Must be called from the event loop."""
-        if instance_id not in self._consumer_tasks or self._consumer_tasks[instance_id].done():
-            task = asyncio.create_task(self._instance_consumer(instance_id))
-            self._consumer_tasks[instance_id] = task
-
-    async def _instance_consumer(self, instance_id: str) -> None:
-        """Persistent consumer that processes messages for an instance."""
-        queue = self._instance_queues.get(instance_id)
-        if not queue:
-            return
-        consecutive_errors = 0
-        while True:
-            try:
-                await queue.get()
-                queue.task_done()
-                await self._process_queue(instance_id)
-                consecutive_errors = 0
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                consecutive_errors += 1
-                if consecutive_errors > 10:
-                    logger.error(f"Consumer for {instance_id[:8]}... exceeded max retries, stopping")
-                    break
-                backoff = min(1 << consecutive_errors, 30)  # Exponential, max 30s
-                logger.error(f"Consumer error for instance {instance_id[:8]}...: {e}", exc_info=True)
-                await asyncio.sleep(backoff)
-
-    def _signal_consumer(self, instance_id: str) -> None:
-        """Signal the persistent consumer that there is work to do. Thread-safe."""
-        self._ensure_consumer(instance_id)
-        queue = self._instance_queues.get(instance_id)
-        if queue is not None:
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                logger.debug(f"Queue full for {instance_id[:8]}..., consumer is alive and will process eventually")
-
-    async def _process_queue(self, instance_id: str) -> None:
-        """Event-driven queue processor for an instance."""
-        logger.debug(f"_process_queue called for instance {instance_id[:8]}...")
-        # Check if already processing
-        async with self._processing_lock:
-            if instance_id in self._processing:
-                logger.debug(f"Instance {instance_id[:8]}... already being processed, skipping")
-                return
-            self._processing.add(instance_id)
-            logger.debug(f"Added instance {instance_id[:8]}... to processing set")
-        
-        try:
-            if not self.circuit_breaker.can_execute(instance_id):
-                logger.warning(f"Circuit breaker open for instance {instance_id[:8]}...")
-                # Notify parent if this is a child instance with pending messages
-                meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                if meta and meta.parent_id:
-                    # Get pending messages (single query, use count from result)
-                    pending = await asyncio.to_thread(self._queue_repository.list, instance_id=instance_id, status="ready", limit=100)
-                    if pending:
-                        await self._send_error_report(
-                            instance_id=instance_id,
-                            error=f"Circuit breaker open - instance has {len(pending)} message(s) blocked",
-                            error_type="circuit_breaker_open",
-                            message_id=pending[0].message_id
-                        )
-                return
-            
-            logger.debug(f"Starting dequeue loop for instance {instance_id[:8]}...")
-            while True:
-                msg = await asyncio.to_thread(self._queue_repository.dequeue_by_instance, instance_id)
-                if msg is None:
-                    logger.debug(f"No more messages for instance {instance_id[:8]}..., exiting loop")
-                    break
-                
-                logger.info(f"Processing message {msg.message_id[:8]}... for instance {instance_id[:8]}...")
-                
-                # Check if this is the first message and generate title
-                # Get message count before processing this message
-                existing_messages = await get_instance_messages(self.checkpointer, instance_id)
-                is_first_message = len(existing_messages) == 0
-                
-                # Check retry_count instead of metadata flag (more reliable)
-                is_retry = msg.retry_count > 0
-                
-                # Broadcast status_changed event
-                await self.broadcaster.broadcast(Event(
-                    type="status_changed",
-                    instance_id=instance_id,
-                    message_id=msg.message_id,
-                    data={"status": "processing", "is_retry": is_retry}
-                ))
-                
-                # Register request for cancellation support
-                cancellation_source = self._request_registry.register(
-                    message_id=msg.message_id,
-                    instance_id=instance_id,
-                    task=asyncio.current_task()
-                )
-                
-                try:
-                    # Project context injection on first message (BEFORE processing)
-                    message_content = msg.content
-                    if is_first_message:
-                        # PRIORITY 1: Use explicit project_id from instance metadata
-                        instance_meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                        explicit_project_id = (
-                            instance_meta.instance_metadata.get("project_id") 
-                            if instance_meta and instance_meta.instance_metadata 
-                            else None
-                        )
-                        
-                        if explicit_project_id:
-                            # Use explicit project context (no text extraction)
-                            project = await asyncio.to_thread(self._project_repository.get, explicit_project_id)
-                            if project:
-                                project_context = format_project_context(project)
-                                message_content = project_context + msg.content
-                                logger.debug(f"Injected explicit project context: {project.name}")
-                            else:
-                                logger.warning(
-                                    f"Project '{explicit_project_id}' not found for instance {instance_id[:8]}... "
-                                    f"(may have been deleted after instance creation)"
-                                )
-                        else:
-                            # FALLBACK: Text extraction only if no explicit project_id
-                            keywords = extract_project_keywords(msg.content)
-                            project = await asyncio.to_thread(self.project_store.match_by_keywords, keywords)
-                            if project:
-                                project_context = format_project_context(project)
-                                message_content = project_context + msg.content
-                                logger.debug(f"Injected inferred project context: {project.name}")
-                                # Save detected project to instance metadata for child inheritance
-                                await asyncio.to_thread(
-                                    self._instance_repository.set_metadata, instance_id, "project_id", project.project_id
-                                )
-                    result = await self._process_message_with_tracking(
-                        instance_id,
-                        message_content,
-                        msg.message_id,
-                        cancellation_token=cancellation_source.token,
-                        is_retry=is_retry,
-                    )
-                    
-                    # Pre-ACK status check to prevent race condition with watchdog
-                    # Always record success since processing completed without error
-                    self.circuit_breaker.record_success(instance_id)
-                    
-                    # Use repository to check status
-                    status = await asyncio.to_thread(self._queue_repository.get_status, msg.message_id)
-                    if status == 'processing':
-                        await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
-                    else:
-                        logger.warning(
-                            f"Message {msg.message_id[:8]}... status changed to '{status if status else 'unknown'}' "
-                            f"during processing, skipping ack (success already recorded)"
-                        )
-                    
-                    # Determine the source for the completed event
-                    # Root source inheritance: child instances don't broadcast completed events
-                    # Only the root instance (parentless) broadcasts with the original external source
-                    meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                    
-                    # Skip broadcast entirely if this is a child instance
-                    if meta and meta.parent_id:
-                        # Child instance - internal completion only, no broadcast
-                        # The parent instance will handle the response
-                        logger.debug(
-                            f"Child instance {instance_id[:8]}... completed internally "
-                            f"(parent={meta.parent_id[:8]}...), skipping broadcast"
-                        )
-                    else:
-                        # Root instance - broadcast completed event
-                        # Use root_source from metadata if available, otherwise fallback to msg.source
-                        instance_metadata = meta.instance_metadata if meta else None
-                        root_source = instance_metadata.get("root_source") if instance_metadata else None
-                        
-                        if root_source is None:
-                            # Fallback to msg.source (shouldn't happen for properly initialized instances)
-                            root_source = msg.source
-                            logger.warning(
-                                f"Instance {instance_id[:8]}... missing root_source in metadata, "
-                                f"falling back to msg.source='{root_source}'"
-                            )
-                        
-                        await self.broadcaster.broadcast(Event(
-                            type="completed",
-                            instance_id=instance_id,
-                            message_id=msg.message_id,
-                            data={
-                                "content": result.content,
-                                "thinking": result.thinking,
-                                "thinking_extracted": result.thinking_extracted,
-                                "tool_calls": result.tool_calls,
-                                "source": root_source,  # Use root_source for external routing
-                            }
-                        ))
-                    
-                    await self._complete_job_for_instance(
-                        instance_id=instance_id,
-                        success=True,
-                        result_summary=result.content[:500] if result and result.content else None,
-                    )
-                    
-                    # Fire-and-forget title generation - don't block the completed event
-                    if is_first_message:
-                        asyncio.create_task(
-                            self._generate_and_broadcast_title(instance_id, msg.content)
-                        )
-                    
-                except OperationCancelledError as e:
-                    logger.info(f"Message {msg.message_id[:8]}... was cancelled: {e.reason.value}")
-                    # Don't schedule retry here - watchdog already did
-                    # Broadcast cancelled event
-                    await self.broadcaster.broadcast(Event(
-                        type="cancelled",
-                        instance_id=instance_id,
-                        message_id=msg.message_id,
-                        data={"reason": e.reason.value}
-                    ))
-                    await self._complete_job_for_instance(
-                        instance_id=instance_id,
-                        success=False,
-                        error=f"Cancelled: {e.reason.value}",
-                    )
-
-                except asyncio.CancelledError:
-                    logger.info(f"Message {msg.message_id[:8]}... task was cancelled")
-                    raise  # Re-raise to properly handle task cancellation
-                    
-                except Exception as e:
-                    logger.error(f"Error processing message {msg.message_id}: {e}", exc_info=True)
-                    self.circuit_breaker.record_failure(instance_id)
-                    
-                    if msg.retry_count < self.config.queue.max_retries:
-                        # Use repository to schedule retry
-                        await asyncio.to_thread(self._queue_repository.retry, msg.message_id, str(e))
-                        # Broadcast retry scheduled event
-                        await self.broadcaster.broadcast(Event(
-                            type="status_changed",
-                            instance_id=instance_id,
-                            message_id=msg.message_id,
-                            data={
-                                "status": "retrying",
-                                "retry_count": msg.retry_count + 1,
-                                "error": str(e)
-                            }
-                        ))
-                    else:
-                        # Use repository to mark as failed
-                        await asyncio.to_thread(self._queue_repository.fail, msg.message_id, str(e))
-                        # Broadcast error event
-                        await self.broadcaster.broadcast(Event(
-                            type="error",
-                            instance_id=instance_id,
-                            message_id=msg.message_id,
-                            data={
-                                "error": str(e),
-                                "status": "failed",
-                                "retry_count": msg.retry_count
-                            }
-                        ))
-                        await self._complete_job_for_instance(
-                            instance_id=instance_id,
-                            success=False,
-                            error=f"Max retries exceeded: {e}",
-                        )
-                        # Send error report to parent if this is a child instance
-                        await self._send_error_report(
-                            instance_id=instance_id,
-                            error=f"Max retries ({msg.retry_count}) exceeded: {e}",
-                            error_type="max_retries_exceeded",
-                            message_id=msg.message_id
-                        )
-                
-                finally:
-                    # Always unregister the request
-                    self._request_registry.unregister(msg.message_id)
-            
-            # Queue is empty - check if this is a child instance and send completion report
-            if await asyncio.to_thread(self._queue_repository.is_empty, instance_id):
-                meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                if meta and meta.parent_id:
-                    # This is a child instance that has completed - send report to parent
-                    await self._send_completion_report(instance_id)
-        finally:
-            async with self._processing_lock:
-                self._processing.discard(instance_id)
-                logger.debug(f"Removed instance {instance_id[:8]}... from processing set")
-
 
     async def _process_message_with_tracking(
         self, 
@@ -1558,12 +1023,11 @@ class InstanceManager:
                                     
                                     if thinking_content:
                                         # Broadcast thinking event
-                                        await self.broadcaster.broadcast(Event(
-                                            type="thinking",
+                                        await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
-                                            message_id=message_id,
+                                            event_type="thinking",
                                             data={"content": thinking_content}
-                                        ))
+                                        )
                                 
                                 # Track tool calls from AI message for matching
                                 if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
@@ -1579,16 +1043,15 @@ class InstanceManager:
                                         }
                                         
                                         # Broadcast tool_call event (tool starting)
-                                        await self.broadcaster.broadcast(Event(
-                                            type="tool_call",
+                                        await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
-                                            message_id=message_id,
+                                            event_type="tool_call",
                                             data={
                                                 "id": tc_id,
                                                 "name": tc_name,
                                                 "arguments": tc_args,
                                             }
-                                        ))
+                                        )
                                 
                                 elif "tools" in data:
                                     # Tools node completed - tool execution finished
@@ -1617,12 +1080,11 @@ class InstanceManager:
                                         }
                                         
                                         # Broadcast tool_complete event
-                                        await self.broadcaster.broadcast(Event(
-                                            type="tool_complete",
+                                        await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
-                                            message_id=message_id,
+                                            event_type="tool_complete",
                                             data=tool_call_data
-                                        ))
+                                        )
                                 
                     elif mode == "messages":
                         # Handle token-level streaming with adaptive batching to reduce event rate
@@ -1673,12 +1135,11 @@ class InstanceManager:
                                 )
                                 
                                 if should_flush and thinking_buffer:
-                                    await self.broadcaster.broadcast(Event(
-                                        type="thinking",
+                                    await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
-                                        message_id=message_id,
+                                        event_type="thinking",
                                         data={"content": thinking_buffer}
-                                    ))
+                                    )
                                     thinking_buffer = ""
                                     thinking_buffer_size = 0
                                     last_thinking_flush = now
@@ -1691,20 +1152,20 @@ class InstanceManager:
                                 )
                                 
                                 if should_flush and content_buffer:
-                                    await self.broadcaster.broadcast(Event(
-                                        type="content_chunk",
+                                    await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
-                                        message_id=message_id,
+                                        event_type="content_chunk",
                                         data={"chunk": content_buffer}
-                                    ))
+                                    )
                                     content_buffer = ""
                                     content_buffer_size = 0
                                     last_content_flush = now
                                     
                                     # Adaptive batching: check queue health periodically
                                     if event_count % 20 == 0:
-                                        stats = self.broadcaster.get_stats(instance_id)
-                                        queue_fill_ratio = stats["queue_size"] / stats.get("max_queue_size", 200)
+                                        # Get streaming queue stats for adaptive batching
+                                        queue = self._event_bus.get_streaming_queue(instance_id)
+                                        queue_fill_ratio = queue.qsize() / max(queue.maxsize, 1)
                                         
                                         # Increase batch size when queue is > 50% full
                                         if queue_fill_ratio > 0.5:
@@ -1725,33 +1186,29 @@ class InstanceManager:
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
             # Broadcast error event
-            await self.broadcaster.broadcast(Event(
-                type="error",
+            await self._event_bus.create_error_event(
                 instance_id=instance_id,
-                message_id=message_id,
-                data={"error": str(e), "stage": "streaming"}
-            ))
-            raise  # Re-raise to let _process_queue handle retry logic
+                error={"error": str(e), "stage": "streaming", "message_id": message_id}
+            )
+            raise  # Re-raise to let caller handle retry logic
         finally:
             # Flush any remaining content in buffer after streaming ends
             # This runs even on timeout so content already generated is sent to client
             if content_buffer:
-                await self.broadcaster.broadcast(Event(
-                    type="content_chunk",
+                await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
-                    message_id=message_id,
+                    event_type="content_chunk",
                     data={"chunk": content_buffer}
-                ))
+                )
                 logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
             
             # Flush any remaining thinking in buffer after streaming ends
             if thinking_buffer:
-                await self.broadcaster.broadcast(Event(
-                    type="thinking",
+                await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
-                    message_id=message_id,
+                    event_type="thinking",
                     data={"content": thinking_buffer}
-                ))
+                )
                 thinking_buffer = ""
         
         # Transfer accumulated thinking from streaming chunks
@@ -1905,73 +1362,13 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
-    async def _send_completion_report(self, instance_id: str, use_llm_summary: bool = False) -> None:
-        """Send completion report to parent instance when child is done.
-        
-        Called when a child instance's queue becomes empty.
-        Sends the child's last assistant message (or LLM summary) to the parent.
-        
-        Args:
-            instance_id: The child instance ID that has completed.
-            use_llm_summary: If True, use LLM to summarize. Default: False (use last message).
-        """
-        # Get instance metadata
-        meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
-        if not meta:
-            logger.warning(f"Cannot send completion report: instance {instance_id} not found")
-            return
-        
-        parent_id = meta.parent_id
-        if not parent_id:
-            logger.debug(f"Instance {instance_id} has no parent, skipping completion report")
-            return
-        
-        agent_name = meta.agent_name or get_agent_name(meta.agent_dir)
-        
-        logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {parent_id[:8]}...")
-        
-        # Get report content - either last message or LLM summary
-        if use_llm_summary:
-            summary = await self._summarize_instance(instance_id, agent_name)
-        else:
-            summary = await self._get_last_assistant_message(instance_id, agent_name)
-        
-        # Enqueue report message to parent using repository
-        msg = await asyncio.to_thread(
-            self._queue_repository.enqueue,
-            instance_id=parent_id,
-            content=summary,
-            source=f"report:{instance_id}",
-            priority=1,  # Normal priority as requested
-            message_metadata={"type": "completion_report", "child_instance_id": instance_id}
-        )
-        message_id = msg.message_id
-        
-        # Broadcast report event
-        await self.broadcaster.broadcast(Event(
-            type="status_changed",
-            instance_id=parent_id,
-            message_id=message_id,
-            data={
-                "type": "completion_report",
-                "child_instance_id": instance_id,
-                "agent_name": agent_name,
-                "summary": summary
-            }
-        ))
-        
-        logger.info(f"Sent completion report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
-        
-        # Trigger parent queue processing
-        self._signal_consumer(parent_id)
-
     async def _check_child_completion_v2(self, instance_id: str) -> None:
         """Atomic check if child instance is done and should send completion report.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
         leaving the instance in COMPLETED state without a report if the fetch fails.
         
-        This is the new path when use_worker_pool=True. It handles:
+        This method handles:
         - Idempotency (won't send duplicate completion reports)
         - Parent's waiting_for counter decrement
         - Parent's children[] cache update (FIX: W6)
@@ -2166,14 +1563,10 @@ Provide a concise summary:"""
         
         # Broadcast child completion event asynchronously
         try:
-            await self.broadcaster.broadcast(Event(
-                type="status_changed",
+            await self._event_bus.create_child_completed_event(
                 instance_id=instance.parent_id,
-                data={
-                    "type": "completion_report",
-                    "child_instance_id": instance_id,
-                }
-            ))
+                child_id=instance_id,
+            )
         except Exception as e:
             logger.warning(f"Failed to broadcast child completion event: {e}")
 
@@ -2259,11 +1652,10 @@ Provide a concise summary:"""
             report_message_id = msg.message_id
             
             # Broadcast error report event
-            await self.broadcaster.broadcast(Event(
-                type="error_report",
+            await self._event_bus.create_child_failed_event(
                 instance_id=parent_id,
-                message_id=report_message_id,
-                data={
+                child_id=instance_id,
+                error={
                     "type": "error_report",
                     "child_instance_id": instance_id,
                     "agent_name": agent_name,
@@ -2272,12 +1664,9 @@ Provide a concise summary:"""
                     "original_message_id": message_id,
                     "severity": severity,
                 }
-            ))
+            )
             
             logger.info(f"Sent error report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
-            
-            # Trigger parent queue processing so it can handle the error
-            self._signal_consumer(parent_id)
             
         except Exception as e:
             logger.error(
@@ -2394,14 +1783,7 @@ Title:"""
             # Store title in instance metadata
             await asyncio.to_thread(self._instance_repository.update_title, instance_id, title)
             logger.info(f"Generated title for instance {instance_id}: {title}")
-            
-            # Broadcast title_updated event for frontend refresh
-            await self.broadcaster.broadcast(Event(
-                type="title_updated",
-                instance_id=instance_id,
-                message_id="",  # Title updates don't need message_id
-                data={"title": title}
-            ))
+            # Title updates don't need explicit broadcast - frontend can refresh from instance metadata
             
         except asyncio.TimeoutError:
             logger.warning(f"Timeout generating title for instance {instance_id[:8]}...")
@@ -2411,16 +1793,15 @@ Title:"""
     def get_queue_stats(self, instance_id: str):
         """Get queue statistics for an instance.
         
-        Returns a QueueStats object with pending_count, processing_count,
+        Returns a dict with pending_count, processing_count,
         and oldest_message_age_seconds attributes.
         """
-        from .queue import QueueStats
         stats = self._queue_repository.get_stats(instance_id)
-        return QueueStats(
-            pending_count=stats["pending_count"],
-            processing_count=stats["processing_count"],
-            oldest_message_age_seconds=stats["oldest_message_age_seconds"]
-        )
+        return {
+            "pending_count": stats["pending_count"],
+            "processing_count": stats["processing_count"],
+            "oldest_message_age_seconds": stats["oldest_message_age_seconds"]
+        }
 
     def _get_system_prompt_tokens(self, instance_id: str) -> int:
         """Get the cached system prompt token count for an instance's agent.
@@ -2601,21 +1982,10 @@ Title:"""
         # 1. Cancel active requests for this instance
         self._request_registry.cancel_by_instance(instance_id)
         
-        # 2. Remove from processing set
-        self._processing.discard(instance_id)
-        
-        # 2b. Stop consumer for this instance (only if not using worker pool)
-        if not self.use_worker_pool:
-            if instance_id in self._consumer_tasks:
-                task = self._consumer_tasks.pop(instance_id)
-                if not task.done():
-                    task.cancel()
-                self._instance_queues.pop(instance_id, None)
-        
-        # 3. Clean up event broadcaster
-        self.broadcaster.cleanup_instance(instance_id)
+        # 2. Clean up event bus for this instance
+        self._event_bus.cleanup_instance(instance_id)
 
-        # 4. Remove from instances dict
+        # 3. Remove from instances dict
         if instance_id in self.instances:
             del self.instances[instance_id]
         else:
@@ -2794,9 +2164,6 @@ Title:"""
         Returns:
             Number of instances deleted from database.
         """
-        # Clear processing set
-        self._processing.clear()
-
         # Clear in-memory instances
         self.instances.clear()
 
@@ -2925,10 +2292,8 @@ Title:"""
         2. Stop accepting new messages via source registry
         3. Cancel active LLM streams via request registry
         4. Wait for in-flight processing to finish (grace period)
-        5. Cancel persistent consumer tasks
-        6. Stop watchdog
-        7. Close SSE connections via broadcaster
-        8. Clean up resources
+        5. Shutdown worker pool
+        6. Clean up resources
         
         Each step is wrapped in its own try/except so failures don't skip subsequent steps.
         
@@ -2946,10 +2311,8 @@ Title:"""
             ("stop_sources", self.stop_sources(timeout=grace_period)),
             ("cancel_active_requests", self._cancel_all_active_requests()),
             ("wait_inflight", self._wait_for_inflight(grace_period)),
-            ("cancel_consumers", self._cancel_consumers()),
-            ("stop_watchdog", self._stop_watchdog()),
-            ("shutdown_broadcaster", self.broadcaster.shutdown()),
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
+            ("shutdown_event_bus", self._event_bus.shutdown()),
         ]
         
         for name, step_coro in steps:
@@ -2960,7 +2323,7 @@ Title:"""
         
         # Clean up resources (existing cleanup method) - also resilient
         try:
-            logger.info("Step 7/8: Cleaning up resources...")
+            logger.info("Step 6/6: Cleaning up resources...")
             self.cleanup()
         except Exception as e:
             logger.error(f"Error during shutdown step 'cleanup': {e}", exc_info=True)
@@ -2985,50 +2348,19 @@ Title:"""
         """
         start_time = time.monotonic()
         while time.monotonic() - start_time < grace_period:
-            # Check if any consumers are still processing
-            active_tasks = [
-                task for task in self._consumer_tasks.values()
-                if not task.done()
-            ]
-            
-            if not active_tasks:
-                logger.debug("All consumers idle, proceeding with shutdown")
-                break
-            
             # Check if any requests are still active
             with self._request_registry._lock:
                 active_requests = len(self._request_registry._requests)
             
-            if active_requests == 0 and not any(task for task in active_tasks if not task.done()):
+            if active_requests == 0:
+                logger.debug("All requests completed, proceeding with shutdown")
                 break
             
             logger.debug(
-                f"Waiting for shutdown: {len(active_tasks)} consumers, "
-                f"{active_requests} active requests"
+                f"Waiting for shutdown: {active_requests} active requests"
             )
             await asyncio.sleep(0.5)
-    
-    async def _stop_watchdog(self) -> None:
-        """Stop the watchdog thread."""
-        self.watchdog.stop()
-    
-    async def _cancel_consumers(self) -> None:
-        """Cancel all persistent consumer tasks."""
-        for instance_id, task in list(self._consumer_tasks.items()):
-            if not task.done():
-                task.cancel()
-                logger.debug(f"Cancelled consumer for instance {instance_id[:8]}...")
-        
-        # Wait for tasks to complete cancellation
-        if self._consumer_tasks:
-            await asyncio.gather(
-                *[task for task in self._consumer_tasks.values()],
-                return_exceptions=True
-            )
-        
-        self._consumer_tasks.clear()
-        self._instance_queues.clear()
-    
+
     def get_active_requests(self, instance_id: str) -> list[str]:
         """Get list of active request message IDs for an instance.
         

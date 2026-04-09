@@ -1,6 +1,7 @@
-"""Error scenario tests for progressive streaming feature.
+"""LEGACY Error scenario tests for progressive streaming feature.
 
-Tests edge cases, error conditions, and failure scenarios.
+DEPRECATED: These tests use EventBroadcaster which has been removed.
+Use EventBus tests instead. This file is kept for reference until migrated.
 """
 
 import pytest
@@ -13,7 +14,18 @@ import os
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from datetime import datetime
 
-from daemon.events import EventBroadcaster, Event, event_to_sse
+# Try to import EventBroadcaster - will skip all tests if module doesn't exist
+try:
+    from daemon.events import EventBroadcaster, Event, event_to_sse
+except ImportError:
+    EventBroadcaster = None
+    Event = None
+    event_to_sse = None
+
+pytestmark = pytest.mark.skipif(
+    EventBroadcaster is None,
+    reason="Legacy tests - EventBroadcaster removed, migrate to EventBus"
+)
 from daemon.models import ErrorCodes
 
 

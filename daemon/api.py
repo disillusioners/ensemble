@@ -76,7 +76,6 @@ from .models import (
 )
 from .manager import InstanceManager
 from .config import Config, load_config
-from .events import event_to_sse
 from .services.event_bus import EventBus
 from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
@@ -170,11 +169,11 @@ async def lifespan(app: FastAPI):
     config = load_config()
     manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
-    # Set the main event loop for thread-safe broadcasting
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
+    # Set the main event loop for thread-safe EventBus operations
+    manager._event_bus._loop = asyncio.get_running_loop()
     
-    # Set up worker pool for message queue redesign
-    manager.setup_worker_pool(num_workers=4, use_worker_pool=True)
+    # Set up worker pool for message processing
+    manager.setup_worker_pool(num_workers=4)
     start_time = time.time()
     
     # Initialize JobQueueService with shared engine from manager

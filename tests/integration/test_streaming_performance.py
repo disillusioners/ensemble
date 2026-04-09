@@ -1,6 +1,7 @@
-"""Performance and load tests for progressive streaming feature.
+"""LEGACY Performance and load tests for progressive streaming feature.
 
-Tests for concurrent load, throughput, latency, and resource usage.
+DEPRECATED: These tests use EventBroadcaster which has been removed.
+Use EventBus tests instead. This file is kept for reference until migrated.
 """
 
 import pytest
@@ -14,7 +15,17 @@ import statistics
 from unittest.mock import Mock
 from typing import List
 
-from daemon.events import EventBroadcaster, Event
+# Try to import EventBroadcaster - will skip all tests if module doesn't exist
+try:
+    from daemon.events import EventBroadcaster, Event
+except ImportError:
+    EventBroadcaster = None
+    Event = None
+
+pytestmark = pytest.mark.skipif(
+    EventBroadcaster is None,
+    reason="Legacy tests - EventBroadcaster removed, migrate to EventBus"
+)
 
 
 # ============================================================================

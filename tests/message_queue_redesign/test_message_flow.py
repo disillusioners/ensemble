@@ -945,173 +945,26 @@ class TestCheckChildCompletionC3Fix:
 
 
 class TestFeatureFlagRouting:
-    """Tests for USE_WORKER_POOL feature flag routing."""
+    """Tests for USE_WORKER_POOL environment variable handling.
+    
+    The worker pool is now the only message processing path.
+    The USE_WORKER_POOL env var can still disable it for testing purposes.
+    """
 
-    def test_use_worker_pool_property_returns_false_by_default(self, monkeypatch):
+    def test_use_worker_pool_property_removed(self):
         """
-        When no env var and config.use_worker_pool=False, property should return False.
+        The use_worker_pool property has been removed - worker pool is always enabled.
         """
-        # Ensure env var is not set
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-        
         from daemon.manager import InstanceManager
+        # Verify the property no longer exists
+        import inspect
+        # Check that use_worker_pool is not a property on the class
+        has_property = False
+        for name, value in inspect.getmembers(InstanceManager):
+            if name == 'use_worker_pool' and isinstance(value, property):
+                has_property = True
+                break
         
-        # Create a mock config with use_worker_pool = False
-        # Note: property accesses self.config.use_worker_pool directly
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = False
-        
-        # Patch InstanceManager __init__ to avoid database setup
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Default should be False
-            assert manager.use_worker_pool == False
+        assert not has_property, "use_worker_pool should not be a property anymore"
 
-    def test_use_worker_pool_returns_true_when_config_enabled(self, monkeypatch):
-        """
-        When config.use_worker_pool=True, property should return True.
-        """
-        # Ensure env var is not set
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = True
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = True
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            assert manager.use_worker_pool == True
-
-    def test_env_var_true_overrides_config_false(self, monkeypatch):
-        """
-        USE_WORKER_POOL=true env var should override config.use_worker_pool=False.
-        """
-        # Set env var to true
-        monkeypatch.setenv("USE_WORKER_POOL", "true")
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = False
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = False
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Env var should override config
-            assert manager.use_worker_pool == True
-        
-        # Cleanup
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-
-    def test_env_var_false_overrides_config_true(self, monkeypatch):
-        """
-        USE_WORKER_POOL=false env var should override config.use_worker_pool=True.
-        """
-        # Set env var to false
-        monkeypatch.setenv("USE_WORKER_POOL", "false")
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = True
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = True
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Env var should override config
-            assert manager.use_worker_pool == False
-        
-        # Cleanup
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with queue.use_worker_pool = False
-        # Use spec to make getattr work properly with defaults
-        mock_queue = MagicMock(spec=[])
-        mock_queue.use_worker_pool = False
-        mock_config = MagicMock()
-        mock_config.queue = mock_queue
-        
-        # Patch InstanceManager __init__ to avoid database setup
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Default should be False
-            assert manager.use_worker_pool == False
-
-    def test_use_worker_pool_returns_true_when_config_enabled(self, monkeypatch):
-        """
-        When config.use_worker_pool=True, property should return True.
-        """
-        # Ensure env var is not set
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = True
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = True
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            assert manager.use_worker_pool == True
-
-    def test_env_var_true_overrides_config_false(self, monkeypatch):
-        """
-        USE_WORKER_POOL=true env var should override config.use_worker_pool=False.
-        """
-        # Set env var to true
-        monkeypatch.setenv("USE_WORKER_POOL", "true")
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = False
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = False
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Env var should override config
-            assert manager.use_worker_pool == True
-        
-        # Cleanup
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
-
-    def test_env_var_false_overrides_config_true(self, monkeypatch):
-        """
-        USE_WORKER_POOL=false env var should override config.use_worker_pool=True.
-        """
-        # Set env var to false
-        monkeypatch.setenv("USE_WORKER_POOL", "false")
-        
-        from daemon.manager import InstanceManager
-        
-        # Create a mock config with use_worker_pool = True
-        mock_config = MagicMock()
-        mock_config.use_worker_pool = True
-        
-        with patch.object(InstanceManager, '__init__', lambda self, config: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = mock_config
-            
-            # Env var should override config
-            assert manager.use_worker_pool == False
-        
-        # Cleanup
-        monkeypatch.delenv("USE_WORKER_POOL", raising=False)
+# End of test file
