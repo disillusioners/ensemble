@@ -21,6 +21,14 @@ from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
 from .job_queue.models import JobItem, JobStatus, JobLockInfo, JobQueue, QueueType
 
+# Task repository
+from .task.repository import TaskRepository
+from .task.models import Task, TaskStatus, TaskType
+
+# Event repository
+from .event.repository import EventRepository
+from .event.models import Event, EventKind
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -63,6 +71,15 @@ __all__ = [
     "JobLockInfo",
     "JobQueue",
     "QueueType",
+    # Task
+    "TaskRepository",
+    "Task",
+    "TaskStatus",
+    "TaskType",
+    # Event
+    "EventRepository",
+    "Event",
+    "EventKind",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
