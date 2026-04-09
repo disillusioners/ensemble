@@ -6,7 +6,6 @@ import re
 from collections import OrderedDict
 from typing import Optional, TYPE_CHECKING
 
-from ..events import Event, EventBroadcaster
 from ..services.event_bus import EventBus
 from .base import OutgoingMessage
 

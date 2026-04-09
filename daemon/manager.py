@@ -43,6 +43,7 @@ from .repositories.instance.models import Instance
 from .tools import create_instance_tools
 from .events import EventBroadcaster, Event
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
+from .services.event_bus import EventBus
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
@@ -405,6 +406,10 @@ class InstanceManager:
         # NEW: Event broadcaster for real-time SSE updates
         self.broadcaster = EventBroadcaster()
 
+        # NEW: EventBus for hybrid event delivery (DB + streaming)
+        # Will be properly initialized with real event_repo in prepare()
+        self._event_bus: EventBus | None = None
+
         # NEW: Source repository for source config and session mapping management
         # Must be created before SourceRegistry
         self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
@@ -419,8 +424,14 @@ class InstanceManager:
             manager=self,
             instance_repo=self._instance_repository,
         )
+        
+        # Create EventBus for ResponseDispatcher (will be updated with real event_repo in prepare)
+        from .repositories.event.repository import EventRepository
+        _event_repo_for_bus = EventRepository(engine=self._engine)
+        self._event_bus = EventBus(event_repo=_event_repo_for_bus)
+        
         self.source_dispatcher = ResponseDispatcher(
-            broadcaster=self.broadcaster,
+            event_bus=self._event_bus,
             registry=self.source_registry,
             subscriber_id="response_dispatcher"
         )

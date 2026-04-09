@@ -26,6 +26,12 @@ tests/
 │   ├── conftest.py          # Integration fixtures (real config, no langgraph mocks)
 │   └── test_*.py            # Integration tests (skip without OPENAI_API_KEY)
 ├── job_queue/               # Job queue tests
+├── message_queue_redesign/  # Message queue redesign tests (Phase 1-3)
+│   ├── conftest.py          # MQ test fixtures (in-memory SQLite, test repos)
+│   ├── test_event_repository.py   # Event repository tests
+│   ├── test_stale_task_recovery.py # Stale task recovery tests
+│   ├── test_task_repository.py    # Task repository + atomic claim tests
+│   └── test_worker_pool.py        # Worker pool lifecycle tests
 └── mock_*.py                # Mock test scripts
 ```
 
@@ -54,8 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-08 Phase 3 Post-Review Re-Test)
-- **1492 tests pass** (22 skipped, 0 failed) excluding integration on feature/job-queue-management branch
+## Test Results (Latest: 2026-04-09 Phase 4 SSE Events)
+
+### feature/message-queue-redesign branch
+- **1623 tests pass** (22 skipped, 0 failed) excluding integration
+- **132 message_queue_redesign tests pass** — Phase 4 SSE/EventBus tests
+- **34 new tests added** for Phase 4 (test_event_bus.py: DB-backed EventBus, cursor-based SSE)
+- dev.sh validated and working (ensure.md: PASS)
+- **Critical path gap**: Missing Last-Event-ID header/reconnection test (3/4 covered)
+- See `.agents/tester/RESULTS/2026-04-09-phase4-sse-events-tests.md` for full report
+
+### feature/job-queue-management branch (previous)
+- **1492 tests pass** (22 skipped, 0 failed) excluding integration
 - **402 job_queue tests pass** (14 skipped, 0 failed) — all Phase 1+2+3 tests pass
 - **35 queue router API tests pass** — Phase 3 queue CRUD, IDOR, start/stop endpoints
 - **197 frontend tests pass** (10 test suites) — including new queue service/model tests
@@ -85,32 +101,35 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 3 Job Queue Management — API + Frontend + Integration Testing COMPLETE**
+**Phase 4 SSE Events — Testing COMPLETE**
 
 ### Status: ✅ PASS
 
-**Latest:** 1492 backend tests + 197 frontend tests pass, dev.sh validated
-**Phase 3 Commits:**
-- `5220045` — "test(job-queues): add frontend tests for queue service and model"
-- `c1943ca` — "test(job-queues): add API endpoint tests for queue router"
+**Latest:** 1623 tests pass on feature/message-queue-redesign, dev.sh validated
+**Phase 4 Commit:** Unknown — DB-backed EventBus with cursor-based SSE delivery
 
-### Phase 3 Test Files (3 new frontend + 1 new backend)
-- **test_queue_routers.py** (NEW): 35 tests — Queue CRUD API, IDOR protection, system queue protection, start/stop
-- **queue.service.spec.ts** (NEW): QueueService tests — list, create, get, update, delete, start, stop, refresh
-- **job-queue.model.spec.ts** (NEW): Model helpers — getQueueStatusColor, getQueueStatusLabel, getQueueTypeIcon, getQueueTypeLabel
-- **queue-test-helpers.ts** (NEW): createMockQueue, createMockQueueList helpers
+### Phase 4 Test Files (7 test modules)
+- **test_event_bus.py** (34 tests): Phase 4 — DB-backed EventBus, cursor-based SSE, multi-client, cleanup, merge
+- **test_event_repository.py** (19 tests): Event logging, message linking
+- **test_message_flow.py** (18 tests): Phase 3 core — enqueue_message_v2, _check_child_completion_v2, FIX C3, idempotency
+- **test_stale_task_recovery.py** (9 tests): Stale task detection and reset
+- **test_task_repository.py** (24 tests): Task CRUD, atomic claim behavior
+- **test_worker_pool.py** (17 tests): Worker pool lifecycle, concurrent task processing
 
-### Phase 3 Coverage
-- Queue Router: 7 endpoints tested (list, create, get, update, delete, start, stop)
-- IDOR protection: Cross-project access returns 404
-- System queue protection: Cannot delete system queues (403)
-- PROCESSING jobs: Cannot delete queue with active jobs (409)
-- Frontend build: `ng build` succeeds
-- Frontend service: All HTTP methods tested
-- Frontend model: All helper functions tested
+### Phase 4 Coverage
+- EventBus initialization, subscribe, broadcast
+- Cursor-based SSE delivery
+- Multi-client SSE at different cursor positions (FIX C2)
+- Merge algorithm (DB events + streaming events)
+- cleanup_old removes events past TTL
+- Thread-safe broadcast
 
 ### Branch History
+**Branch:** feature/message-queue-redesign
+- **Phase 4 (current):** 1623 tests passed ✅ (132 in message_queue_redesign/, 34 new Phase 4 tests)
+- **Phase 3:** 1581 tests passed ✅ (89 in message_queue_redesign/, 21 new tests)
+
 **Branch:** feature/job-queue-management
-- **Phase 3 (current):** 1492 backend + 197 frontend passed ✅
+- **Phase 3:** 1492 backend + 197 frontend passed ✅
 - **Phase 2:** 367 passed, 14 skipped ✅
 - **Phase 1:** 245 passed, 2 skipped ✅

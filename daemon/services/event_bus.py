@@ -10,7 +10,6 @@ Streaming events (in-memory only):
   → asyncio.Queue → SSE picks up immediately
 """
 import asyncio
-import json
 import logging
 import threading
 from typing import Any, Optional
@@ -69,16 +68,9 @@ class EventBus:
 
         # Thread safety
         self._sync_lock = threading.Lock()
-        self._async_lock: Optional[asyncio.Lock] = None
 
         # Event loop reference for sync operations
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-    def _get_async_lock(self) -> asyncio.Lock:
-        """Get or create the async lock."""
-        if self._async_lock is None:
-            self._async_lock = asyncio.Lock()
-        return self._async_lock
 
     # -------------------------------------------------------------------------
     # Lifecycle Event Methods (persist to DB + notify)

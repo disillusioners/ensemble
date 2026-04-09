@@ -564,6 +564,7 @@ Original scheduled task:
         # Note: instance.status is a string, compare with enum values
         is_active = instance.status in (
             InstanceStatus.running.value,
+            InstanceStatus.waiting.value,
             InstanceStatus.waiting_children.value,
         )
         
