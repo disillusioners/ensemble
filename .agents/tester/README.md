@@ -60,10 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-09 Phase 4 SSE Events)
+## Test Results (Latest: 2026-04-09 Phase 5 Remove Old Code)
 
 ### feature/message-queue-redesign branch
-- **1623 tests pass** (22 skipped, 0 failed) excluding integration
+- **1543 tests pass** (22 skipped, 0 failed, 0 errors) excluding integration
+- **129 message_queue_redesign tests pass** — Phase 1-4 redesign tests all pass
+- **ensure.sh validated** — Server starts, EventBus works, WorkerPool initializes, graceful shutdown
+- **No regressions** — Phase 5 removed 667 lines of old consumer pattern code from manager.py
+- See `.agents/tester/RESULTS/2026-04-09-phase5-remove-old-code.md` for full report
+
+### Phase 5 Status: ✅ READY
+
+### Previous Results
+- Phase 4: 1623 tests pass ✅ (22 skipped, 0 failed)
 - **132 message_queue_redesign tests pass** — Phase 4 SSE/EventBus tests
 - **34 new tests added** for Phase 4 (test_event_bus.py: DB-backed EventBus, cursor-based SSE)
 - dev.sh validated and working (ensure.md: PASS)
@@ -101,11 +110,12 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 4 SSE Events — Testing COMPLETE**
+**Phase 5 Remove Old Code — Testing COMPLETE**
 
-### Status: ✅ PASS
+### Status: ✅ READY
 
-**Latest:** 1623 tests pass on feature/message-queue-redesign, dev.sh validated
+**Latest:** 1543 tests pass on feature/message-queue-redesign, ensure.sh validated
+**Phase 5 Commit:** Removed 667 lines of old consumer pattern code from manager.py
 **Phase 4 Commit:** Unknown — DB-backed EventBus with cursor-based SSE delivery
 
 ### Phase 4 Test Files (7 test modules)
