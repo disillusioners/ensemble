@@ -7,6 +7,7 @@ from collections import OrderedDict
 from typing import Optional, TYPE_CHECKING
 
 from ..events import Event, EventBroadcaster
+from ..services.event_bus import EventBus
 from .base import OutgoingMessage
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class ResponseDispatcher:
     """Dispatches completed agent responses to appropriate message sources.
     
-    Listens for "completed" events from the event broadcaster and routes
+    Listens for "completed" events from the EventBus and routes
     responses to external sources using per-user ordering locks.
     """
     
@@ -26,18 +27,18 @@ class ResponseDispatcher:
     
     def __init__(
         self,
-        broadcaster: EventBroadcaster,
+        event_bus: EventBus,
         registry: "SourceRegistry",
         subscriber_id: str = "response_dispatcher"
     ) -> None:
         """Initialize the response dispatcher.
         
         Args:
-            broadcaster: EventBroadcaster to subscribe to.
+            event_bus: EventBus to subscribe to.
             registry: SourceRegistry to get adapters from.
             subscriber_id: Unique identifier for this subscriber.
         """
-        self._broadcaster = broadcaster
+        self._event_bus = event_bus
         self._registry: "SourceRegistry" = registry
         self._subscriber_id = subscriber_id
         
@@ -58,8 +59,8 @@ class ResponseDispatcher:
         
         logger.info("Starting ResponseDispatcher")
         
-        # Subscribe to all events from broadcaster (now async)
-        self._event_queue = await self._broadcaster.subscribe_all(self._subscriber_id)
+        # Subscribe to all events from EventBus
+        self._event_queue = self._event_bus.subscribe_all(self._subscriber_id)
         
         self._running = True
         self._task = asyncio.create_task(self._event_loop())
@@ -78,8 +79,8 @@ class ResponseDispatcher:
         logger.info(f"Stopping ResponseDispatcher (timeout={timeout}s)")
         self._running = False
         
-        # Unsubscribe from broadcaster
-        self._broadcaster.unsubscribe_all(self._subscriber_id)
+        # Unsubscribe from EventBus
+        self._event_bus.unsubscribe_all(self._subscriber_id)
         
         # Wait for task to complete with timeout
         if self._task is not None:
@@ -163,20 +164,24 @@ class ResponseDispatcher:
         
         logger.info("ResponseDispatcher event loop exited")
     
-    async def _handle_event(self, event: Event) -> None:
+    async def _handle_event(self, event: dict) -> None:
         """Process a completed event by sending response to source.
         
         Args:
-            event: The event to process.
+            event: The event dict from EventBus (with event_type and data keys).
         """
         try:
+            # EventBus sends dicts with "event_type" and "data" keys
+            event_type = event.get("event_type")
+            data = event.get("data", {})
+            
             # Step 1: Check event type is "completed"
-            if event.type != "completed":
-                logger.debug(f"Ignoring non-completed event: {event.type}")
+            if event_type != "completed":
+                logger.debug(f"Ignoring non-completed event: {event_type}")
                 return
             
             # Step 2: Get source from event data
-            source = event.data.get("source")
+            source = data.get("source")
             if not source:
                 logger.warning(f"Completed event missing source: {event}")
                 return
@@ -210,11 +215,11 @@ class ResponseDispatcher:
             # Step 5: Create OutgoingMessage
             outgoing = OutgoingMessage(
                 external_user_id=external_user_id,
-                content=event.data.get("content", ""),
+                content=data.get("content", ""),
                 source_id=source_id,
-                metadata=event.data.get("metadata", {}),
-                message_type=event.data.get("message_type", "text"),
-                reply_to_id=event.data.get("reply_to_id")
+                metadata=data.get("metadata", {}),
+                message_type=data.get("message_type", "text"),
+                reply_to_id=data.get("reply_to_id")
             )
             
             # Step 6: Send with per-user lock for ordering

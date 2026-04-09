@@ -77,6 +77,7 @@ from .models import (
 from .manager import InstanceManager
 from .config import Config, load_config
 from .events import event_to_sse
+from .services.event_bus import EventBus
 from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
 from .services.job_lock_manager import JobLockManager
@@ -229,6 +230,13 @@ async def lifespan(app: FastAPI):
     await job_processor.start()
     logger.info("JobProcessor started")
     
+    # Initialize EventBus with EventRepository for hybrid DB + streaming delivery
+    from .repositories.event.repository import EventRepository
+    event_repo = EventRepository(engine=manager._engine)
+    event_bus = EventBus(event_repo=event_repo)
+    app.state.event_bus = event_bus
+    app.state.event_repository = event_repo
+    
     # Auto-provision system queues for existing projects
     # This ensures all projects have their system queues (system_fifo_queue, system_parallel_queue)
     try:
@@ -246,6 +254,10 @@ async def lifespan(app: FastAPI):
     
     # Stop JobProcessor on shutdown
     await job_processor.stop()
+    
+    # Shutdown EventBus
+    if hasattr(app.state, 'event_bus'):
+        await app.state.event_bus.shutdown()
     
     # Call manager shutdown for graceful shutdown sequence
     # This handles cancellation of active requests, consumers, SSE, stop_sources(), etc.
@@ -934,6 +946,173 @@ async def stream_events(instance_id: str, request: Request):
             logger.debug(f"SSE disconnected from instance {instance_id}")
 
     return EventSourceResponse(event_generator(), ping=30)
+
+
+# 9. GET /instances/{instance_id}/events - SSE stream
+@api_router.get("/instances/{instance_id}/events")
+async def stream_events(instance_id: str, request: Request):
+    """SSE stream for instance events with DB-backed cursor delivery."""
+    # Reject new connections during shutdown
+    if manager.is_shutting_down:
+        raise HTTPException(status_code=503, detail="Server is shutting down")
+    
+    # Check instance exists
+    try:
+        manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}"
+            ).model_dump()
+        )
+
+    connection_id = str(uuid.uuid4())  # Unique ID for this connection
+
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        """Generate SSE events for the instance using EventBus."""
+        nonlocal connection_id
+        current_task = asyncio.current_task()
+        connected_at = time.monotonic()
+        
+        # Track this connection
+        async with _sse_lock:
+            _sse_connections[connection_id] = {
+                "instance_id": instance_id,
+                "connected_at": connected_at,
+                "task": current_task
+            }
+        
+        try:
+            # Send initial connection event
+            yield {"event": "connected", "data": json.dumps({"instance_id": instance_id})}
+
+            # Get Last-Event-ID from header for cursor-based reconnection
+            last_event_id = 0
+            if "Last-Event-ID" in request.headers:
+                try:
+                    last_event_id = int(request.headers.get("Last-Event-ID", 0))
+                except ValueError:
+                    logger.warning(f"Invalid Last-Event-ID header: {request.headers.get('Last-Event-ID')}")
+
+            # Get EventBus and EventRepository from app state
+            event_bus: EventBus = request.app.state.event_bus
+            event_repo = request.app.state.event_repository
+            
+            # First, replay missed events from DB (reconnection support)
+            if last_event_id > 0:
+                missed_events = event_repo.get_events_since(instance_id, last_event_id)
+                for event in missed_events:
+                    yield format_sse_event(event)
+                    last_event_id = max(last_event_id, event.id)
+                logger.debug(f"Replayed {len(missed_events)} events for instance {instance_id}")
+
+            # Get notification signal for this instance
+            notification = event_bus.get_notification(instance_id)
+            
+            event_count = 0
+            while True:
+                # Check for client disconnect
+                if await request.is_disconnected():
+                    logger.info(f"Client disconnected from instance {instance_id} after {event_count} events")
+                    break
+                
+                # Check connection TTL
+                if time.monotonic() - connected_at > SSE_CONNECTION_TTL_SECONDS:
+                    logger.info(f"SSE connection TTL expired for instance {instance_id} after {event_count} events")
+                    yield {"event": "shutdown", "data": json.dumps({"reason": "connection_timeout"})}
+                    break
+                
+                # Check if manager is shutting down
+                if manager.is_shutting_down:
+                    yield {"event": "shutdown", "data": json.dumps({"reason": "server_shutdown"})}
+                    break
+
+                try:
+                    # Wait for notification or timeout (keepalive every 30s)
+                    await asyncio.wait_for(notification.wait(), timeout=30)
+                    notification.clear()
+                except asyncio.TimeoutError:
+                    # Send keepalive
+                    yield {"event": "keepalive", "data": "{}"}
+                    continue
+                
+                # Read streaming events from in-memory queue
+                streaming_events = event_bus.get_streaming_events(instance_id)
+                
+                # Read lifecycle events from DB using cursor
+                db_events = event_repo.get_events_since(instance_id, last_event_id)
+                
+                # Merge DB and streaming events
+                # DB events: ordered by auto-increment id
+                # Streaming events: ordered by timestamp
+                # Merge by created_at, streaming events first if same timestamp
+                all_events = []
+                for e in db_events:
+                    all_events.append(("db", e.created_at, e))
+                for e in streaming_events:
+                    all_events.append(("streaming", time.time(), e))  # Use current time for streaming events
+                all_events.sort(key=lambda x: (x[1], 0 if x[0] == "streaming" else 1))
+                
+                # Yield merged events
+                for kind, _, event in all_events:
+                    yield format_sse_event(event)
+                    if kind == "db":
+                        last_event_id = max(last_event_id, event.id)
+                    event_count += 1
+
+        except Exception as e:
+            # Catch-all for generator errors
+            logger.exception(f"Fatal error in event generator for instance {instance_id}")
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
+            }
+        finally:
+            # Clean up connection tracking
+            async with _sse_lock:
+                _sse_connections.pop(connection_id, None)
+            logger.debug(f"SSE disconnected from instance {instance_id}")
+
+    return EventSourceResponse(event_generator(), ping=30)
+
+
+def format_sse_event(event) -> dict:
+    """Format event for SSE response (works with both Event dataclass and Event model)."""
+    # Handle Event dataclass (from streaming)
+    if hasattr(event, 'type'):
+        event_type = event.type
+        event_id = event.event_id
+        message_id = event.message_id
+        instance_id = event.instance_id
+        data = event.data
+    # Handle Event model (from DB)
+    elif hasattr(event, 'kind'):
+        event_type = event.kind
+        event_id = event.id
+        message_id = event.message_id
+        instance_id = event.instance_id
+        data = json.loads(event.data) if event.data else {}
+    # Handle streaming events from EventBus (dict format)
+    elif isinstance(event, dict):
+        event_type = event.get("event_type", "unknown")
+        event_id = 0  # Streaming events don't have DB IDs
+        message_id = None
+        instance_id = event.get("instance_id", "")
+        data = event.get("data", {})
+    else:
+        return {"event": "error", "data": json.dumps({"error": "Unknown event type"})}
+    
+    return {
+        "id": str(event_id),
+        "event": event_type,
+        "data": json.dumps({
+            "message_id": message_id,
+            "instance_id": instance_id,
+            **data
+        })
+    }
 
 
 # ==================== Source Management Endpoints ====================

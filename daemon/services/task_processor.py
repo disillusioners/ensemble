@@ -7,6 +7,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from .event_bus import EventBus
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
@@ -49,6 +50,7 @@ class ProcessMessageProcessor(BaseProcessor):
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
         message_repository=None,
+        event_bus: "EventBus | None" = None,
     ):
         """Initialize the message processor.
 
@@ -57,11 +59,13 @@ class ProcessMessageProcessor(BaseProcessor):
             task_repo: TaskRepository for task operations.
             event_repo: Optional EventRepository for event creation.
             message_repository: Optional MessageQueueRepository for message updates.
+            event_bus: Optional EventBus for event creation.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
         self._message_repo = message_repository
+        self._event_bus = event_bus
 
     async def process(self, task: "Task") -> dict[str, Any]:
         """Process a message task with full lifecycle.
@@ -107,7 +111,12 @@ class ProcessMessageProcessor(BaseProcessor):
         is_retry = message.retry_count > 0 if hasattr(message, 'retry_count') else False
         
         # Create processing_started event
-        if self._event_repo:
+        if self._event_bus:
+            await self._event_bus.create_processing_started_event(
+                instance_id=task.instance_id,
+                message_id=task.message_id,
+            )
+        elif self._event_repo:
             await asyncio.to_thread(
                 self._event_repo.create_event,
                 instance_id=task.instance_id,
@@ -131,7 +140,17 @@ class ProcessMessageProcessor(BaseProcessor):
             )
             
             # Create processing_completed event
-            if self._event_repo:
+            if self._event_bus:
+                await self._event_bus.create_processing_completed_event(
+                    instance_id=task.instance_id,
+                    message_id=task.message_id,
+                    result={
+                        "task_id": task.id,
+                        "message_id": task.message_id,
+                        "success": True,
+                    },
+                )
+            elif self._event_repo:
                 await asyncio.to_thread(
                     self._event_repo.create_event,
                     instance_id=task.instance_id,
@@ -165,7 +184,16 @@ class ProcessMessageProcessor(BaseProcessor):
             logger.error(f"Failed to process message task {task.id}: {e}", exc_info=True)
             
             # Create error event
-            if self._event_repo:
+            if self._event_bus:
+                await self._event_bus.create_error_event(
+                    instance_id=task.instance_id,
+                    error={
+                        "task_id": task.id,
+                        "message_id": task.message_id,
+                        "error": str(e),
+                    },
+                )
+            elif self._event_repo:
                 await asyncio.to_thread(
                     self._event_repo.create_event,
                     instance_id=task.instance_id,
@@ -191,10 +219,12 @@ class SendReportProcessor(BaseProcessor):
         instance_manager,
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
+        event_bus: "EventBus | None" = None,
     ):
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
+        self._event_bus = event_bus
 
     async def process(self, task: "Task") -> dict[str, Any]:
         """Send a completion report to the parent instance.
@@ -221,10 +251,12 @@ class CleanupProcessor(BaseProcessor):
         instance_manager,
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
+        event_bus: "EventBus | None" = None,
     ):
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
+        self._event_bus = event_bus
 
     async def process(self, task: "Task") -> dict[str, Any]:
         """Perform cleanup for an instance.
@@ -255,6 +287,7 @@ class TaskProcessor:
         task_repo: "TaskRepository",
         instance_manager,
         event_repo: "EventRepository | None" = None,
+        event_bus: "EventBus | None" = None,
     ):
         """Initialize the task processor.
 
@@ -262,22 +295,27 @@ class TaskProcessor:
             task_repo: TaskRepository for task operations.
             instance_manager: InstanceManager for message processing.
             event_repo: Optional EventRepository for event creation.
+            event_bus: Optional EventBus for event creation.
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
+        self._event_bus = event_bus
 
         # Create type-specific processors
         self._processors: dict[str, BaseProcessor] = {
             "process_message": ProcessMessageProcessor(
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
+                event_bus=event_bus,
             ),
             "send_report": SendReportProcessor(
-                instance_manager, task_repo, event_repo
+                instance_manager, task_repo, event_repo,
+                event_bus=event_bus,
             ),
             "cleanup": CleanupProcessor(
-                instance_manager, task_repo, event_repo
+                instance_manager, task_repo, event_repo,
+                event_bus=event_bus,
             ),
         }
 
