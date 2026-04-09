@@ -49,6 +49,94 @@ class TestEventCreation:
             )
             assert event.kind == kind.value
 
+    def test_create_event_with_message_id(self, engine):
+        """Test creating an event with message_id."""
+        repo = EventRepository(engine)
+        
+        event = repo.create_event(
+            instance_id="test-instance-123",
+            kind=EventKind.MESSAGE_RECEIVED.value,
+            data={"message": "Hello"},
+            message_id="msg-abc-123",
+        )
+        
+        assert event.id is not None
+        assert event.instance_id == "test-instance-123"
+        assert event.message_id == "msg-abc-123"
+        assert event.kind == EventKind.MESSAGE_RECEIVED.value
+
+    def test_create_event_without_message_id(self, engine):
+        """Test creating an event without message_id (should be None)."""
+        repo = EventRepository(engine)
+        
+        event = repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.PROCESSING_STARTED.value,
+        )
+        
+        assert event.message_id is None
+
+
+class TestMessageIdCorrelation:
+    """Tests for event-to-message correlation via message_id."""
+
+    def test_event_message_correlation(self, engine):
+        """Test correlating events with a message via message_id."""
+        repo = EventRepository(engine)
+        message_id = "msg-correlation-test"
+        
+        # Create multiple events for the same message
+        event1 = repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.MESSAGE_RECEIVED.value,
+            message_id=message_id,
+        )
+        event2 = repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.PROCESSING_STARTED.value,
+            message_id=message_id,
+        )
+        
+        # Retrieve all events
+        events = repo.get_by_instance("test-instance")
+        
+        # Find events with the same message_id
+        correlated_events = [e for e in events if e.message_id == message_id]
+        assert len(correlated_events) == 2
+        assert correlated_events[0].kind == EventKind.MESSAGE_RECEIVED.value
+        assert correlated_events[1].kind == EventKind.PROCESSING_STARTED.value
+
+    def test_events_from_different_messages(self, engine):
+        """Test that events from different messages are distinguishable."""
+        repo = EventRepository(engine)
+        
+        # Create events for different messages
+        repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.MESSAGE_RECEIVED.value,
+            message_id="msg-1",
+        )
+        repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.MESSAGE_RECEIVED.value,
+            message_id="msg-2",
+        )
+        repo.create_event(
+            instance_id="test-instance",
+            kind=EventKind.PROCESSING_STARTED.value,
+            message_id="msg-1",
+        )
+        
+        events = repo.get_by_instance("test-instance")
+        assert len(events) == 3
+        
+        # Count events per message
+        msg1_events = [e for e in events if e.message_id == "msg-1"]
+        msg2_events = [e for e in events if e.message_id == "msg-2"]
+        
+        assert len(msg1_events) == 2
+        assert len(msg2_events) == 1
+
 
 class TestEventRetrieval:
     """Tests for event retrieval."""

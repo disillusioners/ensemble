@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from sqlalchemy import Index
 from sqlmodel import SQLModel, Field
@@ -35,6 +35,9 @@ class Event(SQLModel, table=True):
     # Instance reference
     instance_id: str = Field(index=True)
 
+    # Message reference (for correlating events with messages)
+    message_id: Optional[str] = Field(default=None, index=True)
+
     # Event type
     kind: str = Field(default=EventKind.MESSAGE_RECEIVED.value)
 
@@ -44,11 +47,12 @@ class Event(SQLModel, table=True):
     # Timestamp
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, object]:
         """Convert to dictionary for serialization."""
         return {
             "id": self.id,
             "instance_id": self.instance_id,
+            "message_id": self.message_id,
             "kind": self.kind,
             "data": self.data,
             "created_at": self.created_at.isoformat() if self.created_at else None,

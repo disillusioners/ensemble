@@ -256,10 +256,11 @@ class TestInstanceStatus:
     def test_instance_status_values(self):
         """Test InstanceStatus has correct number of values."""
         values = [s.value for s in InstanceStatus]
-        assert len(values) == 5
+        assert len(values) == 6
         assert "idle" in values
         assert "running" in values
         assert "waiting" in values
+        assert "waiting_children" in values
         assert "error" in values
         assert "terminated" in values
 

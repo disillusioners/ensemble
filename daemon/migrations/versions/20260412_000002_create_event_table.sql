@@ -9,6 +9,7 @@
 CREATE TABLE IF NOT EXISTS event (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     instance_id         TEXT NOT NULL,
+    message_id          TEXT,
     kind                TEXT NOT NULL DEFAULT 'message_received'
                           CHECK(kind IN (
                             'message_received', 'processing_started',

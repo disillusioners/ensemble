@@ -52,8 +52,8 @@ class MessageQueue(SQLModel, table=True):
     priority: int = Field(default=1)
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=5)
-    error_message: Optional[str] = None
-    last_error: Optional[str] = None  # Last error message
+    error_message: Optional[str] = Field(default=None)
+    last_error: Optional[str] = Field(default=None)  # Last error message
     
     # Use 'message_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     message_metadata: dict[str, Any] = Field(
@@ -62,10 +62,10 @@ class MessageQueue(SQLModel, table=True):
     )
     
     enqueued_at: datetime = Field(default_factory=datetime.utcnow)
-    processing_started_at: Optional[datetime] = None
-    last_activity_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    next_retry_at: Optional[datetime] = None
+    processing_started_at: Optional[datetime] = Field(default=None)
+    last_activity_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    next_retry_at: Optional[datetime] = Field(default=None)
     
     # FK to task table
     processing_task_id: Optional[str] = Field(default=None, index=True)

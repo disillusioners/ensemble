@@ -29,10 +29,12 @@ class EventRepository:
         instance_id: str,
         kind: str,
         data: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> Event:
         """Create a new event."""
         event = Event(
             instance_id=instance_id,
+            message_id=message_id,
             kind=kind,
             data=json.dumps(data) if data is not None else None,
             created_at=datetime.now(timezone.utc),
@@ -64,7 +66,7 @@ class EventRepository:
             stmt = (
                 select(Event)
                 .where(Event.instance_id == instance_id)
-                .order_by(Event.created_at.asc())
+                .order_by(Event.id.asc())
                 .limit(limit)
             )
             return list(session.exec(stmt))
@@ -99,19 +101,15 @@ class EventRepository:
                     .limit(limit)
                 )
             else:
-                # No cursor: get latest events (for SSE initial connection)
+                # No cursor: get events in chronological order (id ascending)
                 stmt = (
                     select(Event)
                     .where(Event.instance_id == instance_id)
-                    .order_by(Event.created_at.desc())
+                    .order_by(Event.id.asc())
                     .limit(limit)
                 )
 
             events = list(session.exec(stmt))
-
-            # For initial connection (no cursor), reverse to chronological order
-            if after_id is None:
-                events.reverse()
 
             return events
 

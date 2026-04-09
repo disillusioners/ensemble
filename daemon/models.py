@@ -11,6 +11,7 @@ class InstanceStatus(str, Enum):
     idle = "idle"
     running = "running"
     waiting = "waiting"
+    waiting_children = "waiting_children"
     error = "error"
     terminated = "terminated"
 
