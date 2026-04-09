@@ -50,13 +50,15 @@ class SQLModelInstanceRepository:
         """Load children onto instance."""
         if instance is None:
             return None
-        instance.children = self._load_children(db_session, instance.instance_id)
+        with db_session.no_autoflush:
+            instance.children = self._load_children(db_session, instance.instance_id)
         return instance
 
     def _enrich_instances(self, db_session: SQLModelSession, instances: list[Instance]) -> list[Instance]:
         """Load children for multiple instances."""
-        for inst in instances:
-            inst.children = self._load_children(db_session, inst.instance_id)
+        with db_session.no_autoflush:
+            for inst in instances:
+                inst.children = self._load_children(db_session, inst.instance_id)
         return instances
 
     # --------------------------------------------------------
