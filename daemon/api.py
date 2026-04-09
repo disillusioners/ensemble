@@ -823,134 +823,6 @@ async def get_messages(instance_id: str):
 # 9. GET /instances/{instance_id}/events - SSE stream
 @api_router.get("/instances/{instance_id}/events")
 async def stream_events(instance_id: str, request: Request):
-    """SSE stream for instance events."""
-    # Reject new connections during shutdown
-    if manager.is_shutting_down:
-        raise HTTPException(status_code=503, detail="Server is shutting down")
-    
-    # Check instance exists
-    try:
-        manager.get_instance(instance_id)
-    except KeyError:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
-            ).model_dump()
-        )
-
-    broadcaster = manager.broadcaster
-    connection_id = str(uuid.uuid4())  # Unique ID for this connection
-
-    async def event_generator() -> AsyncGenerator[dict, None]:
-        """Generate SSE events for the instance."""
-        import asyncio
-        import json
-        
-        nonlocal connection_id
-        current_task = asyncio.current_task()
-        connected_at = time.monotonic()
-        
-        # Track this connection
-        async with _sse_lock:
-            _sse_connections[connection_id] = {
-                "instance_id": instance_id,
-                "connected_at": connected_at,
-                "task": current_task
-            }
-        
-        try:
-            # Send initial connection event
-            yield {"event": "connected", "data": json.dumps({"instance_id": instance_id})}
-
-            # Handle reconnection - get Last-Event-ID header
-            last_event_id = request.headers.get("Last-Event-ID")
-            if last_event_id:
-                try:
-                    last_id = int(last_event_id)
-                    # Send missed events for reconnection
-                    missed_events = broadcaster.get_events_since(instance_id, last_id)
-                    for event in missed_events:
-                        yield event_to_sse(event)
-                    logger.debug(f"Replayed {len(missed_events)} events for instance {instance_id}")
-                except ValueError:
-                    logger.warning(f"Invalid Last-Event-ID header: {last_event_id}")
-
-            # Clear any stale events from previous connection
-            broadcaster.clear_queue(instance_id)
-            
-            # Get the event queue for this instance
-            queue = await broadcaster.get_queue(instance_id)
-            logger.info(f"SSE connected to instance {instance_id}, queue ready")
-
-            event_count = 0
-            while True:
-                # Check for client disconnect
-                if await request.is_disconnected():
-                    logger.info(f"Client disconnected from instance {instance_id} after {event_count} events")
-                    break
-                
-                # Check connection TTL
-                if time.monotonic() - connected_at > SSE_CONNECTION_TTL_SECONDS:
-                    logger.info(f"SSE connection TTL expired for instance {instance_id} after {event_count} events")
-                    yield {"event": "shutdown", "data": json.dumps({"reason": "connection_timeout"})}
-                    break
-                
-                # Check if manager is shutting down
-                if manager.is_shutting_down:
-                    yield {"event": "shutdown", "data": json.dumps({"reason": "server_shutdown"})}
-                    break
-
-                try:
-                    # Wait for events
-                    event = await queue.get()
-                    
-                    # Check for sentinel (shutdown signal)
-                    if event is None:
-                        logger.debug(f"Received sentinel for instance {instance_id}")
-                        yield {"event": "shutdown", "data": json.dumps({"reason": "sentinel"})}
-                        break
-                    
-                    event_count += 1
-                    # Log every 50 events to track consumption rate
-                    if event_count % 50 == 0:
-                        logger.debug(f"SSE sent {event_count} events for instance {instance_id}, queue size: {queue.qsize()}")
-                    yield event_to_sse(event)
-                except Exception as e:
-                    # Log the error but continue the stream for transient errors
-                    logger.error(f"Error retrieving event for instance {instance_id}: {e}")
-                    # Only break on fatal errors, not transient ones
-                    if isinstance(e, (asyncio.CancelledError, asyncio.InvalidStateError)):
-                        yield {
-                            "event": "error", 
-                            "data": json.dumps({"error": "Stream error", "details": str(e)})
-                        }
-                        break
-                    # For other errors, send an error event but continue streaming
-                    yield {
-                        "event": "error", 
-                        "data": json.dumps({"error": "Transient error", "details": str(e), "recoverable": True})
-                    }
-        except Exception as e:
-            # Catch-all for generator errors
-            logger.exception(f"Fatal error in event generator for instance {instance_id}")
-            yield {
-                "event": "error",
-                "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
-            }
-        finally:
-            # Clean up connection tracking
-            async with _sse_lock:
-                _sse_connections.pop(connection_id, None)
-            logger.debug(f"SSE disconnected from instance {instance_id}")
-
-    return EventSourceResponse(event_generator(), ping=30)
-
-
-# 9. GET /instances/{instance_id}/events - SSE stream
-@api_router.get("/instances/{instance_id}/events")
-async def stream_events(instance_id: str, request: Request):
     """SSE stream for instance events with DB-backed cursor delivery."""
     # Reject new connections during shutdown
     if manager.is_shutting_down:
@@ -1039,7 +911,7 @@ async def stream_events(instance_id: str, request: Request):
                     continue
                 
                 # Read streaming events from in-memory queue
-                streaming_events = event_bus.get_streaming_events(instance_id)
+                streaming_events = await event_bus.get_streaming_events(instance_id)
                 
                 # Read lifecycle events from DB using cursor
                 db_events = event_repo.get_events_since(instance_id, last_event_id)

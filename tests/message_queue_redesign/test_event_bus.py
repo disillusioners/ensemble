@@ -491,27 +491,40 @@ class TestEventBusCleanup:
 
     @pytest.mark.asyncio
     async def test_cleanup_old_removes_old_events(
-        self, event_bus, event_repo, instance_id
+        self, event_repo, instance_id
     ):
-        """cleanup_old removes events older than specified hours."""
+        """
+        Cleanup removes events older than threshold.
+        """
         # Create some events
-        for i in range(5):
-            await event_bus.create_message_received_event(
+        for i in range(3):
+            event_repo.create_event(
                 instance_id=instance_id,
-                message_id=f"msg-{i}",
+                kind=EventKind.PROCESSING_COMPLETED.value,
+                data={"sequence": i},
             )
 
-        # Verify events exist
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 5
+        # Manually set old timestamps in the DB (bypass the default factory)
+        with event_repo.engine.connect() as conn:
+            from sqlalchemy import text, update
+            from daemon.repositories.event.models import Event
+            from datetime import datetime, timedelta, timezone
 
-        # Cleanup with 0 hours (should remove all)
-        deleted = await event_bus.cleanup_old(hours=0)
-        assert deleted >= 5
+            old_time = datetime.now(timezone.utc) - timedelta(hours=48)
+            conn.execute(
+                update(Event).where(Event.instance_id == instance_id).values(created_at=old_time)
+            )
+            conn.commit()
 
-        # Events should be gone
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 0
+        # Cleanup with 24 hour threshold
+        deleted = event_repo.cleanup_old(max_age_hours=24)
+
+        # All events should be deleted (they're older than 24 hours)
+        assert deleted >= 3
+
+        # Verify no events remain
+        remaining = event_repo.get_events_since(instance_id, after_id=0)
+        assert len(remaining) == 0
 
     @pytest.mark.asyncio
     async def test_cleanup_instance_removes_memory_state(

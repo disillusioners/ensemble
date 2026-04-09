@@ -1,247 +1,436 @@
-"""Integration tests for progressive streaming (SSE) functionality."""
+"""Integration tests for SSE streaming with EventBus."""
 
 import pytest
-import pytest_asyncio
-import asyncio
-import json
-import tempfile
-import sqlite3
-import os
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
-from datetime import datetime
-import httpx
-import sse_starlette
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel
 
-from daemon import api as api_module
-from daemon.events import EventBroadcaster, Event
-from daemon.manager import InstanceManager, MessageResult
-from daemon.models import InstanceCreate, MessageCreate
+from daemon.services.event_bus import EventBus
+from daemon.repositories.event.models import EventKind
+from daemon.repositories.event.repository import EventRepository
 
 
 # ============================================================================
 # Fixtures
 # ============================================================================
 
-@pytest_asyncio.fixture
-async def mock_manager():
-    """Create a mock InstanceManager with all needed methods."""
-    import tempfile
-    
-    manager = Mock()
-    manager.spawn_instance = Mock(return_value="test-instance-id")
-    manager.get_instance = Mock()
-    manager.send_message = Mock(return_value=MessageResult(content="Test response"))
-    manager.terminate_instance = Mock(return_value=True)
-    manager.list_instances = Mock(return_value=[])
-    manager.get_instance_info = Mock(return_value={
-        "instance_id": "test-instance-id",
-        "agent_dir": "/path/to/agent",
-        "status": "running",
-        "parent_id": None,
-        "children": [],
-        "created_at": "2024-01-01T00:00:00",
-        "updated_at": "2024-01-01T00:00:00"
-    })
-    manager.enqueue_message = AsyncMock(return_value=Mock(
-        message_id="test-message-id",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
-    manager.get_messages = AsyncMock(return_value=[])
-    manager.get_queue_stats = Mock(return_value=Mock(
-        pending_count=0,
-        processing_count=0,
-        oldest_message_age_seconds=0
-    ))
-    
-    # Mock broadcaster
-    manager.broadcaster = EventBroadcaster()
-    
-    # Temp database
-    temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    temp_db_path = temp_db.name
-    temp_db.close()
-    conn = sqlite3.connect(temp_db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS source_configs (
-            source_id TEXT PRIMARY KEY,
-            source_type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            config TEXT NOT NULL,
-            credentials TEXT,
-            enabled BOOLEAN DEFAULT TRUE,
-            status TEXT DEFAULT 'stopped',
-            error_message TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    manager.conn = conn
-    manager._temp_db_path = temp_db_path
-    manager.source_registry = None
-    
-    yield manager
-    
-    # Cleanup
-    try:
-        conn.close()
-    except Exception:
-        pass
-    try:
-        os.unlink(temp_db_path)
-    except Exception:
-        pass
+@pytest.fixture
+def engine():
+    """In-memory SQLite for testing."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture
-def app_with_mock_manager(mock_manager):
-    """Create FastAPI app with mocked manager."""
-    with patch.object(api_module, 'manager', mock_manager), \
-         patch.object(api_module, 'start_time', 1000.0):
-        yield mock_manager
+def event_repo(engine):
+    """EventRepository fixture."""
+    return EventRepository(engine=engine)
 
 
-@pytest_asyncio.fixture
-async def client(app_with_mock_manager):
-    """Create async test client."""
-    from daemon.api import app
-    
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), 
-        base_url="http://test"
-    ) as ac:
-        yield ac
+@pytest.fixture
+def event_bus(event_repo):
+    """EventBus fixture."""
+    return EventBus(event_repo=event_repo)
 
 
 # ============================================================================
-# Integration Tests: SSE Streaming
+# Integration Tests: EventBus SSE Streaming
 # ============================================================================
 
-class TestSSEStreamConnection:
-    """Tests for SSE stream connection establishment."""
+class TestEventBusLifecyclePersistence:
+    """Test lifecycle events are persisted to DB via EventBus."""
 
     @pytest.mark.asyncio
-    async def test_sse_endpoint_returns_sse_response(self, mock_manager):
-        """Test that /api/instances/{id}/events endpoint exists and is registered."""
-        from daemon.api import api_router
-        
-        # Verify the route exists in the router (routes are prefixed with /api)
-        routes = [r.path for r in api_router.routes]
-        expected_route = "/api/instances/{instance_id}/events"
-        assert expected_route in routes, f"Expected route {expected_route} not found in {routes}"
+    async def test_processing_completed_event_persisted_to_db(self, engine, event_repo, event_bus):
+        """Processing completed lifecycle event should be persisted to DB."""
+        instance_id = "test-instance-123"
+
+        # Create lifecycle event
+        await event_bus.create_processing_completed_event(
+            instance_id=instance_id,
+            message_id="msg-123",
+            result={"output": "test result"}
+        )
+
+        # Verify persisted to DB
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 1
+        assert events[0].kind == EventKind.PROCESSING_COMPLETED.value
+        assert events[0].message_id == "msg-123"
+        # Data should be stored as JSON string
+        assert events[0].data is not None
+        assert "output" in events[0].data
 
     @pytest.mark.asyncio
-    async def test_sse_endpoint_rejects_non_sse_clients(self, mock_manager):
-        """Test that SSE endpoint properly handles non-SSE Accept header."""
-        from daemon.api import api_router
-        
-        # Verify the route exists (routes are prefixed with /api)
-        routes = [r.path for r in api_router.routes]
-        expected_route = "/api/instances/{instance_id}/events"
-        assert expected_route in routes, f"Expected route {expected_route} not found in {routes}"
+    async def test_message_received_event_persisted_to_db(self, engine, event_repo, event_bus):
+        """Message received lifecycle event should be persisted to DB."""
+        instance_id = "test-instance-456"
 
+        # Create lifecycle event
+        await event_bus.create_message_received_event(
+            instance_id=instance_id,
+            message_id="msg-789",
+            content={"text": "Hello world"}
+        )
 
-class TestSSEEventTypes:
-    """Tests for different SSE event types."""
+        # Verify persisted to DB
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 1
+        assert events[0].kind == EventKind.MESSAGE_RECEIVED.value
+        assert events[0].message_id == "msg-789"
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_message_queued_event(self, mock_manager):
-        """Test message_queued event is broadcast correctly."""
-        broadcaster = mock_manager.broadcaster
-        
+    async def test_processing_started_event_persisted_to_db(self, engine, event_repo, event_bus):
+        """Processing started lifecycle event should be persisted to DB."""
+        instance_id = "test-instance-789"
+
+        await event_bus.create_processing_started_event(
+            instance_id=instance_id,
+            message_id="msg-start"
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 1
+        assert events[0].kind == EventKind.PROCESSING_STARTED.value
+
+    @pytest.mark.asyncio
+    async def test_processing_failed_event_persisted_to_db(self, engine, event_repo, event_bus):
+        """Processing failed lifecycle event should be persisted to DB."""
+        instance_id = "test-instance-fail"
+
+        await event_bus.create_processing_failed_event(
+            instance_id=instance_id,
+            message_id="msg-fail",
+            error={"message": "Something went wrong"}
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 1
+        assert events[0].kind == EventKind.PROCESSING_FAILED.value
+
+    @pytest.mark.asyncio
+    async def test_multiple_lifecycle_events_sequentially(self, engine, event_repo, event_bus):
+        """Multiple lifecycle events should all be persisted in order."""
+        instance_id = "test-instance-multi"
+
+        await event_bus.create_message_received_event(
+            instance_id=instance_id,
+            message_id="msg-1",
+            content={"text": "First message"}
+        )
+
+        await event_bus.create_processing_started_event(
+            instance_id=instance_id,
+            message_id="msg-1",
+        )
+
+        await event_bus.create_processing_completed_event(
+            instance_id=instance_id,
+            message_id="msg-1",
+            result={"content": "Response"}
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 3
+        assert events[0].kind == EventKind.MESSAGE_RECEIVED.value
+        assert events[1].kind == EventKind.PROCESSING_STARTED.value
+        assert events[2].kind == EventKind.PROCESSING_COMPLETED.value
+
+
+class TestEventBusStreamingNotPersisted:
+    """Test streaming events are NOT persisted to DB."""
+
+    @pytest.mark.asyncio
+    async def test_content_chunk_not_persisted(self, engine, event_repo, event_bus):
+        """Content chunk streaming event should NOT be persisted to DB."""
+        instance_id = "test-instance-stream"
+
+        # Broadcast streaming event
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="content_chunk",
+            data={"chunk": "Hello "}
+        )
+
+        # Verify NOT persisted to DB
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 0, "Streaming events should NOT be persisted"
+
+        # But should be in streaming queue
+        streaming = await event_bus.get_streaming_events(instance_id)
+        assert len(streaming) == 1
+        assert streaming[0]["event_type"] == "content_chunk"
+
+    @pytest.mark.asyncio
+    async def test_thinking_event_not_persisted(self, engine, event_repo, event_bus):
+        """Thinking streaming event should NOT be persisted to DB."""
+        instance_id = "test-instance-thinking"
+
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="thinking",
+            data={"content": "Let me think..."}
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 0, "Streaming events should NOT be persisted"
+
+    @pytest.mark.asyncio
+    async def test_tool_call_event_not_persisted(self, engine, event_repo, event_bus):
+        """Tool call streaming event should NOT be persisted to DB."""
+        instance_id = "test-instance-tool"
+
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="tool_call",
+            data={"id": "call_1", "name": "bash", "arguments": {"command": "ls"}}
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 0, "Streaming events should NOT be persisted"
+
+    @pytest.mark.asyncio
+    async def test_tool_complete_event_not_persisted(self, engine, event_repo, event_bus):
+        """Tool complete streaming event should NOT be persisted to DB."""
+        instance_id = "test-instance-tool-complete"
+
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="tool_complete",
+            data={"id": "call_1", "name": "bash", "output": "files here"}
+        )
+
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 0, "Streaming events should NOT be persisted"
+
+    @pytest.mark.asyncio
+    async def test_mixed_lifecycle_and_streaming(self, engine, event_repo, event_bus):
+        """Mix of lifecycle and streaming events - only lifecycle persisted."""
+        instance_id = "test-instance-mixed"
+
+        # Lifecycle event
+        await event_bus.create_message_received_event(
+            instance_id=instance_id,
+            message_id="msg-1",
+            content={"text": "Hello"}
+        )
+
+        # Streaming events
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="content_chunk",
+            data={"chunk": "Hi "}
+        )
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="content_chunk",
+            data={"chunk": "there!"}
+        )
+
+        # Only lifecycle events should be in DB
+        events = event_repo.get_events_since(instance_id, after_id=None)
+        assert len(events) == 1
+        assert events[0].kind == EventKind.MESSAGE_RECEIVED.value
+
+        # Streaming events in queue
+        streaming = await event_bus.get_streaming_events(instance_id)
+        assert len(streaming) == 2
+
+
+class TestEventBusNotification:
+    """Test EventBus notification mechanism."""
+
+    @pytest.mark.asyncio
+    async def test_notification_set_on_lifecycle_event(self, event_bus):
+        """Lifecycle events should trigger notification."""
+        instance_id = "test-instance-notify"
+
+        # Get notification
+        notification = event_bus.get_notification(instance_id)
+        assert not notification.is_set()
+
+        # Create lifecycle event
+        await event_bus.create_message_received_event(
+            instance_id=instance_id,
+            message_id="msg-456",
+            content={"text": "test"}
+        )
+
+        # Notification should be set
+        assert notification.is_set()
+
+    @pytest.mark.asyncio
+    async def test_notification_set_on_streaming_event(self, event_bus):
+        """Streaming events should also trigger notification."""
+        instance_id = "test-instance-stream-notify"
+
+        notification = event_bus.get_notification(instance_id)
+        assert not notification.is_set()
+
+        # Broadcast streaming event
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="content_chunk",
+            data={"chunk": "test"}
+        )
+
+        # Notification should be set
+        assert notification.is_set()
+
+
+class TestEventBusCleanup:
+    """Test EventBus cleanup functionality."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_removes_in_memory_state(self, event_bus):
+        """Cleanup should remove in-memory state for an instance."""
+        instance_id = "instance-to-clean"
+
+        # Add some state
+        await event_bus.broadcast_streaming_event(
+            instance_id=instance_id,
+            event_type="content_chunk",
+            data={"chunk": "test"}
+        )
+        event_bus.get_notification(instance_id)
+
+        # Verify state exists
+        assert instance_id in event_bus._streaming_channels
+        assert instance_id in event_bus._notifications
+
+        # Cleanup
+        event_bus.cleanup_instance(instance_id)
+
+        # Verify cleaned up
+        assert instance_id not in event_bus._streaming_channels
+        assert instance_id not in event_bus._notifications
+
+
+# ============================================================================
+# Legacy Tests: EventBroadcaster (deprecated)
+# ============================================================================
+
+class TestLegacyEventBroadcaster:
+    """Tests for legacy EventBroadcaster (deprecated).
+
+    These tests cover the old in-memory EventBroadcaster API which is no longer
+    used by the SSE endpoints. Kept for reference and migration validation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_event_broadcaster_sends_message_queued_event(self):
+        """Test legacy message_queued event is broadcast correctly."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
         # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+        queue = await broadcaster.get_queue(instance_id)
+
         await broadcaster.broadcast(Event(
             type="message_queued",
-            instance_id="instance-1",
+            instance_id=instance_id,
             message_id="msg-1",
             data={"content": "Hello", "source": "api"}
         ))
-        
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
+
+        event = await queue.get()
+
         assert event.type == "message_queued"
         assert event.data["content"] == "Hello"
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_status_changed_event(self, mock_manager):
-        """Test status_changed event is broadcast correctly."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+    async def test_event_broadcaster_sends_status_changed_event(self):
+        """Test legacy status_changed event is broadcast correctly."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
+        queue = await broadcaster.get_queue(instance_id)
+
         await broadcaster.broadcast(Event(
             type="status_changed",
-            instance_id="instance-1",
+            instance_id=instance_id,
             message_id="msg-1",
             data={"status": "processing"}
         ))
-        
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
+
+        event = await queue.get()
+
         assert event.type == "status_changed"
         assert event.data["status"] == "processing"
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_content_chunk_event(self, mock_manager):
-        """Test content_chunk event for progressive streaming."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+    async def test_event_broadcaster_sends_content_chunk_event(self):
+        """Test legacy content_chunk event for progressive streaming."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
+        queue = await broadcaster.get_queue(instance_id)
+
         # Simulate progressive chunks
         chunks = ["Hello", " ", "world", "!"]
         for chunk in chunks:
             await broadcaster.broadcast(Event(
                 type="content_chunk",
-                instance_id="instance-1",
+                instance_id=instance_id,
                 message_id="msg-1",
                 data={"chunk": chunk}
             ))
-        
+
         # Collect all chunks
         received_chunks = []
         for _ in range(4):
-            event = await asyncio.wait_for(queue.get(), timeout=1.0)
+            event = await queue.get()
             received_chunks.append(event.data["chunk"])
-        
+
         assert "".join(received_chunks) == "Hello world!"
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_thinking_event(self, mock_manager):
-        """Test thinking event for extended thinking models."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+    async def test_event_broadcaster_sends_thinking_event(self):
+        """Test legacy thinking event for extended thinking models."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
+        queue = await broadcaster.get_queue(instance_id)
+
         await broadcaster.broadcast(Event(
             type="thinking",
-            instance_id="instance-1",
+            instance_id=instance_id,
             message_id="msg-1",
             data={"content": "Let me think about this..."}
         ))
-        
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
+
+        event = await queue.get()
+
         assert event.type == "thinking"
         assert "think" in event.data["content"].lower()
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_tool_call_event(self, mock_manager):
-        """Test tool_call event for tool invocations."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+    async def test_event_broadcaster_sends_tool_call_event(self):
+        """Test legacy tool_call event for tool invocations."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
+        queue = await broadcaster.get_queue(instance_id)
+
         await broadcaster.broadcast(Event(
             type="tool_call",
-            instance_id="instance-1",
+            instance_id=instance_id,
             message_id="msg-1",
             data={
                 "id": "call_123",
@@ -249,23 +438,25 @@ class TestSSEEventTypes:
                 "arguments": {"command": "ls -la"}
             }
         ))
-        
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
+
+        event = await queue.get()
+
         assert event.type == "tool_call"
         assert event.data["name"] == "bash"
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_tool_complete_event(self, mock_manager):
-        """Test tool_complete event after tool execution."""
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
-        queue = await broadcaster.get_queue("instance-1")
-        
+    async def test_event_broadcaster_sends_tool_complete_event(self):
+        """Test legacy tool_complete event after tool execution."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
+        instance_id = "instance-1"
+
+        queue = await broadcaster.get_queue(instance_id)
+
         await broadcaster.broadcast(Event(
             type="tool_complete",
-            instance_id="instance-1",
+            instance_id=instance_id,
             message_id="msg-1",
             data={
                 "id": "call_123",
@@ -273,48 +464,50 @@ class TestSSEEventTypes:
                 "output": "total 0\ndrwxr-xr-x  5 user  staff   160 Mar  4 10:00 ."
             }
         ))
-        
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        
+
+        event = await queue.get()
+
         assert event.type == "tool_complete"
         assert "total" in event.data["output"]
 
     @pytest.mark.asyncio
-    async def test_event_broadcaster_sends_completed_event(self, mock_manager):
-        """Test completed event when message processing finishes."""
-        broadcaster = mock_manager.broadcaster
+    async def test_event_broadcaster_sends_completed_event(self):
+        """Test legacy completed event when message processing finishes."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
         instance_id = "instance-1"
         message_id = "msg-1"
-        
-        # Create queue BEFORE broadcasting so events are captured
+
         queue = await broadcaster.get_queue(instance_id)
-        
+
         await broadcaster.broadcast(Event(
             type="completed",
             instance_id=instance_id,
             message_id=message_id,
             data={"content": "Thinking... Result", "tool_calls": None}
         ))
-        
+
         # Verify all events in queue
         events = []
         while not queue.empty():
             event = queue.get_nowait()
             events.append(event)
-        
+
         assert len(events) == 1
         assert events[0].type == "completed"
 
     @pytest.mark.asyncio
-    async def test_streaming_with_tool_calls(self, mock_manager):
-        """Test streaming pipeline with tool calls."""
+    async def test_streaming_with_tool_calls(self):
+        """Test legacy streaming pipeline with tool calls."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
         instance_id = "test-instance-tools"
         message_id = "msg-tools"
-        broadcaster = mock_manager.broadcaster
-        
-        # Create queue BEFORE broadcasting so events are captured
+
         queue = await broadcaster.get_queue(instance_id)
-        
+
         # 1. Message queued
         await broadcaster.broadcast(Event(
             type="message_queued",
@@ -322,7 +515,7 @@ class TestSSEEventTypes:
             message_id=message_id,
             data={"content": "Run a command"}
         ))
-        
+
         # 2. Tool call
         await broadcaster.broadcast(Event(
             type="tool_call",
@@ -334,7 +527,7 @@ class TestSSEEventTypes:
                 "arguments": {"command": "echo hello"}
             }
         ))
-        
+
         # 3. Tool complete
         await broadcaster.broadcast(Event(
             type="tool_complete",
@@ -346,7 +539,7 @@ class TestSSEEventTypes:
                 "output": "hello"
             }
         ))
-        
+
         # 4. Final response
         await broadcaster.broadcast(Event(
             type="completed",
@@ -354,36 +547,35 @@ class TestSSEEventTypes:
             message_id=message_id,
             data={"content": "hello", "tool_calls": [{"id": "call_1", "name": "bash"}]}
         ))
-        
+
         events = []
         while not queue.empty():
             events.append(queue.get_nowait())
-        
+
         assert any(e.type == "tool_call" for e in events)
         assert any(e.type == "tool_complete" for e in events)
 
-
-class TestInstanceCleanup:
-    """Tests for proper instance cleanup."""
-
     @pytest.mark.asyncio
-    async def test_cleanup_removes_event_state(self, mock_manager):
-        """Test that instance cleanup removes all event state."""
+    async def test_cleanup_removes_event_state(self):
+        """Test that legacy cleanup removes all event state."""
+        from daemon.events import EventBroadcaster, Event
+
+        broadcaster = EventBroadcaster()
         instance_id = "instance-to-clean"
-        
+
         # Add events
-        await mock_manager.broadcaster.broadcast(Event(
+        await broadcaster.broadcast(Event(
             type="test",
             instance_id=instance_id,
             data={}
         ))
-        
+
         # Verify state exists
-        assert instance_id in mock_manager.broadcaster._event_history
-        
+        assert instance_id in broadcaster._event_history
+
         # Cleanup
-        mock_manager.broadcaster.cleanup_instance(instance_id)
-        
+        broadcaster.cleanup_instance(instance_id)
+
         # Verify cleaned up
-        assert instance_id not in mock_manager.broadcaster._event_history
-        assert instance_id not in mock_manager.broadcaster._queues
+        assert instance_id not in broadcaster._event_history
+        assert instance_id not in broadcaster._queues
