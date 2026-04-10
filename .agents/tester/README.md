@@ -60,20 +60,22 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-09 Phase 5 Remove Old Code)
+## Test Results (Latest: 2026-04-11 Phase 6 Config & Wiring — FINAL)
 
 ### feature/message-queue-redesign branch
-- **1543 tests pass** (22 skipped, 0 failed, 0 errors) excluding integration
-- **129 message_queue_redesign tests pass** — Phase 1-4 redesign tests all pass
-- **ensure.sh validated** — Server starts, EventBus works, WorkerPool initializes, graceful shutdown
-- **No regressions** — Phase 5 removed 667 lines of old consumer pattern code from manager.py
-- See `.agents/tester/RESULTS/2026-04-09-phase5-remove-old-code.md` for full report
+- **1704 tests pass** (22 skipped, 0 failed, 0 errors) excluding integration
+- **290 message_queue_redesign tests pass** — Phase 1-6 redesign tests ALL pass
+- **ensure.sh validated** — Server starts and runs cleanly for 30 seconds
+- **Config loads correctly** — timeout=15.0min, retries=3, backoff=60s/3600s, grace=10s
+- **All E2E critical paths verified**: timeout→retry→complete, max retries→permanent failure, exponential backoff
+- No regressions, no quick fixes needed
+- See `.agents/tester/RESULTS/2026-04-11-phase6-config-wiring-final.md` for full report
 
-### Phase 5 Status: ✅ READY
+### Phase 6 Config & Wiring Status: ✅ READY — FEATURE COMPLETE
 
 ### Previous Results
-- Phase 4: 1623 tests pass ✅ (22 skipped, 0 failed)
-- **132 message_queue_redesign tests pass** — Phase 4 SSE/EventBus tests
+- Phase 5: 1689 tests pass ✅ (22 skipped, 0 failed), 275 MQ tests pass
+- Phase 4: 1623 tests pass ✅ (22 skipped, 0 failed), 132 MQ tests pass
 - **34 new tests added** for Phase 4 (test_event_bus.py: DB-backed EventBus, cursor-based SSE)
 - dev.sh validated and working (ensure.md: PASS)
 - **Critical path gap**: Missing Last-Event-ID header/reconnection test (3/4 covered)
@@ -110,36 +112,33 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 5 Remove Old Code — Testing COMPLETE**
+**Phase 6 Config & Wiring — FINAL TESTING COMPLETE**
 
-### Status: ✅ READY
+### Status: ✅ READY — FEATURE COMPLETE
 
-**Latest:** 1543 tests pass on feature/message-queue-redesign, ensure.sh validated
-**Phase 5 Commit:** Removed 667 lines of old consumer pattern code from manager.py
-**Phase 4 Commit:** Unknown — DB-backed EventBus with cursor-based SSE delivery
+**Latest:** 1704 tests pass, 290 MQ tests pass, ensure.sh validated, config loads correctly
+**Phase 6:** Config & Wiring — 10 E2E tests covering full timeout/retry flow
+**All 6 phases verified:** Schema → Worker Pool → Message Flow → Events → StaleTaskRecovery → Config & Wiring
 
-### Phase 4 Test Files (7 test modules)
-- **test_event_bus.py** (34 tests): Phase 4 — DB-backed EventBus, cursor-based SSE, multi-client, cleanup, merge
-- **test_event_repository.py** (19 tests): Event logging, message linking
-- **test_message_flow.py** (18 tests): Phase 3 core — enqueue_message_v2, _check_child_completion_v2, FIX C3, idempotency
-- **test_stale_task_recovery.py** (9 tests): Stale task detection and reset
-- **test_task_repository.py** (24 tests): Task CRUD, atomic claim behavior
-- **test_worker_pool.py** (17 tests): Worker pool lifecycle, concurrent task processing
+### Phase 6 Test File
+- **test_timeout_retry_e2e.py** (10 tests): Config flow, timeout→retry→complete, max retries→permanent failure, exponential backoff, multiple timeouts→success, default config, env var overrides, stale recovery config threshold, real repo integration
 
-### Phase 4 Coverage
-- EventBus initialization, subscribe, broadcast
-- Cursor-based SSE delivery
-- Multi-client SSE at different cursor positions (FIX C2)
-- Merge algorithm (DB events + streaming events)
-- cleanup_old removes events past TTL
-- Thread-safe broadcast
+### Phase 1-6 Test Files (13 test modules, 290 tests)
+- **test_event_bus.py** (34 tests): Phase 4 — DB-backed EventBus, cursor-based SSE
+- **test_event_repository.py** (18 tests): Event logging, message linking
+- **test_message_flow.py** (23 tests): Phase 3 — enqueue_message_v2, completion checks, idempotency
+- **test_stale_recovery_v2.py** (24 tests): Phase 5 — 5-step recovery protocol, graceful/force
+- **test_stale_task_recovery.py** (19 tests): Phase 3 — Stale task detection and reset
+- **test_task_repository.py** (25 tests): Phase 1-3 — Task CRUD, atomic claim, retry chain
+- **test_task_retry_models.py** (28 tests): Phase 5 — Retry policy models, exponential backoff
+- **test_task_retry_repository.py** (31 tests): Phase 5 — Retry scheduling, retry_scheduled guard
+- **test_timeout_monitor.py** (18 tests): Phase 5 — Timeout detection, grace period
+- **test_timeout_retry_e2e.py** (10 tests): Phase 6 — E2E config flow, timeout/retry chains
+- **test_worker_pool.py** (13 tests): Phase 2 — Worker pool lifecycle
+- **test_worker_timeout.py** (27 tests): Phase 5 — Worker timeout handling
 
-### Branch History
 **Branch:** feature/message-queue-redesign
-- **Phase 4 (current):** 1623 tests passed ✅ (132 in message_queue_redesign/, 34 new Phase 4 tests)
+- **Phase 6 (FINAL):** 1704 tests passed ✅ (290 in message_queue_redesign/, 10 new Phase 6 E2E tests)
+- **Phase 5:** 1689 tests passed ✅ (275 in message_queue_redesign/)
+- **Phase 4:** 1623 tests passed ✅ (132 in message_queue_redesign/, 34 new Phase 4 tests)
 - **Phase 3:** 1581 tests passed ✅ (89 in message_queue_redesign/, 21 new tests)
-
-**Branch:** feature/job-queue-management
-- **Phase 3:** 1492 backend + 197 frontend passed ✅
-- **Phase 2:** 367 passed, 14 skipped ✅
-- **Phase 1:** 245 passed, 2 skipped ✅
