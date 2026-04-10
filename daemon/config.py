@@ -144,6 +144,28 @@ class ServicesConfig(BaseSettings):
         default=60,
         description="How often to check for stale tasks and recover them (seconds)."
     )
+    
+    # Task timeout and retry configuration
+    task_timeout_minutes: float = Field(
+        default=15.0,
+        description="Maximum time a task can run before being cancelled (minutes). Set to 0 to disable timeout."
+    )
+    max_task_retries: int = Field(
+        default=3,
+        description="Maximum number of retry attempts for failed/timed-out tasks. Set to 0 to disable retries."
+    )
+    task_retry_backoff_base: int = Field(
+        default=60,
+        description="Base delay for exponential backoff between retries (seconds). Actual delay: base * 2^retry_count."
+    )
+    task_retry_backoff_max: int = Field(
+        default=3600,
+        description="Maximum delay between retries (seconds). Default: 1 hour."
+    )
+    stale_task_cancel_grace_seconds: int = Field(
+        default=10,
+        description="Seconds to wait for graceful shutdown after requesting task cancellation in stale task recovery."
+    )
 
 
 class Config(BaseSettings):

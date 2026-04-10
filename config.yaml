@@ -51,3 +51,9 @@ queue:
 services:
   worker_poll_interval: 0.5  # How often workers poll for tasks (seconds)
   stale_task_recovery_interval: 60  # How often to check for stale tasks (seconds)
+  # Task timeout and retry
+  task_timeout_minutes: 15  # Max task execution time (0 = no timeout)
+  max_task_retries: 3  # Max retry attempts (0 = no retry)
+  task_retry_backoff_base: 60  # Base backoff in seconds (1 min)
+  task_retry_backoff_max: 3600  # Max backoff in seconds (1 hour)
+  stale_task_cancel_grace_seconds: 10  # Grace period for worker shutdown

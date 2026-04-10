@@ -56,8 +56,7 @@ if TYPE_CHECKING:
     from .services.task_processor import TaskProcessor
     from .services.stale_task_recovery import StaleTaskRecovery
 
-# Import default value for cancel grace seconds (used in worker pool setup)
-from .services.stale_task_recovery import DEFAULT_CANCEL_GRACE_SECONDS
+
 
 logger = logging.getLogger(__name__)
 
@@ -465,27 +464,20 @@ class InstanceManager:
         task_repo = TaskRepository(engine=self._engine)
         event_repo = EventRepository(engine=self._engine)
         
-        # Get configurable poll intervals and thresholds from config
-        worker_poll_interval = self.config.services.worker_poll_interval
-        stale_recovery_interval = self.config.services.stale_task_recovery_interval
+        # Get shorthand for services config
+        svc = self.config.services
         
-        # FIX: W9 — Pass threshold_minutes and cancel_grace_seconds from config
-        # Use instance_timeout_minutes as threshold (tasks running longer than instance timeout are stale)
-        # Use default cancel_grace_seconds (10s) for graceful shutdown
-        stale_threshold_minutes = self.config.limits.instance_timeout_minutes
-        stale_cancel_grace_seconds = DEFAULT_CANCEL_GRACE_SECONDS
-        
-        # Run startup crash recovery
+        # Run startup crash recovery with config values
         stale_recovery = StaleTaskRecovery(
             task_repository=task_repo,
             message_repository=self._queue_repository,
             event_repository=event_repo,
-            threshold_minutes=stale_threshold_minutes,
-            check_interval_seconds=stale_recovery_interval,
-            cancel_grace_seconds=stale_cancel_grace_seconds,
-            max_retries=self.config.queue.llm_max_retries,
-            retry_backoff_base=int(self.config.queue.llm_retry_delay_seconds),
-            retry_backoff_max=int(self.config.queue.llm_retry_delay_seconds * (self.config.queue.llm_retry_exponential_base ** self.config.queue.llm_max_retries)),
+            threshold_minutes=int(svc.task_timeout_minutes),
+            check_interval_seconds=svc.stale_task_recovery_interval,
+            cancel_grace_seconds=svc.stale_task_cancel_grace_seconds,
+            max_retries=svc.max_task_retries,
+            retry_backoff_base=svc.task_retry_backoff_base,
+            retry_backoff_max=svc.task_retry_backoff_max,
         )
         # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
         # even if recover_on_startup() raises an exception
@@ -501,15 +493,19 @@ class InstanceManager:
             event_repo=event_repo,
         )
         
-        # Create and start worker pool
+        # Create and start worker pool with timeout/retry config
         self._worker_pool = WorkerPool(
             task_processor=self._task_processor,
             num_workers=num_workers,
-            poll_interval=worker_poll_interval,
+            poll_interval=svc.worker_poll_interval,
+            timeout_minutes=svc.task_timeout_minutes,
+            max_retries=svc.max_task_retries,
+            retry_backoff_base=svc.task_retry_backoff_base,
+            retry_backoff_max=svc.task_retry_backoff_max,
         )
         self._worker_pool.start()
         
-        logger.info(f"Worker pool started with {num_workers} workers (poll_interval={worker_poll_interval}s)")
+        logger.info(f"Worker pool started with {num_workers} workers (poll_interval={svc.worker_poll_interval}s, timeout={svc.task_timeout_minutes}min)")
 
     def shutdown_worker_pool(self) -> None:
         """Shut down the worker pool gracefully."""
