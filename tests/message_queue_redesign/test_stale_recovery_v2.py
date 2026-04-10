@@ -911,3 +911,234 @@ class TestIntegration:
         
         assert cancelled_count == 3
         assert retry_count == 3
+
+
+# ============================================================================
+# Phase 5 Fix Tests
+# ============================================================================
+
+
+class TestPhase5Fixes:
+    """Tests for Phase 5 critical bug fixes."""
+    
+    def test_task_completes_during_grace_period_message_not_failed(self, repository):
+        """FIX: C1 — Task completes during grace period → message NOT failed.
+        
+        If a worker completes a task during the grace period, the recovery
+        should skip the task entirely and NOT fail the associated message.
+        """
+        # Create stale running task
+        stale_task = create_stale_running_task(
+            repository,
+            instance_id="grace-complete-test",
+            message_id="grace-complete-msg",
+            age_minutes=20,
+        )
+        
+        mock_message_repo = MockMessageRepository()
+        
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=mock_message_repo,
+            threshold_minutes=15,
+            cancel_grace_seconds=0,  # Minimal grace for test speed
+            max_retries=3,
+        )
+        
+        # BEFORE recovery runs, simulate the worker completing the task
+        repository.complete_task(
+            stale_task.id,
+            result={"completed": True, "message": "done"}
+        )
+        
+        # Run recovery
+        recovered = recovery.recover_stale_tasks()
+        
+        # Should recover 0 tasks (the completed one was skipped)
+        assert recovered == 0
+        
+        # Task should still be COMPLETED (not cancelled)
+        updated = repository.get(stale_task.id)
+        assert updated.status == TaskStatus.COMPLETED.value
+        
+        # Message should NOT have been failed
+        assert len(mock_message_repo.failed_messages) == 0
+    
+    def test_task_fails_during_grace_period_message_not_failed(self, repository):
+        """FIX: C1 — Task fails during grace period → message NOT failed.
+        
+        If a worker fails a task during the grace period, the recovery
+        should skip the task entirely and NOT fail the associated message.
+        """
+        # Create stale running task
+        stale_task = create_stale_running_task(
+            repository,
+            instance_id="grace-fail-test",
+            message_id="grace-fail-msg",
+            age_minutes=20,
+        )
+        
+        mock_message_repo = MockMessageRepository()
+        
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=mock_message_repo,
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+            max_retries=3,
+        )
+        
+        # BEFORE recovery runs, simulate the worker failing the task
+        repository.fail_task(
+            stale_task.id,
+            error="Worker encountered an error"
+        )
+        
+        # Run recovery
+        recovered = recovery.recover_stale_tasks()
+        
+        # Should recover 0 tasks (the failed one was skipped)
+        assert recovered == 0
+        
+        # Task should still be FAILED (not cancelled)
+        updated = repository.get(stale_task.id)
+        assert updated.status == TaskStatus.FAILED.value
+        
+        # Message should NOT have been failed
+        assert len(mock_message_repo.failed_messages) == 0
+    
+    def test_startup_recovery_handles_both_stale_and_orphaned(self, repository):
+        """FIX: C3 — recover_on_startup handles both stale RUNNING + orphaned CANCELLED.
+        
+        The startup recovery should properly handle both:
+        1. Stale RUNNING tasks (worker crashed mid-execution)
+        2. Orphaned CANCELLED tasks (crash between cancel and retry)
+        """
+        # Create stale RUNNING task
+        stale_running = create_stale_running_task(
+            repository,
+            instance_id="startup-stale",
+            message_id="startup-stale-msg",
+            age_minutes=30,
+            retry_count=0,
+        )
+        
+        # Create orphaned CANCELLED task (no retry child)
+        orphaned = create_cancelled_task(
+            repository,
+            instance_id="startup-orphan",
+            message_id="startup-orphan-msg",
+            retry_count=1,
+            retry_scheduled=False,
+        )
+        
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=MockMessageRepository(),
+            threshold_minutes=15,
+            max_retries=3,
+        )
+        
+        recovered = recovery.recover_on_startup()
+        
+        # Both tasks should be recovered
+        assert recovered == 2
+        
+        # Stale RUNNING should be cancelled with retry_scheduled=True
+        updated_running = repository.get(stale_running.id)
+        assert updated_running.status == TaskStatus.CANCELLED.value
+        assert updated_running.retry_scheduled is True
+        
+        # Orphaned CANCELLED should now have retry_scheduled=True
+        updated_orphaned = repository.get(orphaned.id)
+        assert updated_orphaned.retry_scheduled is True
+        
+        # Verify retry tasks were created
+        from sqlalchemy import text
+        with repository.engine.begin() as conn:
+            retry_count = conn.execute(
+                text("""
+                    SELECT COUNT(*) FROM task
+                    WHERE status = :status_pending
+                    AND retry_count > 0
+                """),
+                {"status_pending": TaskStatus.PENDING.value}
+            ).fetchone()[0]
+        
+        assert retry_count == 2  # One retry for each recovered task
+    
+    def test_recovery_idempotent_second_run_finds_nothing(self, repository):
+        """FIX: W4 — recover_stale_tasks is idempotent.
+        
+        Running recovery twice should not cause issues. The second run
+        should find that all stale tasks have already been handled.
+        """
+        # Create stale running task
+        stale_task = create_stale_running_task(
+            repository,
+            instance_id="idempotent-test",
+            message_id="idempotent-msg",
+            age_minutes=20,
+        )
+        
+        mock_message_repo = MockMessageRepository()
+        
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=mock_message_repo,
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+            max_retries=3,
+        )
+        
+        # First run
+        recovered1 = recovery.recover_stale_tasks()
+        assert recovered1 == 1
+        
+        # Verify task was cancelled with retry
+        updated = repository.get(stale_task.id)
+        assert updated.status == TaskStatus.CANCELLED.value
+        assert updated.retry_scheduled is True
+        
+        # Second run — should find nothing to do
+        recovered2 = recovery.recover_stale_tasks()
+        assert recovered2 == 0
+        
+        # No additional messages should have been failed
+        assert len(mock_message_repo.failed_messages) == 1  # Only from first run
+    
+    def test_recovered_count_only_increments_for_acted_tasks(self, repository):
+        """FIX: W4 — recovered_count only increments for tasks actually acted upon.
+        
+        Tasks that are skipped (COMPLETED, FAILED, or already handled) should
+        not contribute to the recovered_count.
+        """
+        # Create stale running task that will be completed before we check it
+        stale_task = create_stale_running_task(
+            repository,
+            instance_id="count-test",
+            message_id="count-msg",
+            age_minutes=20,
+        )
+        
+        mock_message_repo = MockMessageRepository()
+        
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=mock_message_repo,
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+            max_retries=3,
+        )
+        
+        # Complete the task before recovery checks it
+        repository.complete_task(stale_task.id, result={"done": True})
+        
+        # Run recovery
+        recovered = recovery.recover_stale_tasks()
+        
+        # Should be 0 because we skipped the completed task
+        assert recovered == 0
+        
+        # Message should not have been failed
+        assert len(mock_message_repo.failed_messages) == 0

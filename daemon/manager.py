@@ -56,6 +56,9 @@ if TYPE_CHECKING:
     from .services.task_processor import TaskProcessor
     from .services.stale_task_recovery import StaleTaskRecovery
 
+# Import default value for cancel grace seconds (used in worker pool setup)
+from .services.stale_task_recovery import DEFAULT_CANCEL_GRACE_SECONDS
+
 logger = logging.getLogger(__name__)
 
 # UUID validation pattern (compiled once at module level)
@@ -462,22 +465,34 @@ class InstanceManager:
         task_repo = TaskRepository(engine=self._engine)
         event_repo = EventRepository(engine=self._engine)
         
-        # Get configurable poll intervals from config
+        # Get configurable poll intervals and thresholds from config
         worker_poll_interval = self.config.services.worker_poll_interval
         stale_recovery_interval = self.config.services.stale_task_recovery_interval
+        
+        # FIX: W9 — Pass threshold_minutes and cancel_grace_seconds from config
+        # Use instance_timeout_minutes as threshold (tasks running longer than instance timeout are stale)
+        # Use default cancel_grace_seconds (10s) for graceful shutdown
+        stale_threshold_minutes = self.config.limits.instance_timeout_minutes
+        stale_cancel_grace_seconds = DEFAULT_CANCEL_GRACE_SECONDS
         
         # Run startup crash recovery
         stale_recovery = StaleTaskRecovery(
             task_repository=task_repo,
             message_repository=self._queue_repository,
             event_repository=event_repo,
+            threshold_minutes=stale_threshold_minutes,
             check_interval_seconds=stale_recovery_interval,
+            cancel_grace_seconds=stale_cancel_grace_seconds,
             max_retries=self.config.queue.llm_max_retries,
             retry_backoff_base=int(self.config.queue.llm_retry_delay_seconds),
             retry_backoff_max=int(self.config.queue.llm_retry_delay_seconds * (self.config.queue.llm_retry_exponential_base ** self.config.queue.llm_max_retries)),
         )
-        stale_recovery.recover_on_startup()
+        # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
+        # even if recover_on_startup() raises an exception
         self._stale_recovery = stale_recovery
+        stale_recovery.recover_on_startup()
+        # FIX: C2 — Start periodic background recovery thread
+        stale_recovery.start()
         
         # Create task processor with manager reference
         self._task_processor = TaskProcessor(

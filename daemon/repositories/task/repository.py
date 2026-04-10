@@ -657,6 +657,7 @@ class TaskRepository:
         - status = 'cancelled'
         - retry_scheduled = False (or the retry_scheduled flag was set but child doesn't exist)
         - retry_count < max_retries (retry should have been scheduled)
+        - message_id IS NOT NULL (tasks with NULL message_id don't have associated messages)
 
         Used by startup recovery to detect crash-before-retry scenarios.
         """
@@ -665,6 +666,7 @@ class TaskRepository:
                 SELECT t1.* FROM task t1
                 WHERE t1.status = :status_cancelled
                 AND t1.retry_scheduled = 0
+                AND t1.message_id IS NOT NULL
                 AND NOT EXISTS (
                     SELECT 1 FROM task t2
                     WHERE t2.instance_id = t1.instance_id

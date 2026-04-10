@@ -156,6 +156,9 @@ class StaleTaskRecovery:
         # FIX: C2 — Only retry if retry_scheduled=0. If Worker already called schedule_retry()
         #      (which sets retry_scheduled=1), we skip — no duplicate retry task.
         # FIX: W1 — Use force_cancel_and_schedule_retry() for single-transaction atomicity.
+        # FIX: C1 — Skip COMPLETED/FAILED tasks (worker finished during grace period).
+        # FIX: W4 — Only increment recovered_count for tasks actually acted upon.
+        # FIX: W6 — Guard message failing: only reach it for tasks we actually recovered.
         recovered_count = 0
         for task in stale_tasks:
             try:
@@ -163,6 +166,15 @@ class StaleTaskRecovery:
                 current = self._task_repo.get(task.id)
                 if current is None:
                     continue
+                
+                # FIX: C1 — If task completed/failed during grace period, skip entirely
+                # This prevents us from incorrectly failing the associated message.
+                if current.status in (TaskStatus.COMPLETED.value, TaskStatus.FAILED.value):
+                    logger.debug(f"Task {task.id} already completed/failed — skipping")
+                    continue  # Don't touch the message
+                
+                # FIX: W4 — Track whether we actually took action
+                task_acted_upon = False
                 
                 if current.status == TaskStatus.RUNNING.value:
                     # Task still running after grace period — force cancel + retry atomically
@@ -181,6 +193,7 @@ class StaleTaskRecovery:
                         )
                         self._log_recovery_event(task, "force_cancelled_and_retried",
                                                    retry_task_id=retry_task.id)
+                        task_acted_upon = True
                     else:
                         # Max retries exceeded or retry already scheduled — permanent fail
                         if current.retry_count >= self._max_retries:
@@ -194,7 +207,8 @@ class StaleTaskRecovery:
                                 f"(max retries {self._max_retries} exceeded)"
                             )
                             self._log_recovery_event(task, "permanently_failed")
-                    
+                            task_acted_upon = True
+                
                 elif current.status == TaskStatus.CANCELLED.value:
                     # Worker already cancelled it — check if retry was scheduled
                     # FIX: C2 — If retry_scheduled=True, Worker handled retry. Skip.
@@ -217,6 +231,7 @@ class StaleTaskRecovery:
                             )
                             self._log_recovery_event(task, "retry_scheduled_by_recovery",
                                                        retry_task_id=retry_task.id)
+                            task_acted_upon = True
                         else:
                             self._task_repo.fail_task(
                                 task.id,
@@ -224,9 +239,10 @@ class StaleTaskRecovery:
                                 f"{self._max_retries} retries"
                             )
                             self._log_recovery_event(task, "permanently_failed")
+                            task_acted_upon = True
                 
-                # Handle associated message
-                if task.message_id:
+                # FIX: W6 — Only fail the associated message if we actually acted upon the task
+                if task_acted_upon and task.message_id:
                     try:
                         self._message_repo.fail(
                             task.message_id,
@@ -237,7 +253,9 @@ class StaleTaskRecovery:
                             f"Failed to update message {task.message_id[:8]}...: {e}"
                         )
                 
-                recovered_count += 1
+                # FIX: W4 — Only increment for tasks we actually acted upon
+                if task_acted_upon:
+                    recovered_count += 1
                 
             except Exception as e:
                 logger.error(
