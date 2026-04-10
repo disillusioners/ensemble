@@ -51,13 +51,27 @@ def sample_task_data():
 
 class MockTask:
     """Mock task for testing."""
-    def __init__(self, task_id=1, task_type="process_message", instance_id="test-instance"):
+    def __init__(
+        self,
+        task_id=1,
+        task_type="process_message",
+        instance_id="test-instance",
+        message_id="test-message",
+        status="pending",
+        worker_id=None,
+        retry_count=0,
+        retry_scheduled=False,
+        cancel_requested=False,
+    ):
         self.id = task_id
         self.task_type = task_type
         self.instance_id = instance_id
-        self.message_id = "test-message"
-        self.status = "pending"
-        self.worker_id = None
+        self.message_id = message_id
+        self.status = status
+        self.worker_id = worker_id
+        self.retry_count = retry_count
+        self.retry_scheduled = retry_scheduled
+        self.cancel_requested = cancel_requested
         self.result = None
         self.error = None
         self.created_at = datetime.now(timezone.utc)
@@ -94,12 +108,116 @@ class MockTaskProcessor:
 class MockTaskRepository:
     """Mock task repository for testing."""
     def __init__(self):
-        self.stale_tasks = []
+        self.tasks = {}  # task_id -> task
+        self.stale_tasks = []  # For find_stale_running_tasks
+        self._next_task_id = 1000  # Start high to avoid collision
+        self._retry_tasks = []  # Tasks to return from schedule_retry
         self.reset_count = 0
     
     def find_stale_running_tasks(self, threshold_minutes):
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
         return [t for t in self.stale_tasks if t.started_at and t.started_at < threshold]
+    
+    def find_cancellable_tasks(self, threshold_minutes):
+        """Find running tasks past threshold that haven't been flagged for cancel."""
+        threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+        return [
+            t for t in self.stale_tasks
+            if t.status == "running"
+            and t.started_at and t.started_at < threshold
+            and not t.cancel_requested
+        ]
+    
+    def request_cancel(self, task_id):
+        """Request cancellation of a task."""
+        task = self.tasks.get(task_id)
+        if task and task.status == "running" and not task.cancel_requested:
+            task.cancel_requested = True
+            return True
+        return False
+    
+    def get(self, task_id):
+        """Get task by ID."""
+        return self.tasks.get(task_id)
+    
+    def force_cancel_and_schedule_retry(self, task_id, max_retries, reason, backoff_base=60, backoff_max=3600):
+        """Atomically cancel and schedule retry."""
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+        
+        # Check retry limit
+        if task.retry_count >= max_retries:
+            return None
+        
+        # Check retry_scheduled guard
+        if task.retry_scheduled:
+            return None
+        
+        # Mark parent as cancelled
+        task.status = "cancelled"
+        task.retry_scheduled = True
+        task.error = f"Force cancelled: {reason}"
+        
+        # Create retry task
+        retry_task = MockTask(
+            task_id=self._next_task_id,
+            task_type=task.task_type,
+            instance_id=task.instance_id,
+            message_id=task.message_id,
+            status="pending",
+            retry_count=task.retry_count + 1,
+        )
+        self._next_task_id += 1
+        self.tasks[retry_task.id] = retry_task
+        return retry_task
+    
+    def schedule_retry(self, task_id, max_retries, backoff_base=60, backoff_max=3600):
+        """Schedule retry for a cancelled task."""
+        task = self.tasks.get(task_id)
+        if not task:
+            return None
+        
+        # Check retry_scheduled guard
+        if task.retry_scheduled:
+            return None
+        
+        # Check retry limit
+        if task.retry_count >= max_retries:
+            return None
+        
+        # Mark parent as cancelled with retry_scheduled
+        task.status = "cancelled"
+        task.retry_scheduled = True
+        
+        # Create retry task
+        retry_task = MockTask(
+            task_id=self._next_task_id,
+            task_type=task.task_type,
+            instance_id=task.instance_id,
+            message_id=task.message_id,
+            status="pending",
+            retry_count=task.retry_count + 1,
+        )
+        self._next_task_id += 1
+        self.tasks[retry_task.id] = retry_task
+        return retry_task
+    
+    def fail_task(self, task_id, error):
+        """Mark task as failed."""
+        task = self.tasks.get(task_id)
+        if task:
+            task.status = "failed"
+            task.error = error
+            return task
+        return None
+    
+    def find_orphaned_cancelled_tasks(self):
+        """Find cancelled tasks without retry scheduled."""
+        return [
+            t for t in self.tasks.values()
+            if t.status == "cancelled" and not t.retry_scheduled
+        ]
     
     def reset_stale_tasks(self, threshold_minutes):
         self.reset_count += 1

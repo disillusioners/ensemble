@@ -472,6 +472,9 @@ class InstanceManager:
             message_repository=self._queue_repository,
             event_repository=event_repo,
             check_interval_seconds=stale_recovery_interval,
+            max_retries=self.config.queue.llm_max_retries,
+            retry_backoff_base=int(self.config.queue.llm_retry_delay_seconds),
+            retry_backoff_max=int(self.config.queue.llm_retry_delay_seconds * (self.config.queue.llm_retry_exponential_base ** self.config.queue.llm_max_retries)),
         )
         stale_recovery.recover_on_startup()
         self._stale_recovery = stale_recovery

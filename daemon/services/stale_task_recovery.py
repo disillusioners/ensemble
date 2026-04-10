@@ -1,4 +1,4 @@
-"""Stale task recovery service for crash recovery."""
+"""Stale task recovery service with graceful cancellation."""
 
 from __future__ import annotations
 
@@ -8,24 +8,30 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+from daemon.repositories.task.models import TaskStatus
+
 logger = logging.getLogger(__name__)
 
-# Default threshold: 15 minutes (LLM calls can legitimately take 5-10 minutes)
 DEFAULT_STALE_THRESHOLD_MINUTES = 15
-# Default check interval: 60 seconds
 DEFAULT_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_CANCEL_GRACE_SECONDS = 10
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_BASE = 60
+DEFAULT_RETRY_BACKOFF_MAX = 3600
 
 
 class StaleTaskRecovery:
-    """Background service that recovers stale tasks from worker crashes.
+    """Background service that recovers stale tasks using 5-step protocol.
     
-    Periodically scans for tasks that have been running longer than the
-    threshold (default: 15 minutes) and resets them to pending status.
+    5-Step Recovery Protocol:
+    1. Find stale running tasks (past threshold, not yet cancelled)
+    2. Request cancellation (set cancel_requested flag)
+    3. Wait briefly for graceful shutdown (grace period)
+    4. Force cancel tasks still running after grace period
+    5. Schedule retry for cancelled tasks (if under max retries)
     
-    This is important because:
-    1. Workers can crash (OOM, SIGKILL, etc.)
-    2. Tasks may be orphaned with status='running' but no active worker
-    3. The crash recovery resets these to 'pending' so another worker can claim them
+    This replaces the old "reset to pending" approach which caused
+    duplicate processing.
     """
     
     def __init__(
@@ -34,6 +40,10 @@ class StaleTaskRecovery:
         message_repository,
         threshold_minutes: int = DEFAULT_STALE_THRESHOLD_MINUTES,
         check_interval_seconds: int = DEFAULT_CHECK_INTERVAL_SECONDS,
+        cancel_grace_seconds: int = DEFAULT_CANCEL_GRACE_SECONDS,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_backoff_base: int = DEFAULT_RETRY_BACKOFF_BASE,
+        retry_backoff_max: int = DEFAULT_RETRY_BACKOFF_MAX,
         event_repository=None,
     ):
         """Initialize stale task recovery.
@@ -43,6 +53,10 @@ class StaleTaskRecovery:
             message_repository: MessageQueueRepository for message recovery.
             threshold_minutes: Tasks running longer than this are considered stale.
             check_interval_seconds: How often to check for stale tasks.
+            cancel_grace_seconds: Time to wait after requesting cancel for graceful shutdown.
+            max_retries: Maximum number of retry attempts.
+            retry_backoff_base: Base for exponential backoff (seconds).
+            retry_backoff_max: Maximum backoff time (seconds).
             event_repository: Optional EventRepository for logging recovery events.
         """
         self._task_repo = task_repository
@@ -50,6 +64,10 @@ class StaleTaskRecovery:
         self._event_repo = event_repository
         self._threshold_minutes = threshold_minutes
         self._check_interval = check_interval_seconds
+        self._cancel_grace_seconds = cancel_grace_seconds
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
     
@@ -69,7 +87,9 @@ class StaleTaskRecovery:
         logger.info(
             f"StaleTaskRecovery started: "
             f"threshold={self._threshold_minutes}min, "
-            f"interval={self._check_interval}s"
+            f"interval={self._check_interval}s, "
+            f"grace={self._cancel_grace_seconds}s, "
+            f"max_retries={self._max_retries}"
         )
     
     def stop(self, timeout: float = 10.0) -> None:
@@ -94,74 +114,254 @@ class StaleTaskRecovery:
             self._stop_event.wait(timeout=self._check_interval)
     
     def recover_stale_tasks(self) -> int:
-        """Find and reset stale tasks.
+        """Execute 5-step recovery protocol.
         
         Returns:
-            Number of tasks recovered.
+            Number of tasks processed during recovery.
         """
-        # Find tasks that have been running too long
-        stale_tasks = self._task_repo.find_stale_running_tasks(
+        # Step 1: Find stale running tasks not yet flagged
+        stale_tasks = self._task_repo.find_cancellable_tasks(
             threshold_minutes=self._threshold_minutes
         )
         
         if not stale_tasks:
             return 0
         
-        # Reset ALL stale tasks in ONE call (repository resets all matching tasks)
-        self._task_repo.reset_stale_tasks(threshold_minutes=self._threshold_minutes)
+        logger.warning(f"Found {len(stale_tasks)} stale tasks requiring recovery")
         
-        recovered_count = 0
-        
+        # Step 2: Request cancellation for each
         for task in stale_tasks:
             try:
-                # Also reset the associated message
+                cancelled = self._task_repo.request_cancel(task.id)
+                if cancelled:
+                    logger.info(
+                        f"Step 2: Requested cancel for stale task {task.id} "
+                        f"(instance={task.instance_id[:8]}..., worker={task.worker_id})"
+                    )
+                    self._log_recovery_event(task, "cancel_requested")
+            except Exception as e:
+                logger.error(f"Failed to request cancel for task {task.id}: {e}")
+        
+        # Step 3: Wait briefly for graceful shutdown
+        if self._cancel_grace_seconds > 0:
+            logger.debug(
+                f"Step 3: Waiting {self._cancel_grace_seconds}s "
+                f"for graceful worker shutdown..."
+            )
+            self._stop_event.wait(timeout=self._cancel_grace_seconds)
+            if self._stop_event.is_set():
+                return 0  # Shutting down
+        
+        # Step 4+5: Force cancel + schedule retry for tasks still running
+        # FIX: C2 — Only retry if retry_scheduled=0. If Worker already called schedule_retry()
+        #      (which sets retry_scheduled=1), we skip — no duplicate retry task.
+        # FIX: W1 — Use force_cancel_and_schedule_retry() for single-transaction atomicity.
+        recovered_count = 0
+        for task in stale_tasks:
+            try:
+                # Re-read current state
+                current = self._task_repo.get(task.id)
+                if current is None:
+                    continue
+                
+                if current.status == TaskStatus.RUNNING.value:
+                    # Task still running after grace period — force cancel + retry atomically
+                    retry_task = self._task_repo.force_cancel_and_schedule_retry(
+                        task_id=task.id,
+                        max_retries=self._max_retries,
+                        reason=f"Stale task force-cancelled (>{self._threshold_minutes}min)",
+                        backoff_base=self._retry_backoff_base,
+                        backoff_max=self._retry_backoff_max,
+                    )
+                    
+                    if retry_task:
+                        logger.info(
+                            f"Step 4+5: Force-cancelled + retry {retry_task.id} "
+                            f"for stale task {task.id} (attempt {retry_task.retry_count})"
+                        )
+                        self._log_recovery_event(task, "force_cancelled_and_retried",
+                                                   retry_task_id=retry_task.id)
+                    else:
+                        # Max retries exceeded or retry already scheduled — permanent fail
+                        if current.retry_count >= self._max_retries:
+                            self._task_repo.fail_task(
+                                task.id,
+                                f"Stale task permanently failed after "
+                                f"{self._max_retries} retries"
+                            )
+                            logger.warning(
+                                f"Step 4: Task {task.id} permanently failed "
+                                f"(max retries {self._max_retries} exceeded)"
+                            )
+                            self._log_recovery_event(task, "permanently_failed")
+                    
+                elif current.status == TaskStatus.CANCELLED.value:
+                    # Worker already cancelled it — check if retry was scheduled
+                    # FIX: C2 — If retry_scheduled=True, Worker handled retry. Skip.
+                    if current.retry_scheduled:
+                        logger.debug(
+                            f"Step 5: Task {task.id} already has retry scheduled by Worker — skipping"
+                        )
+                    else:
+                        # Worker cancelled but didn't schedule retry — try to schedule one
+                        retry_task = self._task_repo.schedule_retry(
+                            task_id=task.id,
+                            max_retries=self._max_retries,
+                            backoff_base=self._retry_backoff_base,
+                            backoff_max=self._retry_backoff_max,
+                        )
+                        if retry_task:
+                            logger.info(
+                                f"Step 5: Scheduled retry {retry_task.id} "
+                                f"for Worker-cancelled task {task.id}"
+                            )
+                            self._log_recovery_event(task, "retry_scheduled_by_recovery",
+                                                       retry_task_id=retry_task.id)
+                        else:
+                            self._task_repo.fail_task(
+                                task.id,
+                                f"Stale task permanently failed after "
+                                f"{self._max_retries} retries"
+                            )
+                            self._log_recovery_event(task, "permanently_failed")
+                
+                # Handle associated message
                 if task.message_id:
                     try:
-                        self._message_repo.fail(task.message_id, "Worker crashed - task reset to pending")
+                        self._message_repo.fail(
+                            task.message_id,
+                            f"Task recovered: stale (>{self._threshold_minutes}min)"
+                        )
                     except Exception as e:
                         logger.warning(
-                            f"Failed to reset message {task.message_id[:8]}...: {e}"
+                            f"Failed to update message {task.message_id[:8]}...: {e}"
                         )
                 
-                # Log recovery event if event repository available
-                if self._event_repo:
-                    self._event_repo.create_event(
-                        instance_id=task.instance_id,
-                        kind="task_recovered",
-                        data={
-                            "task_id": task.id,
-                            "message_id": task.message_id,
-                            "worker_id": task.worker_id,
-                            "reason": f"stale (>{self._threshold_minutes}min)",
-                        }
-                    )
-                
-                logger.warning(
-                    f"Recovered stale task {task.id}: "
-                    f"type={task.task_type}, "
-                    f"instance={task.instance_id[:8]}..., "
-                    f"worker={task.worker_id}"
-                )
                 recovered_count += 1
                 
             except Exception as e:
-                logger.error(f"Failed to recover task {task.id}: {e}")
+                logger.error(
+                    f"Failed to recover task {task.id}: {e}",
+                    exc_info=True
+                )
         
         return recovered_count
     
     def recover_on_startup(self) -> int:
-        """Run recovery immediately on startup.
+        """Run recovery immediately on startup (skip grace period).
         
-        Called during application startup to recover from any previous crash.
-        This is synchronous (blocking) since it's part of initialization.
-        
-        Returns:
-            Number of tasks recovered.
+        Uses force_cancel_and_schedule_retry() for atomicity.
+        Also detects orphaned CANCELLED tasks (crash between cancel and retry).
         """
-        logger.info("Running startup crash recovery...")
-        recovered = self.recover_stale_tasks()
-        logger.info(f"Startup recovery: {recovered} stale tasks recovered")
+        logger.info("Running startup crash recovery (no grace period)...")
+        
+        # Phase A: Handle stale RUNNING tasks (worker crashed mid-execution)
+        stale_tasks = self._task_repo.find_stale_running_tasks(
+            threshold_minutes=self._threshold_minutes
+        )
+        
+        recovered = 0
+        
+        if stale_tasks:
+            logger.warning(f"Startup recovery: found {len(stale_tasks)} stale RUNNING tasks")
+            
+            for task in stale_tasks:
+                try:
+                    # Force cancel + retry in single transaction
+                    retry_task = self._task_repo.force_cancel_and_schedule_retry(
+                        task_id=task.id,
+                        max_retries=self._max_retries,
+                        reason="Startup recovery: worker crash",
+                        backoff_base=self._retry_backoff_base,
+                        backoff_max=self._retry_backoff_max,
+                    )
+                    
+                    if retry_task:
+                        logger.info(
+                            f"Startup recovery: task {task.id} → retry {retry_task.id}"
+                        )
+                        self._log_recovery_event(task, "startup_recovered",
+                                                   retry_task_id=retry_task.id)
+                    else:
+                        self._task_repo.fail_task(
+                            task.id,
+                            f"Startup recovery: max retries ({self._max_retries}) exceeded"
+                        )
+                        logger.warning(
+                            f"Startup recovery: task {task.id} permanently failed"
+                        )
+                        self._log_recovery_event(task, "startup_permanently_failed")
+                    
+                    recovered += 1
+                    
+                except Exception as e:
+                    logger.error(f"Startup recovery failed for task {task.id}: {e}")
+        
+        # Phase B: Detect orphaned CANCELLED tasks (crash between cancel and retry)
+        orphaned_tasks = self._task_repo.find_orphaned_cancelled_tasks()
+        
+        if orphaned_tasks:
+            logger.warning(
+                f"Startup recovery: found {len(orphaned_tasks)} orphaned CANCELLED tasks"
+            )
+            
+            for task in orphaned_tasks:
+                try:
+                    retry_task = self._task_repo.schedule_retry(
+                        task_id=task.id,
+                        max_retries=self._max_retries,
+                        backoff_base=self._retry_backoff_base,
+                        backoff_max=self._retry_backoff_max,
+                    )
+                    
+                    if retry_task:
+                        logger.info(
+                            f"Startup recovery (orphan): task {task.id} → retry {retry_task.id}"
+                        )
+                        self._log_recovery_event(task, "orphan_recovered",
+                                                   retry_task_id=retry_task.id)
+                        recovered += 1
+                    else:
+                        # Max retries exceeded — mark permanent fail
+                        self._task_repo.fail_task(
+                            task.id,
+                            f"Startup recovery (orphan): max retries ({self._max_retries}) exceeded"
+                        )
+                        self._log_recovery_event(task, "orphan_permanently_failed")
+                        recovered += 1
+                    
+                except Exception as e:
+                    logger.error(
+                        f"Startup recovery (orphan) failed for task {task.id}: {e}"
+                    )
+        
+        logger.info(f"Startup recovery complete: {recovered} tasks recovered")
         return recovered
+    
+    def _log_recovery_event(
+        self,
+        task,
+        action: str,
+        retry_task_id: int | None = None,
+    ) -> None:
+        """Log recovery event to event repository."""
+        if not self._event_repo:
+            return
+        
+        try:
+            self._event_repo.create_event(
+                instance_id=task.instance_id,
+                kind=f"task_recovery_{action}",
+                data={
+                    "task_id": task.id,
+                    "message_id": task.message_id,
+                    "worker_id": task.worker_id,
+                    "retry_count": task.retry_count,
+                    "retry_task_id": retry_task_id,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to log recovery event: {e}")
     
     def is_running(self) -> bool:
         """Check if the recovery thread is running."""
