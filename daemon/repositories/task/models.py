@@ -28,6 +28,7 @@ class TaskStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Task(SQLModel, table=True):
@@ -50,6 +51,17 @@ class Task(SQLModel, table=True):
 
     # Worker assignment
     worker_id: Optional[str] = Field(default=None, index=True)
+
+    # Retry tracking
+    retry_count: int = Field(default=0)
+    next_retry_at: Optional[str] = Field(default=None)
+
+    # Cancellation
+    cancel_requested: bool = Field(default=False)
+    cancel_requested_at: Optional[str] = Field(default=None)
+
+    # Retry guard (atomic flag to prevent double-retry)
+    retry_scheduled: bool = Field(default=False)
 
     # Result storage (TEXT column storing JSON)
     result: Optional[str] = Field(default=None)
@@ -78,6 +90,11 @@ class Task(SQLModel, table=True):
             "message_id": self.message_id,
             "status": self.status,
             "worker_id": self.worker_id,
+            "retry_count": self.retry_count,
+            "next_retry_at": self.next_retry_at,
+            "cancel_requested": self.cancel_requested,
+            "cancel_requested_at": self.cancel_requested_at,
+            "retry_scheduled": self.retry_scheduled,
             "result": result_data,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
