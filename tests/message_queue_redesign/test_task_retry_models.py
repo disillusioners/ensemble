@@ -296,13 +296,18 @@ class TestRowToTaskMapping:
         )
 
         # Manually update the task in DB with new field values
+        # Use past datetime so task is claimable
+        from datetime import datetime, timezone, timedelta
+        past_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        past_time_str = past_time.strftime("%Y-%m-%dT%H:%M:%S.%f") + past_time.strftime("%z")
+
         from sqlmodel import SQLModel, Session as SQLModelSession
         with SQLModelSession(self.engine if hasattr(self, 'engine') else repository.engine) as db_session:
             db_task = db_session.get(Task, task.id)
             db_task.retry_count = 3
-            db_task.next_retry_at = "2026-04-15T12:00:00Z"
+            db_task.next_retry_at = past_time_str
             db_task.cancel_requested = True
-            db_task.cancel_requested_at = "2026-04-15T11:00:00Z"
+            db_task.cancel_requested_at = past_time_str
             db_task.retry_scheduled = True
             db_session.commit()
 
@@ -311,9 +316,9 @@ class TestRowToTaskMapping:
 
         assert claimed is not None
         assert claimed.retry_count == 3
-        assert claimed.next_retry_at == "2026-04-15T12:00:00Z"
+        assert claimed.next_retry_at == past_time_str
         assert claimed.cancel_requested == 1  # SQLite stores bool as int
-        assert claimed.cancel_requested_at == "2026-04-15T11:00:00Z"
+        assert claimed.cancel_requested_at == past_time_str
         assert claimed.retry_scheduled == 1  # SQLite stores bool as int
 
     def test_row_to_task_maps_original_fields(self, repository):

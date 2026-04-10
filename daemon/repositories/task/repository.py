@@ -111,8 +111,9 @@ class TaskRepository:
         self,
         worker_id: str,
     ) -> Task | None:
-        """Atomically claim the next pending task.
+        """Atomically claim the next eligible pending task.
 
+        Only claims tasks that are ready (no backoff delay remaining).
         Uses UPDATE-RETURNING pattern for SQLite compatibility.
         Only one worker can claim a task at a time.
 
@@ -120,11 +121,11 @@ class TaskRepository:
             worker_id: ID of the worker claiming the task.
 
         Returns:
-            Claimed Task object or None if no pending tasks.
+            Claimed Task object or None if no pending tasks ready.
         """
         now = datetime.now(timezone.utc)
+        now_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + now.strftime("%z")
 
-        # Use engine.begin() for explicit transaction to serialize concurrent claims
         with self.engine.begin() as conn:
             stmt = text("""
                 UPDATE task
@@ -134,21 +135,19 @@ class TaskRepository:
                 WHERE id = (
                     SELECT id FROM task
                     WHERE status = :status_pending
+                    AND (next_retry_at IS NULL OR next_retry_at <= :now_str)
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
                 RETURNING *
             """)
-
-            result = conn.execute(stmt, {
+            row = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
-                "status_pending": TaskStatus.PENDING.value,
                 "worker_id": worker_id,
                 "started_at": now,
-            })
-
-            row = result.fetchone()
-            # Transaction auto-commits on successful exit
+                "status_pending": TaskStatus.PENDING.value,
+                "now_str": now_str,
+            }).fetchone()
 
             if row is None:
                 return None
@@ -363,3 +362,332 @@ class TaskRepository:
             result = db_session.exec(stmt)
             db_session.commit()
             return result.rowcount
+
+    # --------------------------------------------------------
+    # RETRY & CANCELLATION
+    # --------------------------------------------------------
+
+    def schedule_retry(
+        self,
+        task_id: int,
+        max_retries: int,
+        backoff_base: int = 60,
+        backoff_max: int = 3600,
+    ) -> Task | None:
+        """Create a new Task for retry with exponential backoff.
+
+        Marks the parent task as CANCELLED with retry_scheduled=True and creates
+        a new PENDING task with incremented retry_count and calculated next_retry_at.
+
+        All operations are in a single transaction — crash-safe.
+
+        Returns the new retry task, or None if max retries exceeded or parent
+        already has retry_scheduled=True (double-retry guard).
+        """
+        with self.engine.begin() as conn:
+            # Get parent task
+            parent_row = conn.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id}
+            ).fetchone()
+
+            if parent_row is None:
+                return None
+
+            parent = dict(parent_row._mapping)
+
+            # Check retry_scheduled guard to prevent double-retry
+            if parent.get("retry_scheduled", 0):
+                return None  # Retry already scheduled by another process
+
+            # Check retry limit
+            current_retry_count = parent.get("retry_count", 0)
+            if current_retry_count >= max_retries:
+                return None  # Max retries exceeded
+
+            new_retry_count = current_retry_count + 1
+
+            # Calculate exponential backoff
+            delay_seconds = min(
+                backoff_base * (2 ** current_retry_count),
+                backoff_max
+            )
+            next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
+            now = datetime.now(timezone.utc)
+
+            # Mark parent as CANCELLED and set retry_scheduled guard
+            conn.execute(
+                text("""
+                    UPDATE task SET
+                        status = :status_cancelled,
+                        cancel_requested = 1,
+                        cancel_requested_at = :cancelled_at,
+                        completed_at = :completed_at,
+                        retry_scheduled = 1
+                    WHERE id = :id
+                """),
+                {
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "cancelled_at": now,
+                    "completed_at": now,
+                    "id": task_id,
+                }
+            )
+
+            # Create new retry task (column is task_type, not type)
+            result = conn.execute(
+                text("""
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, next_retry_at, created_at,
+                                      cancel_requested, retry_scheduled)
+                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                            :retry_count, :next_retry_at_str, :created_at,
+                            :cancel_requested, :retry_scheduled)
+                    RETURNING *
+                """),
+                {
+                    "task_type": parent["task_type"],
+                    "instance_id": parent["instance_id"],
+                    "message_id": parent.get("message_id"),
+                    "status_pending": TaskStatus.PENDING.value,
+                    "retry_count": new_retry_count,
+                    "next_retry_at_str": next_retry_at_str,
+                    "created_at": now,
+                    "cancel_requested": 0,
+                    "retry_scheduled": 0,
+                }
+            ).fetchone()
+
+            return self._row_to_task(result)
+
+    def request_cancel(self, task_id: int) -> bool:
+        """Atomically request cancellation of a running task.
+
+        Sets cancel_requested=True on the task. The worker thread
+        checks this flag periodically and will stop gracefully.
+
+        Returns True if the flag was set, False if task not found,
+        already cancelled, or retry already scheduled.
+        """
+        now = datetime.now(timezone.utc)
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE task
+                    SET cancel_requested = 1,
+                        cancel_requested_at = :cancelled_at
+                    WHERE id = :id
+                    AND status = :status_running
+                    AND cancel_requested = 0
+                    AND retry_scheduled = 0
+                """),
+                {
+                    "cancelled_at": now,
+                    "id": task_id,
+                    "status_running": TaskStatus.RUNNING.value,
+                }
+            )
+            return result.rowcount > 0
+
+    def find_cancellable_tasks(self, threshold_minutes: int) -> list[Task]:
+        """Find running tasks that have exceeded the timeout threshold
+        and haven't been marked for cancellation yet."""
+        threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
+
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT * FROM task
+                WHERE status = :status_running
+                AND started_at < :threshold
+                AND cancel_requested = 0
+            """)
+            rows = conn.execute(stmt, {
+                "status_running": TaskStatus.RUNNING.value,
+                "threshold": threshold,
+            }).fetchall()
+            return [self._row_to_task(row) for row in rows]
+
+    def cancel_task(self, task_id: int, reason: str = "") -> Task | None:
+        """Directly cancel a task (mark as CANCELLED).
+
+        Used by StaleTaskRecovery when worker doesn't respond to
+        cancel_requested flag within grace period.
+        """
+        now = datetime.now(timezone.utc)
+
+        with self.engine.begin() as conn:
+            # Check current status
+            row = conn.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id}
+            ).fetchone()
+
+            if row is None:
+                return None
+
+            current = self._row_to_task(row)
+            if current.status not in (TaskStatus.RUNNING.value, TaskStatus.PENDING.value):
+                return None
+
+            conn.execute(
+                text("""
+                    UPDATE task SET
+                        status = :status_cancelled,
+                        cancel_requested = 1,
+                        cancel_requested_at = :cancelled_at,
+                        completed_at = :completed_at,
+                        error = :error
+                    WHERE id = :id
+                """),
+                {
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "cancelled_at": now,
+                    "completed_at": now,
+                    "error": f"Task cancelled: {reason}",
+                    "id": task_id,
+                }
+            )
+
+            # Re-fetch to return updated task
+            updated_row = conn.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id}
+            ).fetchone()
+            return self._row_to_task(updated_row) if updated_row else None
+
+    def force_cancel_and_schedule_retry(
+        self,
+        task_id: int,
+        max_retries: int,
+        reason: str,
+        backoff_base: int = 60,
+        backoff_max: int = 3600,
+    ) -> Task | None:
+        """Atomically cancel a task and schedule a retry in a single transaction.
+
+        Combines cancel_task() + schedule_retry() to prevent the window where
+        a crash would leave an orphaned CANCELLED task with no retry child.
+
+        Returns the new retry task, or None if max retries exceeded.
+        """
+        now = datetime.now(timezone.utc)
+
+        with self.engine.begin() as conn:
+            # Get parent task
+            parent_row = conn.execute(
+                text("SELECT * FROM task WHERE id = :id"),
+                {"id": task_id}
+            ).fetchone()
+
+            if parent_row is None:
+                return None
+
+            parent = dict(parent_row._mapping)
+
+            # Check guards
+            if parent.get("retry_scheduled", 0):
+                return None  # Already has retry scheduled
+
+            current_retry_count = parent.get("retry_count", 0)
+            if current_retry_count >= max_retries:
+                return None  # Max retries exceeded
+
+            new_retry_count = current_retry_count + 1
+
+            # Calculate backoff
+            delay_seconds = min(
+                backoff_base * (2 ** current_retry_count),
+                backoff_max
+            )
+            next_retry_at = now + timedelta(seconds=delay_seconds)
+            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
+
+            # Force-cancel parent and set retry_scheduled guard
+            conn.execute(
+                text("""
+                    UPDATE task SET
+                        status = :status_cancelled,
+                        cancel_requested = 1,
+                        cancel_requested_at = :now,
+                        completed_at = :now,
+                        error = :error,
+                        retry_scheduled = 1
+                    WHERE id = :id
+                """),
+                {
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "now": now,
+                    "error": f"Force cancelled: {reason}",
+                    "id": task_id,
+                }
+            )
+
+            # Create retry child
+            result = conn.execute(
+                text("""
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, next_retry_at, created_at,
+                                      cancel_requested, retry_scheduled)
+                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                            :retry_count, :next_retry_at_str, :created_at,
+                            :cancel_requested, :retry_scheduled)
+                    RETURNING *
+                """),
+                {
+                    "task_type": parent["task_type"],
+                    "instance_id": parent["instance_id"],
+                    "message_id": parent.get("message_id"),
+                    "status_pending": TaskStatus.PENDING.value,
+                    "retry_count": new_retry_count,
+                    "next_retry_at_str": next_retry_at_str,
+                    "created_at": now,
+                    "cancel_requested": 0,
+                    "retry_scheduled": 0,
+                }
+            ).fetchone()
+
+            return self._row_to_task(result)
+
+    def find_orphaned_cancelled_tasks(self) -> list[Task]:
+        """Find CANCELLED tasks that never got a retry child.
+
+        These are tasks where:
+        - status = 'cancelled'
+        - retry_scheduled = False (or the retry_scheduled flag was set but child doesn't exist)
+        - retry_count < max_retries (retry should have been scheduled)
+
+        Used by startup recovery to detect crash-before-retry scenarios.
+        """
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT t1.* FROM task t1
+                WHERE t1.status = :status_cancelled
+                AND t1.retry_scheduled = 0
+                AND NOT EXISTS (
+                    SELECT 1 FROM task t2
+                    WHERE t2.instance_id = t1.instance_id
+                    AND t2.message_id = t1.message_id
+                    AND t2.retry_count > t1.retry_count
+                )
+            """)
+            rows = conn.execute(stmt, {
+                "status_cancelled": TaskStatus.CANCELLED.value,
+            }).fetchall()
+            return [self._row_to_task(row) for row in rows]
+
+    def get_retry_chain(self, instance_id: str, message_id: str) -> list[Task]:
+        """Get all tasks in a retry chain for debugging."""
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT * FROM task
+                WHERE instance_id = :instance_id
+                AND message_id = :message_id
+                ORDER BY retry_count ASC
+            """)
+            rows = conn.execute(stmt, {
+                "instance_id": instance_id,
+                "message_id": message_id,
+            }).fetchall()
+            return [self._row_to_task(row) for row in rows]
