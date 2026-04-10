@@ -902,6 +902,7 @@ class InstanceManager:
         message_id: str,
         cancellation_token: CancellationToken | None = None,
         is_retry: bool = False,
+        retry_count: int = 0,  # FIX: C3 — new parameter
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -984,7 +985,7 @@ class InstanceManager:
         
         if is_retry:
             if await self._has_checkpoint(instance_id):
-                logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{msg.retry_count})")
+                logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{retry_count})")
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")

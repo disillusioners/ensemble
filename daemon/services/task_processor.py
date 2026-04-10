@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from .event_bus import EventBus
 from .main_loop_bridge import MainLoopBridge
+from daemon.cancellation import CancellationToken, OperationCancelledError
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
@@ -22,11 +23,12 @@ class BaseProcessor(ABC):
     """Base class for task processors."""
 
     @abstractmethod
-    async def process(self, task: "Task") -> dict[str, Any]:
+    async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a task asynchronously.
 
         Args:
             task: The task to process.
+            cancellation_token: Optional token for cancellation.
 
         Returns:
             Result dictionary with processing outcome.
@@ -67,7 +69,7 @@ class ProcessMessageProcessor(BaseProcessor):
         self._message_repo = message_repository
         self._event_bus = event_bus
 
-    async def process(self, task: "Task") -> dict[str, Any]:
+    async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
         
         1. Get message content from repository
@@ -77,6 +79,7 @@ class ProcessMessageProcessor(BaseProcessor):
         
         Args:
             task: The task with message_id to process.
+            cancellation_token: Optional token for cancellation.
             
         Returns:
             Result dictionary with processing outcome.
@@ -108,7 +111,7 @@ class ProcessMessageProcessor(BaseProcessor):
             )
         
         message_content = message.content if message else ""
-        is_retry = message.retry_count > 0 if hasattr(message, 'retry_count') else False
+        is_retry = task.retry_count > 0
         
         # Create processing_started event
         if self._event_bus:
@@ -135,8 +138,8 @@ class ProcessMessageProcessor(BaseProcessor):
                 instance_id=task.instance_id,
                 message=message_content,
                 message_id=task.message_id,
-                cancellation_token=None,
-                is_retry=is_retry,
+                cancellation_token=cancellation_token,
+                retry_count=task.retry_count,
             )
             
             # Create processing_completed event
@@ -180,6 +183,8 @@ class ProcessMessageProcessor(BaseProcessor):
                 "message_id": task.message_id,
             }
             
+        except OperationCancelledError:
+            raise
         except Exception as e:
             logger.error(f"Failed to process message task {task.id}: {e}", exc_info=True)
             
@@ -226,11 +231,12 @@ class SendReportProcessor(BaseProcessor):
         self._event_repo = event_repo
         self._event_bus = event_bus
 
-    async def process(self, task: "Task") -> dict[str, Any]:
+    async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Send a completion report to the parent instance.
 
         Args:
             task: The task with report data.
+            cancellation_token: Optional token for cancellation.
 
         Returns:
             Result dictionary.
@@ -258,11 +264,12 @@ class CleanupProcessor(BaseProcessor):
         self._event_repo = event_repo
         self._event_bus = event_bus
 
-    async def process(self, task: "Task") -> dict[str, Any]:
+    async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Perform cleanup for an instance.
 
         Args:
             task: The task with cleanup instructions.
+            cancellation_token: Optional token for cancellation.
 
         Returns:
             Result dictionary.
@@ -332,7 +339,7 @@ class TaskProcessor:
         """
         return self._task_repo.claim_pending_task(worker_id)
 
-    def run_task(self, task: "Task") -> None:
+    def run_task(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> None:
         """Run a task asynchronously via the main event loop.
 
         This method is called from the worker thread. It uses
@@ -340,6 +347,7 @@ class TaskProcessor:
 
         Args:
             task: The task to run.
+            cancellation_token: Optional token for cancellation.
 
         Raises:
             Exception: If the task fails.
@@ -349,21 +357,11 @@ class TaskProcessor:
             raise ValueError(f"Unknown task type: {task.task_type}")
 
         async def _run():
-            result = await processor.process(task)
-            # Complete the task with result
-            self._task_repo.complete_task(task.id, result)
-            return result
+            return await processor.process(task, cancellation_token=cancellation_token)
 
         # Bridge from worker thread to main event loop
-        try:
-            result = MainLoopBridge.run_async(_run(), timeout=300.0)
-            return result
-        except TimeoutError:
-            self._task_repo.fail_task(task.id, "Task processing timed out (300s)")
-            raise
-        except Exception as e:
-            self._task_repo.fail_task(task.id, str(e))
-            raise
+        # No timeout here - let TimeoutMonitor handle it
+        return MainLoopBridge.run_async(_run(), timeout=None)
 
     def get_pending_count(self) -> int:
         """Get the number of pending tasks."""

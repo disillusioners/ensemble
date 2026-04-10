@@ -6,9 +6,13 @@ import asyncio
 import logging
 import threading
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+from daemon.cancellation import CancellationReason, OperationCancelledError
 from .main_loop_bridge import MainLoopBridge
+
+if TYPE_CHECKING:
+    from daemon.services.task_processor import Task
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,10 @@ class Worker(threading.Thread):
         worker_id: str,
         task_processor,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        timeout_minutes: float = 15.0,
+        max_retries: int = 3,
+        retry_backoff_base: int = 60,
+        retry_backoff_max: int = 3600,
     ):
         """Initialize a worker thread.
         
@@ -43,11 +51,19 @@ class Worker(threading.Thread):
             worker_id: Unique identifier for this worker.
             task_processor: TaskProcessor instance to delegate task processing.
             poll_interval: How often to poll for tasks (seconds).
+            timeout_minutes: Task timeout in minutes.
+            max_retries: Maximum number of retry attempts.
+            retry_backoff_base: Base for exponential backoff (seconds).
+            retry_backoff_max: Maximum backoff time (seconds).
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
         self._task_processor = task_processor
         self._poll_interval = poll_interval
+        self._timeout_minutes = timeout_minutes
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
         self._stop_event = threading.Event()
         self._tasks_claimed = 0
         self._tasks_completed = 0
@@ -72,16 +88,7 @@ class Worker(threading.Thread):
                     
                     # Run the task asynchronously via the main event loop
                     # This is the FIX: C1 pattern - thread to async bridge
-                    try:
-                        self._task_processor.run_task(task)
-                        self._tasks_completed += 1
-                        logger.debug(f"Worker {self.worker_id} completed task {task.id}")
-                    except Exception as e:
-                        self._tasks_failed += 1
-                        logger.error(
-                            f"Worker {self.worker_id} failed task {task.id}: {e}",
-                            exc_info=True
-                        )
+                    self._process_with_timeout(task)
                 else:
                     # No work available, sleep and retry
                     self._stop_event.wait(timeout=self._poll_interval)
@@ -115,6 +122,100 @@ class Worker(threading.Thread):
             "tasks_failed": self._tasks_failed,
             "is_alive": self.is_alive(),
         }
+    
+    def _process_with_timeout(self, task: "Task") -> None:
+        """Process a task with timeout monitoring and retry logic."""
+        from daemon.cancellation import CancellationTokenSource
+        from daemon.services.timeout_monitor import TimeoutMonitor
+        
+        # Create cancellation infrastructure
+        source = CancellationTokenSource()
+        token = source.token
+        timeout_seconds = self._timeout_minutes * 60
+        
+        monitor = TimeoutMonitor(
+            task_id=task.id,
+            source=source,
+            timeout_seconds=timeout_seconds,
+        )
+        monitor.start()
+        
+        try:
+            # Run the task with cancellation token
+            self._task_processor.run_task(task, cancellation_token=token)
+            self._tasks_completed += 1
+            logger.debug(f"Worker {self.worker_id} completed task {task.id}")
+            
+        except OperationCancelledError as e:
+            # Task was cancelled (timeout or other reason)
+            logger.warning(
+                f"Worker {self.worker_id}: task {task.id} cancelled: {e.message}"
+            )
+            self._handle_cancellation(task, e.reason)
+            
+        except TimeoutError:
+            # MainLoopBridge safety timeout (shouldn't happen normally)
+            logger.error(
+                f"Worker {self.worker_id}: task {task.id} hit safety timeout"
+            )
+            self._handle_cancellation(
+                task, CancellationReason.TIMEOUT
+            )
+            
+        except Exception as e:
+            # Other error — decide retry vs permanent fail
+            logger.error(
+                f"Worker {self.worker_id} failed task {task.id}: {e}",
+                exc_info=True
+            )
+            self._handle_task_failure(task, str(e))
+            
+        finally:
+            monitor.stop()
+    
+    def _handle_cancellation(
+        self, task: "Task", reason: "CancellationReason"
+    ) -> None:
+        """Handle task cancellation — schedule retry or permanent fail."""
+        if reason == CancellationReason.TIMEOUT:
+            # Try to schedule a retry
+            retry_task = self._task_processor._task_repo.schedule_retry(
+                task_id=task.id,
+                max_retries=self._max_retries,
+                backoff_base=self._retry_backoff_base,
+                backoff_max=self._retry_backoff_max,
+            )
+            
+            if retry_task:
+                logger.info(
+                    f"Worker {self.worker_id}: scheduled retry {retry_task.id} "
+                    f"for task {task.id} (attempt {retry_task.retry_count}/{self._max_retries})"
+                )
+                self._tasks_failed += 1  # Count original task as failed
+            else:
+                # Max retries exceeded
+                self._task_processor._task_repo.fail_task(
+                    task.id,
+                    f"Task cancelled after {self._max_retries} retries"
+                )
+                self._tasks_failed += 1
+                logger.warning(
+                    f"Worker {self.worker_id}: task {task.id} permanently failed "
+                    f"after {self._max_retries} retries"
+                )
+        else:
+            # Non-timeout cancellation (shutdown, user request, etc.)
+            self._task_processor._task_repo.cancel_task(
+                task.id, reason=f"Cancelled: {reason.value}"
+            )
+            self._tasks_failed += 1
+    
+    def _handle_task_failure(self, task: "Task", error: str) -> None:
+        """Handle task failure — schedule retry or permanent fail."""
+        # For now: fail permanently. Retry-on-error is a separate feature.
+        # Timeout cancellation already handles retry.
+        self._task_processor._task_repo.fail_task(task.id, error)
+        self._tasks_failed += 1
 
 
 class WorkerPool:
@@ -131,6 +232,10 @@ class WorkerPool:
         task_processor,
         num_workers: int = 4,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        timeout_minutes: float = 15.0,
+        max_retries: int = 3,
+        retry_backoff_base: int = 60,
+        retry_backoff_max: int = 3600,
     ):
         """Initialize the worker pool.
         
@@ -138,10 +243,18 @@ class WorkerPool:
             task_processor: TaskProcessor instance for task processing.
             num_workers: Number of worker threads to spawn.
             poll_interval: How often workers poll for tasks (seconds).
+            timeout_minutes: Task timeout in minutes.
+            max_retries: Maximum number of retry attempts.
+            retry_backoff_base: Base for exponential backoff (seconds).
+            retry_backoff_max: Maximum backoff time (seconds).
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
         self._poll_interval = poll_interval
+        self._timeout_minutes = timeout_minutes
+        self._max_retries = max_retries
+        self._retry_backoff_base = retry_backoff_base
+        self._retry_backoff_max = retry_backoff_max
         self._workers: list[Worker] = []
         self._started = False
         self._stopped = False
@@ -162,6 +275,10 @@ class WorkerPool:
                 worker_id=f"worker-{i}",
                 task_processor=self._task_processor,
                 poll_interval=self._poll_interval,
+                timeout_minutes=self._timeout_minutes,
+                max_retries=self._max_retries,
+                retry_backoff_base=self._retry_backoff_base,
+                retry_backoff_max=self._retry_backoff_max,
             )
             worker.start()
             self._workers.append(worker)
