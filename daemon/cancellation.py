@@ -1,6 +1,7 @@
 """Thread-safe cancellation token system for request termination."""
 
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from enum import Enum
@@ -33,6 +34,7 @@ class CancellationToken:
     """
     _cancelled: threading.Event = field(default_factory=threading.Event)
     _reason: Optional[CancellationReason] = field(default=None, init=False)
+    _cancelled_at: Optional[float] = field(default=None, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     
     @property
@@ -45,6 +47,12 @@ class CancellationToken:
         """Get the cancellation reason, if any."""
         with self._lock:
             return self._reason
+    
+    @property
+    def cancelled_at(self) -> Optional[float]:
+        """Get the monotonic timestamp when cancellation was requested."""
+        with self._lock:
+            return self._cancelled_at
     
     def check(self) -> None:
         """Check and raise if cancelled.
@@ -90,6 +98,7 @@ class CancellationTokenSource:
                 return  # Already cancelled
             
             self._token._reason = reason
+            self._token._cancelled_at = time.monotonic()
             self._token._cancelled.set()
             
             # Invoke callbacks
