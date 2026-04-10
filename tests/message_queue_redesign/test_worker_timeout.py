@@ -180,6 +180,88 @@ class TestRetryCountPassthrough:
         default = params["retry_count"].default
         assert default == 0
 
+    def test_process_message_processor_passes_is_retry_to_manager(self):
+        """ProcessMessageProcessor passes is_retry=True when retry_count > 0."""
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock, patch, MagicMock
+        
+        # Create mock dependencies
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="ok"))
+        
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test message content"
+        mock_message_repo.get = Mock(return_value=mock_message)
+        
+        # Create processor
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            event_bus=None,
+        )
+        
+        # Create task with retry_count > 0
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 2  # This means is_retry should be True
+        
+        # Run processing
+        import asyncio
+        asyncio.run(processor.process(task))
+        
+        # Verify is_retry=True was passed
+        mock_manager._process_message_with_tracking.assert_called_once()
+        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        assert "is_retry" in call_kwargs, "is_retry not passed to manager"
+        assert call_kwargs["is_retry"] is True, f"Expected is_retry=True, got {call_kwargs['is_retry']}"
+        
+    def test_process_message_processor_passes_is_retry_false_for_first_attempt(self):
+        """ProcessMessageProcessor passes is_retry=False when retry_count == 0."""
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock, patch, MagicMock
+        
+        # Create mock dependencies
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="ok"))
+        
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test message content"
+        mock_message_repo.get = Mock(return_value=mock_message)
+        
+        # Create processor
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            event_bus=None,
+        )
+        
+        # Create task with retry_count == 0 (first attempt)
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 0  # First attempt, is_retry should be False
+        
+        # Run processing
+        import asyncio
+        asyncio.run(processor.process(task))
+        
+        # Verify is_retry=False was passed
+        mock_manager._process_message_with_tracking.assert_called_once()
+        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        assert "is_retry" in call_kwargs, "is_retry not passed to manager"
+        assert call_kwargs["is_retry"] is False, f"Expected is_retry=False, got {call_kwargs['is_retry']}"
+
 
 # ============================================================================
 # Worker Timeout Tests

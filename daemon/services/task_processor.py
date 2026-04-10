@@ -139,6 +139,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 message=message_content,
                 message_id=task.message_id,
                 cancellation_token=cancellation_token,
+                is_retry=is_retry,
                 retry_count=task.retry_count,
             )
             
