@@ -3,6 +3,7 @@
 import logging
 from typing import Any
 
+import httpx
 import openai
 from langchain_core.runnables import RunnableLambda
 
@@ -46,7 +47,7 @@ class ContextLengthExceededError(Exception):
         )
 
 
-# Exceptions that with_retry should catch and retry
+# Exceptions that with_retry should catch and retry — server/connection errors
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     # Wrapper exception from classifier for retryable status codes
     TransientAPIError,
@@ -55,10 +56,17 @@ TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     BrokenPipeError,
     ConnectionAbortedError,
     # OpenAI exceptions that DON'T get wrapped (from lower-level HTTP client)
-    openai.APITimeoutError,
     openai.APIConnectionError,
     # Response validation failure from Phase 1
     LLMResponseValidationError,
+)
+
+
+# Timeout errors — expensive retries (each costs up to request_timeout)
+TIMEOUT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    openai.APITimeoutError,
+    httpx.TimeoutException,
+    TimeoutError,
 )
 
 

@@ -484,6 +484,8 @@ class TestBuildInstanceGraphIntegration:
     @pytest.mark.asyncio
     async def test_build_instance_graph_with_retry_config(self, mock_checkpointer, mock_tools):
         """Test build_instance_graph applies retry config with classify_llm_errors."""
+        from daemon.llm_error_classifier import TRANSIENT_EXCEPTIONS, TIMEOUT_EXCEPTIONS
+        
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
             # Setup mock LLM
             mock_llm_instance = MagicMock()
@@ -508,7 +510,8 @@ class TestBuildInstanceGraphIntegration:
                     with patch('daemon.graph.ToolNode'):
                         from daemon.graph import build_instance_graph
                         
-                        retry_config = {"max_retries": 5}
+                        # Use new config format with separate transient and timeout attempts
+                        retry_config = {"transient_attempts": 8, "timeout_attempts": 3}
                         
                         build_instance_graph(
                             tools=mock_tools,
@@ -521,8 +524,18 @@ class TestBuildInstanceGraphIntegration:
                         # Verify classify_llm_errors was called (BEFORE with_retry)
                         mock_classify.assert_called_once_with(mock_llm_with_tools)
                         
-                        # Verify with_retry was called on the classified LLM
-                        mock_llm_with_tools.with_retry.assert_called_once()
+                        # Verify with_retry was called TWICE (transient + timeout handlers)
+                        assert mock_llm_with_tools.with_retry.call_count == 2
+                        
+                        # Verify transient retry config
+                        transient_call = mock_llm_with_tools.with_retry.call_args_list[0]
+                        assert transient_call.kwargs["stop_after_attempt"] == 8
+                        assert transient_call.kwargs["retry_if_exception_type"] == TRANSIENT_EXCEPTIONS
+                        
+                        # Verify timeout retry config
+                        timeout_call = mock_llm_with_tools.with_retry.call_args_list[1]
+                        assert timeout_call.kwargs["stop_after_attempt"] == 3
+                        assert timeout_call.kwargs["retry_if_exception_type"] == TIMEOUT_EXCEPTIONS
 
 
 class TestCompactionContextPassedToCompactor:

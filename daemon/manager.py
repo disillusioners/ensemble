@@ -638,7 +638,8 @@ class InstanceManager:
 
         # Build retry config from queue settings
         retry_config = {
-            "max_retries": self.config.queue.llm_max_retries,
+            "transient_attempts": self.config.queue.llm_retry_transient_attempts,
+            "timeout_attempts": self.config.queue.llm_retry_timeout_attempts,
         }
 
         # Build graph config with thread_id for state management
@@ -2104,7 +2105,8 @@ Title:"""
 
         # Build retry config from queue settings
         retry_config = {
-            "max_retries": self.config.queue.llm_max_retries,
+            "transient_attempts": self.config.queue.llm_retry_transient_attempts,
+            "timeout_attempts": self.config.queue.llm_retry_timeout_attempts,
         }
 
         # Build graph config with thread_id for state management

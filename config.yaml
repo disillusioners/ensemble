@@ -41,11 +41,21 @@ agents:
 # Message Queue Settings
 queue:
   discard_on_startup: false
-  # llm_max_retries: Max LLM call attempts per task. Uses tenacity
-  #   exponential backoff (1s, 2s, 4s...). Each attempt has request_timeout
-  #   overhead. With request_timeout=660s and max_retries=3:
-  #   worst case = (3 × 660s) + ~12s = ~33 min total.
-  llm_max_retries: 3
+  # LLM retry settings per error category:
+  #
+  # Transient errors (500/502/503/429 rate limit, connection errors):
+  #   These fail fast (response in seconds), so more retries fit in the time budget.
+  #   8 attempts × ~5s per failed request ≈ 40s total overhead.
+  llm_retry_transient_attempts: 8
+  #
+  # Timeout errors (request_timeout exceeded):
+  #   Each timeout attempt costs up to request_timeout (660s = 11 min).
+  #   3 attempts × 660s ≈ 33 min, within the 45 min task_timeout budget.
+  #   More retries would exceed the task timeout and waste resources.
+  llm_retry_timeout_attempts: 3
+  #
+  # Non-retryable errors (401 auth, 403 forbidden, 400 bad request):
+  #   These fail immediately with no retries — retrying won't fix them.
 
 # Context Compaction Settings
 compaction:
@@ -62,10 +72,9 @@ compaction:
 # Worker Pool and Background Services
 services:
   # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts.
-  #   With request_timeout=660s and llm_max_retries=3 (default):
-  #   Worst case = (3 × 660s) + ~12s backoff = ~33 min.
-  #   35 min provides sufficient margin over the 33 min worst case.
-  task_timeout_minutes: 35
+  #   With 3 timeout retries (3 × 660s ≈ 33 min) + transient retry overhead (~40s):
+  #   Total ≈ 34 min, well within the 45 min budget.
+  task_timeout_minutes: 45
   max_task_retries: 3  # Max retry attempts (0 = no retry)
   task_retry_backoff_base: 60  # Base backoff in seconds (1 min)
   task_retry_backoff_max: 3600  # Max backoff in seconds (1 hour)

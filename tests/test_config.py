@@ -338,4 +338,5 @@ class TestQueueConfig:
         config = QueueConfig()
         
         assert config.discard_on_startup is False
-        assert config.llm_max_retries == 3
+        assert config.llm_retry_transient_attempts == 8
+        assert config.llm_retry_timeout_attempts == 3

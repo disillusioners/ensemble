@@ -246,7 +246,8 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.llm_max_retries = 3
+        config.queue.llm_retry_transient_attempts = 8
+        config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
         # Mock registry
@@ -299,7 +300,8 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.llm_max_retries = 3
+        config.queue.llm_retry_transient_attempts = 8
+        config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
         mock_registry = MagicMock()
@@ -347,7 +349,8 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.llm_max_retries = 3
+        config.queue.llm_retry_transient_attempts = 8
+        config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
         mock_registry = MagicMock()
@@ -391,7 +394,8 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.llm_max_retries = 3
+        config.queue.llm_retry_transient_attempts = 8
+        config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
         mock_registry = MagicMock()
@@ -456,7 +460,8 @@ class TestErrorMessageConsistency:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.llm_max_retries = 3
+        config.queue.llm_retry_transient_attempts = 8
+        config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
         mock_registry2 = MagicMock()

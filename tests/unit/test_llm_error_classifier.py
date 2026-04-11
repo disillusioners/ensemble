@@ -7,6 +7,7 @@ import openai
 from daemon.llm_error_classifier import (
     RETRYABLE_STATUS_CODES,
     TRANSIENT_EXCEPTIONS,
+    TIMEOUT_EXCEPTIONS,
     TransientAPIError,
     ContextLengthExceededError,
     classify_llm_errors,
@@ -174,14 +175,13 @@ class TestTransientExceptions:
     """Tests for TRANSIENT_EXCEPTIONS tuple."""
 
     def test_contains_required_types(self):
-        """TRANSIENT_EXCEPTIONS should contain all required exception types."""
+        """TRANSIENT_EXCEPTIONS should contain all required exception types (except timeout)."""
         required = (
             TransientAPIError,
             LLMResponseValidationError,
             ConnectionResetError,
             BrokenPipeError,
             ConnectionAbortedError,
-            openai.APITimeoutError,
             openai.APIConnectionError,
         )
         for exc_type in required:
@@ -207,9 +207,9 @@ class TestTransientExceptions:
         """TRANSIENT_EXCEPTIONS should contain ConnectionAbortedError."""
         assert ConnectionAbortedError in TRANSIENT_EXCEPTIONS
 
-    def test_contains_api_timeout_error(self):
-        """TRANSIENT_EXCEPTIONS should contain openai.APITimeoutError."""
-        assert openai.APITimeoutError in TRANSIENT_EXCEPTIONS
+    def test_does_not_contain_api_timeout_error(self):
+        """TRANSIENT_EXCEPTIONS should NOT contain openai.APITimeoutError (it's in TIMEOUT_EXCEPTIONS)."""
+        assert openai.APITimeoutError not in TRANSIENT_EXCEPTIONS
 
     def test_contains_api_connection_error(self):
         """TRANSIENT_EXCEPTIONS should contain openai.APIConnectionError."""
@@ -222,6 +222,42 @@ class TestTransientExceptions:
     def test_is_tuple(self):
         """TRANSIENT_EXCEPTIONS should be a tuple."""
         assert isinstance(TRANSIENT_EXCEPTIONS, tuple)
+
+
+class TestTimeoutExceptions:
+    """Tests for TIMEOUT_EXCEPTIONS tuple."""
+
+    def test_contains_required_types(self):
+        """TIMEOUT_EXCEPTIONS should contain all timeout-related exception types."""
+        import httpx
+        required = (
+            openai.APITimeoutError,
+            httpx.TimeoutException,
+            TimeoutError,
+        )
+        for exc_type in required:
+            assert exc_type in TIMEOUT_EXCEPTIONS
+
+    def test_contains_api_timeout_error(self):
+        """TIMEOUT_EXCEPTIONS should contain openai.APITimeoutError."""
+        assert openai.APITimeoutError in TIMEOUT_EXCEPTIONS
+
+    def test_contains_httpx_timeout_exception(self):
+        """TIMEOUT_EXCEPTIONS should contain httpx.TimeoutException."""
+        import httpx
+        assert httpx.TimeoutException in TIMEOUT_EXCEPTIONS
+
+    def test_contains_timeout_error(self):
+        """TIMEOUT_EXCEPTIONS should contain TimeoutError."""
+        assert TimeoutError in TIMEOUT_EXCEPTIONS
+
+    def test_does_not_contain_transient_api_error(self):
+        """TIMEOUT_EXCEPTIONS should NOT contain TransientAPIError."""
+        assert TransientAPIError not in TIMEOUT_EXCEPTIONS
+
+    def test_is_tuple(self):
+        """TIMEOUT_EXCEPTIONS should be a tuple."""
+        assert isinstance(TIMEOUT_EXCEPTIONS, tuple)
 
 
 class TestClassifyLLErrors:

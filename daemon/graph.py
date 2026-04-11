@@ -373,13 +373,31 @@ def build_instance_graph(
         # CRITICAL: classify errors BEFORE with_retry so they can be caught
         llm_with_tools = classify_llm_errors(llm_with_tools)
         
-        max_retries = retry_config.get("max_retries", 3)
+        from daemon.llm_error_classifier import TRANSIENT_EXCEPTIONS, TIMEOUT_EXCEPTIONS
+        
+        transient_attempts = retry_config.get("transient_attempts", 8)
+        timeout_attempts = retry_config.get("timeout_attempts", 3)
+        
+        # Transient errors (500/502/503/429) — fail fast, many retries
+        # These return quickly so we can afford 7-10 attempts in the time budget
         llm_with_tools = llm_with_tools.with_retry(
-            stop_after_attempt=max_retries,
+            stop_after_attempt=transient_attempts,
             retry_if_exception_type=TRANSIENT_EXCEPTIONS,
             wait_exponential_jitter=True,
         )
-        logger.debug(f"LLM configured with {max_retries} retries")
+        
+        # Timeout errors — expensive retries (each costs up to request_timeout)
+        # 3 attempts × 660s ≈ 33 min, well within 45 min task timeout
+        llm_with_tools = llm_with_tools.with_retry(
+            stop_after_attempt=timeout_attempts,
+            retry_if_exception_type=TIMEOUT_EXCEPTIONS,
+            wait_exponential_jitter=True,
+        )
+        
+        logger.debug(
+            f"LLM configured with {transient_attempts} transient retries, "
+            f"{timeout_attempts} timeout retries"
+        )
     
     # Late binding for graph reference
     graph_ref = [None]

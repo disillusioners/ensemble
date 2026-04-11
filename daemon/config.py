@@ -93,8 +93,11 @@ class QueueConfig(BaseSettings):
     # Development helper: discard all queued messages on startup
     discard_on_startup: bool = Field(default=False)
 
-    # LLM retry configuration
-    llm_max_retries: int = Field(default=3)
+    # LLM retry configuration — per error category
+    # Transient errors (500/502/503/429): fail fast, more retries fit in time budget
+    llm_retry_transient_attempts: int = Field(default=8)
+    # Timeout errors: each attempt costs up to request_timeout (660s = 11 min)
+    llm_retry_timeout_attempts: int = Field(default=3)
 
 
 class AgentsConfig(BaseSettings):
@@ -137,7 +140,7 @@ class ServicesConfig(BaseSettings):
     
     # Task timeout and retry configuration
     task_timeout_minutes: float = Field(
-        default=35.0,
+        default=45.0,
         description="Maximum time a task can run before being cancelled (minutes). Set to 0 to disable timeout."
     )
     max_task_retries: int = Field(
