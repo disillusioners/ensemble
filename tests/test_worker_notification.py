@@ -198,3 +198,365 @@ class TestNotificationRaceConditions:
         
         assert result is False
         assert elapsed < 0.05, "Zero timeout should return immediately"
+
+
+class MockTask:
+    """Mock task object for integration tests."""
+    
+    def __init__(self, task_id: int = 1, task_type: str = "process_message"):
+        self.id = task_id
+        self.task_type = task_type
+        self.instance_id = "test-instance-123"
+        self.message_id = "test-message-456"
+        self.retry_count = 0
+        self.status = "pending"
+        self.worker_id = None
+
+
+class IntegrationTaskProcessor:
+    """Task processor for integration tests that can simulate real behavior."""
+    
+    def __init__(self, pool=None):
+        self.claim_count = 0
+        self.run_count = 0
+        self.claimed_tasks = []
+        self.tasks_to_return = []  # Queue of tasks to return from claim_task
+        self.run_exception = None  # Exception to throw on run_task
+        self.run_called = threading.Event()
+        self._run_count_at_last_set = 0  # Track run_count when event was last set
+        # Use _task_repo to match what Worker code expects
+        self._task_repo = MockTaskRepo(
+            task_queue=self.tasks_to_return,
+            notify_callback=pool.notify_work if pool else None
+        )
+    
+    def claim_task(self, worker_id: str):
+        """Return next task from queue, or None if empty."""
+        self.claim_count += 1
+        if self.tasks_to_return:
+            task = self.tasks_to_return.pop(0)
+            task.worker_id = worker_id
+            self.claimed_tasks.append(task)
+            return task
+        return None
+    
+    def run_task(self, task, cancellation_token=None):
+        """Run the task (mock - just track it was called)."""
+        self.run_count += 1
+        self.run_called.set()
+        self._run_count_at_last_set = self.run_count
+        if self.run_exception:
+            exc = self.run_exception
+            self.run_exception = None  # Only throw once
+            raise exc
+    
+    def wait_for_run_count(self, expected_count, timeout):
+        """Wait until run_count reaches expected value using event-based polling."""
+        # Use the event with a timeout-based polling approach
+        start = time.time()
+        while self.run_count < expected_count:
+            # Wait on the event with a short timeout, then recheck
+            if self.run_called.wait(timeout=min(0.05, timeout - (time.time() - start))):
+                # Event was set, but check if we have the right count
+                if self.run_count >= expected_count:
+                    return True
+                # Reset event for next iteration (in case count increased)
+                self.run_called.clear()
+            if time.time() - start > timeout:
+                return False
+        return True
+    
+    def get_pending_count(self):
+        return len(self.tasks_to_return)
+
+
+class TimeoutTriggeringProcessor:
+    """Processor that triggers timeout cancellation on specific tasks."""
+    
+    def __init__(self, pool=None):
+        self.claim_count = 0
+        self.run_count = 0
+        self.claimed_tasks = []
+        self.tasks_to_return = []
+        self.tasks_to_timeout = set()  # Task IDs that should timeout
+        self.run_called = threading.Event()
+        self._task_repo = MockTaskRepo(
+            task_queue=self.tasks_to_return,
+            notify_callback=pool.notify_work if pool else None
+        )
+        self._monitor = None  # Set by worker when created
+    
+    def claim_task(self, worker_id: str):
+        """Return next task from queue, or None if empty."""
+        self.claim_count += 1
+        if self.tasks_to_return:
+            task = self.tasks_to_return.pop(0)
+            task.worker_id = worker_id
+            self.claimed_tasks.append(task)
+            return task
+        return None
+    
+    def run_task(self, task, cancellation_token=None):
+        """Run the task - simulate timeout for certain tasks."""
+        self.run_count += 1
+        self.run_called.set()
+        
+        if task.id in self.tasks_to_timeout:
+            # Simulate timeout: raise OperationCancelledError
+            from daemon.cancellation import CancellationReason, OperationCancelledError
+            # Raise TimeoutError which triggers _handle_cancellation with TIMEOUT reason
+            raise TimeoutError(f"Simulated timeout for task {task.id}")
+        
+        # Normal completion - do nothing
+    
+    def wait_for_run_count(self, expected_count, timeout):
+        """Wait until run_count reaches expected value using event-based polling."""
+        start = time.time()
+        while self.run_count < expected_count:
+            if self.run_called.wait(timeout=min(0.05, timeout - (time.time() - start))):
+                if self.run_count >= expected_count:
+                    return True
+                self.run_called.clear()
+            if time.time() - start > timeout:
+                return False
+        return True
+    
+    def get_pending_count(self):
+        return len(self.tasks_to_return)
+
+
+class MockTaskRepo:
+    """Mock task repository for integration tests."""
+    
+    def __init__(self, task_queue: list = None, notify_callback=None):
+        """Initialize MockTaskRepo.
+        
+        Args:
+            task_queue: Reference to the task queue for auto-adding retry tasks.
+            notify_callback: Optional callback to call when schedule_retry adds a task.
+                             This enables automatic worker notification for retry tasks.
+        """
+        self.schedule_retry_count = 0
+        self.fail_task_count = 0
+        self.cancel_task_count = 0
+        self.retry_task = None
+        self._schedule_retry_called = threading.Event()
+        self._fail_task_called = threading.Event()
+        # Reference to the task queue for auto-adding retry tasks
+        self._task_queue = task_queue
+        # Callback for notifying workers (e.g., pool.notify_work)
+        self._notify_callback = notify_callback
+    
+    def schedule_retry(self, task_id, max_retries, backoff_base, backoff_max):
+        self.schedule_retry_count += 1
+        self._schedule_retry_called.set()
+        # Create a retry task
+        retry_task = MockTask(task_id=task_id + 100, task_type="process_message")
+        retry_task.retry_count = 1
+        self.retry_task = retry_task
+        # Auto-add to queue if we have a reference to it
+        if self._task_queue is not None:
+            self._task_queue.append(retry_task)
+        # Auto-notify worker about new retry task (simulates real system behavior)
+        if self._notify_callback is not None:
+            self._notify_callback()
+        return retry_task
+    
+    def fail_task(self, task_id, error):
+        self.fail_task_count += 1
+        self._fail_task_called.set()
+    
+    def cancel_task(self, task_id, reason):
+        self.cancel_task_count += 1
+
+
+class TestWorkerLifecycleIntegration:
+    """Integration tests with real Worker threads."""
+    
+    def test_real_worker_processes_task_after_notify(self):
+        """Real Worker should process task after notify_work() is called."""
+        processor = IntegrationTaskProcessor()
+        # Add a task that will be returned when worker claims
+        processor.tasks_to_return.append(MockTask(task_id=1))
+        
+        pool = WorkerPool(task_processor=processor, num_workers=1)
+        pool.start()
+        
+        try:
+            # Wait for worker to start and go idle (no task available initially)
+            time.sleep(0.1)
+            
+            # Now notify - worker should wake and process
+            pool.notify_work()
+            
+            # Wait for run_task to be called (with timeout)
+            assert processor.wait_for_run_count(1, timeout=3.0), \
+                f"Worker should have called run_task within timeout (got {processor.run_count})"
+            
+            assert processor.run_count == 1, \
+                f"run_task should be called once, got {processor.run_count}"
+            assert len(processor.claimed_tasks) == 1, \
+                f"Worker should have claimed 1 task, got {len(processor.claimed_tasks)}"
+            
+        finally:
+            pool.stop(timeout=5.0)
+    
+    def test_real_worker_goes_idle_when_no_tasks(self):
+        """Real Worker should go idle (not claim) when no tasks available."""
+        processor = IntegrationTaskProcessor()
+        # Empty task queue - worker will have empty claim attempts
+        
+        pool = WorkerPool(task_processor=processor, num_workers=1)
+        pool.start()
+        
+        try:
+            # Poll until worker has attempted at least one claim
+            start = time.time()
+            while processor.claim_count < 1:
+                if time.time() - start > 2.0:
+                    pytest.fail("Worker did not attempt any claims within 2 seconds")
+                time.sleep(0.05)
+            
+            # Worker has attempted to claim at least once (and found nothing)
+            assert processor.claim_count > 0, \
+                "Worker should have attempted to claim tasks"
+            
+            # No tasks should have been run (none available)
+            assert processor.run_count == 0, \
+                f"No tasks should be run when queue is empty, got {processor.run_count}"
+            
+            # Now add a task and notify
+            processor.tasks_to_return.append(MockTask(task_id=2))
+            pool.notify_work()
+            
+            # Worker should wake and process
+            assert processor.wait_for_run_count(1, timeout=3.0), \
+                f"Worker should wake and process task after notify (got {processor.run_count})"
+            assert processor.run_count == 1, \
+                f"Should process 1 task after notify, got {processor.run_count}"
+            
+        finally:
+            pool.stop(timeout=5.0)
+    
+    def test_worker_error_recovery_uses_wait_for_work(self):
+        """Worker should recover after task failure and continue processing."""
+        processor = IntegrationTaskProcessor()
+        
+        # First task will fail
+        processor.tasks_to_return.append(MockTask(task_id=1))
+        processor.run_exception = ValueError("Simulated task failure")
+        
+        # Second task will succeed
+        processor.tasks_to_return.append(MockTask(task_id=2))
+        
+        pool = WorkerPool(task_processor=processor, num_workers=1)
+        pool.start()
+        
+        try:
+            pool.notify_work()
+            
+            # Wait for first failure
+            assert processor.wait_for_run_count(1, timeout=3.0), \
+                f"First task should be attempted (got {processor.run_count})"
+            
+            # Wait for recovery and second task processing
+            time.sleep(0.5)  # Let worker settle after error
+            
+            # Notify for second task
+            pool.notify_work()
+            
+            # Wait for second task to complete successfully
+            assert processor.wait_for_run_count(2, timeout=3.0), \
+                f"Second task should be attempted after recovery (got {processor.run_count})"
+            
+            assert processor.run_count == 2, \
+                f"Both tasks should be attempted, got {processor.run_count}"
+            
+            # Worker should still be alive (recovered)
+            assert pool.is_running(), "Worker pool should still be running after error"
+            
+        finally:
+            pool.stop(timeout=5.0)
+    
+    def test_schedule_retry_notifies_worker(self):
+        """Task timeout triggers schedule_retry which notifies worker for retry task."""
+        pool = WorkerPool(task_processor=None, num_workers=1)  # Create pool first
+        processor = TimeoutTriggeringProcessor(pool=pool)  # Pass pool for auto-notify
+        
+        # First task will timeout - schedule_retry will auto-add the retry task
+        processor.tasks_to_return.append(MockTask(task_id=1))
+        processor.tasks_to_timeout.add(1)
+        
+        pool._task_processor = processor  # Set processor on pool
+        pool.start()
+        
+        try:
+            pool.notify_work()
+            
+            # Wait for first task timeout
+            assert processor.wait_for_run_count(1, timeout=3.0), \
+                f"First task should be attempted (got {processor.run_count})"
+            
+            # Wait for schedule_retry to be called (timeout triggers retry path)
+            assert processor._task_repo._schedule_retry_called.wait(timeout=2.0), \
+                "schedule_retry should be called on timeout"
+            
+            # NO manual notify_work() needed - MockTaskRepo auto-notifies via callback
+            # The retry task was auto-added AND auto-notified
+            
+            # Wait for retry task to be processed
+            assert processor.wait_for_run_count(2, timeout=3.0), \
+                f"Retry task should be attempted (got {processor.run_count})"
+            
+            assert processor.run_count == 2, \
+                f"Both original and retry tasks should run, got {processor.run_count}"
+            assert processor._task_repo.schedule_retry_count >= 1, \
+                "schedule_retry should be called at least once"
+            
+        finally:
+            pool.stop(timeout=5.0)
+    
+    def test_multi_worker_notification(self):
+        """Two workers should process two tasks when notified."""
+        processor = IntegrationTaskProcessor()
+        
+        # Add two tasks
+        processor.tasks_to_return.append(MockTask(task_id=1))
+        processor.tasks_to_return.append(MockTask(task_id=2))
+        
+        pool = WorkerPool(task_processor=processor, num_workers=2)
+        pool.start()
+        
+        try:
+            # Wait for workers to start and attempt claims
+            start = time.time()
+            while processor.claim_count < 2:
+                if time.time() - start > 2.0:
+                    pytest.fail("Workers did not make enough claim attempts within 2 seconds")
+                time.sleep(0.05)
+            
+            # Notify twice (one per task)
+            pool.notify_work()
+            pool.notify_work()
+            
+            # Wait for both tasks to be processed
+            assert processor.wait_for_run_count(2, timeout=3.0), \
+                f"At least both tasks should be processed (got {processor.run_count})"
+            
+            assert processor.run_count == 2, \
+                f"Both tasks should be processed by 2 workers, got {processor.run_count}"
+            
+            # Verify two different workers claimed tasks using polling
+            start = time.time()
+            distinct_workers = 0
+            while distinct_workers < 2 and time.time() - start < 1.0:
+                worker_ids = set(t.worker_id for t in processor.claimed_tasks)
+                distinct_workers = len(worker_ids)
+                if distinct_workers < 2:
+                    time.sleep(0.05)
+            
+            assert len(worker_ids) == 2, \
+                f"Two different workers should claim tasks, got {len(worker_ids)}: {worker_ids}"
+            
+        finally:
+            pool.stop(timeout=5.0)

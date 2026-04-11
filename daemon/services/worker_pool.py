@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
@@ -94,14 +95,14 @@ class Worker(threading.Thread):
                 # No task available → this is an empty claim attempt
                 self._worker_pool._stats["empty_claim_attempts"] += 1
                 
-                # Wait for notification OR safety timeout
-                self._worker_pool.wait_for_work(timeout=3.0)
+                # Wait for notification OR safety timeout OR stop signal
+                self._worker_pool.wait_for_work(timeout=3.0, stop_event=self._stop_event)
                 # Loop back to try claiming again
                 
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} unexpected error: {e}", exc_info=True)
                 # Wait for work notification during error recovery
-                self._worker_pool.wait_for_work(timeout=1.0)
+                self._worker_pool.wait_for_work(timeout=1.0, stop_event=self._stop_event)
         
         logger.info(
             f"Worker {self.worker_id} stopped: "
@@ -289,13 +290,24 @@ class WorkerPool:
             self._condition.notify()
             self._stats["notifications_sent"] += 1
     
-    def wait_for_work(self, timeout: float = 3.0) -> bool:
-        """Worker calls this when idle. Returns True if notified, False if timed out."""
+    def wait_for_work(self, timeout: float = 3.0, stop_event: threading.Event = None) -> bool:
+        """Worker calls this when idle. Returns True if notified, False if timed out.
+        
+        Args:
+            timeout: Maximum time to wait in seconds.
+            stop_event: Optional event to check for early exit. If set, returns False.
+        """
         with self._condition:
-            if self._notification_count > 0:
-                self._notification_count -= 1
-                return True
-            self._condition.wait(timeout=timeout)
+            start_time = time.monotonic()
+            while self._notification_count == 0:
+                # Check stop signal first to avoid waiting when shutting down
+                if stop_event is not None and stop_event.is_set():
+                    return False
+                elapsed = time.monotonic() - start_time
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    break
+                self._condition.wait(timeout=remaining)
             if self._notification_count > 0:
                 self._notification_count -= 1
                 return True
