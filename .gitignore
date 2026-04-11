@@ -58,3 +58,4 @@ test-results/*
 test_e2e_queue.db
 tmp_test/*
 test_e2e_instance_title.db
+.inspiration-projects/*
