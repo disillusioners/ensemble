@@ -1434,16 +1434,20 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
-    async def _should_send_completion_report(self, session, instance_id: str) -> bool:
+    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str) -> bool:
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we don't send duplicate completion reports:
-        1. No pending messages (READY, RETRYING) for the instance
-        2. No existing completion report message in queue
+        1. No pending messages (READY, RETYING) for the instance
+        2. No existing completion report for this specific message
+        
+        The idempotency key includes the message_id so each message completion
+        generates a unique report (allowing multiple completions from the same child).
         
         Args:
             session: Database session.
             instance_id: The child instance ID to check.
+            completed_message_id: The message ID that just completed.
             
         Returns:
             True if should proceed with sending report, False to skip.
@@ -1473,15 +1477,16 @@ Provide a concise summary:"""
             )
             return False
         
-        # FIX C3 - Idempotency: Check if completion report already sent
+        # Idempotency: Check if completion report already sent for THIS message
         instance = session.get(Instance, instance_id)
         if instance is None or instance.parent_id is None:
             return False
             
+        # Use message_id in source so each completion generates a unique report
         existing_report = session.exec(
             select(MessageQueue)
             .where(MessageQueue.instance_id == instance.parent_id)
-            .where(MessageQueue.source == f"report:{instance_id}")
+            .where(MessageQueue.source == f"report:{instance_id}:{completed_message_id}")
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,
@@ -1491,8 +1496,8 @@ Provide a concise summary:"""
         
         if existing_report is not None:
             logger.debug(
-                f"Completion report already queued for child {instance_id[:8]}..., "
-                f"skipping duplicate"
+                f"Completion report already queued for child {instance_id[:8]}... "
+                f"message {completed_message_id[:8]}..., skipping duplicate"
             )
             return False
         
@@ -1503,6 +1508,7 @@ Provide a concise summary:"""
         session,
         instance,
         last_content: str,
+        completed_message_id: str,
     ) -> tuple[MessageQueue, Task, str]:
         """Create the completion report message and task for the parent.
         
@@ -1510,10 +1516,14 @@ Provide a concise summary:"""
         - COMPLETION_REPORT message for parent
         - PROCESS_MESSAGE task
         
+        The report source includes the message_id so each completion is unique,
+        allowing multiple reports from the same child for different messages.
+        
         Args:
             session: Database session.
             instance: The child Instance object.
             last_content: The content to include in the report (fetched before transaction).
+            completed_message_id: The message ID that completed (for unique report source).
             
         Returns:
             Tuple of (report_message, report_task, report_message_id).
@@ -1529,12 +1539,13 @@ Provide a concise summary:"""
         instance.version = (instance.version or 1) + 1
         
         # Create completion report message for parent
+        # Include message_id in source for per-message idempotency
         report_message_id = str(uuid.uuid4())
         report_message = MessageQueue(
             message_id=report_message_id,
             instance_id=instance.parent_id,
             content=last_content,  # Already fetched before transaction
-            source=f"report:{instance.instance_id}",
+            source=f"report:{instance.instance_id}:{completed_message_id}",
             type=MessageType.COMPLETION_REPORT.value,
             status=MessageStatus.READY.value,
             priority=0,  # System priority
@@ -1686,20 +1697,21 @@ Provide a concise summary:"""
         
         return completion_event, parent_event
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str) -> None:
-        """Atomic check if child instance is done and should send completion report.
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
+        """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
         leaving the instance in COMPLETED state without a report if the fetch fails.
         
         This method handles:
-        - Idempotency (won't send duplicate completion reports)
+        - Idempotency per-message (won't send duplicate reports for same message)
         - Parent's waiting_for counter decrement
         - Parent's children[] cache update (FIX: W6)
         - Cascade: if parent's waiting_for reaches 0, transition parent to RUNNING
         
         Args:
-            instance_id: The child instance that may have completed.
+            instance_id: The child instance that completed.
+            completed_message_id: The message ID that just completed (for idempotency).
         """
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
         last_content = await self._get_last_assistant_message(instance_id, agent_name="agent")
@@ -1719,7 +1731,7 @@ Provide a concise summary:"""
                 return
             
             # Idempotency checks
-            if not await self._should_send_completion_report(session, instance_id):
+            if not await self._should_send_completion_report(session, instance_id, completed_message_id):
                 return
             
             # ATOMIC: Instance completed — create completion report for parent
@@ -1727,7 +1739,7 @@ Provide a concise summary:"""
             
             # Create completion report
             report_message, report_task, report_message_id = await self._create_completion_report(
-                session, instance, last_content
+                session, instance, last_content, completed_message_id
             )
             
             # Update parent state

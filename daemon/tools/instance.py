@@ -274,7 +274,12 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 return (
                     f"ERROR: '{instance_id}' not found, please re-plan, spawn new instance for your task"
                 )
-        
+
+        # Check if instance is terminated
+        instance_info = manager.get_instance_info(instance_id)
+        if instance_info.get("terminated"):
+            return f"ERROR: Instance '{instance_id}' is terminated. Cannot send message."
+
         # Enqueue the message via worker pool (creates MessageQueue + Task atomically)
         result = await manager.enqueue_message(
             instance_id=instance_id,

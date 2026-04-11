@@ -174,7 +174,9 @@ class ProcessMessageProcessor(BaseProcessor):
             # This may create a completion report task for the parent
             try:
                 if hasattr(self._manager, '_process_child_completion_and_notify_parent'):
-                    await self._manager._process_child_completion_and_notify_parent(task.instance_id)
+                    await self._manager._process_child_completion_and_notify_parent(
+                        task.instance_id, task.message_id
+                    )
             except Exception as e:
                 logger.error(
                     f"Error checking child completion for {task.instance_id[:8]}...: {e}",
