@@ -21,10 +21,12 @@ limits:
   instance_timeout_minutes: 60
   message_rate_limit: 60
   graph_recursion_limit: 200
+  llm_concurrency: 10
 
 # Persistence Settings
 persistence:
   db_path: ./data/instances.db
+  checkpointer_db_path: ./data/checkpoints.db
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
@@ -36,16 +38,20 @@ agents:
 
 # Message Queue Settings
 queue:
-  max_queue_size: 100
-  message_timeout_seconds: 3600  # 1 hour for long tasks
-  max_retries: 5
-  watchdog_check_interval_seconds: 30
-  cleanup_completed_age_hours: 24
-  circuit_breaker_failure_threshold: 5
-  circuit_breaker_recovery_timeout_seconds: 300
-  llm_max_retries: 7
-  llm_retry_delay_seconds: 3.0
-  llm_retry_exponential_base: 2.0
+  discard_on_startup: false
+  llm_max_retries: 3
+
+# Context Compaction Settings
+compaction:
+  enabled: true
+  threshold: 0.80
+  recent_message_window: 10
+  min_recent_window: 3
+  context_window_override: 0
+  target_ratio: 0.40
+  summarization_model: ""
+  min_messages_before_compaction: 10
+  summarization_chunk_threshold: 0.60
 
 # Worker Pool and Background Services
 services:

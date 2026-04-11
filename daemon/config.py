@@ -90,21 +90,11 @@ class QueueConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="QUEUE_")
 
-    max_queue_size: int = Field(default=100)
-    message_timeout_seconds: int = Field(default=3600)  # 1 hour
-    max_retries: int = Field(default=5)
-    watchdog_check_interval_seconds: int = Field(default=30)
-    cleanup_completed_age_hours: int = Field(default=24)
-    circuit_breaker_failure_threshold: int = Field(default=5)
-    circuit_breaker_recovery_timeout_seconds: int = Field(default=300)
-
     # Development helper: discard all queued messages on startup
     discard_on_startup: bool = Field(default=False)
 
     # LLM retry configuration
     llm_max_retries: int = Field(default=3)
-    llm_retry_delay_seconds: float = Field(default=10.0)
-    llm_retry_exponential_base: float = Field(default=2.0)
 
 
 class AgentsConfig(BaseSettings):

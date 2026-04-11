@@ -221,12 +221,7 @@ if message_metadata.get("type") == "error_report":
 
 ## Configuration
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `max_retries` | 5 | Max retry attempts per message |
-| `message_timeout_seconds` | 3600 | Time before watchdog marks stuck |
-| `circuit_breaker_threshold` | 5 | Failures before circuit opens |
-| `circuit_breaker_recovery` | 300s | Time before circuit closes |
+This module uses hardcoded values for timeouts and retries.
 
 ## Thread Safety
 

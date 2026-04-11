@@ -334,10 +334,5 @@ class TestQueueConfig:
         
         config = QueueConfig()
         
-        assert config.max_queue_size == 100
-        assert config.message_timeout_seconds == 3600
-        assert config.max_retries == 5
-        assert config.watchdog_check_interval_seconds == 30
-        assert config.cleanup_completed_age_hours == 24
+        assert config.discard_on_startup is False
         assert config.llm_max_retries == 3
-        assert config.llm_retry_delay_seconds == 10.0
