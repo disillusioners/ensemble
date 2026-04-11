@@ -500,7 +500,6 @@ class InstanceManager:
         self._worker_pool = WorkerPool(
             task_processor=self._task_processor,
             num_workers=num_workers,
-            poll_interval=svc.worker_poll_interval,
             timeout_minutes=svc.task_timeout_minutes,
             max_retries=svc.max_task_retries,
             retry_backoff_base=svc.task_retry_backoff_base,
@@ -508,7 +507,7 @@ class InstanceManager:
         )
         self._worker_pool.start()
         
-        logger.info(f"Worker pool started with {num_workers} workers (poll_interval={svc.worker_poll_interval}s, timeout={svc.task_timeout_minutes}min)")
+        logger.info(f"Worker pool started with {num_workers} workers (timeout={svc.task_timeout_minutes}min)")
 
     def shutdown_worker_pool(self) -> None:
         """Shut down the worker pool gracefully."""

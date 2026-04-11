@@ -100,8 +100,8 @@ class Worker(threading.Thread):
                 
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} unexpected error: {e}", exc_info=True)
-                # Brief sleep to avoid tight error loop
-                self._stop_event.wait(timeout=1.0)
+                # Wait for work notification during error recovery
+                self._worker_pool.wait_for_work(timeout=1.0)
         
         logger.info(
             f"Worker {self.worker_id} stopped: "
@@ -286,8 +286,8 @@ class WorkerPool:
         """Signal that new work is available. Safe to call from any thread."""
         with self._condition:
             self._notification_count += 1
-            self._condition.notify_all()
-        self._stats["notifications_sent"] += 1
+            self._condition.notify()
+            self._stats["notifications_sent"] += 1
     
     def wait_for_work(self, timeout: float = 3.0) -> bool:
         """Worker calls this when idle. Returns True if notified, False if timed out."""

@@ -390,6 +390,8 @@ class TaskRepository:
         Returns the new retry task, or None if max retries exceeded or parent
         already has retry_scheduled=True (double-retry guard).
         """
+        retry_task = None  # Will be set inside transaction if successful
+
         with self.engine.begin() as conn:
             # Get parent task
             parent_row = conn.execute(
@@ -398,75 +400,78 @@ class TaskRepository:
             ).fetchone()
 
             if parent_row is None:
-                return None
+                pass  # Let transaction finish, retry_task stays None
+            else:
+                parent = dict(parent_row._mapping)
 
-            parent = dict(parent_row._mapping)
+                # Check retry_scheduled guard to prevent double-retry
+                if parent.get("retry_scheduled", 0):
+                    pass  # Retry already scheduled by another process
+                elif parent.get("retry_count", 0) >= max_retries:
+                    pass  # Max retries exceeded
+                else:
+                    current_retry_count = parent.get("retry_count", 0)
+                    new_retry_count = current_retry_count + 1
 
-            # Check retry_scheduled guard to prevent double-retry
-            if parent.get("retry_scheduled", 0):
-                return None  # Retry already scheduled by another process
+                    # Calculate exponential backoff
+                    delay_seconds = min(
+                        backoff_base * (2 ** current_retry_count),
+                        backoff_max
+                    )
+                    next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+                    next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
+                    now = datetime.now(timezone.utc)
 
-            # Check retry limit
-            current_retry_count = parent.get("retry_count", 0)
-            if current_retry_count >= max_retries:
-                return None  # Max retries exceeded
+                    # Mark parent as CANCELLED and set retry_scheduled guard
+                    conn.execute(
+                        text("""
+                            UPDATE task SET
+                                status = :status_cancelled,
+                                cancel_requested = 1,
+                                cancel_requested_at = :cancelled_at,
+                                completed_at = :completed_at,
+                                retry_scheduled = 1
+                            WHERE id = :id
+                        """),
+                        {
+                            "status_cancelled": TaskStatus.CANCELLED.value,
+                            "cancelled_at": now,
+                            "completed_at": now,
+                            "id": task_id,
+                        }
+                    )
 
-            new_retry_count = current_retry_count + 1
+                    # Create new retry task (column is task_type, not type)
+                    result = conn.execute(
+                        text("""
+                            INSERT INTO task (task_type, instance_id, message_id, status,
+                                              retry_count, next_retry_at, created_at,
+                                              cancel_requested, retry_scheduled)
+                            VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                                    :retry_count, :next_retry_at_str, :created_at,
+                                    :cancel_requested, :retry_scheduled)
+                            RETURNING *
+                        """),
+                        {
+                            "task_type": parent["task_type"],
+                            "instance_id": parent["instance_id"],
+                            "message_id": parent.get("message_id"),
+                            "status_pending": TaskStatus.PENDING.value,
+                            "retry_count": new_retry_count,
+                            "next_retry_at_str": next_retry_at_str,
+                            "created_at": now,
+                            "cancel_requested": 0,
+                            "retry_scheduled": 0,
+                        }
+                    ).fetchone()
 
-            # Calculate exponential backoff
-            delay_seconds = min(
-                backoff_base * (2 ** current_retry_count),
-                backoff_max
-            )
-            next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
-            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
-            now = datetime.now(timezone.utc)
+                    retry_task = self._row_to_task(result)
 
-            # Mark parent as CANCELLED and set retry_scheduled guard
-            conn.execute(
-                text("""
-                    UPDATE task SET
-                        status = :status_cancelled,
-                        cancel_requested = 1,
-                        cancel_requested_at = :cancelled_at,
-                        completed_at = :completed_at,
-                        retry_scheduled = 1
-                    WHERE id = :id
-                """),
-                {
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "cancelled_at": now,
-                    "completed_at": now,
-                    "id": task_id,
-                }
-            )
-
-            # Create new retry task (column is task_type, not type)
-            result = conn.execute(
-                text("""
-                    INSERT INTO task (task_type, instance_id, message_id, status,
-                                      retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled)
-                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                            :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled)
-                    RETURNING *
-                """),
-                {
-                    "task_type": parent["task_type"],
-                    "instance_id": parent["instance_id"],
-                    "message_id": parent.get("message_id"),
-                    "status_pending": TaskStatus.PENDING.value,
-                    "retry_count": new_retry_count,
-                    "next_retry_at_str": next_retry_at_str,
-                    "created_at": now,
-                    "cancel_requested": 0,
-                    "retry_scheduled": 0,
-                }
-            ).fetchone()
-
+        # AFTER commit — safe to notify workers
+        if retry_task is not None:
             self._notify_pending_task()
-            return self._row_to_task(result)
+
+        return retry_task
 
     def _notify_pending_task(self) -> None:
         """Notify workers that a pending task was created."""
@@ -587,6 +592,7 @@ class TaskRepository:
 
         Returns the new retry task, or None if max retries exceeded.
         """
+        retry_task = None  # Will be set inside transaction if successful
         now = datetime.now(timezone.utc)
 
         with self.engine.begin() as conn:
@@ -597,74 +603,78 @@ class TaskRepository:
             ).fetchone()
 
             if parent_row is None:
-                return None
+                pass  # Let transaction finish, retry_task stays None
+            else:
+                parent = dict(parent_row._mapping)
 
-            parent = dict(parent_row._mapping)
+                # Check guards
+                if parent.get("retry_scheduled", 0):
+                    pass  # Already has retry scheduled
+                elif parent.get("retry_count", 0) >= max_retries:
+                    pass  # Max retries exceeded
+                else:
+                    current_retry_count = parent.get("retry_count", 0)
+                    new_retry_count = current_retry_count + 1
 
-            # Check guards
-            if parent.get("retry_scheduled", 0):
-                return None  # Already has retry scheduled
+                    # Calculate backoff
+                    delay_seconds = min(
+                        backoff_base * (2 ** current_retry_count),
+                        backoff_max
+                    )
+                    next_retry_at = now + timedelta(seconds=delay_seconds)
+                    next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
 
-            current_retry_count = parent.get("retry_count", 0)
-            if current_retry_count >= max_retries:
-                return None  # Max retries exceeded
+                    # Force-cancel parent and set retry_scheduled guard
+                    conn.execute(
+                        text("""
+                            UPDATE task SET
+                                status = :status_cancelled,
+                                cancel_requested = 1,
+                                cancel_requested_at = :now,
+                                completed_at = :now,
+                                error = :error,
+                                retry_scheduled = 1
+                            WHERE id = :id
+                        """),
+                        {
+                            "status_cancelled": TaskStatus.CANCELLED.value,
+                            "now": now,
+                            "error": f"Force cancelled: {reason}",
+                            "id": task_id,
+                        }
+                    )
 
-            new_retry_count = current_retry_count + 1
+                    # Create retry child
+                    result = conn.execute(
+                        text("""
+                            INSERT INTO task (task_type, instance_id, message_id, status,
+                                              retry_count, next_retry_at, created_at,
+                                              cancel_requested, retry_scheduled)
+                            VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                                    :retry_count, :next_retry_at_str, :created_at,
+                                    :cancel_requested, :retry_scheduled)
+                            RETURNING *
+                        """),
+                        {
+                            "task_type": parent["task_type"],
+                            "instance_id": parent["instance_id"],
+                            "message_id": parent.get("message_id"),
+                            "status_pending": TaskStatus.PENDING.value,
+                            "retry_count": new_retry_count,
+                            "next_retry_at_str": next_retry_at_str,
+                            "created_at": now,
+                            "cancel_requested": 0,
+                            "retry_scheduled": 0,
+                        }
+                    ).fetchone()
 
-            # Calculate backoff
-            delay_seconds = min(
-                backoff_base * (2 ** current_retry_count),
-                backoff_max
-            )
-            next_retry_at = now + timedelta(seconds=delay_seconds)
-            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
+                    retry_task = self._row_to_task(result)
 
-            # Force-cancel parent and set retry_scheduled guard
-            conn.execute(
-                text("""
-                    UPDATE task SET
-                        status = :status_cancelled,
-                        cancel_requested = 1,
-                        cancel_requested_at = :now,
-                        completed_at = :now,
-                        error = :error,
-                        retry_scheduled = 1
-                    WHERE id = :id
-                """),
-                {
-                    "status_cancelled": TaskStatus.CANCELLED.value,
-                    "now": now,
-                    "error": f"Force cancelled: {reason}",
-                    "id": task_id,
-                }
-            )
-
-            # Create retry child
-            result = conn.execute(
-                text("""
-                    INSERT INTO task (task_type, instance_id, message_id, status,
-                                      retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled)
-                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                            :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled)
-                    RETURNING *
-                """),
-                {
-                    "task_type": parent["task_type"],
-                    "instance_id": parent["instance_id"],
-                    "message_id": parent.get("message_id"),
-                    "status_pending": TaskStatus.PENDING.value,
-                    "retry_count": new_retry_count,
-                    "next_retry_at_str": next_retry_at_str,
-                    "created_at": now,
-                    "cancel_requested": 0,
-                    "retry_scheduled": 0,
-                }
-            ).fetchone()
-
+        # AFTER commit — safe to notify workers
+        if retry_task is not None:
             self._notify_pending_task()
-            return self._row_to_task(result)
+
+        return retry_task
 
     def find_orphaned_cancelled_tasks(self) -> list[Task]:
         """Find CANCELLED tasks that never got a retry child.
