@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 8 packs
-- Unit: 6 | Integration: 1 | Mock: 1
+- Total: 9 packs
+- Unit: 7 | Integration: 1 | Mock: 1
 
 ## Unit Test Packs
 
@@ -13,6 +13,7 @@
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-07 | ✅ PASS (177 passed) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue (task lock manager, queue integration, repository, service, manager job callbacks) + Phase 1 schema/migration/models/schemas + Phase 2 queue repo/mgmt service/processor/lock manager/queue-aware enqueue + Phase 3 queue router API endpoints | 2 min | 2026-04-08 | ✅ PASS (402 passed, 14 skipped) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend job queue (model, services, SSE, components) + Phase 3 queue service/model — Jest | 2 min | 2026-04-08 | ✅ PASS (197 passed) |
+| worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-11 | ✅ PASS (13 passed, 3× verified no flakiness) |
 
 ## Integration Test Packs
 

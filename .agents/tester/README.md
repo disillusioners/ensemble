@@ -60,9 +60,21 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-11 Worker Pool Optimization)
+## Test Results (Latest: 2026-04-11 Worker Pool Followup Fixes)
 
-### feature/worker-pool-optimization branch
+### feature/worker-pool-followup branch (commit 3c396b8)
+- **1789 tests pass** (22 skipped, 0 failed) excluding integration
+- **13 notification tests pass × 3 runs** — flakiness check, all deterministic
+- **5 new integration tests** — real Worker threads with threading.Event coordination
+- **Spurious wakeup defense verified** — while loop + monotonic elapsed tracking works
+- **Stop event check verified** — fast shutdown in wait_for_work()
+- **ensure.sh validated** — Server starts and runs cleanly for 30 seconds
+- **No regressions** from base branch
+- See `.agents/tester/RESULTS/2026-04-11-worker-pool-followup.md` for full report
+
+### Worker Pool Followup Status: ✅ READY FOR MERGE
+
+### feature/worker-pool-optimization branch (previous)
 - **1749 tests pass** (22 skipped, 0 failed) excluding integration
 - **31 notification tests pass** — 8 original + 23 new edge case tests ALL pass
 - **ensure.sh validated** — Server starts and runs cleanly for 30 seconds
@@ -72,7 +84,7 @@ tests/
 - 1 quick fix applied: integration tests updated to use _event_bus API
 - See `.agents/tester/RESULTS/2026-04-11-worker-pool-optimization.md` for full report
 
-### Worker Pool Optimization Status: ✅ READY FOR MERGE
+### Worker Pool Optimization Status: ✅ READY FOR MERGE (followup tested)
 
 ### Previous Results (feature/message-queue-redesign branch)
 - **1704 tests pass** (22 skipped, 0 failed, 0 errors) excluding integration
@@ -124,13 +136,15 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 6 Config & Wiring — FINAL TESTING COMPLETE**
+**Worker Pool Followup Fixes — TESTING COMPLETE**
 
-### Status: ✅ READY — FEATURE COMPLETE
+### Status: ✅ READY FOR MERGE
 
-**Latest:** 1704 tests pass, 290 MQ tests pass, ensure.sh validated, config loads correctly
-**Phase 6:** Config & Wiring — 10 E2E tests covering full timeout/retry flow
-**All 6 phases verified:** Schema → Worker Pool → Message Flow → Events → StaleTaskRecovery → Config & Wiring
+**Latest:** 1789 tests pass, 13 notification tests pass × 3 runs (no flakiness), ensure.sh validated
+**Commit:** 3c396b8 on `feature/worker-pool-followup`
+**Spurious wakeup defense:** while loop + monotonic elapsed tracking — verified
+**Stop event check:** Fast shutdown via stop_event in wait_for_work() — verified
+**5 new integration tests:** Real Worker threads with threading.Event — reliable, no race conditions
 
 ### Phase 6 Test File
 - **test_timeout_retry_e2e.py** (10 tests): Config flow, timeout→retry→complete, max retries→permanent failure, exponential backoff, multiple timeouts→success, default config, env var overrides, stale recovery config threshold, real repo integration

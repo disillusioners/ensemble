@@ -282,6 +282,10 @@ class WorkerPool:
             "empty_claim_attempts": 0,
             "workers_woken_by_timeout": 0,
         }
+        
+        # Event for test instrumentation - set when wait_for_work() is called
+        # Tests can wait on this to synchronize with workers entering wait state
+        self._wait_for_work_called = threading.Event()
     
     def notify_work(self) -> None:
         """Signal that new work is available. Safe to call from any thread."""
@@ -294,9 +298,16 @@ class WorkerPool:
         """Worker calls this when idle. Returns True if notified, False if timed out.
         
         Args:
-            timeout: Maximum time to wait in seconds.
+            timeout: Maximum time to wait in seconds. timeout=0 performs a non-blocking
+                check and does not count as a timeout wake.
             stop_event: Optional event to check for early exit. If set, returns False.
+        
+        Returns:
+            True if woken by notify_work(), False if timed out or stopped.
         """
+        # Signal for test instrumentation
+        self._wait_for_work_called.set()
+        
         with self._condition:
             start_time = time.monotonic()
             while self._notification_count == 0:

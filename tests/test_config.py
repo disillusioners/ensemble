@@ -331,8 +331,10 @@ class TestAgentsConfig:
 class TestQueueConfig:
     """Tests for QueueConfig."""
 
-    def test_queue_config_defaults(self):
+    def test_queue_config_defaults(self, monkeypatch):
         """Test QueueConfig default values."""
+        # Clear env var so we test defaults, not environment-influenced values
+        monkeypatch.delenv("QUEUE_DISCARD_ON_STARTUP", raising=False)
         from daemon.config import QueueConfig
         
         config = QueueConfig()
