@@ -242,18 +242,21 @@ export class ChatComponent implements OnInit, OnDestroy {
         } else {
           // When not appending (polling refresh), merge intelligently
           // Keep any instances we've loaded beyond the first page that still exist
-          const currentInstanceIds = new Set(currentInstances.map(i => i.instance_id));
           const responseInstanceIds = new Set(response.instances.map(i => i.instance_id));
           
-          // If user has loaded more pages, preserve instances not in this response
-          if (currentInstances.length > response.instances.length) {
-            const extraInstances = currentInstances.filter(
-              i => !responseInstanceIds.has(i.instance_id)
-            );
+          // Always preserve instances from loaded pages not in this response
+          // (e.g., page 2+ instances when polling only refreshes page 1)
+          const extraInstances = currentInstances.filter(
+            i => !responseInstanceIds.has(i.instance_id)
+          );
+          
+          if (extraInstances.length > 0) {
+            // User has loaded more pages - preserve those instances
             this.instances.set([...response.instances, ...extraInstances]);
             // Recalculate has_more based on what we have vs total
             this.hasMoreInstances.set((response.instances.length + extraInstances.length) < response.total);
           } else {
+            // No extra pages loaded - just use the response
             this.instances.set(response.instances);
             this.hasMoreInstances.set(response.has_more);
           }
