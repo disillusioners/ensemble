@@ -36,7 +36,9 @@ from .repositories import (
 from .registry import get_registry
 
 from .repositories.instance.repository import get_agent_name
-from .repositories.instance.models import Instance
+from .repositories.instance.models import Instance, InstanceStatus
+from sqlmodel import Session
+from sqlalchemy import text
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.event_bus import EventBus
@@ -681,7 +683,18 @@ class InstanceManager:
             parent_id=parent_id,
             metadata=instance_metadata if instance_metadata else None,
         )
-
+        
+        # Increment parent's waiting_for counter
+        if parent_id:
+            with Session(self._engine) as session:
+                parent = session.get(Instance, parent_id)
+                if parent:
+                    parent.waiting_for += 1
+                    # Update parent status to WAITING_CHILDREN if it was IDLE
+                    if parent.status == InstanceStatus.IDLE.value:
+                        parent.status = InstanceStatus.WAITING_CHILDREN.value
+                    session.commit()
+        
         # Store in instances dict
         self.instances[instance_id] = (graph, resolved_agent_dir)
 
@@ -1430,16 +1443,18 @@ Provide a concise summary:"""
                 return
             
             # Check for pending/processing messages for this instance
+            # Note: Don't check PROCESSING status for the current message being checked
+            # (it's the message that just finished processing)
             pending_count = session.exec(
                 select(func.count())
                 .select_from(MessageQueue)
                 .where(MessageQueue.instance_id == instance_id)
                 .where(MessageQueue.status.in_([
                     MessageStatus.READY.value,
-                    MessageStatus.PROCESSING.value,
+                    # MessageStatus.PROCESSING.value,  # Excluded - we're checking this message
                     MessageStatus.RETRYING.value,
                 ]))
-            ).one()
+            ).scalar_one()
             
             if pending_count > 0:
                 logger.debug(
@@ -1545,7 +1560,7 @@ Provide a concise summary:"""
                             MessageStatus.PROCESSING.value,
                             MessageStatus.RETRYING.value,
                         ]))
-                    ).one()
+                    ).scalar_one()
                     
                     if parent_pending == 0:
                         # No pending messages, parent is truly complete
@@ -1564,10 +1579,10 @@ Provide a concise summary:"""
             completion_event = Event(
                 instance_id=instance_id,
                 kind=EventKind.INSTANCE_COMPLETED.value,
-                data={
+                data=json.dumps({
                     "parent_id": instance.parent_id,
                     "report_message_id": report_message_id,
-                },
+                }),
                 created_at=datetime.now(timezone.utc),
             )
             session.add(completion_event)
@@ -1577,10 +1592,10 @@ Provide a concise summary:"""
                 instance_id=instance.parent_id,
                 message_id=report_message_id,
                 kind=EventKind.CHILD_COMPLETED.value,
-                data={
+                data=json.dumps({
                     "child_instance_id": instance_id,
                     "waiting_for_remaining": (parent.waiting_for - 1) if parent else 0,
-                },
+                }),
                 created_at=datetime.now(timezone.utc),
             )
             session.add(parent_event)

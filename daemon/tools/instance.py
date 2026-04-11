@@ -275,12 +275,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     f"ERROR: '{instance_id}' not found, please re-plan, spawn new instance for your task"
                 )
         
-        # Enqueue the message (fast ~1-5ms DB write)
-        message_id = manager._queue_repository.enqueue(
+        # Enqueue the message via worker pool (creates MessageQueue + Task atomically)
+        result = await manager.enqueue_message(
             instance_id=instance_id,
-            content=message,
+            message=message,
             source=f"agent:{current_instance_id}"
-        ).message_id
+        )
+        message_id = result.message_id
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

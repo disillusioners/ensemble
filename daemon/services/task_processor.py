@@ -166,6 +166,10 @@ class ProcessMessageProcessor(BaseProcessor):
                     },
                 )
             
+            # Mark message as completed so _check_child_completion_v2 can proceed
+            if self._message_repo:
+                await asyncio.to_thread(self._message_repo.complete, task.message_id)
+            
             # Check if this instance is a child that has completed all work
             # This may create a completion report task for the parent
             try:
