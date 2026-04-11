@@ -41,7 +41,7 @@ agents:
 # Message Queue Settings
 queue:
   discard_on_startup: false
-  # llm_max_retries: Max LLM call retries per task attempt. Uses tenacity
+  # llm_max_retries: Max LLM call attempts per task. Uses tenacity
   #   exponential backoff (1s, 2s, 4s...). Each attempt has request_timeout
   #   overhead. With request_timeout=660s and max_retries=3:
   #   worst case = (3 × 660s) + ~12s = ~33 min total.
@@ -61,11 +61,11 @@ compaction:
 
 # Worker Pool and Background Services
 services:
-  # task_timeout_minutes: Task-level hard timeout. Must cover all LLM retries.
+  # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts.
   #   With request_timeout=660s and llm_max_retries=3 (default):
   #   Worst case = (3 × 660s) + ~12s backoff = ~33 min.
-  #   Set high enough to avoid killing in-flight LLM requests during transient failures.
-  task_timeout_minutes: 30
+  #   35 min provides sufficient margin over the 33 min worst case.
+  task_timeout_minutes: 35
   max_task_retries: 3  # Max retry attempts (0 = no retry)
   task_retry_backoff_base: 60  # Base backoff in seconds (1 min)
   task_retry_backoff_max: 3600  # Max backoff in seconds (1 hour)

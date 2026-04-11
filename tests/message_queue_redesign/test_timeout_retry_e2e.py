@@ -515,7 +515,7 @@ class TestDefaultConfigValues:
         config = ServicesConfig()
 
         # Verify defaults
-        assert config.task_timeout_minutes == 30.0
+        assert config.task_timeout_minutes == 35.0
         assert config.max_task_retries == 3
         assert config.task_retry_backoff_base == 60
         assert config.task_retry_backoff_max == 3600
@@ -539,7 +539,7 @@ class TestDefaultConfigValues:
         pool.start()
         try:
             for worker in pool._workers:
-                assert worker._timeout_minutes == 30.0
+                assert worker._timeout_minutes == 35.0
                 assert worker._max_retries == 3
                 assert worker._retry_backoff_base == 60
                 assert worker._retry_backoff_max == 3600
