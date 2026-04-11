@@ -684,6 +684,9 @@ class InstanceManager:
                 )
             instance_metadata["project_id"] = project_id
         
+        logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id})")
+        
+        # Create instance in DB
         self._instance_repository.create(
             instance_id=instance_id,
             agent_id=resolved_agent_id,
@@ -691,6 +694,13 @@ class InstanceManager:
             parent_id=parent_id,
             metadata=instance_metadata if instance_metadata else None,
         )
+        
+        # Verify instance was created in DB
+        created = self._instance_repository.get(instance_id)
+        if created is None:
+            logger.error(f"CRITICAL: Instance {instance_id} was NOT persisted to database after create() call!")
+        else:
+            logger.info(f"Instance {instance_id} created in DB with status={created.status}, parent_id={created.parent_id}")
         
         # Update parent's children list and waiting_for counter
         if parent_id:
@@ -702,11 +712,16 @@ class InstanceManager:
                     if instance_id not in children_list:
                         children_list.append(instance_id)
                         parent.children = json.dumps(children_list)
+                        logger.info(f"Added child {instance_id} to parent's children list")
                     parent.waiting_for += 1
                     # Update parent status to WAITING_CHILDREN if it was IDLE
                     if parent.status == InstanceStatus.IDLE.value:
                         parent.status = InstanceStatus.WAITING_CHILDREN.value
+                        logger.info(f"Parent {parent_id} status changed to WAITING_CHILDREN")
                     session.commit()
+                    logger.info(f"Parent {parent_id} updated: children={children_list}, waiting_for={parent.waiting_for}")
+                else:
+                    logger.warning(f"Parent {parent_id} not found in DB when updating children list for child {instance_id}")
         
         # Store in instances dict
         self.instances[instance_id] = (graph, resolved_agent_dir)
@@ -907,6 +922,11 @@ class InstanceManager:
                     instance.status = InstanceStatus.RUNNING.value
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
+            else:
+                logger.warning(
+                    f"Instance {instance_id} not found in database during enqueue_message. "
+                    f"This may indicate the instance was not properly persisted."
+                )
             
             # 4. Create event for the new message
             event = Event(
@@ -1548,12 +1568,8 @@ Provide a concise summary:"""
                     except (json.JSONDecodeError, TypeError):
                         logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
                 
-                # Update instance_hierarchy junction table (canonical source)
-                session.exec(
-                    sql_delete(Instance.__table__)
-                    .where(Instance.instance_id == instance_id)
-                )
-                # Actually use proper delete
+                # Remove from instance_hierarchy junction table
+                # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
                 session.execute(
                     text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
                     {"child_id": instance_id}
