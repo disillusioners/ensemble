@@ -276,11 +276,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 )
         
         # Enqueue the message (fast ~1-5ms DB write)
-        message_id = manager.queue.enqueue(
+        message_id = manager._queue_repository.enqueue(
             instance_id=instance_id,
             content=message,
             source=f"agent:{current_instance_id}"
-        )
+        ).message_id
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     
