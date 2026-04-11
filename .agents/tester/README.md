@@ -60,9 +60,21 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-11 Phase 6 Config & Wiring — FINAL)
+## Test Results (Latest: 2026-04-11 Worker Pool Optimization)
 
-### feature/message-queue-redesign branch
+### feature/worker-pool-optimization branch
+- **1749 tests pass** (22 skipped, 0 failed) excluding integration
+- **31 notification tests pass** — 8 original + 23 new edge case tests ALL pass
+- **ensure.sh validated** — Server starts and runs cleanly for 30 seconds
+- **Notification mechanism verified**: notify_work() → wait_for_work(), 3s safety-net timeout, metrics tracking
+- **Edge cases verified**: rapid notifications, callback exceptions, shutdown, schedule_retry integration
+- No regressions from base branch
+- 1 quick fix applied: integration tests updated to use _event_bus API
+- See `.agents/tester/RESULTS/2026-04-11-worker-pool-optimization.md` for full report
+
+### Worker Pool Optimization Status: ✅ READY FOR MERGE
+
+### Previous Results (feature/message-queue-redesign branch)
 - **1704 tests pass** (22 skipped, 0 failed, 0 errors) excluding integration
 - **290 message_queue_redesign tests pass** — Phase 1-6 redesign tests ALL pass
 - **ensure.sh validated** — Server starts and runs cleanly for 30 seconds

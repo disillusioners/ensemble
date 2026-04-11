@@ -8,7 +8,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) | 2 min | 2026-04-10 | ✅ PASS (644 passed) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) | 2 min | 2026-04-11 | ✅ PASS (644 passed) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-07 | ✅ PASS (111 passed) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-07 | ✅ PASS (177 passed) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue (task lock manager, queue integration, repository, service, manager job callbacks) + Phase 1 schema/migration/models/schemas + Phase 2 queue repo/mgmt service/processor/lock manager/queue-aware enqueue + Phase 3 queue router API endpoints | 2 min | 2026-04-08 | ✅ PASS (402 passed, 14 skipped) |
