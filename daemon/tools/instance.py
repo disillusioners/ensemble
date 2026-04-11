@@ -300,9 +300,9 @@ Returns:
 """
     
     @tool
-    def terminate_instance(instance_id: str) -> bool:
+    async def terminate_instance(instance_id: str) -> bool:
         """Terminate an instance. Use with caution. Use tool_help("terminate_instance") for details."""
-        return manager.terminate_instance(instance_id)
+        return await manager.terminate_instance(instance_id)
     
     terminate_instance._full_doc_ = """Terminate an instance. Use with caution.
 

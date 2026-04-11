@@ -1996,7 +1996,7 @@ Title:"""
                 count += 1
         return count
 
-    def terminate_instance(self, instance_id: str) -> bool:
+    async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an instance.
 
         This method performs comprehensive cleanup:
@@ -2021,7 +2021,7 @@ Title:"""
         if meta and meta.children:
             for child_id in list(meta.children):
                 logger.info(f"Cascading terminate to child instance: {child_id[:8]}...")
-                self.terminate_instance(child_id)
+                await self.terminate_instance(child_id)
         
         # 1. Cancel active requests for this instance
         self._request_registry.cancel_by_instance(instance_id)
@@ -2041,10 +2041,10 @@ Title:"""
         if hasattr(self, '_instance_repository') and self._instance_repository:
             self._instance_repository.update_status(instance_id, "terminated")
 
-        # 6. Release project lock if JobQueueService is connected
+        # 6. Release project lock if JobQueueService is connected (async)
         if self._job_queue_service is not None:
             try:
-                released_projects = self._job_queue_service.release_locks_by_instance_sync(instance_id)
+                released_projects = await self._job_queue_service.release_lock_by_instance(instance_id)
                 if released_projects:
                     logger.info(
                         f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "

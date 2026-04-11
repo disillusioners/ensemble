@@ -707,7 +707,7 @@ async def terminate_instance(instance_id: str):
             ).model_dump()
         )
 
-    manager.terminate_instance(instance_id)
+    await manager.terminate_instance(instance_id)
     
     return {"terminated": True}
 
@@ -1501,7 +1501,7 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
     except Exception as e:
         # Rollback: terminate the orphaned instance
         try:
-            manager.terminate_instance(instance_id)
+            await manager.terminate_instance(instance_id)
         except Exception:
             pass  # Best effort cleanup
         raise HTTPException(

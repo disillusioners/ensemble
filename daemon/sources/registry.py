@@ -645,7 +645,7 @@ class SourceRegistry:
                     )
                     # Also terminate the old instance
                     try:
-                        self._manager.terminate_instance(old_instance_id)
+                        await self._manager.terminate_instance(old_instance_id)
                         logger.debug(f"Terminated old instance: {old_instance_id}")
                     except Exception as e:
                         logger.warning(f"Could not terminate old instance {old_instance_id}: {e}")
