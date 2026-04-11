@@ -14,7 +14,7 @@ The codebase contains three overlapping queue systems that evolved over time. Th
 |----------|-----|----------|--------|
 | 1 | Sync/Async Lock Mismatch | 🔴 CRITICAL | Medium (2-3 days) |
 | 2 | Non-Durable Locks | 🟠 HIGH | Medium |
-| 3 | No Auto-Trigger After `complete_job()` | 🟠 HIGH | Low (half day) |
+| 3 | No Auto-Trigger After `complete_job()` | 🟡 MEDIUM | Low (half day) |
 | 4 | Missing Integration Tests | 🟠 HIGH | Medium |
 | 5 | SQLite Concurrency | 🟡 MEDIUM | Low |
 | 6 | Incomplete Processors | 🟡 MEDIUM | Low-Medium |
@@ -29,7 +29,7 @@ The codebase contains three overlapping queue systems that evolved over time. Th
 |---|-----|----------|------------|-------------------|
 | 1 | **Sync/Async Lock Mismatch** | 🔴 **CRITICAL** | Design debt — async-only lock manager called from sync `terminate_instance()` | Queue stalls on every instance termination |
 | 2 | **Non-Durable Locks** | 🟠 **HIGH** | Architectural choice (in-memory) | Duplicate job execution after restart |
-| 3 | **No Auto-Trigger After `complete_job()`** | 🟠 **HIGH** | API design gap — caller must manually chain | Queue stalls if caller forgets `trigger_next_job()` |
+| 3 | **No Auto-Trigger After `complete_job()`** | 🟡 **MEDIUM** | API design gap — caller must manually chain | Queue stalls **only for direct `complete_job()` callers**; manager-orchestrated flows are protected by `_complete_job_for_instance()` chaining |
 | 4 | **Missing Integration Tests** | 🟠 **HIGH** | Test infrastructure gap | Untested concurrent behavior in production |
 | 5 | **SQLite Concurrency** | 🟡 **MEDIUM** | Platform limitation (known, managed) | Bottleneck under load; `pool_size=1` serializes everything |
 | 6 | **Incomplete Processors** | 🟡 **MEDIUM** | Incomplete implementation | `send_report` and `cleanup` task types will crash |
@@ -47,7 +47,7 @@ The codebase contains three overlapping queue systems that evolved over time. Th
 **Problem:** `JobLockManager` uses `asyncio.Lock` internally, but `terminate_instance()` calls sync methods that cannot await async locks:
 
 ```python
-# daemon/services/job_queue_service.py:844
+# daemon/services/job_queue_service.py:830
 def release_locks_by_instance_sync(self, instance_id: str) -> list[str]:
     logger.warning(
         f"release_locks_by_instance_sync called for instance {instance_id}. "
@@ -55,7 +55,7 @@ def release_locks_by_instance_sync(self, instance_id: str) -> list[str]:
     )
     return []  # Returns EMPTY — locks NOT released!
 
-# daemon/services/job_queue_service.py:779
+# daemon/services/job_queue_service.py:734
 def trigger_next_job_sync(self, project_id: str) -> bool:
     logger.warning(f"Cannot trigger next job for project {project_id}...")
     return False  # Always fails silently
@@ -79,21 +79,28 @@ def trigger_next_job_sync(self, project_id: str) -> bool:
 
 ---
 
-### 2.3 No Auto-Trigger After `complete_job()` (HIGH)
+### 2.3 No Auto-Trigger After `complete_job()` (MEDIUM)
 
 **Location:** `daemon/services/job_queue_service.py:604-649`
 
 **Problem:** `complete_job()` marks job as done but does NOT trigger the next job in queue.
 
 ```python
-async def complete_job(self, job_id: str, result: str = "completed") -> Job:
-    # ... marks job completed ...
-    return job  # No trigger_next_job() call!
+# daemon/services/job_queue_service.py:604
+async def complete_job(
+    self,
+    job_id: str,
+    success: bool = True,
+    error: Optional[str] = None,
+    result_summary: Optional[str] = None,
+) -> Optional[JobItem]:
+    # ... marks job completed/failed and releases lock ...
+    return updated_job
 ```
 
-**Impact:** Queue stalls if any caller uses `complete_job()` without manually calling `trigger_next_job()`.
+**Impact:** Queue stalls if any direct caller uses `complete_job()` without manually calling `trigger_next_job()` afterward.
 
-**Current Workaround:** `manager.py` explicitly chains the call. This is fragile.
+**Mitigating Factor:** `manager.py` (line 522) already works around this: `_complete_job_for_instance()` explicitly calls `trigger_next_job()` after completion. This means manager-orchestrated workflows are protected — **only direct `complete_job()` API callers** are affected.
 
 ---
 
@@ -132,10 +139,12 @@ async def test_concurrent_enqueue_different_projects(...):
 **Problem:** Only `ProcessMessageProcessor` is implemented:
 
 ```python
+# daemon/services/task_processor.py:217
 class SendReportProcessor(BaseProcessor):
     async def process(self, task: "Task", cancellation_token=None) -> dict[str, Any]:
         raise NotImplementedError("SendReportProcessor not yet implemented")
 
+# daemon/services/task_processor.py:250
 class CleanupProcessor(BaseProcessor):
     async def process(self, task: "Task", cancellation_token=None) -> dict[str, Any]:
         raise NotImplementedError("CleanupProcessor not yet implemented")
@@ -149,7 +158,7 @@ class CleanupProcessor(BaseProcessor):
 
 **Location:** `daemon/services/job_processor.py`
 
-**Problem:** `JobProcessor` polls the database every 0.5 seconds. During quiet periods, this creates unnecessary DB load.
+**Problem:** `JobProcessor` polls the database every 2.0 seconds. During quiet periods, this creates unnecessary DB load.
 
 **Note:** Acceptable trade-off for current scale. Event-driven alternatives would add complexity.
 
@@ -228,16 +237,25 @@ class JobLockManager:
 **Approach:** Embed trigger in `complete_job()` for defensive design.
 
 ```python
-# daemon/services/job_queue_service.py
+# daemon/services/job_queue_service.py:604
 
-async def complete_job(self, job_id: str, result: str = "completed") -> Job:
-    """Complete a job AND trigger the next queued job for the project."""
-    # ... existing completion logic ...
+async def complete_job(
+    self,
+    job_id: str,
+    success: bool = True,
+    error: Optional[str] = None,
+    result_summary: Optional[str] = None,
+) -> Optional[JobItem]:
+    """Complete a job and trigger the next queued job for the project."""
+    # ... existing completion logic (lines 623-649) ...
     
     project_id = job.project_id
     
     # Release locks
-    await self._lock_manager.release_lock(project_id, job_id, job.instance_id)
+    if job.queue_id and job.project_id:
+        await self._lock_manager.release_queue_lock(job.project_id, job.queue_id, job_id)
+    elif job.project_id:
+        await self._lock_manager.release(job.project_id, job_id)
     
     # Automatically trigger next job
     try:
@@ -245,7 +263,7 @@ async def complete_job(self, job_id: str, result: str = "completed") -> Job:
     except Exception as e:
         logger.warning(f"Failed to trigger next job for {project_id}: {e}")
     
-    return job
+    return updated_job
 ```
 
 **Effort:** Low (half day)
@@ -291,10 +309,10 @@ class CleanupProcessor(BaseProcessor):
         return {"success": True, "instance_id": instance_id}
 ```
 
-**Integration Test:**
+**Integration Test:** (see `tests/job_queue/test_task_queue_integration.py::test_complete_end_to_end_scenario`)
 
 ```python
-# tests/job_queue/test_queue_e2e.py
+# tests/job_queue/test_task_queue_integration.py:953
 
 @pytest.mark.asyncio
 async def test_full_job_lifecycle(tmp_path):
@@ -327,9 +345,9 @@ async def test_full_job_lifecycle(tmp_path):
 ## 4. Open Questions
 
 | Question | Impact | Recommendation |
-|----------|--------|-----------------|
+|----------|--------|----------------|
 | WorkerPool vs JobProcessor overlap? | Architecture clarity | Clarify in design doc |
-| SQLite WAL mode enabled? | Data integrity under crash | Verify `PRAGMA journal_mode=WAL` |
+| SQLite WAL mode enabled? | ✅ RESOLVED | WAL mode enabled via `PRAGMA journal_mode=WAL` in `daemon/repositories/factory.py:89` |
 | StaleTaskRecovery timing configurable? | SLA implications | Make interval configurable |
 | PostgreSQL for production? | Scalability | Consider for multi-instance |
 
