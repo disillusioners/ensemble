@@ -369,6 +369,20 @@ class TaskRepository:
             db_session.commit()
             return result.rowcount
 
+    def clear_all(self) -> int:
+        """Delete all tasks.
+
+        Useful for development to start with a clean task queue on startup.
+
+        Returns:
+            Number of tasks deleted.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = sql_delete(Task)
+            result = db_session.exec(stmt)
+            db_session.commit()
+            return result.rowcount
+
     # --------------------------------------------------------
     # RETRY & CANCELLATION
     # --------------------------------------------------------

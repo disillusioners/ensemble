@@ -33,6 +33,7 @@ from .repositories import (
     create_source_repository,
     create_message_queue_repository,
 )
+from .repositories.task.repository import TaskRepository
 from .registry import get_registry
 
 from .repositories.instance.repository import get_agent_name
@@ -333,10 +334,18 @@ class InstanceManager:
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
         
-        # Development helper: discard all queued messages on startup
+        # Development helper: discard all queued messages and tasks on startup
         if config.queue.discard_on_startup:
-            count = self._queue_repository.clear_all()
-            logger.info(f"Discarded {count} messages from queue (discard_on_startup=True)")
+            msg_count = self._queue_repository.clear_all()
+            logger.info(f"Discarded {msg_count} messages from queue (discard_on_startup=True)")
+            
+            # Also discard tasks (linked to messages)
+            task_repo = TaskRepository(
+                engine=self._engine,
+                on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
+            )
+            task_count = task_repo.clear_all()
+            logger.info(f"Discarded {task_count} tasks (discard_on_startup=True)")
         
         # NEW: Request registry for cancellation support
         self._request_registry = ActiveRequestRegistry()
@@ -459,7 +468,6 @@ class InstanceManager:
             MainLoopBridge.set_loop(self._loop)
         
         # Create repositories (use existing engine)
-        from .repositories.task.repository import TaskRepository
         from .repositories.task.models import Task
         from .repositories.event.repository import EventRepository
         
