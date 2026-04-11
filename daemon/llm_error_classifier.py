@@ -92,6 +92,13 @@ def _make_llm_retry_strategy(transient_max: int, timeout_max: int):
         """Retry predicate that tracks per-category attempt counts."""
 
         def __call__(self, retry_state) -> bool:
+            # Reset counters at the start of each new invoke cycle.
+            # tenacity creates fresh RetryCallState per cycle but reuses the predicate.
+            # attempt_number == 1 means first failure of a new cycle.
+            if retry_state.attempt_number == 1:
+                counts["transient"] = 0
+                counts["timeout"] = 0
+
             exception = retry_state.outcome.exception()
             if exception is None:
                 return False

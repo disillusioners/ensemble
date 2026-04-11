@@ -681,8 +681,8 @@ class TestClassifyLLErrors:
 class TestRetryByCategory:
     """Tests for _make_llm_retry_strategy per-category retry limits."""
 
-    def _make_mock_retry_state(self, exception):
-        """Create a mock RetryCallState with the given exception."""
+    def _make_mock_retry_state(self, exception, attempt_number=1):
+        """Create a mock RetryCallState with the given exception and attempt number."""
         from unittest.mock import MagicMock
         from tenacity import RetryCallState
 
@@ -691,6 +691,7 @@ class TestRetryByCategory:
 
         retry_state = MagicMock(spec=RetryCallState)
         retry_state.outcome = outcome
+        retry_state.attempt_number = attempt_number
 
         return retry_state
 
@@ -703,10 +704,13 @@ class TestRetryByCategory:
 
         strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
-        state = self._make_mock_retry_state(error)
-        assert strategy(state) is True   # attempt 1 (count=1, 1<3)
-        assert strategy(state) is True   # attempt 2 (count=2, 2<3)
-        assert strategy(state) is False  # attempt 3 (count=3, 3<3=False) - exhausted
+        state = self._make_mock_retry_state(error, attempt_number=1)
+        assert strategy(state) is True   # count=1, 1<3
+        state = self._make_mock_retry_state(error, attempt_number=2)
+        assert strategy(state) is True   # count=2, 2<3
+        state = self._make_mock_retry_state(error, attempt_number=3)
+        assert strategy(state) is False  # count=3, 3<3=False - exhausted
+        state = self._make_mock_retry_state(error, attempt_number=4)
         assert strategy(state) is False  # count=4, 4<3=False - still exhausted
 
     def test_timeout_errors_limited_to_timeout_max(self):
@@ -716,11 +720,12 @@ class TestRetryByCategory:
         strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
 
         error = openai.APITimeoutError(request=MagicMock())
-        state = self._make_mock_retry_state(error)
-
-        assert strategy(state) is True   # attempt 1 (count=1, 1<2)
-        assert strategy(state) is False  # attempt 2 (count=2, 2<2=False) - exhausted
-        assert strategy(state) is False   # count=3, 3<2=False - still exhausted
+        state = self._make_mock_retry_state(error, attempt_number=1)
+        assert strategy(state) is True   # timeout count=1, 1<2
+        state = self._make_mock_retry_state(error, attempt_number=2)
+        assert strategy(state) is False  # timeout count=2, 2<2=False - exhausted
+        state = self._make_mock_retry_state(error, attempt_number=3)
+        assert strategy(state) is False  # count=3, 3<2=False - still exhausted
 
     def test_api_timeout_error_counted_as_timeout_not_transient(self):
         """APITimeoutError inherits from APIConnectionError (in TRANSIENT_EXCEPTIONS).
@@ -731,9 +736,9 @@ class TestRetryByCategory:
         strategy = _make_llm_retry_strategy(transient_max=10, timeout_max=1)
 
         error = openai.APITimeoutError(request=MagicMock())
-        state = self._make_mock_retry_state(error)
+        state = self._make_mock_retry_state(error, attempt_number=2)
 
-        # APITimeoutError is checked against TIMEOUT_EXCEPTIONS first
+        # APITimeoutError is checked against TIMEOUT_EXCEPTIONS first (not reset on attempt_number=2)
         assert strategy(state) is False  # 1st timeout: count=1, 1<1=False - exhausted
 
     def test_mixed_errors_tracked_independently(self):
@@ -750,25 +755,29 @@ class TestRetryByCategory:
 
         # 1st transient error: count=1, returns True (1 < 2)
         t_error = openai.APIConnectionError(message="Connection failed", request=MagicMock())
-        t_state = self._make_mock_retry_state(t_error)
-        assert strategy(t_state) is True
+        t_state1 = self._make_mock_retry_state(t_error, attempt_number=1)
+        assert strategy(t_state1) is True
 
-        # 1st timeout error: count=1, returns True (1 < 2)
+        # 1st timeout error: count=1, returns True (1 < 2); attempt_number=2 avoids reset
         to_error = openai.APITimeoutError(request=MagicMock())
-        to_state = self._make_mock_retry_state(to_error)
+        to_state = self._make_mock_retry_state(to_error, attempt_number=2)
         assert strategy(to_state) is True
 
         # 2nd transient error: count=2, returns False (2 < 2 is False) - exhausted
-        assert strategy(t_state) is False
+        t_state2 = self._make_mock_retry_state(t_error, attempt_number=2)
+        assert strategy(t_state2) is False
 
         # 2nd timeout error: count=2, returns False (2 < 2 is False) - exhausted
-        assert strategy(to_state) is False
+        to_state2 = self._make_mock_retry_state(to_error, attempt_number=3)
+        assert strategy(to_state2) is False
 
         # 3rd transient error: count=3, returns False (3 < 2 is False)
-        assert strategy(t_state) is False
+        t_state3 = self._make_mock_retry_state(t_error, attempt_number=3)
+        assert strategy(t_state3) is False
 
         # 3rd timeout error: count=3, returns False (3 < 2 is False)
-        assert strategy(to_state) is False
+        to_state3 = self._make_mock_retry_state(to_error, attempt_number=4)
+        assert strategy(to_state3) is False
 
     def test_non_retryable_error_returns_false(self):
         """Non-retryable errors (401, 403, 400) should never retry."""
@@ -793,3 +802,22 @@ class TestRetryByCategory:
 
         state = self._make_mock_retry_state(None)
         assert strategy(state) is False
+
+    def test_counters_reset_between_invoke_cycles(self):
+        """Verify retry counters reset between invoke cycles."""
+        from daemon.llm_error_classifier import _make_llm_retry_strategy
+
+        strategy = _make_llm_retry_strategy(transient_max=3, timeout_max=2)
+
+        # Cycle 1: exhaust timeout retries
+        error = openai.APITimeoutError(request=MagicMock())
+        state = self._make_mock_retry_state(error, attempt_number=1)
+        assert strategy(state) is True   # timeout count=1, 1<2 → True
+        state = self._make_mock_retry_state(error, attempt_number=2)
+        assert strategy(state) is False  # timeout count=2, 2<2 → False (exhausted)
+
+        # Cycle 2: attempt_number resets to 1 → counters should reset
+        state = self._make_mock_retry_state(error, attempt_number=1)
+        assert strategy(state) is True   # timeout count=1 (reset!)
+        state = self._make_mock_retry_state(error, attempt_number=2)
+        assert strategy(state) is False  # timeout count=2, exhausted again

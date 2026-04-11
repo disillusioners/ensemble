@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 from .llm_error_classifier import (
     classify_llm_errors,
     ContextLengthExceededError,
+    TIMEOUT_EXCEPTIONS,
+    TRANSIENT_EXCEPTIONS,
     TransientAPIError,
 )
 from .response_validation import LLMResponseValidationError
@@ -333,7 +335,8 @@ def create_agent_node(
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
             transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
             timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
-            logger.error(f"[LLM] All retries exhausted (transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {e}")
+            category = 'timeout' if isinstance(e, TIMEOUT_EXCEPTIONS) else 'transient' if isinstance(e, TRANSIENT_EXCEPTIONS) else 'non-retryable'
+            logger.error(f"[LLM] All retries exhausted ({category}, transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {e}")
             raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}")
