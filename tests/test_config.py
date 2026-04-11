@@ -295,6 +295,8 @@ class TestLimitsConfig:
         assert config.max_children_per_instance == 10
         assert config.instance_timeout_minutes == 60
         assert config.message_rate_limit == 60
+        assert config.graph_recursion_limit == 100
+        assert config.llm_concurrency == 10
 
 
 class TestPersistenceConfig:
@@ -307,6 +309,7 @@ class TestPersistenceConfig:
         config = PersistenceConfig()
         
         assert config.db_path == "./data/instances.db"
+        assert config.checkpointer_db_path == "./data/checkpoints.db"
         assert config.checkpoint_interval == 1
         assert config.checkpoint_ttl_hours == 168
         assert config.checkpoint_cleanup_interval == 24

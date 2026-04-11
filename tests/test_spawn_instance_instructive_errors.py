@@ -246,7 +246,6 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
         config.queue.discard_on_startup = False
 
@@ -300,7 +299,6 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
         config.queue.discard_on_startup = False
 
@@ -349,7 +347,6 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
         config.queue.discard_on_startup = False
 
@@ -394,7 +391,6 @@ class TestManagerSpawnInstanceErrors:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
         config.queue.discard_on_startup = False
 
@@ -460,7 +456,6 @@ class TestErrorMessageConsistency:
         config.limits.max_instances = 10
         config.limits.max_children_per_instance = 5
         config.limits.graph_recursion_limit = 1000
-        config.queue.max_retries = 3
         config.queue.llm_max_retries = 3
         config.queue.discard_on_startup = False
 
