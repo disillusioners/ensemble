@@ -1600,12 +1600,15 @@ Provide a concise summary:"""
             )
             session.add(parent_event)
             
+            # Capture parent_id before session closes (instance will be detached)
+            parent_id = instance.parent_id
+            
             session.commit()
         
-        # Broadcast child completion event asynchronously
+        # Broadcast child completion event asynchronously (using captured parent_id)
         try:
             await self._event_bus.create_child_completed_event(
-                instance_id=instance.parent_id,
+                instance_id=parent_id,
                 child_id=instance_id,
             )
         except Exception as e:
