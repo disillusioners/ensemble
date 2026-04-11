@@ -56,9 +56,81 @@ def release_locks_by_instance_sync(self, instance_id: str) -> list[str]:
     return []  # Returns EMPTY — locks NOT released!
 
 # daemon/services/job_queue_service.py:734
-def trigger_next_job_sync(self, project_id: str) -> bool:
-    logger.warning(f"Cannot trigger next job for project {project_id}...")
-    return False  # Always fails silently
+    def trigger_next_job_sync(
+        self,
+        project_id: str,
+        queue_id: Optional[str] = None,
+    ) -> Optional[JobItem]:
+        """Trigger the next pending job for a queue or project (synchronous version).
+        
+        NOTE: This method has limitations with the new async-only lock manager.
+        For new code, prefer the async trigger_next_job() method.
+        
+        Called after a job completes to process any waiting jobs
+        for the same queue or project.
+        
+        Returns:
+            The next JobItem started, or None if no pending jobs.
+        """
+        # TODO: This sync method cannot properly use the async-only lock manager.
+        # Migrate all callers to async trigger_next_job()
+        
+        # Get next pending job
+        if queue_id:
+            pending = self._repository.list_pending_by_queue(queue_id)
+        else:
+            pending = self._repository.list_pending_by_project(project_id)
+        
+        next_job = pending[0] if pending else None
+        if next_job is None:
+            return None
+        
+        # Get the job
+        job = self._repository.get(next_job.job_id)
+        if job is None:
+            return None
+        
+        # Check if job is still pending
+        if job.status != JobStatus.PENDING.value:
+            return None
+        
+        # Generate new instance ID for this job
+        instance_id = str(uuid.uuid4())
+        
+        # If job has queue_id, we can't properly acquire async lock in sync context
+        if job.queue_id and job.project_id:
+            logger.warning(
+                f"trigger_next_job_sync called with queue_id for job {job.job_id}. "
+                "Lock acquisition will not work properly. Use async trigger_next_job() instead."
+            )
+            # Still try to start job atomically
+            try:
+                return self._repository.start_job_atomic(next_job.job_id, instance_id)
+            except ValueError:
+                return None
+        
+        # If job has project_id but no queue_id, try backward-compatible locking
+        if job.project_id:
+            acquired = self._lock_manager.acquire_sync(
+                project_id=job.project_id,
+                job_id=next_job.job_id,
+                instance_id=instance_id,
+            )
+            
+            if not acquired:
+                return None
+            
+            try:
+                return self._repository.start_job(next_job.job_id, instance_id)
+            except ValueError:
+                self._lock_manager.release_sync(job.project_id, next_job.job_id)
+                return None
+        
+        # No project_id - start immediately without locking
+        try:
+            return self._repository.start_job(next_job.job_id, instance_id)
+        except ValueError:
+            return None
 ```
 
 **Impact:** Every instance termination silently fails to release locks and trigger queued jobs. Queue stalls require StaleTaskRecovery (15+ minute recovery window).
@@ -310,6 +382,8 @@ class CleanupProcessor(BaseProcessor):
 ```
 
 **Integration Test:** (see `tests/job_queue/test_task_queue_integration.py::test_complete_end_to_end_scenario`)
+
+# Proposed integration test (not yet implemented):
 
 ```python
 # tests/job_queue/test_task_queue_integration.py:953
