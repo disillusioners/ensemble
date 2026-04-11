@@ -19,7 +19,6 @@ from .llm_error_classifier import (
     classify_llm_errors,
     ContextLengthExceededError,
     TransientAPIError,
-    TRANSIENT_EXCEPTIONS,
 )
 from .response_validation import LLMResponseValidationError
 
@@ -275,8 +274,9 @@ def create_agent_node(
     async def agent_node(state):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
-        max_retries = retry_config.get('max_retries', 3) if retry_config else 3
-        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (max_retries={max_retries})')
+        transient = retry_config.get('transient_attempts', 8) if retry_config else 8
+        timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
+        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (transient_attempts={transient}, timeout_attempts={timeout})')
         
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -331,8 +331,9 @@ def create_agent_node(
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError, 
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
-            max_retries = retry_config.get('max_retries', 3) if retry_config else 'N/A'
-            logger.error(f"[LLM] All retries exhausted after {max_retries} attempts: {type(e).__name__}: {e}")
+            transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
+            timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
+            logger.error(f"[LLM] All retries exhausted (transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {e}")
             raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}")
@@ -372,28 +373,26 @@ def build_instance_graph(
     if retry_config:
         # CRITICAL: classify errors BEFORE with_retry so they can be caught
         llm_with_tools = classify_llm_errors(llm_with_tools)
-        
-        from daemon.llm_error_classifier import TRANSIENT_EXCEPTIONS, TIMEOUT_EXCEPTIONS
-        
+
+        from daemon.llm_error_classifier import _make_llm_retry_strategy
+
         transient_attempts = retry_config.get("transient_attempts", 8)
         timeout_attempts = retry_config.get("timeout_attempts", 3)
-        
-        # Transient errors (500/502/503/429) — fail fast, many retries
-        # These return quickly so we can afford 7-10 attempts in the time budget
+
+        retry_predicate = _make_llm_retry_strategy(
+            transient_max=transient_attempts,
+            timeout_max=timeout_attempts,
+        )
+
+        # Use max() as hard safety ceiling; the predicate controls per-category limits
+        max_attempts = max(transient_attempts, timeout_attempts)
+
         llm_with_tools = llm_with_tools.with_retry(
-            stop_after_attempt=transient_attempts,
-            retry_if_exception_type=TRANSIENT_EXCEPTIONS,
+            stop_after_attempt=max_attempts,
+            retry=retry_predicate,
             wait_exponential_jitter=True,
         )
-        
-        # Timeout errors — expensive retries (each costs up to request_timeout)
-        # 3 attempts × 660s ≈ 33 min, well within 45 min task timeout
-        llm_with_tools = llm_with_tools.with_retry(
-            stop_after_attempt=timeout_attempts,
-            retry_if_exception_type=TIMEOUT_EXCEPTIONS,
-            wait_exponential_jitter=True,
-        )
-        
+
         logger.debug(
             f"LLM configured with {transient_attempts} transient retries, "
             f"{timeout_attempts} timeout retries"

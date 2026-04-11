@@ -411,19 +411,22 @@ class TestErrorClassifierIntegration:
             f"(found at {classify_pos} vs {retry_pos})"
         )
 
-    def test_retry_uses_transient_exceptions(self):
-        """with_retry should use TRANSIENT_EXCEPTIONS for retry_if_exception_type."""
+    def test_retry_uses_retry_predicate(self):
+        """with_retry should use retry=retry_predicate for per-category limits."""
         import inspect
         from daemon.graph import build_instance_graph
         
         source = inspect.getsource(build_instance_graph)
         
-        # Verify TRANSIENT_EXCEPTIONS is used in with_retry call
-        assert "TRANSIENT_EXCEPTIONS" in source, (
-            "TRANSIENT_EXCEPTIONS should be used in retry configuration"
+        # Verify _make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS
+        assert "_make_llm_retry_strategy" in source, (
+            "_make_llm_retry_strategy should be used in retry configuration"
         )
-        assert "retry_if_exception_type=TRANSIENT_EXCEPTIONS" in source, (
-            "with_retry should use TRANSIENT_EXCEPTIONS for retry_if_exception_type"
+        assert "retry=retry_predicate" in source, (
+            "with_retry should use retry=retry_predicate for per-category limits"
+        )
+        assert "TRANSIENT_EXCEPTIONS" not in source, (
+            "TRANSIENT_EXCEPTIONS should not be imported in graph.py anymore"
         )
 
 
@@ -484,8 +487,6 @@ class TestBuildInstanceGraphIntegration:
     @pytest.mark.asyncio
     async def test_build_instance_graph_with_retry_config(self, mock_checkpointer, mock_tools):
         """Test build_instance_graph applies retry config with classify_llm_errors."""
-        from daemon.llm_error_classifier import TRANSIENT_EXCEPTIONS, TIMEOUT_EXCEPTIONS
-        
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
             # Setup mock LLM
             mock_llm_instance = MagicMock()
@@ -524,18 +525,16 @@ class TestBuildInstanceGraphIntegration:
                         # Verify classify_llm_errors was called (BEFORE with_retry)
                         mock_classify.assert_called_once_with(mock_llm_with_tools)
                         
-                        # Verify with_retry was called TWICE (transient + timeout handlers)
-                        assert mock_llm_with_tools.with_retry.call_count == 2
+                        # Verify with_retry was called ONCE with the new predicate
+                        assert mock_llm_with_tools.with_retry.call_count == 1
                         
-                        # Verify transient retry config
-                        transient_call = mock_llm_with_tools.with_retry.call_args_list[0]
-                        assert transient_call.kwargs["stop_after_attempt"] == 8
-                        assert transient_call.kwargs["retry_if_exception_type"] == TRANSIENT_EXCEPTIONS
-                        
-                        # Verify timeout retry config
-                        timeout_call = mock_llm_with_tools.with_retry.call_args_list[1]
-                        assert timeout_call.kwargs["stop_after_attempt"] == 3
-                        assert timeout_call.kwargs["retry_if_exception_type"] == TIMEOUT_EXCEPTIONS
+                        # Verify retry config
+                        retry_call = mock_llm_with_tools.with_retry.call_args_list[0]
+                        assert retry_call.kwargs["stop_after_attempt"] == 8  # max(8, 3)
+                        assert retry_call.kwargs["wait_exponential_jitter"] is True
+                        # retry should be a RetryByCategory instance
+                        retry_predicate = retry_call.kwargs["retry"]
+                        assert retry_predicate is not None
 
 
 class TestCompactionContextPassedToCompactor:

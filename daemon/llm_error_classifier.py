@@ -70,6 +70,48 @@ TIMEOUT_EXCEPTIONS: tuple[type[Exception], ...] = (
 )
 
 
+def _make_llm_retry_strategy(transient_max: int, timeout_max: int):
+    """Create a retry strategy with separate per-category attempt limits.
+    
+    Uses a closure with mutable counters so that transient and timeout
+    retries are tracked independently. Timeout exceptions are checked
+    FIRST because openai.APITimeoutError inherits from openai.APIConnectionError
+    (which is in TRANSIENT_EXCEPTIONS) — checking timeout first ensures it's
+    counted in the correct category.
+    
+    Args:
+        transient_max: Max retry attempts for transient errors (500/502/503/429/connection).
+        timeout_max: Max retry attempts for timeout errors.
+    
+    Returns:
+        A callable that tenacity can use as a retry predicate.
+    """
+    counts = {"transient": 0, "timeout": 0}
+
+    class RetryByCategory:
+        """Retry predicate that tracks per-category attempt counts."""
+
+        def __call__(self, retry_state) -> bool:
+            exception = retry_state.outcome.exception()
+            if exception is None:
+                return False
+
+            # IMPORTANT: Check timeout FIRST since APITimeoutError inherits
+            # from APIConnectionError (in TRANSIENT_EXCEPTIONS). Without this
+            # ordering, timeouts would be misclassified as transient errors.
+            if isinstance(exception, TIMEOUT_EXCEPTIONS):
+                counts["timeout"] += 1
+                return counts["timeout"] < timeout_max
+            elif isinstance(exception, TRANSIENT_EXCEPTIONS):
+                counts["transient"] += 1
+                return counts["transient"] < transient_max
+
+            # Non-retryable — don't retry (401, 403, 400, etc.)
+            return False
+
+    return RetryByCategory()
+
+
 def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
     """Wrap LLM to classify exceptions before they reach with_retry.
     
