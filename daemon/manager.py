@@ -684,11 +684,16 @@ class InstanceManager:
             metadata=instance_metadata if instance_metadata else None,
         )
         
-        # Increment parent's waiting_for counter
+        # Update parent's children list and waiting_for counter
         if parent_id:
             with Session(self._engine) as session:
                 parent = session.get(Instance, parent_id)
                 if parent:
+                    # Add child to parent's denormalized children list
+                    children_list = json.loads(parent.children) if parent.children else []
+                    if instance_id not in children_list:
+                        children_list.append(instance_id)
+                        parent.children = json.dumps(children_list)
                     parent.waiting_for += 1
                     # Update parent status to WAITING_CHILDREN if it was IDLE
                     if parent.status == InstanceStatus.IDLE.value:
