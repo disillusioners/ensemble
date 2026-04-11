@@ -95,7 +95,7 @@ class QueueConfig(BaseSettings):
 
     # LLM retry configuration — per error category
     # Transient errors (500/502/503/429): fail fast, more retries fit in time budget
-    llm_retry_transient_attempts: int = Field(default=8)
+    llm_retry_transient_attempts: int = Field(default=10)  # ~17 min total retry time
     # Timeout errors: each attempt costs up to request_timeout (660s = 11 min)
     llm_retry_timeout_attempts: int = Field(default=3)
 
