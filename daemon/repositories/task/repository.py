@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
@@ -20,9 +20,15 @@ logger = logging.getLogger(__name__)
 class TaskRepository:
     """Repository for Task CRUD operations with atomic claiming."""
 
-    def __init__(self, engine: Engine):
-        """Initialize repository with a database engine."""
+    def __init__(self, engine: Engine, on_pending_task: Callable[[], None] | None = None):
+        """Initialize repository with a database engine.
+
+        Args:
+            engine: SQLAlchemy database engine.
+            on_pending_task: Optional callback to notify workers of new pending tasks.
+        """
         self.engine = engine
+        self._on_pending_task = on_pending_task
 
     # --------------------------------------------------------
     # CREATE
@@ -459,7 +465,16 @@ class TaskRepository:
                 }
             ).fetchone()
 
+            self._notify_pending_task()
             return self._row_to_task(result)
+
+    def _notify_pending_task(self) -> None:
+        """Notify workers that a pending task was created."""
+        if self._on_pending_task:
+            try:
+                self._on_pending_task()
+            except Exception:
+                logger.warning("Failed to notify workers of pending task", exc_info=True)
 
     def request_cancel(self, task_id: int) -> bool:
         """Atomically request cancellation of a running task.
@@ -648,6 +663,7 @@ class TaskRepository:
                 }
             ).fetchone()
 
+            self._notify_pending_task()
             return self._row_to_task(result)
 
     def find_orphaned_cancelled_tasks(self) -> list[Task]:

@@ -1,12 +1,10 @@
-"""Worker pool for message queue redesign - stateless worker threads."""
+"""Worker pool for message queue redesign - notification-driven worker threads."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import threading
-import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
 from .main_loop_bridge import MainLoopBridge
@@ -16,30 +14,32 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Default poll interval: 0.5 seconds (responsive but not aggressive)
-DEFAULT_POLL_INTERVAL = 0.5
 # Default task timeout: 5 minutes (300 seconds)
 DEFAULT_TASK_TIMEOUT = 300.0
 
 
 class Worker(threading.Thread):
-    """Worker thread that polls the database for tasks and processes them.
+    """Worker thread that processes tasks using notification-based coordination.
     
     Workers are completely stateless — no in-memory state, no persistent
     connections to other services. All state is in the database.
     
     Each worker:
-    1. Polls the database for pending tasks (atomic claim via UPDATE-RETURNING)
-    2. Runs the task asynchronously via the main event loop
-    3. Updates task status in the database (complete or fail)
-    4. Repeats
+    1. Attempts to claim a pending task from the database
+    2. If no task available, waits for notification from the pool
+    3. Runs the task asynchronously via the main event loop
+    4. Updates task status in the database (complete or fail)
+    5. Repeats
+    
+    The worker pool coordinates via threading.Condition to wake workers
+    when new work arrives, avoiding continuous polling.
     """
     
     def __init__(
         self,
         worker_id: str,
         task_processor,
-        poll_interval: float = DEFAULT_POLL_INTERVAL,
+        worker_pool,
         timeout_minutes: float = 45.0,
         max_retries: int = 3,
         retry_backoff_base: int = 60,
@@ -50,7 +50,7 @@ class Worker(threading.Thread):
         Args:
             worker_id: Unique identifier for this worker.
             task_processor: TaskProcessor instance to delegate task processing.
-            poll_interval: How often to poll for tasks (seconds).
+            worker_pool: WorkerPool instance for notification coordination.
             timeout_minutes: Task timeout in minutes.
             max_retries: Maximum number of retry attempts.
             retry_backoff_base: Base for exponential backoff (seconds).
@@ -59,7 +59,7 @@ class Worker(threading.Thread):
         super().__init__(daemon=True)
         self.worker_id = worker_id
         self._task_processor = task_processor
-        self._poll_interval = poll_interval
+        self._worker_pool = worker_pool
         self._timeout_minutes = timeout_minutes
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
@@ -70,7 +70,7 @@ class Worker(threading.Thread):
         self._tasks_failed = 0
     
     def run(self) -> None:
-        """Main loop: poll for tasks and process them."""
+        """Main loop: claim tasks or wait for notification."""
         logger.info(f"Worker {self.worker_id} started")
         
         while not self._stop_event.is_set():
@@ -89,10 +89,15 @@ class Worker(threading.Thread):
                     # Run the task asynchronously via the main event loop
                     # This is the FIX: C1 pattern - thread to async bridge
                     self._process_with_timeout(task)
-                else:
-                    # No work available, sleep and retry
-                    self._stop_event.wait(timeout=self._poll_interval)
-                    
+                    continue  # Check for more work immediately
+                
+                # No task available → this is an empty claim attempt
+                self._worker_pool._stats["empty_claim_attempts"] += 1
+                
+                # Wait for notification OR safety timeout
+                self._worker_pool.wait_for_work(timeout=3.0)
+                # Loop back to try claiming again
+                
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} unexpected error: {e}", exc_info=True)
                 # Brief sleep to avoid tight error loop
@@ -219,19 +224,28 @@ class Worker(threading.Thread):
 
 
 class WorkerPool:
-    """Manages a pool of worker threads for processing tasks.
+    """Manages a pool of worker threads using notification-based coordination.
     
     The worker pool manages the lifecycle of multiple worker threads:
     - start(): Creates and starts N worker threads
     - stop(): Gracefully stops all workers
     - get_stats(): Returns statistics for monitoring
+    
+    Workers wait on a threading.Condition when idle, and are woken via
+    notify_all() when new work arrives. A safety-net 3-second timeout
+    ensures workers never permanently sleep.
+    
+    The pool tracks metrics:
+    - notifications_sent: Total wakeups signaled
+    - empty_claim_attempts: Claims that found no work
+    - workers_woken_by_timeout: Workers that woke via timeout (not notification)
+    - wakeup_efficiency: Ratio of useful notifications to total attempts
     """
     
     def __init__(
         self,
         task_processor,
         num_workers: int = 4,
-        poll_interval: float = DEFAULT_POLL_INTERVAL,
         timeout_minutes: float = 45.0,
         max_retries: int = 3,
         retry_backoff_base: int = 60,
@@ -242,7 +256,6 @@ class WorkerPool:
         Args:
             task_processor: TaskProcessor instance for task processing.
             num_workers: Number of worker threads to spawn.
-            poll_interval: How often workers poll for tasks (seconds).
             timeout_minutes: Task timeout in minutes.
             max_retries: Maximum number of retry attempts.
             retry_backoff_base: Base for exponential backoff (seconds).
@@ -250,7 +263,6 @@ class WorkerPool:
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
-        self._poll_interval = poll_interval
         self._timeout_minutes = timeout_minutes
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
@@ -258,6 +270,37 @@ class WorkerPool:
         self._workers: list[Worker] = []
         self._started = False
         self._stopped = False
+        
+        # Notification coordination
+        self._condition = threading.Condition()
+        self._notification_count = 0
+        
+        # Metrics
+        self._stats = {
+            "notifications_sent": 0,
+            "empty_claim_attempts": 0,
+            "workers_woken_by_timeout": 0,
+        }
+    
+    def notify_work(self) -> None:
+        """Signal that new work is available. Safe to call from any thread."""
+        with self._condition:
+            self._notification_count += 1
+            self._condition.notify_all()
+        self._stats["notifications_sent"] += 1
+    
+    def wait_for_work(self, timeout: float = 3.0) -> bool:
+        """Worker calls this when idle. Returns True if notified, False if timed out."""
+        with self._condition:
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            self._condition.wait(timeout=timeout)
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            self._stats["workers_woken_by_timeout"] += 1
+            return False
     
     def start(self) -> None:
         """Start all worker threads."""
@@ -274,7 +317,7 @@ class WorkerPool:
             worker = Worker(
                 worker_id=f"worker-{i}",
                 task_processor=self._task_processor,
-                poll_interval=self._poll_interval,
+                worker_pool=self,
                 timeout_minutes=self._timeout_minutes,
                 max_retries=self._max_retries,
                 retry_backoff_base=self._retry_backoff_base,
@@ -304,6 +347,10 @@ class WorkerPool:
         for worker in self._workers:
             worker.stop(timeout=0)  # Signal only, don't wait
         
+        # Wake all sleeping workers so they see the stop signal
+        with self._condition:
+            self._condition.notify_all()
+        
         # Wait for all workers to stop
         per_worker_timeout = timeout / max(len(self._workers), 1)
         for worker in self._workers:
@@ -318,11 +365,24 @@ class WorkerPool:
     
     def get_stats(self) -> dict:
         """Get statistics for the pool and all workers."""
+        notifications = self._stats["notifications_sent"]
+        timeouts = self._stats["workers_woken_by_timeout"]
+        empty_claims = self._stats["empty_claim_attempts"]
+        
+        # Wakeup efficiency: useful notifications / total notifications
+        # A useful notification = one that leads to claiming work
+        # A timeout = notification was unnecessary (workers would have polled anyway)
+        wakeup_efficiency = notifications / max(1, notifications + empty_claims)
+        
         return {
             "num_workers": len(self._workers),
             "started": self._started,
             "stopped": self._stopped,
             "is_running": self.is_running(),
+            "notifications_sent": notifications,
+            "empty_claim_attempts": empty_claims,
+            "workers_woken_by_timeout": timeouts,
+            "wakeup_efficiency": round(wakeup_efficiency, 3),
             "workers": [w.get_stats() for w in self._workers],
             "pool_pending_tasks": self._task_processor.get_pending_count(),
         }

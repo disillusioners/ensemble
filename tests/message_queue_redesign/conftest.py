@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for message queue redesign tests."""
 
 import pytest
+import threading
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
@@ -251,6 +252,37 @@ class MockEventRepository:
 def mock_task_processor():
     """Create a MockTaskProcessor instance."""
     return MockTaskProcessor()
+
+
+class MockWorkerPool:
+    """Mock worker pool for testing."""
+    def __init__(self, wait_timeout: float = 0.1):
+        self._condition = threading.Condition()
+        self._notification_count = 0
+        self._wait_timeout = wait_timeout
+    
+    def notify_work(self):
+        with self._condition:
+            self._notification_count += 1
+            self._condition.notify_all()
+    
+    def wait_for_work(self, timeout: float = 3.0):
+        with self._condition:
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            # Use shorter timeout for tests
+            self._condition.wait(timeout=self._wait_timeout)
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            return False
+
+
+@pytest.fixture
+def mock_worker_pool():
+    """Create a MockWorkerPool instance."""
+    return MockWorkerPool()
 
 
 @pytest.fixture

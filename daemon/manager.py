@@ -461,7 +461,10 @@ class InstanceManager:
         from .repositories.task.models import Task
         from .repositories.event.repository import EventRepository
         
-        task_repo = TaskRepository(engine=self._engine)
+        task_repo = TaskRepository(
+            engine=self._engine,
+            on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
+        )
         event_repo = EventRepository(engine=self._engine)
         
         # Get shorthand for services config
@@ -891,6 +894,10 @@ class InstanceManager:
             session.add(event)
             
             session.commit()
+        
+        # After commit — task is now visible in DB
+        if self._worker_pool is not None:
+            self._worker_pool.notify_work()
         
         # Broadcast event asynchronously (fire and forget)
         try:

@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from unittest.mock import Mock
 
-from daemon.services.worker_pool import Worker, WorkerPool, DEFAULT_POLL_INTERVAL
+from daemon.services.worker_pool import Worker, WorkerPool
 
 
 class TestWorker:
@@ -34,12 +34,12 @@ class TestWorker:
         task = mock_task_processor.claim_task("test-worker")
         assert task is None
     
-    def test_worker_stops_on_stop_event(self, mock_task_processor):
+    def test_worker_stops_on_stop_event(self, mock_task_processor, mock_worker_pool):
         """Worker should stop when stop event is set."""
         mock_task_processor.should_claim = False
         mock_task_processor.tasks_to_return = []
         
-        worker = Worker("test-worker", mock_task_processor, poll_interval=0.1)
+        worker = Worker("test-worker", mock_task_processor, mock_worker_pool)
         worker.start()
         
         time.sleep(0.3)
@@ -48,9 +48,9 @@ class TestWorker:
         
         assert not worker.is_alive()
     
-    def test_worker_get_stats(self, mock_task_processor):
+    def test_worker_get_stats(self, mock_task_processor, mock_worker_pool):
         """Worker should track statistics."""
-        worker = Worker("test-worker", mock_task_processor)
+        worker = Worker("test-worker", mock_task_processor, mock_worker_pool)
         
         stats = worker.get_stats()
         assert stats["worker_id"] == "test-worker"
@@ -58,15 +58,19 @@ class TestWorker:
         assert "tasks_completed" in stats
         assert "tasks_failed" in stats
     
-    def test_worker_default_poll_interval(self, mock_task_processor):
-        """Worker should use default poll interval."""
-        worker = Worker("test-worker", mock_task_processor)
-        assert worker._poll_interval == DEFAULT_POLL_INTERVAL
-    
-    def test_worker_custom_poll_interval(self, mock_task_processor):
-        """Worker should use custom poll interval."""
-        worker = Worker("test-worker", mock_task_processor, poll_interval=0.25)
-        assert worker._poll_interval == 0.25
+    def test_worker_stops_on_no_work(self, mock_task_processor, mock_worker_pool):
+        """Worker should wait when no tasks available."""
+        mock_task_processor.should_claim = False
+        mock_task_processor.tasks_to_return = []
+        
+        worker = Worker("test-worker", mock_task_processor, mock_worker_pool)
+        worker.start()
+        
+        time.sleep(0.3)
+        
+        worker.stop(timeout=2.0)
+        
+        assert not worker.is_alive()
 
 
 class TestWorkerPool:

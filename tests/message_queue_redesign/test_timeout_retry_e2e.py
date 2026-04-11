@@ -6,6 +6,7 @@ LangGraph execution part.
 """
 
 import os
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch, MagicMock
@@ -26,6 +27,34 @@ from daemon.services.stale_task_recovery import StaleTaskRecovery
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
+class MockWorkerPool:
+    """Mock worker pool for testing."""
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._notification_count = 0
+    
+    def notify_work(self):
+        with self._condition:
+            self._notification_count += 1
+            self._condition.notify_all()
+    
+    def wait_for_work(self, timeout=3.0):
+        with self._condition:
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            self._condition.wait(timeout=0.1)
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            return False
+
+
+@pytest.fixture
+def mock_worker_pool():
+    """Create a MockWorkerPool instance."""
+    return MockWorkerPool()
 
 @pytest.fixture
 def engine():
@@ -171,6 +200,7 @@ class TestTimeoutRetryCompleteFlow:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=0.05,  # 3 seconds
             max_retries=3,
             retry_backoff_base=1,  # 1 second for fast tests
@@ -272,6 +302,7 @@ class TestMaxRetriesPermanentFailure:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,
             max_retries=2,
         )
@@ -444,6 +475,7 @@ class TestMultipleTimeoutsThenSuccess:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=5,
             retry_backoff_base=1,
             retry_backoff_max=10,
@@ -700,6 +732,7 @@ class TestRealRepositoryWithMockedExecution:
         worker = Worker(
             worker_id="integration-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
             retry_backoff_base=1,
             retry_backoff_max=5,
@@ -765,6 +798,7 @@ class TestZeroTimeoutDisablesTimeout:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=0,  # Zero timeout = disabled
             max_retries=3,
             retry_backoff_base=1,
@@ -825,6 +859,7 @@ class TestZeroRetriesDisablesRetry:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,
             max_retries=0,  # Zero retries = disabled
             retry_backoff_base=1,

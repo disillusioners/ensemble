@@ -9,6 +9,7 @@ These tests verify:
 """
 
 import pytest
+import threading
 from datetime import datetime, timezone
 from unittest.mock import Mock, MagicMock, patch, call, PropertyMock
 from typing import Any
@@ -27,6 +28,28 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 # ============================================================================
 # Test Fixtures
 # ============================================================================
+
+class MockWorkerPool:
+    """Mock worker pool for testing."""
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._notification_count = 0
+    
+    def notify_work(self):
+        with self._condition:
+            self._notification_count += 1
+            self._condition.notify_all()
+    
+    def wait_for_work(self, timeout=3.0):
+        with self._condition:
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            self._condition.wait(timeout=0.1)
+            if self._notification_count > 0:
+                self._notification_count -= 1
+                return True
+            return False
 
 @pytest.fixture
 def mock_task():
@@ -278,6 +301,7 @@ class TestWorkerTimeoutMonitor:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,  # 5 minutes
             max_retries=3,
         )
@@ -339,6 +363,7 @@ class TestWorkerTimeoutMonitor:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,
             max_retries=3,
         )
@@ -387,6 +412,7 @@ class TestWorkerRetryLogic:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -417,6 +443,7 @@ class TestWorkerRetryLogic:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -442,6 +469,7 @@ class TestWorkerRetryLogic:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -468,6 +496,7 @@ class TestWorkerRetryLogic:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -495,6 +524,7 @@ class TestTimeoutMonitorLifecycle:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,
         )
         
@@ -520,6 +550,7 @@ class TestTimeoutMonitorLifecycle:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             timeout_minutes=5.0,
         )
         
@@ -552,6 +583,7 @@ class TestTimeoutMonitorLifecycle:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -615,17 +647,17 @@ class TestWorkerPoolConfig:
 
     def test_worker_constructor_stores_config(self, mock_task_processor):
         """Worker stores timeout_minutes, max_retries, etc."""
+        mock_pool = MockWorkerPool()
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
-            poll_interval=1.0,
+            worker_pool=mock_pool,
             timeout_minutes=45.0,
             max_retries=3,
             retry_backoff_base=60,
             retry_backoff_max=3600,
         )
         
-        assert worker._poll_interval == 1.0
         assert worker._timeout_minutes == 45.0
         assert worker._max_retries == 3
         assert worker._retry_backoff_base == 60
@@ -636,6 +668,7 @@ class TestWorkerPoolConfig:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
         )
         
         # Default timeout is 45.0 minutes
@@ -706,6 +739,7 @@ class TestWorkerRetryWorkflow:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -747,6 +781,7 @@ class TestWorkerRetryWorkflow:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
@@ -783,6 +818,7 @@ class TestWorkerRetryWorkflow:
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
+            worker_pool=MockWorkerPool(),
             max_retries=3,
         )
         
