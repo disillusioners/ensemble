@@ -8,10 +8,12 @@ from langchain_openai.chat_models.base import (
 from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChunk, HumanMessage, SystemMessage
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_core.runnables import RunnableLambda
 from typing import Any, Mapping, Optional, cast
 import asyncio
 import logging
 import openai
+from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +376,7 @@ def build_instance_graph(
 
     # Wrap with error classification and retry if config provided
     if retry_config:
-        # CRITICAL: classify errors BEFORE with_retry so they can be caught
+        # CRITICAL: classify errors BEFORE retry so they can be caught
         llm_with_tools = classify_llm_errors(llm_with_tools)
 
         from daemon.llm_error_classifier import _make_llm_retry_strategy
@@ -390,11 +392,22 @@ def build_instance_graph(
         # Use max() as hard safety ceiling; the predicate controls per-category limits
         max_attempts = max(transient_attempts, timeout_attempts)
 
-        llm_with_tools = llm_with_tools.with_retry(
-            stop_after_attempt=max_attempts,
+        # Use tenacity directly since LangChain's with_retry() no longer supports
+        # custom retry predicates (the 'retry=' parameter was removed)
+        retrying = Retrying(
+            stop=stop_after_attempt(max_attempts),
+            wait=wait_exponential_jitter(),
             retry=retry_predicate,
-            wait_exponential_jitter=True,
+            reraise=True,
         )
+
+        # Capture the classified LLM for retry wrapper
+        classified_llm = llm_with_tools
+
+        def _run_with_retry(input_value):
+            return retrying(classified_llm.invoke, input_value)
+
+        llm_with_tools = RunnableLambda(_run_with_retry)
 
         logger.debug(
             f"LLM configured with {transient_attempts} transient retries, "

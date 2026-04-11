@@ -86,7 +86,7 @@ class Instance(SQLModel, table=True):
             "status": self.status,
             "title": self.title,
             "metadata": dict(self.instance_metadata) if self.instance_metadata else {},
-            "children": json.loads(self.children) if self.children else [],
+            "children": self.children if self.children else [],
             "waiting_for": self.waiting_for,
             "version": self.version,
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,

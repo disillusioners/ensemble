@@ -486,7 +486,7 @@ class TestBuildInstanceGraphIntegration:
 
     @pytest.mark.asyncio
     async def test_build_instance_graph_with_retry_config(self, mock_checkpointer, mock_tools):
-        """Test build_instance_graph applies retry config with classify_llm_errors."""
+        """Test build_instance_graph applies retry config with tenacity-based retry."""
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
             # Setup mock LLM
             mock_llm_instance = MagicMock()
@@ -494,47 +494,46 @@ class TestBuildInstanceGraphIntegration:
             mock_llm_instance.bind_tools.return_value = mock_llm_with_tools
             mock_llm_class.return_value = mock_llm_instance
             
-            # Mock with_retry method
-            mock_llm_with_tools.with_retry = MagicMock(return_value=mock_llm_with_tools)
-            
             # Mock classify_llm_errors
             with patch('daemon.graph.classify_llm_errors') as mock_classify:
                 mock_classify.return_value = mock_llm_with_tools
                 
-                # Mock langgraph components
-                with patch('daemon.graph.StateGraph') as mock_state_graph:
-                    mock_graph_instance = MagicMock()
-                    mock_compiled = MagicMock()
-                    mock_graph_instance.compile.return_value = mock_compiled
-                    mock_state_graph.return_value = mock_graph_instance
-                    
-                    with patch('daemon.graph.ToolNode'):
-                        from daemon.graph import build_instance_graph
+                # Mock tenacity Retrying
+                with patch('daemon.graph.Retrying') as mock_retrying:
+                    # Mock langgraph components
+                    with patch('daemon.graph.StateGraph') as mock_state_graph:
+                        mock_graph_instance = MagicMock()
+                        mock_compiled = MagicMock()
+                        mock_graph_instance.compile.return_value = mock_compiled
+                        mock_state_graph.return_value = mock_graph_instance
                         
-                        # Use new config format with separate transient and timeout attempts
-                        retry_config = {"transient_attempts": 8, "timeout_attempts": 3}
-                        
-                        build_instance_graph(
-                            tools=mock_tools,
-                            checkpointer=mock_checkpointer,
-                            llm_config={"model": "gpt-4o", "api_key": "test"},
-                            system_prompt="You are helpful.",
-                            retry_config=retry_config,
-                        )
-                        
-                        # Verify classify_llm_errors was called (BEFORE with_retry)
-                        mock_classify.assert_called_once_with(mock_llm_with_tools)
-                        
-                        # Verify with_retry was called ONCE with the new predicate
-                        assert mock_llm_with_tools.with_retry.call_count == 1
-                        
-                        # Verify retry config
-                        retry_call = mock_llm_with_tools.with_retry.call_args_list[0]
-                        assert retry_call.kwargs["stop_after_attempt"] == 8  # max(8, 3)
-                        assert retry_call.kwargs["wait_exponential_jitter"] is True
-                        # retry should be a RetryByCategory instance
-                        retry_predicate = retry_call.kwargs["retry"]
-                        assert retry_predicate is not None
+                        with patch('daemon.graph.ToolNode'):
+                            from daemon.graph import build_instance_graph
+                            
+                            # Use new config format with separate transient and timeout attempts
+                            retry_config = {"transient_attempts": 8, "timeout_attempts": 3}
+                            
+                            build_instance_graph(
+                                tools=mock_tools,
+                                checkpointer=mock_checkpointer,
+                                llm_config={"model": "gpt-4o", "api_key": "test"},
+                                system_prompt="You are helpful.",
+                                retry_config=retry_config,
+                            )
+                            
+                            # Verify classify_llm_errors was called (BEFORE retry wrapper)
+                            mock_classify.assert_called_once_with(mock_llm_with_tools)
+                            
+                            # Verify Retrying was called with correct parameters
+                            mock_retrying.assert_called_once()
+                            retry_call = mock_retrying.call_args_list[0]
+                            # stop should be stop_after_attempt(max(8, 3)) = 8
+                            assert "stop" in retry_call.kwargs
+                            # retry predicate should be passed
+                            assert "retry" in retry_call.kwargs
+                            assert retry_call.kwargs["retry"] is not None
+                            # reraise should be True
+                            assert retry_call.kwargs.get("reraise") is True
 
 
 class TestCompactionContextPassedToCompactor:
