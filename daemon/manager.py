@@ -887,7 +887,7 @@ class InstanceManager:
                 instance_id=instance_id,
                 message_id=message_id,
                 kind=EventKind.MESSAGE_RECEIVED.value,
-                data={"source": source, "priority": priority},
+                data=json.dumps({"source": source, "priority": priority}),
                 created_at=datetime.now(timezone.utc),
             )
             session.add(event)
