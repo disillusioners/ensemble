@@ -14,6 +14,7 @@ class InstanceStatus(str, Enum):
     waiting_children = "waiting_children"
     error = "error"
     terminated = "terminated"
+    completed = "completed"
 
 
 class SchedulerInstanceMode(str, Enum):

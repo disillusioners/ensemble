@@ -1434,7 +1434,259 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
 
-    async def _check_child_completion_v2(self, instance_id: str) -> None:
+    async def _should_send_completion_report(self, session, instance_id: str) -> bool:
+        """Check if completion report should be sent (idempotency checks).
+        
+        Performs two checks to ensure we don't send duplicate completion reports:
+        1. No pending messages (READY, RETRYING) for the instance
+        2. No existing completion report message in queue
+        
+        Args:
+            session: Database session.
+            instance_id: The child instance ID to check.
+            
+        Returns:
+            True if should proceed with sending report, False to skip.
+        """
+        from sqlmodel import select
+        from sqlalchemy import func
+        from .repositories.message_queue.models import MessageQueue, MessageStatus
+        
+        # Check for pending/processing messages for this instance
+        # Note: Don't check PROCESSING status for the current message being checked
+        # (it's the message that just finished processing)
+        pending_count = session.exec(
+            select(func.count())
+            .select_from(MessageQueue)
+            .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                # MessageStatus.PROCESSING.value,  # Excluded - we're checking this message
+                MessageStatus.RETRYING.value,
+            ]))
+        ).one()
+        
+        if pending_count > 0:
+            logger.debug(
+                f"Instance {instance_id[:8]}... has {pending_count} pending messages, "
+                f"skipping completion check"
+            )
+            return False
+        
+        # FIX C3 - Idempotency: Check if completion report already sent
+        instance = session.get(Instance, instance_id)
+        if instance is None or instance.parent_id is None:
+            return False
+            
+        existing_report = session.exec(
+            select(MessageQueue)
+            .where(MessageQueue.instance_id == instance.parent_id)
+            .where(MessageQueue.source == f"report:{instance_id}")
+            .where(MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                MessageStatus.PROCESSING.value,
+                MessageStatus.COMPLETED.value,
+            ]))
+        ).first()
+        
+        if existing_report is not None:
+            logger.debug(
+                f"Completion report already queued for child {instance_id[:8]}..., "
+                f"skipping duplicate"
+            )
+            return False
+        
+        return True
+
+    async def _create_completion_report(
+        self,
+        session,
+        instance,
+        last_content: str,
+    ) -> tuple[MessageQueue, Task, str]:
+        """Create the completion report message and task for the parent.
+        
+        Updates the child instance status to COMPLETED and creates:
+        - COMPLETION_REPORT message for parent
+        - PROCESS_MESSAGE task
+        
+        Args:
+            session: Database session.
+            instance: The child Instance object.
+            last_content: The content to include in the report (fetched before transaction).
+            
+        Returns:
+            Tuple of (report_message, report_task, report_message_id).
+        """
+        from datetime import datetime, timezone
+        from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
+        from .repositories.task.models import Task, TaskType, TaskStatus
+        
+        # Update child instance status to COMPLETED
+        instance.status = InstanceStatus.COMPLETED.value
+        instance.updated_at = datetime.now(timezone.utc).isoformat()
+        instance.last_activity_at = datetime.now(timezone.utc)
+        instance.version = (instance.version or 1) + 1
+        
+        # Create completion report message for parent
+        report_message_id = str(uuid.uuid4())
+        report_message = MessageQueue(
+            message_id=report_message_id,
+            instance_id=instance.parent_id,
+            content=last_content,  # Already fetched before transaction
+            source=f"report:{instance.instance_id}",
+            type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+            priority=0,  # System priority
+            enqueued_at=datetime.now(timezone.utc),
+        )
+        session.add(report_message)
+        
+        # Create task for parent to process the report
+        report_task = Task(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=instance.parent_id,
+            message_id=report_message_id,
+            status=TaskStatus.PENDING.value,
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(report_task)
+        
+        return report_message, report_task, report_message_id
+
+    async def _update_parent_on_child_complete(self, session, instance) -> bool:
+        """Update parent state when child completes.
+        
+        Handles:
+        - Decrement parent's waiting_for counter
+        - Update parent's children[] cache (FIX: W6)
+        - Delete from instance_hierarchy table
+        - Cascade: transition parent based on waiting_for and status
+        
+        Args:
+            session: Database session.
+            instance: The child Instance object.
+            
+        Returns:
+            True if parent transitioned to RUNNING (has more work), False otherwise.
+        """
+        from datetime import datetime, timezone
+        from sqlalchemy import func, select, text
+        from .repositories.message_queue.models import MessageQueue, MessageStatus
+        
+        parent = session.get(Instance, instance.parent_id)
+        if not parent:
+            return False
+        
+        # Decrement parent's waiting_for counter
+        parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+        parent.last_activity_at = datetime.now(timezone.utc)
+        parent.version = (parent.version or 1) + 1
+        
+        # FIX W6: Update parent's children[] denormalized cache
+        # Note: instance_hierarchy is the canonical source; we update the cache here
+        if parent.children:
+            try:
+                children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
+                if instance.instance_id in children_list:
+                    children_list = [c for c in children_list if c != instance.instance_id]
+                    parent.children = json.dumps(children_list)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
+        
+        # Remove from instance_hierarchy junction table
+        # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
+        session.execute(
+            text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+            {"child_id": instance.instance_id}
+        )
+        
+        # Cascade check: if parent is WAITING_CHILDREN and waiting_for is 0, transition to RUNNING
+        if parent.waiting_for == 0 and parent.status == InstanceStatus.WAITING_CHILDREN.value:
+            # Check if parent has any pending messages
+            parent_pending = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == parent.instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).one()
+            
+            if parent_pending == 0:
+                # No pending messages, parent is truly complete
+                parent.status = InstanceStatus.COMPLETED.value
+                parent.updated_at = datetime.now(timezone.utc).isoformat()
+                logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+                return False
+            else:
+                # Has pending messages, transition to RUNNING to process them
+                parent.status = InstanceStatus.RUNNING.value
+                logger.info(
+                    f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
+                    f"transitioning to RUNNING"
+                )
+                return True
+        
+        return False
+
+    async def _create_completion_events(
+        self,
+        session,
+        instance_id: str,
+        parent_id: str,
+        report_message_id: str,
+        waiting_for_remaining: int,
+    ) -> tuple[Event, Event]:
+        """Create completion events for child and parent.
+        
+        Creates:
+        - INSTANCE_COMPLETED event for the child
+        - CHILD_COMPLETED event for the parent
+        
+        Args:
+            session: Database session.
+            instance_id: The child instance ID.
+            parent_id: The parent instance ID.
+            report_message_id: The report message ID for the parent event.
+            waiting_for_remaining: The remaining waiting_for count after decrement.
+            
+        Returns:
+            Tuple of (completion_event, parent_event).
+        """
+        from datetime import datetime, timezone
+        from .repositories.event.models import Event, EventKind
+        
+        # Create completion event for child
+        completion_event = Event(
+            instance_id=instance_id,
+            kind=EventKind.INSTANCE_COMPLETED.value,
+            data=json.dumps({
+                "parent_id": parent_id,
+                "report_message_id": report_message_id,
+            }),
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(completion_event)
+        
+        # Also create event for parent about child completion
+        parent_event = Event(
+            instance_id=parent_id,
+            message_id=report_message_id,
+            kind=EventKind.CHILD_COMPLETED.value,
+            data=json.dumps({
+                "child_instance_id": instance_id,
+                "waiting_for_remaining": waiting_for_remaining,
+            }),
+            created_at=datetime.now(timezone.utc),
+        )
+        session.add(parent_event)
+        
+        return completion_event, parent_event
+
+    async def _process_child_completion_and_notify_parent(self, instance_id: str) -> None:
         """Atomic check if child instance is done and should send completion report.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -1449,15 +1701,6 @@ Provide a concise summary:"""
         Args:
             instance_id: The child instance that may have completed.
         """
-        import uuid
-        from datetime import datetime, timezone
-        from sqlmodel import Session
-        from sqlalchemy import func, select, delete as sql_delete
-        from .repositories.instance.models import Instance, InstanceStatus
-        from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-        from .repositories.task.models import Task, TaskType, TaskStatus
-        from .repositories.event.models import Event, EventKind
-        
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
         last_content = await self._get_last_assistant_message(instance_id, agent_name="agent")
         if last_content is None:
@@ -1475,159 +1718,32 @@ Provide a concise summary:"""
                 logger.debug(f"Instance {instance_id[:8]}... has no parent, skipping completion check")
                 return
             
-            # Check for pending/processing messages for this instance
-            # Note: Don't check PROCESSING status for the current message being checked
-            # (it's the message that just finished processing)
-            pending_count = session.exec(
-                select(func.count())
-                .select_from(MessageQueue)
-                .where(MessageQueue.instance_id == instance_id)
-                .where(MessageQueue.status.in_([
-                    MessageStatus.READY.value,
-                    # MessageStatus.PROCESSING.value,  # Excluded - we're checking this message
-                    MessageStatus.RETRYING.value,
-                ]))
-            ).scalar_one()
-            
-            if pending_count > 0:
-                logger.debug(
-                    f"Instance {instance_id[:8]}... has {pending_count} pending messages, "
-                    f"skipping completion check"
-                )
-                return
-            
-            # FIX C3 - Idempotency: Check if completion report already sent
-            existing_report = session.exec(
-                select(MessageQueue)
-                .where(MessageQueue.instance_id == instance.parent_id)
-                .where(MessageQueue.source == f"report:{instance_id}")
-                .where(MessageQueue.status.in_([
-                    MessageStatus.READY.value,
-                    MessageStatus.PROCESSING.value,
-                    MessageStatus.COMPLETED.value,
-                ]))
-            ).first()
-            
-            if existing_report is not None:
-                logger.debug(
-                    f"Completion report already queued for child {instance_id[:8]}..., "
-                    f"skipping duplicate"
-                )
+            # Idempotency checks
+            if not await self._should_send_completion_report(session, instance_id):
                 return
             
             # ATOMIC: Instance completed — create completion report for parent
             logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
             
-            # Update child instance status to COMPLETED
-            instance.status = InstanceStatus.COMPLETED.value
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            instance.last_activity_at = datetime.now(timezone.utc)
-            instance.version = (instance.version or 1) + 1
-            
-            # Create completion report message for parent
-            report_message_id = str(uuid.uuid4())
-            report_message = MessageQueue(
-                message_id=report_message_id,
-                instance_id=instance.parent_id,
-                content=last_content,  # Already fetched before transaction
-                source=f"report:{instance_id}",
-                type=MessageType.COMPLETION_REPORT.value,
-                status=MessageStatus.READY.value,
-                priority=0,  # System priority
-                enqueued_at=datetime.now(timezone.utc),
+            # Create completion report
+            report_message, report_task, report_message_id = await self._create_completion_report(
+                session, instance, last_content
             )
-            session.add(report_message)
             
-            # Create task for parent to process the report
-            report_task = Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id=instance.parent_id,
-                message_id=report_message_id,
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
+            # Update parent state
+            parent_transitioned_to_running = await self._update_parent_on_child_complete(session, instance)
+            
+            # Calculate waiting_for remaining for event
+            waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
+            
+            # Create events
+            await self._create_completion_events(
+                session,
+                instance_id,
+                instance.parent_id,
+                report_message_id,
+                waiting_for_remaining,
             )
-            session.add(report_task)
-            
-            # Get parent instance
-            parent = session.get(Instance, instance.parent_id)
-            if parent:
-                # Decrement parent's waiting_for counter
-                parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
-                parent.last_activity_at = datetime.now(timezone.utc)
-                parent.version = (parent.version or 1) + 1
-                
-                # FIX W6: Update parent's children[] denormalized cache
-                # Note: instance_hierarchy is the canonical source; we update the cache here
-                if parent.children:
-                    try:
-                        import json
-                        children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
-                        if instance_id in children_list:
-                            children_list = [c for c in children_list if c != instance_id]
-                            parent.children = json.dumps(children_list)
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
-                
-                # Remove from instance_hierarchy junction table
-                # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
-                session.execute(
-                    text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
-                    {"child_id": instance_id}
-                )
-                
-                # Cascade check: if parent is WAITING_CHILDREN and waiting_for is 0, transition to RUNNING
-                if (parent.waiting_for == 0 and 
-                    parent.status == InstanceStatus.WAITING_CHILDREN.value):
-                    
-                    # Check if parent has any pending messages
-                    parent_pending = session.exec(
-                        select(func.count())
-                        .select_from(MessageQueue)
-                        .where(MessageQueue.instance_id == parent.instance_id)
-                        .where(MessageQueue.status.in_([
-                            MessageStatus.READY.value,
-                            MessageStatus.PROCESSING.value,
-                            MessageStatus.RETRYING.value,
-                        ]))
-                    ).scalar_one()
-                    
-                    if parent_pending == 0:
-                        # No pending messages, parent is truly complete
-                        parent.status = InstanceStatus.COMPLETED.value
-                        parent.updated_at = datetime.now(timezone.utc).isoformat()
-                        logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
-                    else:
-                        # Has pending messages, transition to RUNNING to process them
-                        parent.status = InstanceStatus.RUNNING.value
-                        logger.info(
-                            f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
-                            f"transitioning to RUNNING"
-                        )
-            
-            # Create completion event
-            completion_event = Event(
-                instance_id=instance_id,
-                kind=EventKind.INSTANCE_COMPLETED.value,
-                data=json.dumps({
-                    "parent_id": instance.parent_id,
-                    "report_message_id": report_message_id,
-                }),
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(completion_event)
-            
-            # Also create event for parent about child completion
-            parent_event = Event(
-                instance_id=instance.parent_id,
-                message_id=report_message_id,
-                kind=EventKind.CHILD_COMPLETED.value,
-                data=json.dumps({
-                    "child_instance_id": instance_id,
-                    "waiting_for_remaining": (parent.waiting_for - 1) if parent else 0,
-                }),
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(parent_event)
             
             # Capture parent_id before session closes (instance will be detached)
             parent_id = instance.parent_id
