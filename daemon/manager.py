@@ -38,6 +38,9 @@ from .registry import get_registry
 
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance, InstanceStatus
+from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
+from .repositories.task.models import Task, TaskType, TaskStatus
+from .repositories.event.models import Event, EventKind
 from sqlmodel import Session
 from sqlalchemy import text
 from .tools import create_instance_tools
@@ -877,7 +880,6 @@ class InstanceManager:
         from .repositories.task.models import Task, TaskType, TaskStatus
         from .repositories.message_queue.models import MessageQueue, MessageType, MessageStatus
         from .repositories.event.models import Event, EventKind
-        from .repositories.instance.models import Instance, InstanceStatus
         
         message_id = str(uuid.uuid4())
         
