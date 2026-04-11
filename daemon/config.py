@@ -137,7 +137,7 @@ class ServicesConfig(BaseSettings):
     
     # Task timeout and retry configuration
     task_timeout_minutes: float = Field(
-        default=15.0,
+        default=30.0,
         description="Maximum time a task can run before being cancelled (minutes). Set to 0 to disable timeout."
     )
     max_task_retries: int = Field(

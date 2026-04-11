@@ -619,27 +619,27 @@ class TestWorkerPoolConfig:
             worker_id="test-worker",
             task_processor=mock_task_processor,
             poll_interval=1.0,
-            timeout_minutes=15.0,
+            timeout_minutes=30.0,
             max_retries=3,
             retry_backoff_base=60,
             retry_backoff_max=3600,
         )
         
         assert worker._poll_interval == 1.0
-        assert worker._timeout_minutes == 15.0
+        assert worker._timeout_minutes == 30.0
         assert worker._max_retries == 3
         assert worker._retry_backoff_base == 60
         assert worker._retry_backoff_max == 3600
 
     def test_worker_default_timeout(self, mock_task_processor):
-        """Worker uses default timeout_minutes of 15.0 when not specified."""
+        """Worker uses default timeout_minutes of 30.0 when not specified."""
         worker = Worker(
             worker_id="test-worker",
             task_processor=mock_task_processor,
         )
         
-        # Default timeout is 15.0 minutes
-        assert worker._timeout_minutes == 15.0
+        # Default timeout is 30.0 minutes
+        assert worker._timeout_minutes == 30.0
 
 
 # ============================================================================
