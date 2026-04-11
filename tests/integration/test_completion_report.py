@@ -96,7 +96,7 @@ async def test_leader_spawns_coder_and_receives_report(
     logger.info("=" * 70)
     
     manager = InstanceManager(integration_config)
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
+    await manager.initialize()
     
     project_root = Path(__file__).parent.parent.parent
     
@@ -111,20 +111,21 @@ async def test_leader_spawns_coder_and_receives_report(
     events_received = []
     
     async def collect_events(instance_id: str, stop_event: asyncio.Event):
-        """Collect events from the broadcaster."""
-        queue = await manager.broadcaster.get_queue(instance_id)
+        """Collect events from the EventBus streaming queue."""
+        queue = manager._event_bus.get_streaming_queue(instance_id)
         while not stop_event.is_set():
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=2)
                 events_received.append(event)
-                logger.info(f"[EVENT] {event.type} | instance: {event.instance_id[:8]}... | msg: {event.message_id[:8] if event.message_id else 'N/A'}...")
+                logger.info(f"[EVENT] {event.get('event_type')} | instance: {event.get('instance_id', '')[:8]}... | msg: {event.get('data', {}).get('message_id', 'N/A')[:8]}...")
                 
-                if event.data:
+                data = event.get("data") or {}
+                if data:
                     # Log key data
-                    if event.type == "status_changed" and event.data.get("type") == "completion_report":
+                    if event.get("event_type") == "status_changed" and data.get("type") == "completion_report":
                         logger.info(f"[EVENT] 📋 COMPLETION REPORT received!")
-                        logger.info(f"[EVENT]    Agent: {event.data.get('agent_name')}")
-                        logger.info(f"[EVENT]    Summary: {event.data.get('summary')[:100]}...")
+                        logger.info(f"[EVENT]    Agent: {data.get('agent_name')}")
+                        logger.info(f"[EVENT]    Summary: {str(data.get('summary'))[:100]}...")
             except asyncio.TimeoutError:
                 continue
     
@@ -316,7 +317,7 @@ async def test_completion_report_message_format(
     integration_config.persistence.db_path = str(test_db_path)
     
     manager = InstanceManager(integration_config)
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
+    await manager.initialize()
     
     project_root = Path(__file__).parent.parent.parent
     
@@ -346,14 +347,14 @@ async def test_completion_report_message_format(
     
     async def wait_for_report():
         """Wait for completion report event."""
-        queue = await manager.broadcaster.get_queue(leader_instance_id)
+        queue = manager._event_bus.get_streaming_queue(leader_instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=60)
-                logger.info(f"[EVENT] {event.type}")
-                if (event.type == "status_changed" and 
-                    event.data and 
-                    event.data.get("type") == "completion_report"):
+                logger.info(f"[EVENT] {event.get('event_type')}")
+                if (event.get("event_type") == "status_changed" and 
+                    event.get("data") and 
+                    event.get("data").get("type") == "completion_report"):
                     report_data['event'] = event
                     report_received.set()
                     return

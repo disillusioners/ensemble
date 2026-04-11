@@ -212,9 +212,6 @@ async def test_single_message_no_duplicate_llm_calls(
     # Initialize async checkpointer and other async components
     await manager.initialize()
     
-    # Ensure main loop is set for event broadcasting
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
-    
     # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
@@ -252,7 +249,7 @@ async def test_single_message_no_duplicate_llm_calls(
     logger.info("[TEST] Waiting for message processing (max 30s)...")
     logger.info("=" * 60)
     
-    # Wait for the completed event via broadcaster
+    # Wait for the completed event via EventBus
     completed_received = False
     wait_timeout = 30
     
@@ -344,7 +341,7 @@ async def test_sse_events_count(
     4. No error events
     """
     from daemon.manager import InstanceManager
-    from daemon.events import Event
+    from daemon.repositories.event.models import Event
     
     tracker = mock_llm_tracker
     
@@ -357,21 +354,20 @@ async def test_sse_events_count(
     
     manager = InstanceManager(integration_config)
     await manager.initialize()
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
     
     # Track events
     events_received = []
     
     async def collect_events(instance_id: str):
-        """Collect events from the broadcaster."""
-        queue = await manager.broadcaster.get_queue(instance_id)
+        """Collect events from the EventBus streaming queue."""
+        queue = manager._event_bus.get_streaming_queue(instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=20)
                 events_received.append(event)
-                logger.info(f"[SSE] Event: {event.type}, message_id: {event.message_id}")
+                logger.info(f"[SSE] Event: {event.get('event_type')}, message_id: {event.get('data', {}).get('message_id')}")
                 
-                if event.type == "completed" or event.type == "error":
+                if event.get("event_type") == "completed" or event.get("event_type") == "error":
                     # Wait a bit more to see if there are duplicate events
                     await asyncio.sleep(2)
                     break
@@ -403,7 +399,7 @@ async def test_sse_events_count(
     # Analyze events
     event_counts = {}
     for event in events_received:
-        event_type = event.type
+        event_type = event.get("event_type")
         event_counts[event_type] = event_counts.get(event_type, 0) + 1
     
     logger.info("")
@@ -480,7 +476,6 @@ async def test_debug_llm_invocation_count(
         integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
         manager = InstanceManager(integration_config)
         await manager.initialize()
-        manager.broadcaster.set_main_loop(asyncio.get_running_loop())
         
         project_root = Path(__file__).parent.parent.parent
         coder_agent_dir = str(project_root / "agents" / "coder")
@@ -506,8 +501,8 @@ async def test_debug_llm_invocation_count(
             logger.info(f"[DEBUG]   Call #{i+1}: {call['message']}")
         
         # Also check event history for completed events
-        history = manager.broadcaster.get_events_since(instance_id, 0)
-        completed_events = [e for e in history if e.type == 'completed']
+        history = manager._event_bus._event_repo.get_events_since(instance_id, 0)
+        completed_events = [e for e in history if e.kind == 'completed']
         logger.info(f"[DEBUG] Completed events in history: {len(completed_events)}")
         
         # Assertions

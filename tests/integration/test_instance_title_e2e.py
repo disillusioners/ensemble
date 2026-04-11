@@ -92,9 +92,6 @@ async def test_instance_title_generation_e2e(
     # Initialize async components (checkpointer, etc.)
     await manager.initialize()
     
-    # Ensure main loop is set for event broadcasting
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
-    
     # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
     coder_agent_dir = str(project_root / "agents" / "coder")
@@ -115,20 +112,20 @@ async def test_instance_title_generation_e2e(
     title_updated_received = False
     
     async def collect_events(instance_id: str):
-        """Collect events from the broadcaster."""
+        """Collect events from the EventBus streaming queue."""
         nonlocal title_updated_received
-        queue = await manager.broadcaster.get_queue(instance_id)
+        queue = manager._event_bus.get_streaming_queue(instance_id)
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=60)
                 events_received.append(event)
-                logger.info(f"[SSE] Event: {event.type}, instance_id: {event.instance_id}")
+                logger.info(f"[SSE] Event: {event.get('event_type')}, instance_id: {event.get('instance_id')}")
                 
-                if event.type == "title_updated":
+                if event.get("event_type") == "title_updated":
                     title_updated_received = True
-                    logger.info(f"[SSE] Title updated event received: {event.data}")
+                    logger.info(f"[SSE] Title updated event received: {event.get('data')}")
                 
-                if event.type == "completed":
+                if event.get("event_type") == "completed":
                     # Wait a bit more to ensure all events are collected
                     await asyncio.sleep(1)
                     break
@@ -168,7 +165,7 @@ async def test_instance_title_generation_e2e(
     logger.info("[TEST] Waiting for message processing (max 60s)...")
     logger.info("=" * 60)
     
-    # Wait for the completed event via broadcaster
+    # Wait for the completed event via EventBus
     wait_timeout = 60
     
     while time.time() - start_time < wait_timeout:
@@ -234,7 +231,7 @@ async def test_instance_title_generation_e2e(
     assert instance["title"] == final_meta["title"], "Title should match between metadata and list"
     
     # 4. Check events received
-    event_types = [e.type for e in events_received]
+    event_types = [e.get("event_type") for e in events_received]
     logger.info(f"[TEST] Events received: {event_types}")
     
     assert "title_updated" in event_types, "title_updated event should be in events"
@@ -269,7 +266,7 @@ async def test_instance_title_not_regenerated(
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)
-    manager.broadcaster.set_main_loop(asyncio.get_running_loop())
+    await manager.initialize()
     
     # Spawn coder instance
     project_root = Path(__file__).parent.parent.parent
