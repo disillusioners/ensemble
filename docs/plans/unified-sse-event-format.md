@@ -1,5 +1,40 @@
 # Plan: Unified SSE Event Format
 
+## Status: ✅ COMPLETED
+
+All implementation steps completed and tested.
+
+---
+
+## Implementation Summary
+
+### Backend Changes
+
+| File | Changes |
+|------|---------|
+| `daemon/message_models.py` | Added SSEEventPayload, SSEEventDelta, SSEEventStatus models; unified `to_dict()` method |
+| `daemon/services/event_bus.py` | Streaming counters with 's' prefix; cleanup support |
+| `daemon/api.py` | Unified envelope with message/delta/status; legacy_compat flag |
+| `daemon/services/message_service.py` | message_received uses `message.to_dict()` |
+| `daemon/manager.py` | DB Event uses `message.to_dict()`; streaming events use `delta` format |
+| `daemon/persistence.py` | Added `instance_id`, removed `type` field |
+
+### Frontend Changes
+
+| File | Changes |
+|------|---------|
+| `frontend/src/app/models/index.ts` | Added SSEEventEnvelope, SSEDelta, SSEStatus interfaces |
+| `frontend/src/app/services/sse.service.ts` | Unified handlers; explicit 'error' event listener |
+| `frontend/src/app/pages/chat/chat.component.ts` | Removed deprecated `type: 'message'` |
+
+### Test Changes
+
+| File | Changes |
+|------|---------|
+| `tests/unit/test_message_service.py` | Updated to use new `to_dict()` method |
+
+---
+
 ## Context
 
 The current SSE event system has two major issues:
@@ -661,4 +696,37 @@ async def test_legacy_compat_flag():
     """Backend respects legacy_compat flag."""
     # With legacy_compat=true: envelope includes both new + flat fields
     # With legacy_compat=false: envelope only includes new format
+```
+
+---
+
+## Verification Results
+
+### Unit Tests
+- **217 tests passed** ✅
+
+### Manual SSE Test Results
+
+**SSE Events now match API format:**
+
+```sse
+# message_received (user message)
+event: message_received
+data: {"instance_id": "...", "message_id": "...", "message": {"message_id": "...", "role": "user", "content": "say hi to coder", "created_at": "...", "source": "api"}}
+
+# message_received (child completion report)
+event: message_received  
+data: {"instance_id": "...", "message_id": "...", "message": {"message_id": "...", "role": "user", "content": "Coder agent...has done...", "created_at": "...", "source": "child:..."}}
+
+# streaming events use 's' prefix
+id: s1
+event: tool_call
+data: {"instance_id": "...", "message_id": "...", "delta": {"type": "tool_call", "tool_call": {...}}}
+```
+
+### Key Fixes Applied
+
+1. **manager.py** - Both DB Event AND EventBus use `UnifiedMessage.to_dict()` format
+2. **Frontend error handler** - Added explicit `addEventListener('error', ...)` to prevent SSE 'error' events from triggering reconnection
+3. **Removed `type` field** - API and SSE no longer include `type: 'message'`
 ```

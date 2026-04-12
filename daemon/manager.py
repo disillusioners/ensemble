@@ -886,6 +886,8 @@ class InstanceManager:
         Returns:
             AsyncMessageResult with message_id and status.
         """
+        from daemon.message_models import UnifiedMessage
+        
         # Reject new messages during shutdown
         if self.is_shutting_down:
             raise RuntimeError("Manager is shutting down, cannot accept new messages")
@@ -946,12 +948,21 @@ class InstanceManager:
                     f"This may indicate the instance was not properly persisted."
                 )
             
-            # 4. Create event for the new message
+            # 4. Create event for the new message (use UnifiedMessage.to_dict() format)
+            role = "system" if msg_type == MessageType.SYSTEM.value else "user"
+            unified_msg = UnifiedMessage(
+                message_id=message_id,
+                instance_id=instance_id,
+                role=role,
+                content=message,
+                source=source,
+                created_at=datetime.now(timezone.utc),
+            )
             event = Event(
                 instance_id=instance_id,
                 message_id=message_id,
                 kind=EventKind.MESSAGE_RECEIVED.value,
-                data=json.dumps({"source": source, "priority": priority}),
+                data=json.dumps(unified_msg.to_dict()),
                 created_at=datetime.now(timezone.utc),
             )
             session.add(event)
@@ -963,11 +974,13 @@ class InstanceManager:
             self._worker_pool.notify_work()
         
         # Broadcast event asynchronously (fire and forget)
+        # Use unified_msg created earlier for consistency with DB Event
+        logger.info(f"DEBUG: Broadcasting message_received with UnifiedMessage format: {unified_msg.to_dict()}")
         try:
             await self._event_bus.create_message_received_event(
                 instance_id=instance_id,
                 message_id=message_id,
-                content={"source": source, "priority": priority, "content": message}
+                content=unified_msg.to_dict(),
             )
         except Exception as e:
             logger.warning(f"Failed to broadcast message_received event: {e}")
@@ -1576,8 +1589,8 @@ Provide a concise summary:"""
     async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str) -> bool:
         """Check if completion report should be sent (idempotency checks).
         
-        Performs two checks to ensure we don't send duplicate completion reports:
-        1. No pending messages (READY, RETYING) for the instance
+        Performs two checks to ensure we do not send duplicate completion reports:
+        1. No pending messages (READY, RETRYING) for the instance
         2. No existing completion report for this specific message
         
         The idempotency key includes the message_id so each message completion
@@ -1709,7 +1722,7 @@ Provide a concise summary:"""
         
         Handles:
         - Decrement parent's waiting_for counter
-        - Update parent's children[] cache (FIX: W6)
+        - Update parent's children cache (FIX: W6)
         - Delete from instance_hierarchy table
         - Cascade: transition parent based on waiting_for and status
         

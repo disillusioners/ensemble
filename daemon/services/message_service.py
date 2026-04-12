@@ -47,11 +47,7 @@ class MessageService:
         await self._event_bus.create_message_received_event(
             instance_id=instance_id,
             message_id=message_id,
-            content={
-                "source": source,
-                "content": content,
-                **extra,
-            },
+            content=message.to_dict(),
         )
         
         return message
@@ -133,11 +129,7 @@ class MessageService:
         await self._event_bus.create_message_received_event(
             instance_id=parent_instance_id,
             message_id=message_id,
-            content={
-                "source": f"child:{child_instance_id}",
-                "content": report_content,
-                "child_instance_id": child_instance_id,
-            },
+            content=message.to_dict(),
         )
         
         return message
@@ -164,13 +156,7 @@ class MessageService:
         await self._event_bus.create_message_received_event(
             instance_id=parent_instance_id,
             message_id=message_id,
-            content={
-                "source": f"error_report:{child_instance_id}",
-                "content": error_report,
-                "child_instance_id": child_instance_id,
-                "error_type": error_type,
-                "severity": severity,
-            },
+            content=message.to_dict(),
         )
         
         return message

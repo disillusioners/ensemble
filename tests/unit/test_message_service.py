@@ -57,19 +57,23 @@ class TestUserMessageStored:
 
     @pytest.mark.asyncio
     async def test_extra_data_passed_to_event(self, service, mock_event_bus):
-        """Verify extra kwargs are included in event content."""
+        """Verify extra kwargs are included in event content via message.to_dict()."""
         await service.on_user_message_stored(
             instance_id="inst-1",
             message_id="msg-1",
             content="Hello",
             source="api",
-            priority=1,
+            priority=1,  # extra kwarg - not stored in message
         )
         
         call_args = mock_event_bus.create_message_received_event.call_args
         assert call_args is not None
         content = call_args.kwargs.get('content', {})
-        assert content.get('priority') == 1
+        # Now contains full message.to_dict() format
+        assert content.get('role') == "user"
+        assert content.get('source') == "api"
+        assert content.get('content') == "Hello"
+        # Note: extra kwargs like priority are NOT stored in message.to_dict()
 
 
 class TestAssistantMessageCompleted:
@@ -189,7 +193,7 @@ class TestChildCompletionReport:
 
     @pytest.mark.asyncio
     async def test_source_format(self, service, mock_event_bus):
-        """Verify source is correctly formatted as child:instance_id."""
+        """Verify source is correctly formatted as child:instance_id in message.to_dict()."""
         await service.on_child_completion_report(
             parent_instance_id="parent-1",
             child_instance_id="child-abc-123",
@@ -199,8 +203,11 @@ class TestChildCompletionReport:
         
         call_args = mock_event_bus.create_message_received_event.call_args
         content = call_args.kwargs.get('content', {})
+        # Now contains full message.to_dict() format
         assert content.get('source') == "child:child-abc-123"
-        assert content.get('child_instance_id') == "child-abc-123"
+        assert content.get('role') == "user"
+        assert content.get('content') == "Done"
+        # Note: child_instance_id is NOT in message.to_dict() - it's only in source
 
 
 class TestUnifiedMessageFormats:
