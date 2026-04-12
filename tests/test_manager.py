@@ -275,7 +275,8 @@ class TestSendMessage:
 class TestTerminateInstance:
     """Tests for terminate_instance method."""
 
-    def test_terminate_instance_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
+    @pytest.mark.asyncio
+    async def test_terminate_instance_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
         """Test terminating instance."""
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
@@ -286,20 +287,21 @@ class TestTerminateInstance:
             manager._instance_repository = mock_instance_repository
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="550e8400-e29b-41d4-a716-446655440001")
             
-            result = manager.terminate_instance(instance_id)
+            result = await manager.terminate_instance(instance_id)
             
             assert result is True
             assert instance_id not in manager.instances
             mock_instance_repository.update_status.assert_called_once_with(instance_id, "terminated")
 
-    def test_terminate_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
+    @pytest.mark.asyncio
+    async def test_terminate_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
         """Test terminating non-existent instance."""
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             
-            result = manager.terminate_instance("non-existent-instance")
+            result = await manager.terminate_instance("non-existent-instance")
             
             assert result is False
 

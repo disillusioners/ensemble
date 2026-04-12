@@ -23,7 +23,7 @@ async def mock_manager():
     manager.spawn_instance = Mock(return_value="test-instance-id")
     manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
-    manager.terminate_instance = Mock(return_value=True)
+    manager.terminate_instance = AsyncMock(return_value=True)
     manager.list_instances = Mock(return_value=([
         {
             "instance_id": "instance-1",

@@ -1,9 +1,29 @@
 """Tests for daemon/persistence.py"""
 
 import pytest
+import asyncio
 import sys
 from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
+
+
+class EmptyAsyncIterator:
+    """Async iterator that yields nothing, for mocking alist."""
+    
+    def __init__(self, items=None):
+        self.items = items or []
+        self.index = 0
+    
+    def __aiter__(self):
+        return self
+    
+    async def __anext__(self):
+        if self.index < len(self.items):
+            item = self.items[self.index]
+            self.index += 1
+            return item
+        raise StopAsyncIteration
+
 
 # langgraph mocking is handled by conftest.py
 
@@ -62,6 +82,7 @@ class TestGetInstanceMessages:
                 "messages": [HumanMessage(content="Hello world")]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -81,6 +102,7 @@ class TestGetInstanceMessages:
                 "messages": [AIMessage(content="Hello, how can I help?")]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -100,6 +122,7 @@ class TestGetInstanceMessages:
                 "messages": [SystemMessage(content="You are helpful.")]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -118,12 +141,13 @@ class TestGetInstanceMessages:
             "channel_values": {
                 "messages": [
                     AIMessage(
-                        content="The answer is 42.",
+                        content="42",
                         additional_kwargs={"thinking": "Let me calculate..."}
                     )
                 ]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -132,17 +156,18 @@ class TestGetInstanceMessages:
 
     @pytest.mark.asyncio
     async def test_get_instance_messages_extracts_think_tags(self):
-        """Test extracting <think/> tags from content."""
+        """Test extracting think tags from content."""
         from langchain_core.messages import AIMessage
 
         mock_checkpointer = AsyncMock()
         mock_checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
                 "messages": [
-                    AIMessage(content="<think>Reasoning here</think>The answer is 42.")
+                    AIMessage(content="<think>\nReasoning here\n</think>\nThe answer is 42.")
                 ]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -169,6 +194,7 @@ class TestGetInstanceMessages:
                 ]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -194,6 +220,7 @@ class TestGetInstanceMessages:
                 ]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -215,6 +242,7 @@ class TestGetInstanceMessages:
                 ]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
@@ -234,6 +262,7 @@ class TestGetInstanceMessages:
                 "messages": [HumanMessage(content="Test")]
             }
         })
+        mock_checkpointer.alist = MagicMock(return_value=EmptyAsyncIterator())
 
         messages = await get_instance_messages(mock_checkpointer, "test-instance")
 
