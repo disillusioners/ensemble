@@ -73,9 +73,13 @@ compaction:
 services:
   # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts.
   #   With 3 timeout retries (3 × 660s ≈ 33 min) + transient retry overhead (~40s):
-  #   Total ≈ 34 min, well within the 45 min budget.
-  task_timeout_minutes: 45
+  #   Total ≈ 34 min, well within the 60 min budget.
+  task_timeout_minutes: 60
   max_task_retries: 3  # Max retry attempts (0 = no retry)
   task_retry_backoff_base: 60  # Base backoff in seconds (1 min)
   task_retry_backoff_max: 3600  # Max backoff in seconds (1 hour)
   stale_task_cancel_grace_seconds: 10  # Grace period for worker shutdown
+  # graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
+  #   This is the safety net if the graph hangs indefinitely.
+  #   Default: 55 min. Set to 0 to disable.
+  graph_timeout_minutes: 55

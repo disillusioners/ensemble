@@ -140,7 +140,7 @@ class ServicesConfig(BaseSettings):
     
     # Task timeout and retry configuration
     task_timeout_minutes: float = Field(
-        default=45.0,
+        default=60.0,
         description="Maximum time a task can run before being cancelled (minutes). Set to 0 to disable timeout."
     )
     max_task_retries: int = Field(
@@ -158,6 +158,10 @@ class ServicesConfig(BaseSettings):
     stale_task_cancel_grace_seconds: int = Field(
         default=10,
         description="Seconds to wait for graceful shutdown after requesting task cancellation in stale task recovery."
+    )
+    graph_timeout_minutes: float = Field(
+        default=55.0,
+        description="Hard timeout for LangGraph execution via MainLoopBridge (minutes). Set to 0 to disable."
     )
 
 

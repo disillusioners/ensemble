@@ -515,6 +515,7 @@ class InstanceManager:
             instance_manager=self,
             event_repo=event_repo,
             message_service=self._message_service,
+            graph_timeout_minutes=svc.graph_timeout_minutes,
         )
         
         # Create and start worker pool with timeout/retry config

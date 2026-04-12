@@ -322,6 +322,7 @@ class TaskProcessor:
         event_repo: "EventRepository | None" = None,
         event_bus: "EventBus | None" = None,
         message_service: "MessageService | None" = None,
+        graph_timeout_minutes: float = 40.0,
     ):
         """Initialize the task processor.
 
@@ -331,12 +332,14 @@ class TaskProcessor:
             event_repo: Optional EventRepository for event creation.
             event_bus: Optional EventBus for event creation.
             message_service: Optional MessageService for unified SSE emission.
+            graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
         self._event_bus = event_bus
         self._message_service = message_service
+        self._graph_timeout_minutes = graph_timeout_minutes
 
         # Create type-specific processors
         self._processors: dict[str, BaseProcessor] = {
@@ -390,8 +393,9 @@ class TaskProcessor:
             return await processor.process(task, cancellation_token=cancellation_token)
 
         # Bridge from worker thread to main event loop
-        # No timeout here - let TimeoutMonitor handle it
-        return MainLoopBridge.run_async(_run(), timeout=None)
+        # Use config-based graph timeout (0 = no timeout)
+        timeout = self._graph_timeout_minutes * 60.0 if self._graph_timeout_minutes > 0 else None
+        return MainLoopBridge.run_async(_run(), timeout=timeout)
 
     def get_pending_count(self) -> int:
         """Get the number of pending tasks."""
