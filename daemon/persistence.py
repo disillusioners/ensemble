@@ -67,8 +67,9 @@ async def get_instance_messages(
         List of message dictionaries with role, content, thinking, tool_calls.
     """
     import uuid
+    from typing import cast
+    from langgraph.checkpoint.base import CheckpointTuple
     
-    # Use the PASSED checkpointer instead of creating a new one
     config = {"configurable": {"thread_id": instance_id}}
     
     # Get the current state from async checkpointer
@@ -82,8 +83,31 @@ async def get_instance_messages(
     if not messages:
         return []
     
-    # Get checkpoint timestamp for accurate message timing
-    checkpoint_ts = state.get("ts") or None
+    # Collect all checkpoints with timestamps
+    # We need to iterate oldest-to-newest to track when messages first appeared
+    checkpoints_data: list[tuple[str | None, list[Any]]] = []
+    
+    async for checkpoint_tuple in checkpointer.alist(config, limit=1000):
+        ct = cast(CheckpointTuple, checkpoint_tuple)
+        checkpoint = ct.checkpoint
+        if not isinstance(checkpoint, dict):
+            continue
+        ts = checkpoint.get("ts")
+        checkpoint_messages = checkpoint.get("channel_values", {}).get("messages", [])
+        checkpoints_data.append((ts, checkpoint_messages))
+    
+    # Reverse to get oldest-to-newest order
+    checkpoints_data.reverse()
+    
+    # Track when each message first appeared
+    msg_timestamps: dict[str, str] = {}
+    for ts, checkpoint_messages in checkpoints_data:
+        if not ts:
+            continue
+        for msg in checkpoint_messages:
+            msg_id = getattr(msg, 'id', None)
+            if msg_id and msg_id not in msg_timestamps:
+                msg_timestamps[msg_id] = ts
     
     result = []
     
@@ -150,7 +174,12 @@ async def get_instance_messages(
         # Generate a message ID based on content hash (for consistency)
         msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
         
-        # Use checkpoint timestamp if available, not current time
+        # Use tracked timestamp if available, fallback to checkpoint timestamp
+        original_msg_id = getattr(msg, 'id', None)
+        created_at = msg_timestamps.get(original_msg_id) if original_msg_id else None
+        if not created_at:
+            created_at = state.get("ts")
+        
         result.append({
             "message_id": msg_id,
             "type": msg_type,
@@ -159,7 +188,7 @@ async def get_instance_messages(
             "thinking": thinking,
             "thinking_extracted": thinking_extracted,
             "tool_calls": tool_calls,
-            "created_at": checkpoint_ts,
+            "created_at": created_at,
         })
     
     return result
