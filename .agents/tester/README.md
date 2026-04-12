@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-11 Worker Pool Followup Fixes)
+## Test Results (Latest: 2026-04-12 SSE Message Unification)
+
+### feature/sse-message-unification branch (commit 7f39b28)
+- **1787 tests pass** (22 skipped, 0 failed) excluding integration
+- **16 new message_service unit tests** — MessageService, UnifiedMessage, ToolCallInfo
+- **24 new mock tests** — SSE critical paths (emit, error isolation, duplicate prevention, edge cases)
+- **197 frontend tests pass** — no regressions
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- **4 quick fixes applied** (commit 7f39b28): async mock fixes, status count update
+- See `.agents/tester/RESULTS/2026-04-12-sse-message-unification.md` for full report
+
+### SSE Message Unification Status: ✅ READY FOR MERGE
 
 ### feature/worker-pool-followup branch (commit 3c396b8)
 - **1789 tests pass** (22 skipped, 0 failed) excluding integration
