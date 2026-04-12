@@ -974,8 +974,6 @@ class InstanceManager:
             self._worker_pool.notify_work()
         
         # Broadcast event asynchronously (fire and forget)
-        # Use unified_msg created earlier for consistency with DB Event
-        logger.info(f"DEBUG: Broadcasting message_received with UnifiedMessage format: {unified_msg.to_dict()}")
         try:
             await self._event_bus.create_message_received_event(
                 instance_id=instance_id,
