@@ -150,3 +150,36 @@ class MessageService:
         )
         
         return message
+
+    async def on_child_error_report(
+        self,
+        parent_instance_id: str,
+        child_instance_id: str,
+        error_report: str,
+        error_type: str,
+        severity: str,
+        message_id: str,
+    ) -> UnifiedMessage:
+        """Emit message for child agent's error report to parent."""
+        message = UnifiedMessage(
+            message_id=message_id,
+            instance_id=parent_instance_id,
+            role="user",
+            content=error_report,
+            source=f"error_report:{child_instance_id}",
+            created_at=datetime.now(timezone.utc),
+        )
+        
+        await self._event_bus.create_message_received_event(
+            instance_id=parent_instance_id,
+            message_id=message_id,
+            content={
+                "source": f"error_report:{child_instance_id}",
+                "content": error_report,
+                "child_instance_id": child_instance_id,
+                "error_type": error_type,
+                "severity": severity,
+            },
+        )
+        
+        return message

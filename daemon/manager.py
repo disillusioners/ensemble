@@ -2002,6 +2002,20 @@ Provide a concise summary:"""
             )
             report_message_id = msg.message_id
             
+            # Wire error report through MessageService for unified SSE emission
+            if self._message_service:
+                try:
+                    await self._message_service.on_child_error_report(
+                        parent_instance_id=parent_id,
+                        child_instance_id=instance_id,
+                        error_report=error_report,
+                        error_type=error_type,
+                        severity=severity,
+                        message_id=report_message_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to emit error report via MessageService: {e}")
+            
             # Broadcast error report event
             await self._event_bus.create_child_failed_event(
                 instance_id=parent_id,
