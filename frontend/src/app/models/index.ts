@@ -97,7 +97,9 @@ export type EventType =
   | 'tool_call' 
   | 'thinking'
   | 'tool_complete'
-  | 'completed' 
+  | 'processing_completed'  // Backend sends this
+  | 'completed'             // Legacy/other sources
+  | 'cancelled'
   | 'error' 
   | 'keepalive'
   | 'title_updated';

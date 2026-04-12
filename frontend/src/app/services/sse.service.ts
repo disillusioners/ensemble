@@ -182,6 +182,24 @@ export class SseService {
             data: data,
           };
           this.events.update(prev => [...prev, event]);
+          
+          // Update partial message with tool call info
+          if (data.message_id) {
+            this.partialMessages.update(prev => {
+              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.instance_id);
+              const newToolCall = {
+                id: data.id || `tool-${Date.now()}`,
+                name: data.name || '',
+                arguments: data.arguments || {},
+                output: '',  // Output comes in tool_complete event
+              };
+              const updated = {
+                ...existing,
+                tool_calls: [...(existing.tool_calls || []), newToolCall],
+              };
+              return new Map(prev).set(data.message_id, updated);
+            });
+          }
         } catch (err) {
           console.error('Failed to parse tool_call event:', err);
         }
@@ -233,19 +251,26 @@ export class SseService {
           };
           this.events.update(prev => [...prev, event]);
           
-          // Add tool to partial message
-          if (data.message_id) {
+          // Update tool_call with output in partial message
+          if (data.message_id && data.id) {
             this.partialMessages.update(prev => {
-              const existing = prev.get(data.message_id) || this._createEmptyMessage(data.message_id, data.instance_id);
-              const newToolCall = {
-                id: data.id || `tool-${Date.now()}`,
-                name: data.name || '',
-                arguments: {},
-                output: data.output || '',
-              };
+              const existing = prev.get(data.message_id);
+              if (!existing) return prev;
+              
+              // Find and update the existing tool_call by ID
+              const updatedToolCalls = (existing.tool_calls || []).map(tc => {
+                if (tc.id === data.id) {
+                  return {
+                    ...tc,
+                    output: data.output || '',
+                  };
+                }
+                return tc;
+              });
+              
               const updated = {
                 ...existing,
-                tool_calls: [...(existing.tool_calls || []), newToolCall],
+                tool_calls: updatedToolCalls,
               };
               return new Map(prev).set(data.message_id, updated);
             });
@@ -256,61 +281,13 @@ export class SseService {
       });
     });
 
+    // Listen for both 'processing_completed' (from backend) and 'completed' (legacy)
+    eventSource.addEventListener('processing_completed', (e: MessageEvent) => {
+      this.handleCompletedEvent(e, 'processing_completed');
+    });
+    
     eventSource.addEventListener('completed', (e: MessageEvent) => {
-      this.ngZone.run(() => {
-        try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
-          console.log('[SSE] Received completed event:', data.message_id, 'content length:', data.content?.length);
-          const event: SSEEvent = {
-            event_id: parseInt(e.lastEventId || '0'),
-            type: 'completed',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data: data,
-          };
-          this.events.update(prev => [...prev, event]);
-          
-          // Create a Message object from the completed event
-          if (data.message_id) {
-            // Get the partial message that was built during streaming
-            const partialMessage = this.partialMessages().get(data.message_id);
-          
-            // Use tool_calls from partial message (which has outputs) if available,
-            // otherwise fall back to completed event data
-            const toolCalls = partialMessage?.tool_calls || data.tool_calls || undefined;
-          
-            const message: Message = {
-              type: 'message',
-              message_id: data.message_id,
-              role: 'assistant',
-              content: data.content || '',
-              thinking: data.thinking || undefined,
-              thinking_extracted: data.thinking_extracted || undefined,
-              tool_calls: toolCalls,
-              created_at: new Date().toISOString(),
-              instance_id: data.instance_id || this.currentInstanceId,  // FIX: Include instance_id for validation
-            };
-            this.latestCompletedMessage.set(message);
-            console.log('[SSE] Set latestCompletedMessage for:', data.message_id);
-            this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'completed'));
-          
-            // Clear partial message on completion
-            this.partialMessages.update(prev => {
-              const updated = new Map(prev);
-              updated.delete(data.message_id);
-              console.log('[SSE] Cleared partial message, remaining:', updated.size);
-              return updated;
-            });
-          }
-          
-          // Reset streaming state when completed
-          console.log('[SSE] Setting isStreaming to false');
-          this.isStreaming.set(false);
-        } catch (err) {
-          console.error('Failed to parse completed event:', err);
-        }
-      });
+      this.handleCompletedEvent(e, 'completed');
     });
 
     eventSource.addEventListener('cancelled', (e: MessageEvent) => {
@@ -419,6 +396,67 @@ export class SseService {
     }
     this.isStreaming.set(false);
     this.currentInstanceId = null;
+  }
+
+  /**
+   * Handle completed/processing_completed events from SSE.
+   * This method is called by both 'completed' and 'processing_completed' event listeners.
+   */
+  private handleCompletedEvent(e: MessageEvent, eventType: 'processing_completed' | 'completed'): void {
+    this.ngZone.run(() => {
+      try {
+        const data = JSON.parse(e.data);
+        if (!this.isValidInstanceEvent(data)) return;
+        console.log(`[SSE] Received ${eventType} event:`, data.message_id, 'content length:', data.content?.length);
+        const event: SSEEvent = {
+          event_id: parseInt(e.lastEventId || '0'),
+          type: eventType,
+          instance_id: data.instance_id,
+          message_id: data.message_id,
+          data: data,
+        };
+        this.events.update(prev => [...prev, event]);
+        
+        // Create a Message object from the completed event
+        if (data.message_id) {
+          // Get the partial message that was built during streaming
+          const partialMessage = this.partialMessages().get(data.message_id);
+        
+          // Use tool_calls from partial message (which has outputs) if available,
+          // otherwise fall back to completed event data
+          const toolCalls = partialMessage?.tool_calls || data.tool_calls || undefined;
+        
+          const message: Message = {
+            type: 'message',
+            message_id: data.message_id,
+            role: 'assistant',
+            content: data.content || '',
+            thinking: data.thinking || undefined,
+            thinking_extracted: data.thinking_extracted || undefined,
+            tool_calls: toolCalls,
+            created_at: new Date().toISOString(),
+            instance_id: data.instance_id || this.currentInstanceId,
+          };
+          this.latestCompletedMessage.set(message);
+          console.log('[SSE] Set latestCompletedMessage for:', data.message_id);
+          this.statusUpdates.update(prev => new Map(prev).set(data.message_id, 'completed'));
+        
+          // Clear partial message on completion
+          this.partialMessages.update(prev => {
+            const updated = new Map(prev);
+            updated.delete(data.message_id);
+            console.log('[SSE] Cleared partial message, remaining:', updated.size);
+            return updated;
+          });
+        }
+        
+        // Reset streaming state when completed
+        console.log('[SSE] Setting isStreaming to false');
+        this.isStreaming.set(false);
+      } catch (err) {
+        console.error(`Failed to parse ${eventType} event:`, err);
+      }
+    });
   }
 
   /**
