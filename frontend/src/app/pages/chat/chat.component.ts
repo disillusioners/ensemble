@@ -118,6 +118,26 @@ export class ChatComponent implements OnInit, OnDestroy {
                 console.log('[Chat] Added placeholder for message:', delta.message_id);
               }
               break;
+
+            case 'message_received':
+              // Add new message (user input, child reports, etc.) as user role
+              // Child completion reports have source like "child:instance_id"
+              if (msgIndex === -1) {
+                const newMessage: Message = {
+                  type: 'message',
+                  message_id: delta.message_id,
+                  role: 'user', // Child reports are treated as user input to the parent
+                  content: delta.content || '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                };
+                updated.push(newMessage);
+                console.log('[Chat] Added message_received:', delta.message_id, 'source:', delta.source);
+              }
+              break;
               
             case 'content_chunk':
               // Auto-create placeholder if out of order (FIX: was silently dropped before)

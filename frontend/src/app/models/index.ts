@@ -92,6 +92,7 @@ export interface AgentCreate {
 export type EventType = 
   | 'connected' 
   | 'message_queued' 
+  | 'message_received'   // New message received (including child reports)
   | 'status_changed' 
   | 'content_chunk' 
   | 'tool_call' 
@@ -123,7 +124,8 @@ export type MessageDeltaType =
   | 'tool_complete'       // Tool call completed - update tool output
   | 'processing_completed' // Message processing done - finalize message
   | 'processing_failed'    // Message processing failed - mark as error
-  | 'message_completed';   // Final canonical message - replace accumulated state
+  | 'message_completed'     // Final canonical message - replace accumulated state
+  | 'message_received';     // New message received (user input, child reports, etc.)
 
 // Canonical message payload from message_completed event
 export interface CanonicalMessage {
@@ -154,6 +156,9 @@ export interface MessageDelta {
   error?: string;           // For processing_failed
   message?: CanonicalMessage; // For message_completed
   original_message_id?: string; // For message_completed
+  // For message_received
+  source?: string;
+  priority?: number;
   timestamp: string;
 }
 

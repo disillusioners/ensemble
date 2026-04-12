@@ -88,6 +88,37 @@ export class SseService {
       this.isConnected = true;
     });
 
+    // Message received - new message (user input, child reports, etc.)
+    eventSource.addEventListener('message_received', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!this.isValidInstanceEvent(data)) return;
+          console.log('[SSE] message_received:', data.message_id, 'source:', data.source);
+          
+          this.events.update(prev => [...prev, {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'message_received',
+            instance_id: data.instance_id,
+            message_id: data.message_id,
+            data,
+          }]);
+          
+          // Emit delta for ChatComponent to add the message
+          this.emitDelta({
+            type: 'message_received',
+            instance_id: data.instance_id,
+            message_id: data.message_id,
+            content: data.content || '',
+            source: data.source,
+            priority: data.priority,
+          });
+        } catch (err) {
+          console.error('[SSE] Failed to parse message_received:', err);
+        }
+      });
+    });
+
     // Processing started - emit delta to add placeholder
     eventSource.addEventListener('processing_started', (e: MessageEvent) => {
       this.ngZone.run(() => {
