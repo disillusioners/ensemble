@@ -1053,19 +1053,19 @@ class InstanceManager:
         
         # Project context injection for first message
         # Must happen BEFORE building graph_input
-        # Skip injection for internal agent-to-agent messages
+        # Skip injection ONLY for completion/error reports (parent already has context)
         if not is_retry:
-            # Determine if this is an internal agent message
-            is_internal_message = (
+            # Determine if this is a completion report or error report
+            # These should skip injection because parent already has project context
+            is_completion_report = (
                 message_source is not None and (
-                    message_source.startswith("agent:") or
                     message_source.startswith("report:") or
                     message_source.startswith("error_report:")
                 )
             )
             
-            if is_internal_message:
-                # Skip project injection for internal agent messages
+            if is_completion_report:
+                # Skip project injection for completion/error reports
                 pass
             else:
                 # Check if instance already has project context
