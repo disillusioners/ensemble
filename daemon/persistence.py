@@ -66,7 +66,6 @@ async def get_instance_messages(
     Returns:
         List of message dictionaries with role, content, thinking, tool_calls.
     """
-    from datetime import datetime, timezone
     import uuid
     
     # Use the PASSED checkpointer instead of creating a new one
@@ -82,6 +81,9 @@ async def get_instance_messages(
     messages = channel_values.get("messages", [])
     if not messages:
         return []
+    
+    # Get checkpoint timestamp for accurate message timing
+    checkpoint_ts = state.get("ts") or None
     
     result = []
     
@@ -148,6 +150,7 @@ async def get_instance_messages(
         # Generate a message ID based on content hash (for consistency)
         msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
         
+        # Use checkpoint timestamp if available, not current time
         result.append({
             "message_id": msg_id,
             "type": msg_type,
@@ -156,7 +159,7 @@ async def get_instance_messages(
             "thinking": thinking,
             "thinking_extracted": thinking_extracted,
             "tool_calls": tool_calls,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": checkpoint_ts,
         })
     
     return result
