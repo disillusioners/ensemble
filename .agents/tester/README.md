@@ -147,15 +147,13 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Worker Pool Followup Fixes — TESTING COMPLETE**
+**SSE Message Unification — TESTING COMPLETE**
 
 ### Status: ✅ READY FOR MERGE
 
-**Latest:** 1789 tests pass, 13 notification tests pass × 3 runs (no flakiness), ensure.sh validated
-**Commit:** 3c396b8 on `feature/worker-pool-followup`
-**Spurious wakeup defense:** while loop + monotonic elapsed tracking — verified
-**Stop event check:** Fast shutdown via stop_event in wait_for_work() — verified
-**5 new integration tests:** Real Worker threads with threading.Event — reliable, no race conditions
+**Latest:** 1787 tests pass, 24 mock tests pass, 197 frontend tests pass, ensure.md validated
+**Commits:** 3f64993, 18868d5 (feature), 7f39b28 (test fixes)
+**Key verified:** MessageService coordination, error isolation, duplicate prevention, frontend handlers, edge cases
 
 ### Phase 6 Test File
 - **test_timeout_retry_e2e.py** (10 tests): Config flow, timeout→retry→complete, max retries→permanent failure, exponential backoff, multiple timeouts→success, default config, env var overrides, stale recovery config threshold, real repo integration

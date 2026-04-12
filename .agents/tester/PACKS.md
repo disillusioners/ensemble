@@ -15,7 +15,6 @@
 | frontend_unit_test | frontend/jest.config.js | Angular frontend job queue (model, services, SSE, components) + Phase 3 queue service/model — Jest | 2 min | 2026-04-12 | ✅ PASS (197 passed) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-11 | ✅ PASS (13 passed, 3× verified no flakiness) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-12 | ✅ PASS (16 passed) |
-| message_service_mock_test | tests/mock_message_service.py | Mock tests for SSE message unification critical paths | 2 min | 2026-04-12 | ✅ PASS (24 passed) |
 
 ## Integration Test Packs
 
@@ -29,7 +28,6 @@
 |------|----------|-------|---------|----------|--------|
 | mock_message_service_test | tests/mock_message_service.py | MessageService SSE critical paths (emit, error isolation, duplicate prevention, edge cases) | 2 min | 2026-04-12 | ✅ PASS (24 passed) |
 | mock_job_queue_test | test/packs/mock_job_queue_test.sh | Mock job queue API test | 5 min | 2026-04-07 | ❌ FAIL (147 passed, 1 failed, 2 skipped) |
-| mock_message_service_test | tests/mock_message_service.py | SSE message service critical paths, error isolation, duplicate prevention, frontend handlers | 2 min | 2026-04-12 | ✅ PASS (24 passed) |
 
 ---
 
