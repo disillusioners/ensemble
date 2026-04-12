@@ -411,9 +411,47 @@ export class SseService {
       });
     });
 
-    // Error handling
+    // Error handling (connection errors - NOT SSE event type 'error')
+    // Note: We must add explicit 'error' event listener BEFORE onerror handler
+    // to prevent SSE 'event: error' messages from triggering reconnection
+    eventSource.addEventListener('error', (e: MessageEvent) => {
+      // This handles SSE event type 'error', not connection errors
+      this.ngZone.run(() => {
+        try {
+          const raw = JSON.parse(e.data);
+          const envelope = raw.status ? raw : { ...raw, status: raw };
+          if (!this.isValidInstanceEvent(envelope)) return;
+          
+          this.events.update(prev => [...prev, {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'error',
+            instance_id: envelope.instance_id,
+            message_id: envelope.status?.message_id || null,
+            data: envelope,
+          }]);
+          
+          if (envelope.status?.error) {
+            this.latestError.set({
+              message_id: envelope.status.message_id,
+              error: String(envelope.status.error),
+              instance_id: envelope.instance_id
+            });
+            
+            this.emitDelta({
+              type: 'processing_failed',
+              instance_id: envelope.instance_id,
+              message_id: envelope.status.message_id,
+              error: String(envelope.status.error),
+            });
+          }
+        } catch (err) {
+          console.error('[SSE] Failed to parse error event:', err);
+        }
+      });
+    });
+    
     eventSource.onerror = (error) => {
-      console.error('[SSE] EventSource error:', error);
+      console.error('[SSE] EventSource connection error:', error);
       this.isConnected = false;
       
       if (this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {

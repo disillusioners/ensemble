@@ -961,7 +961,7 @@ def format_sse_event(event, legacy_compat: bool = False) -> dict:
     Returns:
         Dict with id, event, and data keys for SSE formatting
     """
-    from daemon.models import EventKind
+    from daemon.repositories.event.models import EventKind
     from daemon.services.event_bus import STREAMING_EVENT_TYPES
     
     # Extract event metadata based on type
