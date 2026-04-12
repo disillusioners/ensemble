@@ -112,6 +112,34 @@ export interface SSEEvent {
   data: Record<string, unknown>;
 }
 
+// Message delta types for SSE streaming updates
+// These are used to update messages in-place in the messages list
+export type MessageDeltaType = 
+  | 'processing_started'   // New message started processing - add placeholder
+  | 'content_chunk'       // Content chunk received - append to message
+  | 'thinking'            // Thinking content received - update message
+  | 'tool_call'           // Tool call started - add tool to message
+  | 'tool_complete'       // Tool call completed - update tool output
+  | 'processing_completed' // Message processing done - finalize message
+  | 'processing_failed';  // Message processing failed - mark as error
+
+export interface MessageDelta {
+  type: MessageDeltaType;
+  instance_id: string;
+  message_id: string;
+  // Delta-specific data
+  content?: string;           // For content_chunk, thinking
+  tool_call?: {              // For tool_call, tool_complete
+    id: string;
+    name: string;
+    arguments?: Record<string, unknown>;
+    output?: string;
+  };
+  success?: boolean;         // For processing_completed
+  error?: string;           // For processing_failed
+  timestamp: string;
+}
+
 // Source types
 export type SourceStatus = 'stopped' | 'starting' | 'running' | 'error';
 export type SourceType = 'telegram' | 'webhook' | 'whatsapp' | 'discord' | 'scheduler';

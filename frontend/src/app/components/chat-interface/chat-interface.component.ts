@@ -15,7 +15,6 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   @ViewChild('messagesContainer') messagesContainerRef!: ElementRef<HTMLDivElement>;
   
   @Input() messages: Message[] = [];
-  @Input() pendingMessage: Message | null = null;
   @Input() isLoading = false;
   @Input() agent: Agent | null | undefined = null;
   @Input() instanceId: string | null = null;
@@ -36,7 +35,6 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
   ngOnChanges(changes: SimpleChanges): void {
     const instanceIdChanged = changes['instanceId'];
     const messagesChanged = changes['messages'] && changes['messages'].currentValue?.length !== changes['messages'].previousValue?.length;
-    const pendingMessageChanged = changes['pendingMessage'];
     const isLoadingChanged = changes['isLoading'];
 
     // Reset scroll state when switching instances
@@ -44,7 +42,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
       this.userHasScrolled.set(false);
       this.isNearBottom.set(true);
       this.shouldScroll.set(true);
-    } else if ((messagesChanged || pendingMessageChanged || isLoadingChanged) && !this.userHasScrolled()) {
+    } else if ((messagesChanged || isLoadingChanged) && !this.userHasScrolled()) {
       this.shouldScroll.set(true);
     }
   }

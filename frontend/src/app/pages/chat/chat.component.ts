@@ -10,7 +10,7 @@ import { SseService } from '../../services/sse.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent } from '../../components/message-input/message-input.component';
-import type { Agent, InstanceInfo, Message } from '../../models';
+import type { Agent, InstanceInfo, Message, MessageDelta } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
@@ -46,7 +46,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
-  readonly pendingMessage = signal<Message | null>(null);
   readonly totalInstances = signal(0);
   readonly hasMoreInstances = signal(false);
   readonly isLoadingMore = signal(false);
@@ -76,111 +75,141 @@ export class ChatComponent implements OnInit, OnDestroy {
       localStorage.setItem('ensemble-show-toolcalls', String(this.showToolCalls()));
     });
 
-    // Effect to handle SSE completed messages
+    // Simplified: Handle message deltas directly - update messages in-place
     effect(() => {
-      const latestMessage = this.sseService.latestCompletedMessage();
+      const deltas = this.sseService.messageDeltas();
       const currentInstance = this.currentInstance();
-      console.log('[Chat] completed effect triggered, latestMessage:', latestMessage?.message_id, 'role:', latestMessage?.role);
-      // FIX: Validate instance_id to prevent cross-instance message leakage
-      if (latestMessage && latestMessage.role === 'assistant' && latestMessage.instance_id === currentInstance?.instance_id) {
-        this.messages.update(prev => {
-          const existingIndex = prev.findIndex(m => m.message_id === latestMessage.message_id);
-          if (existingIndex >= 0) {
-            const updated = [...prev];
-            updated[existingIndex] = latestMessage;
-            console.log('[Chat] Updated existing message at index:', existingIndex);
-            return updated;
-          }
-          console.log('[Chat] Added new message to list');
-          return [...prev, latestMessage];
-        });
-        console.log('[Chat] Setting isSending to false');
-        this.isSending.set(false);
+      
+      if (!currentInstance || deltas.length === 0) return;
+      
+      console.log('[Chat] Processing', deltas.length, 'message deltas');
+      
+      // Process all deltas, updating the messages array
+      this.messages.update(msgs => {
+        let updated = [...msgs];
         
-        // Clear pendingMessage after message is in the list (prevents flicker)
-        if (this.pendingMessage()?.message_id === latestMessage.message_id) {
-          console.log('[Chat] Clearing pendingMessage after adding to list');
-          this.pendingMessage.set(null);
+        for (const delta of deltas) {
+          // Only process deltas for current instance
+          if (delta.instance_id !== currentInstance.instance_id) continue;
+          
+          const msgIndex = updated.findIndex(m => m.message_id === delta.message_id);
+          
+          switch (delta.type) {
+            case 'processing_started':
+              // Add placeholder message if not exists
+              if (msgIndex === -1) {
+                const placeholder: Message = {
+                  type: 'message',
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                };
+                updated.push(placeholder);
+                console.log('[Chat] Added placeholder for message:', delta.message_id);
+              }
+              break;
+              
+            case 'content_chunk':
+              if (msgIndex >= 0) {
+                updated[msgIndex] = {
+                  ...updated[msgIndex],
+                  content: (updated[msgIndex].content || '') + (delta.content || ''),
+                };
+              }
+              break;
+              
+            case 'thinking':
+              if (msgIndex >= 0) {
+                updated[msgIndex] = {
+                  ...updated[msgIndex],
+                  thinking: delta.content,
+                };
+              }
+              break;
+              
+            case 'tool_call':
+              if (msgIndex >= 0) {
+                const toolCalls = [...(updated[msgIndex].tool_calls || [])];
+                toolCalls.push({
+                  id: delta.tool_call?.id || `tool-${Date.now()}`,
+                  name: delta.tool_call?.name || '',
+                  arguments: delta.tool_call?.arguments || {},
+                  output: '',
+                });
+                updated[msgIndex] = { ...updated[msgIndex], tool_calls: toolCalls };
+              }
+              break;
+              
+            case 'tool_complete':
+              if (msgIndex >= 0 && delta.tool_call?.id) {
+                const toolCalls = (updated[msgIndex].tool_calls || []).map(tc => {
+                  if (tc.id === delta.tool_call?.id) {
+                    return { ...tc, output: delta.tool_call?.output || '' };
+                  }
+                  return tc;
+                });
+                updated[msgIndex] = { ...updated[msgIndex], tool_calls: toolCalls };
+              }
+              break;
+              
+            case 'processing_completed':
+              console.log('[Chat] Message completed:', delta.message_id, 'success:', delta.success);
+              this.isSending.set(false);
+              break;
+              
+            case 'processing_failed':
+              console.error('[Chat] Message failed:', delta.message_id, 'error:', delta.error);
+              this.isSending.set(false);
+              break;
+          }
         }
         
-        // CRITICAL FIX: Reset the signal so it can trigger again on next message
-        this.sseService.latestCompletedMessage.set(null);
-        console.log('[Chat] Reset latestCompletedMessage to null');
-      }
+        return updated;
+      });
+      
+      // Clear processed deltas
+      this.sseService.messageDeltas.set([]);
     }, { allowSignalWrites: true });
 
-    // Fallback effect: Reset isSending if streaming stopped but isSending is still true
+    // Fallback: Reset isSending if streaming stopped but isSending is still true
     effect(() => {
       const streaming = this.sseService.isStreaming();
       const sending = this.isSending();
-      console.log('[Chat] Streaming effect - isStreaming:', streaming, 'isSending:', sending);
       if (!streaming && sending) {
         console.log('[Chat] Fallback: Streaming stopped, resetting isSending');
         this.isSending.set(false);
       }
     }, { allowSignalWrites: true });
 
-    // Effect to handle partial/progressive messages
-    // CRITICAL FIX: Added instance validation to prevent stale partial messages
-    // from previous instances displaying in the current instance.
-    // NOTE: We DON'T clear pendingMessage here - the latestCompletedMessage effect
-    // handles that to ensure the completed message is in the list first.
-    effect(() => {
-      const partialMessages = this.sseService.partialMessages();
-      const currentInstance = this.currentInstance();
-      const latestCompleted = this.sseService.latestCompletedMessage();
-      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentInstance:', currentInstance?.instance_id, 'latestCompleted:', latestCompleted?.message_id);
-      
-      // Only show pendingMessage if there's streaming content AND no completed message in flight
-      if (partialMessages && partialMessages.size > 0 && currentInstance && !latestCompleted) {
-        // Only display partial messages that belong to the current instance
-        const validPartial = Array.from(partialMessages.values()).find(
-          m => m.instance_id === currentInstance.instance_id
-        );
-        
-        if (validPartial) {
-          console.log('[Chat] Setting pendingMessage for valid partial:', validPartial.message_id, 'content length:', validPartial.content?.length);
-          this.pendingMessage.set(validPartial);
-        } else {
-          console.log('[Chat] No partial messages for current instance, clearing pendingMessage');
-          this.pendingMessage.set(null);
-        }
-      } else {
-        // Don't clear pendingMessage here - let latestCompletedMessage effect handle it
-        // after the message is added to the list
-        console.log('[Chat] Keeping pendingMessage (waiting for completion or no partials)');
-      }
-    }, { allowSignalWrites: true });
-
-    // Effect to handle title updates from SSE
+    // Handle title updates from SSE
     effect(() => {
       const titleUpdate = this.sseService.titleUpdates();
       const currentInstance = this.currentInstance();
-      // FIX: Validate instance_id to prevent stale title updates from other instances
       if (titleUpdate && titleUpdate.instance_id === currentInstance?.instance_id) {
         this.instances.update(prev => prev.map(i => 
           i.instance_id === titleUpdate.instance_id 
             ? { ...i, title: titleUpdate.title }
             : i
         ));
-        // Also update currentInstance if it matches
         if (this.currentInstance()?.instance_id === titleUpdate.instance_id) {
           this.currentInstance.update(i => i ? { ...i, title: titleUpdate.title } : null);
         }
-        // Reset the signal so it can trigger again
         this.sseService.titleUpdates.set(null);
       }
     }, { allowSignalWrites: true });
     
-    // Effect to handle SSE errors - reset the signal after consumption
+    // Handle SSE errors
     effect(() => {
       const latestError = this.sseService.latestError();
       const currentInstance = this.currentInstance();
-      // FIX: Validate instance_id to prevent stale errors from affecting current instance
       if (latestError && currentInstance && latestError.instance_id === currentInstance?.instance_id) {
         console.error('Message processing error:', latestError);
         this.isSending.set(false);
-        // Reset the signal so it can trigger again
         this.sseService.latestError.set(null);
       }
     }, { allowSignalWrites: true });
@@ -188,16 +217,12 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
-    // FIX: Clean up messages subscription
     if (this.messagesSubscription) {
       this.messagesSubscription.unsubscribe();
       this.messagesSubscription = null;
     }
-    // CRITICAL FIX: Clear events BEFORE disconnect to ensure no stale state.
-    // This also clears partialMessages which would otherwise leak between instances.
     this.sseService.clearEvents();
     this.sseService.disconnect();
-    this.pendingMessage.set(null);
     this.messages.set([]);
     this.currentInstance.set(null);
     if (this.routeSubscription) {
@@ -331,7 +356,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     console.log('[Chat] handleInstanceIdChange called with:', instanceId);
     // Reset sending state when switching instances to prevent input lock
     this.isSending.set(false);
-    this.pendingMessage.set(null);
     this.sendError.set(null);
 
     if (!instanceId) {
@@ -349,10 +373,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (instance) {
       console.log('[Chat] Using instance from list, connecting SSE');
       this.currentInstance.set(instance);
-      // FIX: Clear stale messages immediately before loading new ones
       this.messages.set([]);
       this.loadMessages(instanceId);
-      // FIX: Removed redundant clearEvents() - connect() handles it internally
       this.sseService.connect(instanceId);
     } else {
       // Try to get instance from API
@@ -362,14 +384,11 @@ export class ChatComponent implements OnInit, OnDestroy {
           console.log('[Chat] Got instance from API, connecting SSE');
           this.instanceNotFound.set(null);
           this.currentInstance.set(instanceData);
-          // FIX: Clear stale messages immediately before loading new ones
           this.messages.set([]);
           this.loadMessages(instanceId);
-          // FIX: Removed redundant clearEvents() - connect() handles it internally
           this.sseService.connect(instanceId);
         },
         error: (err) => {
-          // Instance not found - show error message instead of redirecting
           console.warn('[Chat] Instance not found:', instanceId, 'error:', err);
           this.instanceNotFound.set(instanceId);
           this.currentInstance.set(null);
@@ -404,7 +423,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     // Reset state when creating new instance
     this.isSending.set(false);
-    this.pendingMessage.set(null);
     this.sendError.set(null);
     this.currentInstance.set(null);
     this.messages.set([]);

@@ -99,8 +99,7 @@
     @if (currentInstance() && !instanceNotFound()) {
       <app-chat-interface
         [messages]="messages()"
-        [pendingMessage]="pendingMessage()"
-        [isLoading]="isSending()"
+        [isLoading]="isSending() && messages().length === 0"
         [agent]="instanceAgent()"
         [instanceId]="currentInstance()?.instance_id || null"
         [showThinking]="showThinking()"
