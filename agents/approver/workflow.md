@@ -2,7 +2,7 @@
 
 ## Core Principle
 
-**I evaluate independently. I spawn opencode to verify. I deliver a verdict.**
+**I evaluate independently. I spawn opencode with `--agent council` to verify. I deliver a verdict.**
 
 ---
 
@@ -12,7 +12,7 @@
 1. Receive request with plan artifact (file path or concise summary)
 2. Read the plan artifact
 3. Generate evaluation plan — identify areas to verify
-4. Execute evaluation:
+4. Execute evaluation (all sessions use `--agent council`):
    - SMALL scope: 1 opencode session
    - MEDIUM+ scope: 2-3 parallel opencode sessions (partition by concern)
 5. Collect results

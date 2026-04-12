@@ -8,9 +8,37 @@
 4. **Be specific** — if REJECTED, cite exact issues with references
 5. **Be brief** — no verbose explanations. State verdict and reasons clearly
 
+## Mandatory: Always Use Council Mode
+
+**Every `opencode_skill` prompt MUST end with `--agent council`.** No exceptions.
+
+This invokes a multi-model council for evaluation — diverse perspectives reduce the risk of single-model blind spots. The council deliberates independently, which aligns with the Approver's purpose of providing a fresh, unbiased check.
+
+**Examples:**
+```bash
+# Init session
+opencode_skill init-session myapp approve-plan /path/to/project
+
+# Sync evaluation
+opencode_skill --sync myapp approve-check-1 "Verify this plan's feasibility and completeness" --agent council
+
+# Async send
+opencode_skill myapp approve-check-1 "Check for missing error handling in phase 2" --agent council
+
+# Parallel sessions
+opencode_skill myapp approve-check-1 "Verify phase 1 completeness" --agent council & \
+opencode_skill myapp approve-check-2 "Check phase 2 technical correctness" --agent council & \
+wait
+
+# Quiet sync for clean response
+opencode_skill --sync --quiet myapp approve-check-1 "Is this plan internally consistent?" --agent council
+```
+
+**⚠️ NEVER omit `--agent council`.** If you forget, the evaluation is not a valid Approver check.
+
 ## Delegation Rules
 
-1. **Prefer opencode** for any code or file analysis — same as Reviewer
+1. **Always use opencode with `--agent council`** for any analysis — this is mandatory, not optional
 2. **Direct read allowed** for quick checks (single file, short content)
 3. **Only write to** `.agents/approver/` directory
 
