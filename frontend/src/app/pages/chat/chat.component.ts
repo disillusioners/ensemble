@@ -76,6 +76,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
 
     // Simplified: Handle message deltas directly - update messages in-place
+    // FIX: Swap-and-clear pattern prevents race condition where deltas arrive during processing
     effect(() => {
       const deltas = this.sseService.messageDeltas();
       const currentInstance = this.currentInstance();
@@ -83,6 +84,9 @@ export class ChatComponent implements OnInit, OnDestroy {
       if (!currentInstance || deltas.length === 0) return;
       
       console.log('[Chat] Processing', deltas.length, 'message deltas');
+      
+      // Atomically swap: take ownership and clear immediately to prevent race condition
+      this.sseService.messageDeltas.set([]);
       
       // Process all deltas, updating the messages array
       this.messages.update(msgs => {
@@ -92,11 +96,11 @@ export class ChatComponent implements OnInit, OnDestroy {
           // Only process deltas for current instance
           if (delta.instance_id !== currentInstance.instance_id) continue;
           
-          const msgIndex = updated.findIndex(m => m.message_id === delta.message_id);
+          let msgIndex = updated.findIndex(m => m.message_id === delta.message_id);
           
           switch (delta.type) {
             case 'processing_started':
-              // Add placeholder message if not exists
+              // Only add placeholder if not exists (deduplication)
               if (msgIndex === -1) {
                 const placeholder: Message = {
                   type: 'message',
@@ -110,30 +114,77 @@ export class ChatComponent implements OnInit, OnDestroy {
                   instance_id: delta.instance_id,
                 };
                 updated.push(placeholder);
+                msgIndex = updated.length - 1;
                 console.log('[Chat] Added placeholder for message:', delta.message_id);
               }
               break;
               
             case 'content_chunk':
-              if (msgIndex >= 0) {
-                updated[msgIndex] = {
-                  ...updated[msgIndex],
-                  content: (updated[msgIndex].content || '') + (delta.content || ''),
-                };
+              // Auto-create placeholder if out of order (FIX: was silently dropped before)
+              if (msgIndex === -1) {
+                updated.push({
+                  type: 'message',
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
               }
+              // FIX: Enforce immutability with spread operator
+              updated[msgIndex] = {
+                ...updated[msgIndex],
+                content: (updated[msgIndex].content || '') + (delta.content || ''),
+              };
               break;
               
             case 'thinking':
-              if (msgIndex >= 0) {
-                updated[msgIndex] = {
-                  ...updated[msgIndex],
-                  thinking: delta.content,
-                };
+              // Auto-create placeholder if out of order
+              if (msgIndex === -1) {
+                updated.push({
+                  type: 'message',
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: '',
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
               }
+              updated[msgIndex] = {
+                ...updated[msgIndex],
+                thinking: delta.content,
+              };
               break;
               
             case 'tool_call':
-              if (msgIndex >= 0) {
+              // Auto-create placeholder if out of order
+              if (msgIndex === -1) {
+                updated.push({
+                  type: 'message',
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
+              }
+              // FIX: Deduplicate by tool_call.id
+              const existingTool = updated[msgIndex].tool_calls?.find(
+                tc => tc.id === delta.tool_call?.id
+              );
+              if (!existingTool) {
                 const toolCalls = [...(updated[msgIndex].tool_calls || [])];
                 toolCalls.push({
                   id: delta.tool_call?.id || `tool-${Date.now()}`,
@@ -171,9 +222,6 @@ export class ChatComponent implements OnInit, OnDestroy {
         
         return updated;
       });
-      
-      // Clear processed deltas
-      this.sseService.messageDeltas.set([]);
     }, { allowSignalWrites: true });
 
     // Fallback: Reset isSending if streaming stopped but isSending is still true
