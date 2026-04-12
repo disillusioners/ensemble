@@ -40,7 +40,7 @@ agents:
 
 # Message Queue Settings
 queue:
-  discard_on_startup: true
+  discard_on_startup: false
   # LLM retry settings per error category:
   #
   # Transient errors (500/502/503/429 rate limit, connection errors):
