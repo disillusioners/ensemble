@@ -1048,6 +1048,45 @@ class InstanceManager:
         event_count = 0
         
         
+        # Project context injection for first message
+        # Must happen BEFORE building graph_input
+        if not is_retry:
+            # Check if instance already has project context
+            instance_meta = self._instance_repository.get(instance_id)
+            existing_project_id = None
+            if instance_meta and instance_meta.instance_metadata:
+                existing_project_id = instance_meta.instance_metadata.get("project_id")
+            
+            if existing_project_id:
+                # project_id exists (inherited from parent) → inject context using stored project_id
+                matched_project = self._project_repository.get(existing_project_id)
+                if matched_project:
+                    project_context = format_project_context(matched_project)
+                    message = project_context + message
+                    logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
+            else:
+                # No project_id → extract keywords and try to match
+                keywords = extract_project_keywords(message)
+                
+                if keywords:
+                    matched_project = self._project_repository.match_by_keywords(keywords)
+                    
+                    if matched_project:
+                        # Log the match
+                        logger.info(
+                            f"Project context injection: matched '{matched_project.name}' "
+                            f"from keywords: {keywords[:5]}..."
+                        )
+                        
+                        # Prepend project context to message
+                        project_context = format_project_context(matched_project)
+                        message = project_context + message
+                        
+                        # Update instance metadata with project_id
+                        self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
+                        
+                        logger.debug(f"Injected project context for instance {instance_id[:8]}...")
+        
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
