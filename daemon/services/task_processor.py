@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from .event_bus import EventBus
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
+from daemon.message_models import ToolCallInfo
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
     from daemon.repositories.task.repository import TaskRepository
     from daemon.repositories.event.repository import EventRepository
+    from daemon.services.message_service import MessageService
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +56,7 @@ class ProcessMessageProcessor(BaseProcessor):
         event_repo: "EventRepository | None",
         message_repository=None,
         event_bus: "EventBus | None" = None,
+        message_service: "MessageService | None" = None,
     ):
         """Initialize the message processor.
 
@@ -62,12 +66,14 @@ class ProcessMessageProcessor(BaseProcessor):
             event_repo: Optional EventRepository for event creation.
             message_repository: Optional MessageQueueRepository for message updates.
             event_bus: Optional EventBus for event creation.
+            message_service: Optional MessageService for unified SSE emission.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
         self._message_repo = message_repository
         self._event_bus = event_bus
+        self._message_service = message_service
 
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
@@ -166,6 +172,30 @@ class ProcessMessageProcessor(BaseProcessor):
                         "message_id": task.message_id,
                         "success": True,
                     },
+                )
+            
+            # NEW: Emit message_completed event with full assistant response
+            # This broadcasts the complete message (content, thinking, tool_calls) via SSE
+            if self._message_service and result:
+                tool_calls = None
+                if getattr(result, 'tool_calls', None):
+                    tool_calls = [
+                        ToolCallInfo(
+                            id=tc.get("id", str(uuid.uuid4())),
+                            name=tc.get("name", ""),
+                            arguments=tc.get("arguments", {}),
+                            output=tc.get("output"),
+                        )
+                        for tc in result.tool_calls
+                    ]
+                
+                await self._message_service.on_assistant_message_completed(
+                    instance_id=task.instance_id,
+                    original_message_id=task.message_id,
+                    content=result.content or "",
+                    thinking=getattr(result, 'thinking', None),
+                    thinking_extracted=getattr(result, 'thinking_extracted', None),
+                    tool_calls=tool_calls,
                 )
             
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
@@ -312,6 +342,7 @@ class TaskProcessor:
         instance_manager,
         event_repo: "EventRepository | None" = None,
         event_bus: "EventBus | None" = None,
+        message_service: "MessageService | None" = None,
     ):
         """Initialize the task processor.
 
@@ -320,11 +351,13 @@ class TaskProcessor:
             instance_manager: InstanceManager for message processing.
             event_repo: Optional EventRepository for event creation.
             event_bus: Optional EventBus for event creation.
+            message_service: Optional MessageService for unified SSE emission.
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
         self._event_bus = event_bus
+        self._message_service = message_service
 
         # Create type-specific processors
         self._processors: dict[str, BaseProcessor] = {
@@ -332,6 +365,7 @@ class TaskProcessor:
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
                 event_bus=event_bus,
+                message_service=message_service,
             ),
             "send_report": SendReportProcessor(
                 instance_manager, task_repo, event_repo,

@@ -334,6 +334,37 @@ export class SseService {
       });
     });
 
+    // Message completed - final canonical message to replace accumulated streaming state
+    eventSource.addEventListener('message_completed', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!this.isValidInstanceEvent(data)) return;
+          
+          this.events.update(prev => [...prev, {
+            event_id: parseInt(e.lastEventId || '0'),
+            type: 'message_completed',
+            instance_id: data.instance_id,
+            message_id: data.original_message_id,
+            data,
+          }]);
+          
+          // Emit delta with canonical message for ChatComponent
+          if (data.message && data.original_message_id) {
+            this.emitDelta({
+              type: 'message_completed',
+              instance_id: data.instance_id,
+              message_id: data.original_message_id,
+              message: data.message,
+              original_message_id: data.original_message_id,
+            });
+          }
+        } catch (err) {
+          console.error('[SSE] Failed to parse message_completed:', err);
+        }
+      });
+    });
+
     // Error handling
     eventSource.onerror = (error) => {
       console.error('[SSE] EventSource error:', error);

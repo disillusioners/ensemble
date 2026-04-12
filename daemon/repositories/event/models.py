@@ -20,6 +20,7 @@ class EventKind(str, enum.Enum):
     CHILD_FAILED = "child_failed"
     INSTANCE_COMPLETED = "instance_completed"
     ERROR = "error"
+    MESSAGE_COMPLETED = "message_completed"
 
 
 class Event(SQLModel, table=True):

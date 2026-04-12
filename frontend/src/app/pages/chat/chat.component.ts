@@ -217,6 +217,21 @@ export class ChatComponent implements OnInit, OnDestroy {
               console.error('[Chat] Message failed:', delta.message_id, 'error:', delta.error);
               this.isSending.set(false);
               break;
+              
+            case 'message_completed':
+              // Finalize message with canonical content from message_completed event
+              console.log('[Chat] Message finalized with canonical content:', delta.message_id);
+              if (msgIndex >= 0 && delta.message) {
+                updated[msgIndex] = {
+                  ...updated[msgIndex],
+                  role: (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: delta.message.content ?? updated[msgIndex].content,
+                  thinking: delta.message.thinking ?? undefined,
+                  thinking_extracted: delta.message.thinking_extracted ?? undefined,
+                  tool_calls: delta.message.tool_calls || updated[msgIndex].tool_calls,
+                };
+              }
+              break;
           }
         }
         

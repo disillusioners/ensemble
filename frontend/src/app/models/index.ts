@@ -98,6 +98,7 @@ export type EventType =
   | 'thinking'
   | 'tool_complete'
   | 'processing_completed'  // Backend sends this
+  | 'message_completed'     // Canonical message state
   | 'completed'             // Legacy/other sources
   | 'cancelled'
   | 'error' 
@@ -121,7 +122,21 @@ export type MessageDeltaType =
   | 'tool_call'           // Tool call started - add tool to message
   | 'tool_complete'       // Tool call completed - update tool output
   | 'processing_completed' // Message processing done - finalize message
-  | 'processing_failed';  // Message processing failed - mark as error
+  | 'processing_failed'    // Message processing failed - mark as error
+  | 'message_completed';   // Final canonical message - replace accumulated state
+
+// Canonical message payload from message_completed event
+export interface CanonicalMessage {
+  message_id: string;
+  instance_id?: string;
+  role: string;
+  content: string;
+  thinking?: string | null;
+  thinking_extracted?: string | null;
+  tool_calls?: ToolCall[];
+  created_at?: string;
+  source?: string | null;
+}
 
 export interface MessageDelta {
   type: MessageDeltaType;
@@ -137,6 +152,8 @@ export interface MessageDelta {
   };
   success?: boolean;         // For processing_completed
   error?: string;           // For processing_failed
+  message?: CanonicalMessage; // For message_completed
+  original_message_id?: string; // For message_completed
   timestamp: string;
 }
 

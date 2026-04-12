@@ -46,6 +46,7 @@ from sqlalchemy import text
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.event_bus import EventBus
+from .services.message_service import MessageService
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
@@ -395,6 +396,9 @@ class InstanceManager:
         self._worker_pool: WorkerPool | None = None
         self._task_processor: TaskProcessor | None = None
         self._stale_recovery: StaleTaskRecovery | None = None
+        
+        # MessageService for unified SSE emission
+        self._message_service: MessageService | None = None
 
         # Shutdown flag for graceful shutdown
         self._shutting_down = False
@@ -502,11 +506,15 @@ class InstanceManager:
         # FIX: C2 — Start periodic background recovery thread
         stale_recovery.start()
         
+        # Create MessageService for unified SSE emission
+        self._message_service = MessageService(event_bus=self._event_bus)
+        
         # Create task processor with manager reference
         self._task_processor = TaskProcessor(
             task_repo=task_repo,
             instance_manager=self,
             event_repo=event_repo,
+            message_service=self._message_service,
         )
         
         # Create and start worker pool with timeout/retry config
