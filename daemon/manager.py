@@ -1421,25 +1421,27 @@ class InstanceManager:
         tool_outputs = {}
         all_tool_calls = []
         last_ai_message = None
+        last_ai_message_tool_calls = []  # Track tool_calls from last AI message
         
         for msg in messages[current_turn_start:]:
             # Build tool outputs map
             if hasattr(msg, 'tool_call_id'):
                 tool_outputs[msg.tool_call_id] = msg.content
             
-            # Extract tool calls
-            if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                    tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                    tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
-                    
-                    all_tool_calls.append({
-                        "id": tc_id,
-                        "name": tc_name,
-                        "arguments": tc_args,
-                        "output": tool_outputs.get(tc_id),
-                    })
+            # Track tool_calls from last AI message
+            if hasattr(msg, 'type') and msg.type == 'ai':
+                last_ai_message_tool_calls = []  # Reset for each AI message
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
+                        tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
+                        tc_args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                        last_ai_message_tool_calls.append({
+                            "id": tc_id,
+                            "name": tc_name,
+                            "arguments": tc_args,
+                            "output": tool_outputs.get(tc_id),
+                        })
             
             # Track last AI message for thinking and content
             if hasattr(msg, 'type') and msg.type == 'ai':
@@ -1460,11 +1462,12 @@ class InstanceManager:
         # Parse <think/> tags from content
         content, thinking_extracted = parse_think_tags(final_content)
         
+        # Only include tool_calls from the LAST AI message (matches checkpointer behavior)
         return MessageResult(
             content=content,
             thinking=thinking_content,
             thinking_extracted=thinking_extracted,
-            tool_calls=all_tool_calls if all_tool_calls else None,
+            tool_calls=last_ai_message_tool_calls if last_ai_message_tool_calls else None,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
