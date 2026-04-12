@@ -168,8 +168,8 @@
         </div>
       }
 
-      <!-- Typing indicator -->
-      @if (isLoading) {
+      <!-- Typing indicator (three dots) - only show when loading AND no pending message -->
+      @if (isLoading && (!pendingMessage || !hasVisibleContent(pendingMessage))) {
         <div class="message-row assistant-message">
           <div class="avatar" [style.backgroundColor]="agentColor + '20'">
             <span class="agent-icon">{{ agent?.icon || '🤖' }}</span>

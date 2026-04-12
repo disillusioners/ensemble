@@ -96,6 +96,13 @@ export class ChatComponent implements OnInit, OnDestroy {
         });
         console.log('[Chat] Setting isSending to false');
         this.isSending.set(false);
+        
+        // Clear pendingMessage after message is in the list (prevents flicker)
+        if (this.pendingMessage()?.message_id === latestMessage.message_id) {
+          console.log('[Chat] Clearing pendingMessage after adding to list');
+          this.pendingMessage.set(null);
+        }
+        
         // CRITICAL FIX: Reset the signal so it can trigger again on next message
         this.sseService.latestCompletedMessage.set(null);
         console.log('[Chat] Reset latestCompletedMessage to null');
@@ -116,12 +123,16 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Effect to handle partial/progressive messages
     // CRITICAL FIX: Added instance validation to prevent stale partial messages
     // from previous instances displaying in the current instance.
+    // NOTE: We DON'T clear pendingMessage here - the latestCompletedMessage effect
+    // handles that to ensure the completed message is in the list first.
     effect(() => {
       const partialMessages = this.sseService.partialMessages();
       const currentInstance = this.currentInstance();
-      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentInstance:', currentInstance?.instance_id);
+      const latestCompleted = this.sseService.latestCompletedMessage();
+      console.log('[Chat] partialMessages effect, size:', partialMessages?.size, 'currentInstance:', currentInstance?.instance_id, 'latestCompleted:', latestCompleted?.message_id);
       
-      if (partialMessages && partialMessages.size > 0 && currentInstance) {
+      // Only show pendingMessage if there's streaming content AND no completed message in flight
+      if (partialMessages && partialMessages.size > 0 && currentInstance && !latestCompleted) {
         // Only display partial messages that belong to the current instance
         const validPartial = Array.from(partialMessages.values()).find(
           m => m.instance_id === currentInstance.instance_id
@@ -135,8 +146,9 @@ export class ChatComponent implements OnInit, OnDestroy {
           this.pendingMessage.set(null);
         }
       } else {
-        console.log('[Chat] Clearing pendingMessage');
-        this.pendingMessage.set(null);
+        // Don't clear pendingMessage here - let latestCompletedMessage effect handle it
+        // after the message is added to the list
+        console.log('[Chat] Keeping pendingMessage (waiting for completion or no partials)');
       }
     }, { allowSignalWrites: true });
 
