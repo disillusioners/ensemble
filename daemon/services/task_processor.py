@@ -111,6 +111,7 @@ class ProcessMessageProcessor(BaseProcessor):
             )
         
         message_content = message.content if message else ""
+        message_source = message.source if message else None
         is_retry = task.retry_count > 0
         
         # Create processing_started event
@@ -141,6 +142,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 cancellation_token=cancellation_token,
                 is_retry=is_retry,
                 retry_count=task.retry_count,
+                message_source=message_source,
             )
             
             # Create processing_completed event

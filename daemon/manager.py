@@ -972,6 +972,7 @@ class InstanceManager:
         cancellation_token: CancellationToken | None = None,
         is_retry: bool = False,
         retry_count: int = 0,  # FIX: C3 — new parameter
+        message_source: str | None = None,  # Source of message (e.g., "agent:xxx", "api", "telegram:xxx")
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -984,6 +985,8 @@ class InstanceManager:
             message_id: The queue message ID.
             cancellation_token: Optional token to check for cancellation.
             is_retry: If True, attempt to resume from checkpoint.
+            message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
+                Used to skip project injection for internal agent messages.
         
         Returns:
             MessageResult with response data.
@@ -1050,42 +1053,56 @@ class InstanceManager:
         
         # Project context injection for first message
         # Must happen BEFORE building graph_input
+        # Skip injection for internal agent-to-agent messages
         if not is_retry:
-            # Check if instance already has project context
-            instance_meta = self._instance_repository.get(instance_id)
-            existing_project_id = None
-            if instance_meta and instance_meta.instance_metadata:
-                existing_project_id = instance_meta.instance_metadata.get("project_id")
+            # Determine if this is an internal agent message
+            is_internal_message = (
+                message_source is not None and (
+                    message_source.startswith("agent:") or
+                    message_source.startswith("report:") or
+                    message_source.startswith("error_report:")
+                )
+            )
             
-            if existing_project_id:
-                # project_id exists (inherited from parent) → inject context using stored project_id
-                matched_project = self._project_repository.get(existing_project_id)
-                if matched_project:
-                    project_context = format_project_context(matched_project)
-                    message = project_context + message
-                    logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
+            if is_internal_message:
+                # Skip project injection for internal agent messages
+                pass
             else:
-                # No project_id → extract keywords and try to match
-                keywords = extract_project_keywords(message)
+                # Check if instance already has project context
+                instance_meta = self._instance_repository.get(instance_id)
+                existing_project_id = None
+                if instance_meta and instance_meta.instance_metadata:
+                    existing_project_id = instance_meta.instance_metadata.get("project_id")
                 
-                if keywords:
-                    matched_project = self._project_repository.match_by_keywords(keywords)
-                    
+                if existing_project_id:
+                    # project_id exists (inherited from parent) → inject context using stored project_id
+                    matched_project = self._project_repository.get(existing_project_id)
                     if matched_project:
-                        # Log the match
-                        logger.info(
-                            f"Project context injection: matched '{matched_project.name}' "
-                            f"from keywords: {keywords[:5]}..."
-                        )
-                        
-                        # Prepend project context to message
                         project_context = format_project_context(matched_project)
                         message = project_context + message
+                        logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
+                else:
+                    # No project_id → extract keywords and try to match
+                    keywords = extract_project_keywords(message)
+                    
+                    if keywords:
+                        matched_project = self._project_repository.match_by_keywords(keywords)
                         
-                        # Update instance metadata with project_id
-                        self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
-                        
-                        logger.debug(f"Injected project context for instance {instance_id[:8]}...")
+                        if matched_project:
+                            # Log the match
+                            logger.info(
+                                f"Project context injection: matched '{matched_project.name}' "
+                                f"from keywords: {keywords[:5]}..."
+                            )
+                            
+                            # Prepend project context to message
+                            project_context = format_project_context(matched_project)
+                            message = project_context + message
+                            
+                            # Update instance metadata with project_id
+                            self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
+                            
+                            logger.debug(f"Injected project context for instance {instance_id[:8]}...")
         
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
