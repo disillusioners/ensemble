@@ -295,30 +295,41 @@ export class ChatComponent implements OnInit, OnDestroy {
               
             case 'message_completed':
               // Finalize message with canonical content from message_completed event
-              // Check if this is a new message (message.message_id differs from routing message_id)
-              // This happens when the queue message_id differs from the assistant's actual message_id
+              // Key rule: if existing message has role="user" (child report), create NEW assistant message
+              // If existing message has role="assistant" (regular streaming), update existing
               const msg = delta as typeof delta & { message: NonNullable<typeof delta.message> };
-              const isNewMessage = msg.message?.message_id && 
-                                  msg.message.message_id !== delta.message_id;
+              const existingMsg = msgIndex >= 0 ? updated[msgIndex] : null;
+              const isUserMessage = existingMsg?.role === 'user';
               
               console.log('[Chat] Message finalized:', delta.message_id, 
                          '-> canonical:', msg.message?.message_id,
-                         'isNew:', isNewMessage);
+                         'existingRole:', existingMsg?.role,
+                         'isUserMessage:', isUserMessage);
               
-              if (msgIndex >= 0 && msg.message && !isNewMessage) {
-                // Update existing message - preserve role for child reports (role="user")
-                const existingRole = updated[msgIndex].role;
-                updated[msgIndex] = {
-                  ...updated[msgIndex],
-                  role: existingRole === 'user' ? existingRole : (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: msg.message.content ?? updated[msgIndex].content,
+              if (msgIndex >= 0 && msg.message && isUserMessage) {
+                // Existing is user message (child report) - CREATE NEW assistant message
+                console.log('[Chat] Creating new assistant message for response');
+                updated.push({
+                  message_id: msg.message.message_id || delta.message_id,
+                  role: (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: msg.message.content || '',
                   thinking: msg.message.thinking ?? undefined,
                   thinking_extracted: msg.message.thinking_extracted ?? undefined,
+                  tool_calls: msg.message.tool_calls || [],
+                  created_at: msg.message.created_at || new Date().toISOString(),
+                });
+              } else if (msgIndex >= 0 && msg.message) {
+                // Existing is assistant message - UPDATE existing
+                updated[msgIndex] = {
+                  ...updated[msgIndex],
+                  content: msg.message.content ?? updated[msgIndex].content,
+                  thinking: msg.message.thinking ?? updated[msgIndex].thinking,
+                  thinking_extracted: msg.message.thinking_extracted ?? updated[msgIndex].thinking_extracted,
                   tool_calls: msg.message.tool_calls || updated[msgIndex].tool_calls,
                 };
               } else if (msg.message) {
-                // Create new message with canonical message_id (this is the assistant's response)
-                console.log('[Chat] Creating new message for assistant response:', msg.message.message_id);
+                // No existing message - CREATE new
+                console.log('[Chat] Creating new message (no existing):', msg.message.message_id);
                 updated.push({
                   message_id: msg.message.message_id || delta.message_id,
                   role: (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
