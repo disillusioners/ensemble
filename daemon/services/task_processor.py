@@ -170,6 +170,14 @@ class ProcessMessageProcessor(BaseProcessor):
             if self._message_repo:
                 await asyncio.to_thread(self._message_repo.complete, task.message_id)
             
+            # Mark task as completed - THIS WAS THE BUG: complete_task was never called
+            # causing tasks to stay in RUNNING status forever, making them appear "stale"
+            await asyncio.to_thread(
+                self._task_repo.complete_task,
+                task.id,
+                {"success": True, "message_id": task.message_id}
+            )
+            
             # Check if this instance is a child that has completed all work
             # This may create a completion report task for the parent
             try:
