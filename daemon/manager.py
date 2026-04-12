@@ -1899,6 +1899,18 @@ Provide a concise summary:"""
             
             session.commit()
         
+        # Wire child completion through MessageService for unified SSE emission
+        if self._message_service:
+            try:
+                await self._message_service.on_child_completion_report(
+                    parent_instance_id=parent_id,
+                    child_instance_id=instance_id,
+                    report_content=last_content,
+                    message_id=report_message_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to emit child completion via MessageService: {e}")
+        
         # Broadcast child completion event asynchronously (using captured parent_id)
         try:
             await self._event_bus.create_child_completed_event(

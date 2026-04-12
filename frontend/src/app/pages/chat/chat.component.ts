@@ -230,6 +230,19 @@ export class ChatComponent implements OnInit, OnDestroy {
                   thinking_extracted: delta.message.thinking_extracted ?? undefined,
                   tool_calls: delta.message.tool_calls || updated[msgIndex].tool_calls,
                 };
+              } else {
+                console.warn('[Chat] message_completed: message not found in state, creating from canonical payload', delta.message_id);
+                // Create message from canonical payload as fallback
+                updated.push({
+                  type: 'message',
+                  message_id: delta.message_id || '',
+                  role: (delta.message?.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: delta.message?.content || '',
+                  thinking: delta.message?.thinking ?? undefined,
+                  thinking_extracted: delta.message?.thinking_extracted ?? undefined,
+                  tool_calls: delta.message?.tool_calls || [],
+                  created_at: delta.message?.created_at || new Date().toISOString(),
+                });
               }
               break;
           }

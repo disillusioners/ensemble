@@ -350,7 +350,7 @@ export class SseService {
           }]);
           
           // Emit delta with canonical message for ChatComponent
-          if (data.message && data.original_message_id) {
+          if (data.message && data.original_message_id && data.instance_id) {
             this.emitDelta({
               type: 'message_completed',
               instance_id: data.instance_id,

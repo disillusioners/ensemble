@@ -151,31 +151,10 @@ class ProcessMessageProcessor(BaseProcessor):
                 message_source=message_source,
             )
             
-            # Create processing_completed event
-            if self._event_bus:
-                await self._event_bus.create_processing_completed_event(
-                    instance_id=task.instance_id,
-                    message_id=task.message_id,
-                    result={
-                        "task_id": task.id,
-                        "message_id": task.message_id,
-                        "success": True,
-                    },
-                )
-            elif self._event_repo:
-                await asyncio.to_thread(
-                    self._event_repo.create_event,
-                    instance_id=task.instance_id,
-                    kind="processing_completed",
-                    data={
-                        "task_id": task.id,
-                        "message_id": task.message_id,
-                        "success": True,
-                    },
-                )
-            
             # NEW: Emit message_completed event with full assistant response
             # This broadcasts the complete message (content, thinking, tool_calls) via SSE
+            # NOTE: on_assistant_message_completed also emits processing_completed internally
+            # so we don't need a separate create_processing_completed_event call here
             if self._message_service and result:
                 tool_calls = None
                 if getattr(result, 'tool_calls', None):

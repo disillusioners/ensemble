@@ -128,7 +128,7 @@ export type MessageDeltaType =
 // Canonical message payload from message_completed event
 export interface CanonicalMessage {
   message_id: string;
-  instance_id?: string;
+  instance_id: string;
   role: string;
   content: string;
   thinking?: string | null;
