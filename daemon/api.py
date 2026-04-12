@@ -230,10 +230,10 @@ async def lifespan(app: FastAPI):
     logger.info("JobProcessor started")
     
     # Initialize EventBus with EventRepository for hybrid DB + streaming delivery
+    # IMPORTANT: Use manager's existing EventBus so SSE endpoint receives the same events
     from .repositories.event.repository import EventRepository
     event_repo = EventRepository(engine=manager._engine)
-    event_bus = EventBus(event_repo=event_repo)
-    app.state.event_bus = event_bus
+    app.state.event_bus = manager._event_bus  # Use manager's EventBus, not a new one
     app.state.event_repository = event_repo
     
     # Auto-provision system queues for existing projects
@@ -921,7 +921,9 @@ async def stream_events(instance_id: str, request: Request):
                 # Merge by created_at, streaming events first if same timestamp
                 all_events = []
                 for e in db_events:
-                    all_events.append(("db", e.created_at, e))
+                    # Convert datetime to timestamp for consistent comparison
+                    created_ts = e.created_at.timestamp() if hasattr(e.created_at, 'timestamp') else e.created_at
+                    all_events.append(("db", created_ts, e))
                 for e in streaming_events:
                     all_events.append(("streaming", time.time(), e))  # Use current time for streaming events
                 all_events.sort(key=lambda x: (x[1], 0 if x[0] == "streaming" else 1))
