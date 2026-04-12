@@ -101,6 +101,7 @@ export class ChatComponent implements OnInit, OnDestroy {
           switch (delta.type) {
             case 'processing_started':
               // Only add placeholder if not exists (deduplication)
+              // If message already exists (e.g., from message_received like child reports), preserve it
               if (msgIndex === -1) {
                 const placeholder: Message = {
                   type: 'message',
@@ -116,12 +117,30 @@ export class ChatComponent implements OnInit, OnDestroy {
                 updated.push(placeholder);
                 msgIndex = updated.length - 1;
                 console.log('[Chat] Added placeholder for message:', delta.message_id);
+              } else {
+                // Message already exists (e.g., child report from message_received)
+                // Convert role to assistant since it's now being processed
+                // but preserve the existing content
+                console.log('[Chat] Message already exists, skipping placeholder:', delta.message_id);
               }
               break;
 
             case 'message_received':
               // Add new message (user input, child reports, etc.) as user role
               // Child completion reports have source like "child:instance_id"
+              // Skip if no content (empty message_received events come before the one with content)
+              if (!delta.content) {
+                console.log('[Chat] Skipping empty message_received:', delta.message_id);
+                break;
+              }
+              // Skip if message with same content already exists (user just sent this)
+              const existingSameContent = updated.find(m => 
+                m.role === 'user' && m.content === delta.content
+              );
+              if (existingSameContent) {
+                console.log('[Chat] Skipping duplicate message_received (user already sent this):', delta.message_id);
+                break;
+              }
               if (msgIndex === -1) {
                 const newMessage: Message = {
                   type: 'message',
@@ -428,7 +447,34 @@ export class ChatComponent implements OnInit, OnDestroy {
         // FIX: Only set messages if still on the same instance
         const currentInstance = this.currentInstance();
         if (currentInstance?.instance_id === instanceId) {
-          this.messages.set(msgs);
+          // Merge SSE-added messages with HTTP-loaded messages
+          // This preserves child reports and other SSE-added content
+          const currentMessages = this.messages();
+          
+          // Create a map of existing messages by message_id
+          const existingMap = new Map(currentMessages.map(m => [m.message_id, m]));
+          
+          // Merge: prefer existing (SSE-added) messages, fill in missing from HTTP
+          const merged = msgs.map(httpMsg => {
+            const existing = existingMap.get(httpMsg.message_id);
+            if (existing) {
+              // Preserve SSE-added message (may have more content or different state)
+              return existing;
+            }
+            return httpMsg;
+          });
+          
+          // Add any SSE-only messages that weren't in HTTP response
+          for (const existingMsg of currentMessages) {
+            if (!merged.find(m => m.message_id === existingMsg.message_id)) {
+              merged.push(existingMsg);
+            }
+          }
+          
+          // Sort by creation time
+          merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          
+          this.messages.set(merged);
         }
       },
       error: (err) => console.error('Failed to load messages:', err)
