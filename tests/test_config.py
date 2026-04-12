@@ -331,14 +331,57 @@ class TestAgentsConfig:
 class TestQueueConfig:
     """Tests for QueueConfig."""
 
-    def test_queue_config_defaults(self, monkeypatch):
-        """Test QueueConfig default values."""
-        # Clear env var so we test defaults, not environment-influenced values
+    def test_queue_config_defaults(self, monkeypatch, tmp_path):
+        """Test QueueConfig default values from YAML config."""
+        # Clear env var so we test YAML defaults, not environment-influenced values
         monkeypatch.delenv("QUEUE_DISCARD_ON_STARTUP", raising=False)
-        from daemon.config import QueueConfig
-        
-        config = QueueConfig()
-        
-        assert config.discard_on_startup is False
-        assert config.llm_retry_transient_attempts == 10
-        assert config.llm_retry_timeout_attempts == 3
+
+        # Create a minimal config file
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+queue:
+  discard_on_startup: false
+  llm_retry_transient_attempts: 10
+  llm_retry_timeout_attempts: 3
+""")
+        from daemon.config import load_config
+
+        config = load_config(str(config_file))
+
+        assert config.queue.discard_on_startup is False
+        assert config.queue.llm_retry_transient_attempts == 10
+        assert config.queue.llm_retry_timeout_attempts == 3
+
+    def test_queue_config_env_var_override(self, monkeypatch, tmp_path):
+        """Test that QUEUE_DISCARD_ON_STARTUP env var takes highest priority over YAML."""
+        # YAML sets discard_on_startup: false
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+queue:
+  discard_on_startup: false
+""")
+        # But env var sets it to true
+        monkeypatch.setenv("QUEUE_DISCARD_ON_STARTUP", "true")
+
+        from daemon.config import load_config
+
+        config = load_config(str(config_file))
+
+        assert config.queue.discard_on_startup is True
+
+    def test_queue_config_env_var_false_override(self, monkeypatch, tmp_path):
+        """Test that QUEUE_DISCARD_ON_STARTUP=false overrides YAML true."""
+        # YAML sets discard_on_startup: true
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""
+queue:
+  discard_on_startup: true
+""")
+        # But env var sets it to false
+        monkeypatch.setenv("QUEUE_DISCARD_ON_STARTUP", "false")
+
+        from daemon.config import load_config
+
+        config = load_config(str(config_file))
+
+        assert config.queue.discard_on_startup is False

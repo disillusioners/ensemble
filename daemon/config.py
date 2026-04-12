@@ -91,7 +91,9 @@ class QueueConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="QUEUE_")
 
     # Development helper: discard all queued messages on startup
-    discard_on_startup: bool = Field(default=False)
+    # Note: This field is handled specially in load_config to ensure env var
+    # QUEUE_DISCARD_ON_STARTUP takes highest priority over YAML config.
+    discard_on_startup: Optional[bool] = None
 
     # LLM retry configuration — per error category
     # Transient errors (500/502/503/429): fail fast, more retries fit in time budget
@@ -233,8 +235,19 @@ def load_config(config_path: Optional[str] = None) -> Config:
         config_dict["persistence"] = processed_config["persistence"]
     if "agents" in processed_config:
         config_dict["agents"] = processed_config["agents"]
+
+    # Handle queue config with env var priority for discard_on_startup
+    queue_config: Dict[str, Any] = {}
     if "queue" in processed_config:
-        config_dict["queue"] = processed_config["queue"]
+        queue_config = processed_config["queue"].copy()
+
+    # Env var QUEUE_DISCARD_ON_STARTUP has highest priority
+    if "QUEUE_DISCARD_ON_STARTUP" in os.environ:
+        env_val = os.environ["QUEUE_DISCARD_ON_STARTUP"].lower()
+        queue_config["discard_on_startup"] = env_val in ("true", "1", "yes")
+
+    config_dict["queue"] = queue_config
+
     if "compaction" in processed_config:
         config_dict["compaction"] = processed_config["compaction"]
     if "services" in processed_config:
