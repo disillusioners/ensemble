@@ -297,47 +297,36 @@ export class ChatComponent implements OnInit, OnDestroy {
               // Finalize message with canonical content from message_completed event
               // Check if this is a new message (message.message_id differs from routing message_id)
               // This happens when the queue message_id differs from the assistant's actual message_id
-              const isNewMessage = delta.message?.message_id && 
-                                  delta.message.message_id !== delta.message_id;
+              const msg = delta as typeof delta & { message: NonNullable<typeof delta.message> };
+              const isNewMessage = msg.message?.message_id && 
+                                  msg.message.message_id !== delta.message_id;
               
               console.log('[Chat] Message finalized:', delta.message_id, 
-                         '-> canonical:', delta.message?.message_id,
+                         '-> canonical:', msg.message?.message_id,
                          'isNew:', isNewMessage);
               
-              if (msgIndex >= 0 && delta.message && !isNewMessage) {
+              if (msgIndex >= 0 && msg.message && !isNewMessage) {
                 // Update existing message - preserve role for child reports (role="user")
                 const existingRole = updated[msgIndex].role;
                 updated[msgIndex] = {
                   ...updated[msgIndex],
-                  role: existingRole === 'user' ? existingRole : (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: delta.message.content ?? updated[msgIndex].content,
-                  thinking: delta.message.thinking ?? undefined,
-                  thinking_extracted: delta.message.thinking_extracted ?? undefined,
-                  tool_calls: delta.message.tool_calls || updated[msgIndex].tool_calls,
+                  role: existingRole === 'user' ? existingRole : (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: msg.message.content ?? updated[msgIndex].content,
+                  thinking: msg.message.thinking ?? undefined,
+                  thinking_extracted: msg.message.thinking_extracted ?? undefined,
+                  tool_calls: msg.message.tool_calls || updated[msgIndex].tool_calls,
                 };
-              } else if (delta.message) {
+              } else if (msg.message) {
                 // Create new message with canonical message_id (this is the assistant's response)
-                console.log('[Chat] Creating new message for assistant response:', delta.message.message_id);
+                console.log('[Chat] Creating new message for assistant response:', msg.message.message_id);
                 updated.push({
-                  message_id: delta.message.message_id || delta.message_id,
-                  role: (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: delta.message.content || '',
-                  thinking: delta.message.thinking ?? undefined,
-                  thinking_extracted: delta.message.thinking_extracted ?? undefined,
-                  tool_calls: delta.message.tool_calls || [],
-                  created_at: delta.message.created_at || new Date().toISOString(),
-                });
-              } else {
-                console.warn('[Chat] message_completed: message not found in state, creating from canonical payload', delta.message_id);
-                // Create message from canonical payload as fallback
-                updated.push({
-                  message_id: delta.message_id || '',
-                  role: (delta.message?.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: delta.message?.content || '',
-                  thinking: delta.message?.thinking ?? undefined,
-                  thinking_extracted: delta.message?.thinking_extracted ?? undefined,
-                  tool_calls: delta.message?.tool_calls || [],
-                  created_at: delta.message?.created_at || new Date().toISOString(),
+                  message_id: msg.message.message_id || delta.message_id,
+                  role: (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: msg.message.content || '',
+                  thinking: msg.message.thinking ?? undefined,
+                  thinking_extracted: msg.message.thinking_extracted ?? undefined,
+                  tool_calls: msg.message.tool_calls || [],
+                  created_at: msg.message.created_at || new Date().toISOString(),
                 });
               }
               break;
