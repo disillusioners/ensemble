@@ -42,12 +42,14 @@ time(format_type="iso")                      # Get current time
 ## Instance Management
 
 ```raw
-spawn_instance(agent_dir, instance_id=None)  # Spawn new agent
+spawn_instance(agent_dir, instance_id=None, instance_name=None)  # Spawn new agent
 send_message(instance_id, message)           # Send to instance queue
 terminate_instance(instance_id)              # Kill instance
 list_instances()                             # List all instances
 get_instance_info(instance_id)               # Get instance details
 ```
+
+**instance_name**: Optional short name for the instance to identify it in reports. Use concise, descriptive names. Examples: `create-feature-a`, `fix-bug-b`, `refactor-auth`.
 
 ## Project Management
 

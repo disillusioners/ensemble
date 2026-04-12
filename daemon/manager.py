@@ -578,6 +578,7 @@ class InstanceManager:
         instance_id: str | None = None, 
         parent_id: str | None = None,
         project_id: str | None = None,
+        instance_name: str | None = None,
     ) -> str:
         """Create a new agent instance.
 
@@ -588,6 +589,8 @@ class InstanceManager:
             project_id: Optional project ID for project context. Use `None` to explicitly
                 indicate no project context is needed. If provided, stored in instance
                 metadata so child instances don't rely on text extraction.
+            instance_name: Optional short name for the instance (e.g., 'create-feature-a').
+                Used in completion reports to identify the task.
 
         Returns:
             The instance_id of the newly created instance.
@@ -687,7 +690,11 @@ class InstanceManager:
                 )
             instance_metadata["project_id"] = project_id
         
-        logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id})")
+        # Store instance_name in metadata if provided
+        if instance_name is not None:
+            instance_metadata["instance_name"] = instance_name
+        
+        logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
         
         # Create instance in DB
         self._instance_repository.create(
@@ -1412,24 +1419,61 @@ class InstanceManager:
             tool_calls=all_tool_calls if all_tool_calls else None,
         )
 
-    async def _summarize_instance(self, instance_id: str, agent_name: str) -> str:
+    def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
+        """Get formatted prefix for instance completion reports.
+        
+        Args:
+            instance_id: The instance ID.
+            agent_id: The agent ID.
+        
+        Returns:
+            Formatted prefix like "Coder agent (id=xxx) has done" or
+            "Coder agent (name=create-feature-a, id=xxx) has done"
+        """
+        # Get agent display name from meta.json
+        agent_name = agent_id.capitalize()
+        
+        try:
+            registry = get_registry()
+            metadata = registry.get(agent_id)
+            if metadata and metadata.name:
+                agent_name = metadata.name
+        except Exception:
+            pass
+        
+        # Get instance_name from metadata
+        instance_meta = self._instance_repository.get(instance_id)
+        instance_name = None
+        if instance_meta and instance_meta.instance_metadata:
+            instance_name = instance_meta.instance_metadata.get("instance_name")
+        
+        # Format based on whether instance_name is set
+        if instance_name:
+            return f"{agent_name} agent (name={instance_name}, id={instance_id}) has done"
+        else:
+            return f"{agent_name} agent (id={instance_id}) has done"
+
+    async def _summarize_instance(self, instance_id: str, agent_id: str) -> str:
         """Summarize instance messages using LLM.
         
         Args:
             instance_id: The instance ID to summarize.
-            agent_name: The name of the agent (e.g., "Coder", "Designer").
+            agent_id: The agent ID (e.g., "coder", "leader").
             
         Returns:
-            Formatted summary string: "{agent_name} has done, bellow is {agent_name} response: {summary}"
+            Formatted summary string with instance info.
         """
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_openai import ChatOpenAI
+        
+        # Get the report prefix
+        prefix = self._get_instance_report_prefix(instance_id, agent_id)
         
         # Get instance messages
         messages = await get_instance_messages(self.checkpointer, instance_id)
         
         if not messages:
-            return f"{agent_name} has done, bellow is {agent_name} response: No activity recorded."
+            return f"{prefix}, bellow is the response: No activity recorded."
         
         # Build conversation summary for the LLM
         conversation_text = []
@@ -1443,7 +1487,7 @@ class InstanceManager:
                 conversation_text.append(f"{role}: {content}")
         
         if not conversation_text:
-            return f"{agent_name} has done, bellow is {agent_name} response: No messages to summarize."
+            return f"{prefix}, bellow is the response: No messages to summarize."
         
         conversation = "\n".join(conversation_text)
         
@@ -1486,11 +1530,11 @@ Provide a concise summary:"""
                 summary = " ".join(text_parts)
             else:
                 summary = str(content) if content else ""
-            return f"{agent_name} has done, bellow is {agent_name} response: {summary}"
+            return f"{prefix}, bellow is the response: {summary}"
         except Exception as e:
             logger.warning(f"Failed to summarize instance {instance_id}: {e}")
             # Fallback: count messages and provide basic summary
-            return f"{agent_name} has done, bellow is {agent_name} response: Completed {len(messages)} message(s)."
+            return f"{prefix}, bellow is the response: Completed {len(messages)} message(s)."
 
     async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str) -> bool:
         """Check if completion report should be sent (idempotency checks).
@@ -1772,7 +1816,10 @@ Provide a concise summary:"""
             completed_message_id: The message ID that just completed (for idempotency).
         """
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
-        last_content = await self._get_last_assistant_message(instance_id, agent_name="agent")
+        # Get instance's agent_id for the report
+        instance_meta = self._instance_repository.get(instance_id)
+        agent_id = instance_meta.agent_id if instance_meta else "agent"
+        last_content = await self._get_last_assistant_message(instance_id, agent_id)
         if last_content is None:
             logger.warning(f"No content found for instance {instance_id[:8]}..., skipping completion check")
             return
@@ -1933,7 +1980,7 @@ Provide a concise summary:"""
                 f"Original error was: {error_type}: {error[:200]}"
             )
 
-    async def _get_last_assistant_message(self, instance_id: str, agent_name: str) -> str | None:
+    async def _get_last_assistant_message(self, instance_id: str, agent_id: str) -> str | None:
         """Get the last assistant message from instance history.
         
         This is the default/simple approach for completion reports - just
@@ -1941,11 +1988,14 @@ Provide a concise summary:"""
         
         Args:
             instance_id: The instance ID to get message from.
-            agent_name: The name of the agent (e.g., "Coder", "Designer").
+            agent_id: The agent ID (e.g., "coder", "leader").
             
         Returns:
-            Formatted string: "{agent_name} has done: {last_message}"
+            Formatted string with instance info and last message.
         """
+        # Get the report prefix
+        prefix = self._get_instance_report_prefix(instance_id, agent_id)
+        
         messages = await get_instance_messages(self.checkpointer, instance_id)
         
         # Find the last assistant message
@@ -1958,7 +2008,7 @@ Provide a concise summary:"""
                     break
         
         if last_assistant_content:
-            return f"{agent_name} has done, bellow is {agent_name} response:\n{last_assistant_content}"
+            return f"{prefix}, bellow is the response:\n{last_assistant_content}"
         return None
 
         

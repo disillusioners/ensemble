@@ -169,7 +169,12 @@ class SpawnInstanceInput(BaseModel):
     
     project_id: Annotated[str | None, Field(
         default=None,
-        description="Optional project ID for context injection. Pass None if no project context is needed."
+        description="Optional project ID for context injection. Pass None or 'null' if no project context is needed."
+    )] = None
+    
+    instance_name: Annotated[str | None, Field(
+        default=None,
+        description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b'). Used in completion reports."
     )] = None
     
     @model_validator(mode='after')
@@ -199,7 +204,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         return _get_project_workdir(manager, current_instance_id)
     
     @tool(args_schema=SpawnInstanceInput)
-    def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None) -> str:
+    def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
         
         IMPORTANT: After spawning, you MUST use send_message(instance_id, message) 
@@ -209,6 +214,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         Args:
             agent_id: Agent ID to spawn (e.g., 'coder', 'leader').
             project_id: Optional project ID for context injection. Use None or 'null' if no project context is needed.
+            instance_name: Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').
         
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
@@ -223,6 +229,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 instance_id=None,
                 parent_id=current_instance_id,
                 project_id=project_id,
+                instance_name=instance_name,
             )
             return (
                 f"Successfully spawned instance: {new_instance_id}\n"
