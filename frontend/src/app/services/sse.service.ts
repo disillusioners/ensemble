@@ -111,6 +111,7 @@ export class SseService {
             type: 'message_received',
             instance_id: envelope.instance_id,
             message_id: envelope.message_id,
+            content: envelope.message?.content,
             message: envelope.message,
             source: envelope.message?.source,
           });

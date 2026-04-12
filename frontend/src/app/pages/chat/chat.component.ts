@@ -157,8 +157,23 @@ export class ChatComponent implements OnInit, OnDestroy {
               break;
               
             case 'content_chunk':
-              // Auto-create placeholder if out of order (FIX: was silently dropped before)
-              if (msgIndex === -1) {
+              // Handle streaming content - but don't overwrite child reports
+              // If existing message has role="user", create new message for assistant
+              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
+                // Existing message is a child report - create new message for assistant
+                updated.push({
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
+              } else if (msgIndex === -1) {
+                // No existing message - create new one
                 updated.push({
                   message_id: delta.message_id,
                   role: 'assistant',
@@ -171,7 +186,7 @@ export class ChatComponent implements OnInit, OnDestroy {
                 });
                 msgIndex = updated.length - 1;
               }
-              // FIX: Enforce immutability with spread operator
+              // Append content
               updated[msgIndex] = {
                 ...updated[msgIndex],
                 content: (updated[msgIndex].content || '') + (delta.content || ''),
@@ -179,13 +194,26 @@ export class ChatComponent implements OnInit, OnDestroy {
               break;
               
             case 'thinking':
-              // Auto-create placeholder if out of order
-              if (msgIndex === -1) {
+              // Handle thinking content - but don't overwrite child reports
+              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
+                // Create new message for assistant
                 updated.push({
                   message_id: delta.message_id,
                   role: 'assistant',
                   content: '',
-                  thinking: undefined,
+                  thinking: '',
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
+              } else if (msgIndex === -1) {
+                updated.push({
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: '',
                   thinking_extracted: undefined,
                   tool_calls: [],
                   created_at: new Date().toISOString(),
@@ -200,8 +228,21 @@ export class ChatComponent implements OnInit, OnDestroy {
               break;
               
             case 'tool_call':
-              // Auto-create placeholder if out of order
-              if (msgIndex === -1) {
+              // Handle tool calls - but don't overwrite child reports
+              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
+                // Create new message for assistant
+                updated.push({
+                  message_id: delta.message_id,
+                  role: 'assistant',
+                  content: '',
+                  thinking: undefined,
+                  thinking_extracted: undefined,
+                  tool_calls: [],
+                  created_at: new Date().toISOString(),
+                  instance_id: delta.instance_id,
+                });
+                msgIndex = updated.length - 1;
+              } else if (msgIndex === -1) {
                 updated.push({
                   message_id: delta.message_id,
                   role: 'assistant',
@@ -254,16 +295,38 @@ export class ChatComponent implements OnInit, OnDestroy {
               
             case 'message_completed':
               // Finalize message with canonical content from message_completed event
-              console.log('[Chat] Message finalized with canonical content:', delta.message_id);
-              if (msgIndex >= 0 && delta.message) {
+              // Check if this is a new message (message.message_id differs from routing message_id)
+              // This happens when the queue message_id differs from the assistant's actual message_id
+              const isNewMessage = delta.message?.message_id && 
+                                  delta.message.message_id !== delta.message_id;
+              
+              console.log('[Chat] Message finalized:', delta.message_id, 
+                         '-> canonical:', delta.message?.message_id,
+                         'isNew:', isNewMessage);
+              
+              if (msgIndex >= 0 && delta.message && !isNewMessage) {
+                // Update existing message - preserve role for child reports (role="user")
+                const existingRole = updated[msgIndex].role;
                 updated[msgIndex] = {
                   ...updated[msgIndex],
-                  role: (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  role: existingRole === 'user' ? existingRole : (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
                   content: delta.message.content ?? updated[msgIndex].content,
                   thinking: delta.message.thinking ?? undefined,
                   thinking_extracted: delta.message.thinking_extracted ?? undefined,
                   tool_calls: delta.message.tool_calls || updated[msgIndex].tool_calls,
                 };
+              } else if (delta.message) {
+                // Create new message with canonical message_id (this is the assistant's response)
+                console.log('[Chat] Creating new message for assistant response:', delta.message.message_id);
+                updated.push({
+                  message_id: delta.message.message_id || delta.message_id,
+                  role: (delta.message.role as 'user' | 'assistant' | 'system') || 'assistant',
+                  content: delta.message.content || '',
+                  thinking: delta.message.thinking ?? undefined,
+                  thinking_extracted: delta.message.thinking_extracted ?? undefined,
+                  tool_calls: delta.message.tool_calls || [],
+                  created_at: delta.message.created_at || new Date().toISOString(),
+                });
               } else {
                 console.warn('[Chat] message_completed: message not found in state, creating from canonical payload', delta.message_id);
                 // Create message from canonical payload as fallback
