@@ -92,12 +92,12 @@ class TestAssistantMessageCompleted:
         # message_completed event
         mock_event_bus.create_event.assert_called_once()
         
-        # processing_completed event (backward compat)
+        # processing_completed event (lightweight status)
         mock_event_bus.create_processing_completed_event.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_message_completed_has_full_payload(self, service, mock_event_bus):
-        """Verify message_completed event contains full message payload."""
+    async def test_message_completed_has_message_dict(self, service, mock_event_bus):
+        """Verify message_completed event contains message.to_dict() directly."""
         await service.on_assistant_message_completed(
             instance_id="inst-1",
             original_message_id="user-msg-1",
@@ -109,17 +109,15 @@ class TestAssistantMessageCompleted:
         call_args = mock_event_bus.create_event.call_args
         assert call_args is not None
         data = call_args.kwargs.get('data', {})
-        assert data.get('original_message_id') == "user-msg-1"
-        assert 'message' in data
-        message = data['message']
-        assert message['role'] == "assistant"
-        assert message['content'] == "Response text"
-        assert message['thinking'] == "Thinking content"
-        assert message['thinking_extracted'] == "Extracted thinking"
+        # Now contains message.to_dict() directly, not wrapped
+        assert data.get('role') == "assistant"
+        assert data.get('content') == "Response text"
+        assert data.get('thinking') == "Thinking content"
+        assert data.get('thinking_extracted') == "Extracted thinking"
 
     @pytest.mark.asyncio
-    async def test_processing_completed_has_full_content(self, service, mock_event_bus):
-        """Verify processing_completed event contains full content for backward compat."""
+    async def test_processing_completed_lightweight_status(self, service, mock_event_bus):
+        """Verify processing_completed event contains only lightweight status (no content)."""
         await service.on_assistant_message_completed(
             instance_id="inst-1",
             original_message_id="user-msg-1",
@@ -130,13 +128,17 @@ class TestAssistantMessageCompleted:
         call_args = mock_event_bus.create_processing_completed_event.call_args
         assert call_args is not None
         result = call_args.kwargs.get('result', {})
-        assert result.get('content') == "Response text"
-        assert result.get('thinking') == "Thinking"
+        # Now only contains success status and assistant_message_id
         assert result.get('success') is True
+        assert 'assistant_message_id' in result
+        # No longer contains content, thinking, tool_calls
+        assert 'content' not in result
+        assert 'thinking' not in result
+        assert 'tool_calls' not in result
 
     @pytest.mark.asyncio
-    async def test_tool_calls_included(self, service, mock_event_bus):
-        """Verify tool calls are included in both events."""
+    async def test_tool_calls_in_message_completed(self, service, mock_event_bus):
+        """Verify tool calls are included in message_completed."""
         tool_calls = [
             ToolCallInfo(
                 id="tc-1",
@@ -156,15 +158,14 @@ class TestAssistantMessageCompleted:
         # Check message_completed
         event_call = mock_event_bus.create_event.call_args
         data = event_call.kwargs.get('data', {})
-        message = data['message']
-        assert 'tool_calls' in message
-        assert len(message['tool_calls']) == 1
+        # Now contains message.to_dict() directly
+        assert 'tool_calls' in data
+        assert len(data['tool_calls']) == 1
         
-        # Check processing_completed
+        # processing_completed should not contain tool_calls anymore
         result_call = mock_event_bus.create_processing_completed_event.call_args
         result = result_call.kwargs.get('result', {})
-        assert result.get('tool_calls') is not None
-        assert len(result['tool_calls']) == 1
+        assert 'tool_calls' not in result
 
 
 class TestChildCompletionReport:
@@ -203,10 +204,10 @@ class TestChildCompletionReport:
 
 
 class TestUnifiedMessageFormats:
-    """Tests for UnifiedMessage formatting methods."""
+    """Tests for UnifiedMessage to_dict method."""
 
-    def test_to_sse_data_omits_none_fields(self):
-        """Verify to_sse_data omits None fields for clean SSE payload."""
+    def test_to_dict_omits_none_fields(self):
+        """Verify to_dict omits None fields by default."""
         msg = UnifiedMessage(
             message_id="m1",
             instance_id="i1",
@@ -214,14 +215,14 @@ class TestUnifiedMessageFormats:
             content="Hi",
         )
         
-        data = msg.to_sse_data()
+        data = msg.to_dict()
         assert "thinking" not in data
         assert "tool_calls" not in data
         assert "thinking_extracted" not in data
         assert "source" not in data
 
-    def test_to_sse_data_includes_present_fields(self):
-        """Verify to_sse_data includes all present fields."""
+    def test_to_dict_includes_present_fields(self):
+        """Verify to_dict includes all present fields."""
         msg = UnifiedMessage(
             message_id="m1",
             instance_id="i1",
@@ -231,13 +232,13 @@ class TestUnifiedMessageFormats:
             source="api",
         )
         
-        data = msg.to_sse_data()
+        data = msg.to_dict()
         assert data["thinking"] == "Thinking"
         assert data["source"] == "api"
         assert "thinking_extracted" not in data
 
-    def test_to_api_response_format(self):
-        """Verify to_api_response format for GET /messages."""
+    def test_to_dict_with_include_nulls(self):
+        """Verify to_dict with include_nulls includes None values."""
         msg = UnifiedMessage(
             message_id="m1",
             instance_id="i1",
@@ -245,14 +246,27 @@ class TestUnifiedMessageFormats:
             content="Response",
         )
         
-        resp = msg.to_api_response()
+        data = msg.to_dict(include_nulls=True)
+        assert data.get("thinking") is None
+        assert data.get("tool_calls") is None
+
+    def test_to_dict_api_format(self):
+        """Verify to_dict format for GET /messages (no include_nulls)."""
+        msg = UnifiedMessage(
+            message_id="m1",
+            instance_id="i1",
+            role="assistant",
+            content="Response",
+        )
+        
+        resp = msg.to_dict()
         assert resp["role"] == "assistant"
         assert resp["content"] == "Response"
         assert resp["message_id"] == "m1"
-        assert resp["thinking"] is None
+        assert "thinking" not in resp  # None values omitted
 
-    def test_to_api_response_with_tool_calls(self):
-        """Verify to_api_response includes tool_calls when present."""
+    def test_to_dict_with_tool_calls(self):
+        """Verify to_dict includes tool_calls when present."""
         tool_calls = [
             ToolCallInfo(
                 id="tc-1",
@@ -269,7 +283,7 @@ class TestUnifiedMessageFormats:
             tool_calls=tool_calls,
         )
         
-        resp = msg.to_api_response()
+        resp = msg.to_dict()
         assert resp["tool_calls"] is not None
         assert len(resp["tool_calls"]) == 1
         assert resp["tool_calls"][0]["name"] == "bash"

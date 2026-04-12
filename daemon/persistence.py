@@ -182,7 +182,7 @@ async def get_instance_messages(
         
         result.append({
             "message_id": msg_id,
-            "type": msg_type,
+            "instance_id": instance_id,
             "role": role,
             "content": content,
             "thinking": thinking,

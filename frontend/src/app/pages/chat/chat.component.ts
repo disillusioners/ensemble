@@ -104,7 +104,6 @@ export class ChatComponent implements OnInit, OnDestroy {
               // If message already exists (e.g., from message_received like child reports), preserve it
               if (msgIndex === -1) {
                 const placeholder: Message = {
-                  type: 'message',
                   message_id: delta.message_id,
                   role: 'assistant',
                   content: '',
@@ -143,7 +142,6 @@ export class ChatComponent implements OnInit, OnDestroy {
               }
               if (msgIndex === -1) {
                 const newMessage: Message = {
-                  type: 'message',
                   message_id: delta.message_id,
                   role: 'user', // Child reports are treated as user input to the parent
                   content: delta.content || '',
@@ -162,7 +160,6 @@ export class ChatComponent implements OnInit, OnDestroy {
               // Auto-create placeholder if out of order (FIX: was silently dropped before)
               if (msgIndex === -1) {
                 updated.push({
-                  type: 'message',
                   message_id: delta.message_id,
                   role: 'assistant',
                   content: '',
@@ -185,11 +182,10 @@ export class ChatComponent implements OnInit, OnDestroy {
               // Auto-create placeholder if out of order
               if (msgIndex === -1) {
                 updated.push({
-                  type: 'message',
                   message_id: delta.message_id,
                   role: 'assistant',
                   content: '',
-                  thinking: '',
+                  thinking: undefined,
                   thinking_extracted: undefined,
                   tool_calls: [],
                   created_at: new Date().toISOString(),
@@ -207,7 +203,6 @@ export class ChatComponent implements OnInit, OnDestroy {
               // Auto-create placeholder if out of order
               if (msgIndex === -1) {
                 updated.push({
-                  type: 'message',
                   message_id: delta.message_id,
                   role: 'assistant',
                   content: '',
@@ -273,7 +268,6 @@ export class ChatComponent implements OnInit, OnDestroy {
                 console.warn('[Chat] message_completed: message not found in state, creating from canonical payload', delta.message_id);
                 // Create message from canonical payload as fallback
                 updated.push({
-                  type: 'message',
                   message_id: delta.message_id || '',
                   role: (delta.message?.role as 'user' | 'assistant' | 'system') || 'assistant',
                   content: delta.message?.content || '',
@@ -598,7 +592,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     // Add user message to UI immediately
     const userMessage: Message = {
-      type: 'message',
       message_id: `temp-${Date.now()}`,
       role: 'user',
       content,

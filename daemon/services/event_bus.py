@@ -62,6 +62,9 @@ class EventBus:
         # Global subscribers (receive ALL events)
         self._global_subscribers: dict[str, asyncio.Queue] = {}
 
+        # Per-instance streaming counters for event IDs (delta_type -> counter)
+        self._streaming_counters: dict[str, dict[str, int]] = {}
+
         # Queue size limits
         self._streaming_queue_size = streaming_queue_size
         self._global_queue_size = global_queue_size
@@ -223,7 +226,8 @@ class EventBus:
         self,
         instance_id: str,
         event_type: str,
-        data: Optional[dict[str, Any]] = None,
+        message_id: str,
+        delta: dict[str, Any],
     ) -> None:
         """Broadcast a streaming event (in-memory only).
 
@@ -233,7 +237,8 @@ class EventBus:
         Args:
             instance_id: The instance this event belongs to
             event_type: One of content_chunk, thinking, tool_call, tool_complete
-            data: Event payload
+            message_id: The queue message ID this event belongs to
+            delta: Event payload with type, content/tool_call, and index
         """
         if event_type not in STREAMING_EVENT_TYPES:
             logger.warning(
@@ -241,12 +246,18 @@ class EventBus:
                 f"Expected one of: {STREAMING_EVENT_TYPES}"
             )
 
+        # Extract delta type and generate prefixed ID
+        delta_type = delta.get("type", event_type)
+        event_id = self._next_streaming_id(instance_id, delta_type)
+        
         # Put in per-instance streaming queue
         queue = self.get_streaming_queue(instance_id)
         event = {
             "instance_id": instance_id,
             "event_type": event_type,
-            "data": data,
+            "event_id": event_id,
+            "message_id": message_id,
+            "delta": delta,
         }
 
         try:
@@ -263,7 +274,9 @@ class EventBus:
         await self._broadcast_to_global(
             instance_id=instance_id,
             event_type=event_type,
-            data=data,
+            event_id=event_id,
+            message_id=message_id,
+            delta=delta,
         )
 
     # -------------------------------------------------------------------------
@@ -382,23 +395,37 @@ class EventBus:
         self,
         instance_id: str,
         event_type: str,
-        data: Optional[dict[str, Any]] = None,
+        event_id: str | None = None,
+        message_id: str | None = None,
+        delta: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Broadcast an event to all global subscribers.
 
         Args:
             instance_id: The instance ID
             event_type: The event type
-            data: Optional event data
+            event_id: Optional event ID (for streaming events with prefixed IDs)
+            message_id: Optional message ID
+            delta: Optional delta payload (for streaming events)
+            data: Optional legacy data payload
         """
         if not self._global_subscribers:
             return
 
-        event = {
+        event: dict[str, Any] = {
             "instance_id": instance_id,
             "event_type": event_type,
-            "data": data,
         }
+        
+        if event_id:
+            event["event_id"] = event_id
+        if message_id:
+            event["message_id"] = message_id
+        if delta:
+            event["delta"] = delta
+        elif data:
+            event["data"] = data
 
         for subscriber_id, queue in list(self._global_subscribers.items()):
             try:
@@ -407,6 +434,33 @@ class EventBus:
                 logger.warning(
                     f"Global subscriber {subscriber_id} queue full, dropping event"
                 )
+
+    # -------------------------------------------------------------------------
+    # Streaming ID Generation
+    # -------------------------------------------------------------------------
+
+    def _next_streaming_id(self, instance_id: str, delta_type: str) -> str:
+        """Generate monotonic streaming event ID for a delta type with 's' prefix.
+        
+        Uses 's' prefix to avoid collision with DB auto-increment IDs.
+        SSE client can distinguish: 's5' = streaming, '42' = DB event.
+        
+        Args:
+            instance_id: The instance ID
+            delta_type: The delta type (chunk, thinking, tool_call, tool_complete)
+        
+        Returns:
+            String ID like 's1', 's2' with 's' prefix
+        """
+        if instance_id not in self._streaming_counters:
+            self._streaming_counters[instance_id] = {}
+        
+        counters = self._streaming_counters[instance_id]
+        if delta_type not in counters:
+            counters[delta_type] = 0
+        
+        counters[delta_type] += 1
+        return f"s{counters[delta_type]}"
 
     # -------------------------------------------------------------------------
     # Cleanup Methods
@@ -434,8 +488,11 @@ class EventBus:
         if notification:
             notification.set()  # Ensure any waiters are woken
 
-        # Clear streaming queue (just remove reference, items already consumed)
+        # Clear streaming queue
         self._streaming_channels.pop(instance_id, None)
+        
+        # Clear streaming counters (prevent memory leak)
+        self._streaming_counters.pop(instance_id, None)
 
         logger.debug(f"Cleaned up in-memory state for instance {instance_id}")
 
@@ -454,6 +511,7 @@ class EventBus:
         self._streaming_channels.clear()
         self._notifications.clear()
         self._global_subscribers.clear()
+        self._streaming_counters.clear()
 
         logger.info("EventBus shutdown complete")
 
@@ -465,7 +523,9 @@ class EventBus:
         self,
         instance_id: str,
         event_type: str,
-        data: Optional[dict[str, Any]] = None,
+        message_id: str | None = None,
+        delta: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Synchronous broadcast for use from non-async context.
 
@@ -474,13 +534,17 @@ class EventBus:
         Args:
             instance_id: The instance ID
             event_type: The event type
-            data: Optional event data
+            message_id: The message ID (for streaming events)
+            delta: Delta payload (for streaming events)
+            data: Legacy data payload
         """
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
 
         if event_type in STREAMING_EVENT_TYPES:
-            coro = self.broadcast_streaming_event(instance_id, event_type, data)
+            coro = self.broadcast_streaming_event(
+                instance_id, event_type, message_id or "", delta or {}
+            )
         else:
             # Map to EventKind for lifecycle events
             try:

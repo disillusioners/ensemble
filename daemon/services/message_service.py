@@ -89,27 +89,18 @@ class MessageService:
                 instance_id=instance_id,
                 kind=EventKind.MESSAGE_COMPLETED,
                 message_id=original_message_id,
-                data={
-                    "original_message_id": original_message_id,
-                    "message": message.to_sse_data(),
-                },
+                data=message.to_dict(),
             )
         except Exception as e:
             logger.error(f"Failed to emit message_completed: {e}")
 
-        # Also emit processing_completed with full content (backward compat)
+        # processing_completed: lightweight status only (content comes from message_completed)
         try:
             await self._event_bus.create_processing_completed_event(
                 instance_id=instance_id,
                 message_id=original_message_id,
                 result={
-                    "task_id": None,
-                    "message_id": original_message_id,
                     "success": True,
-                    "content": content,
-                    "thinking": thinking,
-                    "thinking_extracted": thinking_extracted,
-                    "tool_calls": [tc.model_dump() for tc in tool_calls] if tool_calls else None,
                     "assistant_message_id": assistant_message_id,
                 },
             )

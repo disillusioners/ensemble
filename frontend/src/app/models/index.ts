@@ -20,16 +20,15 @@ export interface InstanceListResponse {
   has_more: boolean;
 }
 
-// Message types
+// Message types (aligned with backend UnifiedMessage)
 export interface Message {
-  type: string;
   message_id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
-  thinking?: string;
-  thinking_extracted?: string;
+  thinking?: string | null;
+  thinking_extracted?: string | null;
   tool_calls?: ToolCall[];
-  error?: string;
+  source?: string | null;
   created_at: string;
   // Instance ID for tracking which instance this message belongs to
   // Used for instance validation in SSE event routing
@@ -112,6 +111,30 @@ export interface SSEEvent {
   instance_id: string;
   message_id: string | null;
   data: Record<string, unknown>;
+}
+
+// New unified SSE event envelope (from unified format implementation)
+export interface SSEEventEnvelope {
+  instance_id: string;
+  message_id?: string;
+  message?: Message;
+  delta?: SSEDelta;
+  status?: SSEStatus;
+}
+
+export interface SSEDelta {
+  type: 'chunk' | 'thinking' | 'tool_call' | 'tool_complete';
+  content?: string;
+  tool_call?: ToolCall;
+  index?: number;
+}
+
+export interface SSEStatus {
+  success?: boolean;
+  error?: string;
+  stage?: string;
+  message_id?: string;
+  metadata?: Record<string, unknown>;
 }
 
 // Message delta types for SSE streaming updates

@@ -1172,10 +1172,10 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="thinking",
-                                            data={
-                                                "instance_id": instance_id,
-                                                "message_id": message_id,
-                                                "content": thinking_content
+                                            message_id=message_id,
+                                            delta={
+                                                "type": "thinking",
+                                                "content": thinking_content,
                                             }
                                         )
                                 
@@ -1196,12 +1196,14 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="tool_call",
-                                            data={
-                                                "instance_id": instance_id,
-                                                "message_id": message_id,
-                                                "id": tc_id,
-                                                "name": tc_name,
-                                                "arguments": tc_args,
+                                            message_id=message_id,
+                                            delta={
+                                                "type": "tool_call",
+                                                "tool_call": {
+                                                    "id": tc_id,
+                                                    "name": tc_name,
+                                                    "arguments": tc_args,
+                                                },
                                             }
                                         )
                                 
@@ -1225,8 +1227,6 @@ class InstanceManager:
                                             original_call = {"name": getattr(tool_msg, 'name', 'unknown'), "args": {}}
                                         
                                         tool_call_data = {
-                                            "instance_id": instance_id,
-                                            "message_id": message_id,
                                             "id": tool_call_id,
                                             "name": original_call.get("name", getattr(tool_msg, 'name', 'unknown')),
                                             "arguments": original_call.get("args", {}),
@@ -1237,7 +1237,11 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="tool_complete",
-                                            data=tool_call_data
+                                            message_id=message_id,
+                                            delta={
+                                                "type": "tool_complete",
+                                                "tool_call": tool_call_data,
+                                            }
                                         )
                                 
                     elif mode == "messages":
@@ -1292,10 +1296,10 @@ class InstanceManager:
                                     await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
                                         event_type="thinking",
-                                        data={
-                                            "instance_id": instance_id,
-                                            "message_id": message_id,
-                                            "content": thinking_buffer
+                                        message_id=message_id,
+                                        delta={
+                                            "type": "thinking",
+                                            "content": thinking_buffer,
                                         }
                                     )
                                     thinking_buffer = ""
@@ -1313,10 +1317,10 @@ class InstanceManager:
                                     await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
                                         event_type="content_chunk",
-                                        data={
-                                            "instance_id": instance_id,
-                                            "message_id": message_id,
-                                            "chunk": content_buffer
+                                        message_id=message_id,
+                                        delta={
+                                            "type": "chunk",
+                                            "content": content_buffer,
                                         }
                                     )
                                     content_buffer = ""
@@ -1360,10 +1364,10 @@ class InstanceManager:
                 await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
                     event_type="content_chunk",
-                    data={
-                        "instance_id": instance_id,
-                        "message_id": message_id,
-                        "chunk": content_buffer
+                    message_id=message_id,
+                    delta={
+                        "type": "chunk",
+                        "content": content_buffer,
                     }
                 )
                 logger.debug(f"Flushed final content chunk batch: {len(content_buffer)} chars")
@@ -1373,10 +1377,10 @@ class InstanceManager:
                 await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
                     event_type="thinking",
-                    data={
-                        "instance_id": instance_id,
-                        "message_id": message_id,
-                        "content": thinking_buffer
+                    message_id=message_id,
+                    delta={
+                        "type": "thinking",
+                        "content": thinking_buffer,
                     }
                 )
                 thinking_buffer = ""

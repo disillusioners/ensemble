@@ -1,5 +1,5 @@
 import { Injectable, NgZone, signal } from '@angular/core';
-import type { Message, SSEEvent, EventType, MessageDelta } from '../models';
+import type { Message, SSEEvent, SSEEventEnvelope, EventType, MessageDelta } from '../models';
 
 @Injectable({
   providedIn: 'root'
@@ -92,26 +92,27 @@ export class SseService {
     eventSource.addEventListener('message_received', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
-          console.log('[SSE] message_received:', data.message_id, 'source:', data.source);
+          const raw = JSON.parse(e.data);
+          // Support both new envelope format and legacy flat format
+          const envelope = raw.message ? raw : { ...raw, message: raw };
+          if (!this.isValidInstanceEvent(envelope)) return;
+          console.log('[SSE] message_received:', envelope.message_id, 'source:', envelope.message?.source);
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'message_received',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            data: envelope,
           }]);
           
           // Emit delta for ChatComponent to add the message
           this.emitDelta({
             type: 'message_received',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            content: data.content || '',
-            source: data.source,
-            priority: data.priority,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            message: envelope.message,
+            source: envelope.message?.source,
           });
         } catch (err) {
           console.error('[SSE] Failed to parse message_received:', err);
@@ -152,24 +153,26 @@ export class SseService {
     eventSource.addEventListener('content_chunk', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
+          const raw = JSON.parse(e.data);
+          // Support both new delta format and legacy flat format
+          const envelope = raw.delta ? raw : { ...raw, delta: { type: 'chunk', content: raw.chunk } };
+          if (!this.isValidInstanceEvent(envelope)) return;
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'content_chunk',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            data: envelope,
           }]);
           
           // Emit delta
-          if (data.message_id && data.chunk) {
+          if (envelope.delta?.content) {
             this.emitDelta({
               type: 'content_chunk',
-              instance_id: data.instance_id,
-              message_id: data.message_id,
-              content: data.chunk,
+              instance_id: envelope.instance_id,
+              message_id: envelope.message_id,
+              content: envelope.delta.content,
             });
           }
         } catch (err) {
@@ -182,23 +185,25 @@ export class SseService {
     eventSource.addEventListener('thinking', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
+          const raw = JSON.parse(e.data);
+          // Support both new delta format and legacy flat format
+          const envelope = raw.delta ? raw : { ...raw, delta: { type: 'thinking', content: raw.content } };
+          if (!this.isValidInstanceEvent(envelope)) return;
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'thinking',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            data: envelope,
           }]);
           
-          if (data.message_id && data.content) {
+          if (envelope.delta?.content) {
             this.emitDelta({
               type: 'thinking',
-              instance_id: data.instance_id,
-              message_id: data.message_id,
-              content: data.content,
+              instance_id: envelope.instance_id,
+              message_id: envelope.message_id,
+              content: envelope.delta.content,
             });
           }
         } catch (err) {
@@ -211,27 +216,31 @@ export class SseService {
     eventSource.addEventListener('tool_call', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
+          const raw = JSON.parse(e.data);
+          // Support both new delta format and legacy flat format
+          const envelope = raw.delta ? raw : { 
+            ...raw, 
+            delta: { 
+              type: 'tool_call', 
+              tool_call: { id: raw.id, name: raw.name, arguments: raw.arguments } 
+            } 
+          };
+          if (!this.isValidInstanceEvent(envelope)) return;
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_call',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            data: envelope,
           }]);
           
-          if (data.message_id && data.id) {
+          if (envelope.delta?.tool_call) {
             this.emitDelta({
               type: 'tool_call',
-              instance_id: data.instance_id,
-              message_id: data.message_id,
-              tool_call: {
-                id: data.id,
-                name: data.name || '',
-                arguments: data.arguments || {},
-              },
+              instance_id: envelope.instance_id,
+              message_id: envelope.message_id,
+              tool_call: envelope.delta.tool_call,
             });
           }
         } catch (err) {
@@ -244,27 +253,31 @@ export class SseService {
     eventSource.addEventListener('tool_complete', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
+          const raw = JSON.parse(e.data);
+          // Support both new delta format and legacy flat format
+          const envelope = raw.delta ? raw : { 
+            ...raw, 
+            delta: { 
+              type: 'tool_complete', 
+              tool_call: { id: raw.id, name: raw.name, output: raw.output } 
+            } 
+          };
+          if (!this.isValidInstanceEvent(envelope)) return;
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'tool_complete',
-            instance_id: data.instance_id,
-            message_id: data.message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id,
+            data: envelope,
           }]);
           
-          if (data.message_id && data.id) {
+          if (envelope.delta?.tool_call) {
             this.emitDelta({
               type: 'tool_complete',
-              instance_id: data.instance_id,
-              message_id: data.message_id,
-              tool_call: {
-                id: data.id,
-                name: data.name || '',
-                output: data.output || '',
-              },
+              instance_id: envelope.instance_id,
+              message_id: envelope.message_id,
+              tool_call: envelope.delta.tool_call,
             });
           }
         } catch (err) {
@@ -369,25 +382,27 @@ export class SseService {
     eventSource.addEventListener('message_completed', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
-          const data = JSON.parse(e.data);
-          if (!this.isValidInstanceEvent(data)) return;
+          const raw = JSON.parse(e.data);
+          // Support both new envelope format and legacy flat format
+          const envelope = raw.message ? raw : { ...raw, message: raw.message };
+          if (!this.isValidInstanceEvent(envelope)) return;
           
           this.events.update(prev => [...prev, {
             event_id: parseInt(e.lastEventId || '0'),
             type: 'message_completed',
-            instance_id: data.instance_id,
-            message_id: data.original_message_id,
-            data,
+            instance_id: envelope.instance_id,
+            message_id: envelope.message_id || raw.original_message_id,
+            data: envelope,
           }]);
           
           // Emit delta with canonical message for ChatComponent
-          if (data.message && data.original_message_id && data.instance_id) {
+          if (envelope.message) {
             this.emitDelta({
               type: 'message_completed',
-              instance_id: data.instance_id,
-              message_id: data.original_message_id,
-              message: data.message,
-              original_message_id: data.original_message_id,
+              instance_id: envelope.instance_id,
+              message_id: envelope.message_id,
+              message: envelope.message,
+              original_message_id: envelope.message_id,
             });
           }
         } catch (err) {

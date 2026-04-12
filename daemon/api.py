@@ -951,41 +951,77 @@ async def stream_events(instance_id: str, request: Request):
     return EventSourceResponse(event_generator(), ping=30)
 
 
-def format_sse_event(event) -> dict:
-    """Format event for SSE response (works with both Event dataclass and Event model)."""
-    # Handle Event dataclass (from streaming)
-    if hasattr(event, 'type'):
-        event_type = event.type
-        event_id = event.event_id
-        message_id = event.message_id
-        instance_id = event.instance_id
-        data = event.data
-    # Handle Event model (from DB)
-    elif hasattr(event, 'kind'):
+def format_sse_event(event, legacy_compat: bool = False) -> dict:
+    """Format event for SSE response with unified envelope.
+    
+    Args:
+        event: Either an Event dataclass (streaming), Event model (DB), or dict
+        legacy_compat: If True, include flat fields alongside new envelope structure
+    
+    Returns:
+        Dict with id, event, and data keys for SSE formatting
+    """
+    from daemon.models import EventKind
+    from daemon.services.event_bus import STREAMING_EVENT_TYPES
+    
+    # Extract event metadata based on type
+    if hasattr(event, 'kind'):  # Event model from DB
         event_type = event.kind
         event_id = event.id
         message_id = event.message_id
         instance_id = event.instance_id
-        data = json.loads(event.data) if event.data else {}
-    # Handle streaming events from EventBus (dict format)
-    elif isinstance(event, dict):
+        raw_data = json.loads(event.data) if event.data else {}
+    elif isinstance(event, dict):  # Streaming event from EventBus
         event_type = event.get("event_type", "unknown")
-        event_id = 0  # Streaming events don't have DB IDs
-        message_id = None
+        event_id = event.get("event_id", "0")  # Now includes prefixed ID
+        message_id = event.get("message_id")
         instance_id = event.get("instance_id", "")
-        data = event.get("data", {})
+        raw_data = event.get("delta") or event.get("data") or {}
     else:
         return {"event": "error", "data": json.dumps({"error": "Unknown event type"})}
     
-    return {
+    # Build unified envelope
+    envelope: dict[str, Any] = {
+        "instance_id": instance_id,
+    }
+    
+    # Add message_id if present
+    if message_id:
+        envelope["message_id"] = message_id
+    
+    # Categorize event and add appropriate payload
+    if event_type == EventKind.MESSAGE_RECEIVED.value:
+        # message_received: raw_data is the message payload
+        envelope["message"] = raw_data
+    elif event_type == EventKind.MESSAGE_COMPLETED.value:
+        # message_completed: raw_data is the full message
+        envelope["message"] = raw_data
+    elif event_type in STREAMING_EVENT_TYPES:
+        # Streaming: raw_data is the delta
+        envelope["delta"] = raw_data
+    elif event_type in (EventKind.PROCESSING_STARTED.value, EventKind.PROCESSING_COMPLETED.value,
+                         EventKind.PROCESSING_FAILED.value, EventKind.ERROR.value,
+                         EventKind.CHILD_COMPLETED.value, EventKind.CHILD_FAILED.value,
+                         EventKind.INSTANCE_COMPLETED.value):
+        # Lifecycle status events
+        envelope["status"] = raw_data
+    else:
+        # Fallback: include as-is
+        envelope["data"] = raw_data
+    
+    # Build SSE response
+    result: dict[str, Any] = {
         "id": str(event_id),
         "event": event_type,
-        "data": json.dumps({
-            "message_id": message_id,
-            "instance_id": instance_id,
-            **data
-        })
+        "data": json.dumps(envelope),
     }
+    
+    # Legacy compatibility: add flat fields alongside new structure
+    if legacy_compat:
+        envelope["message_id"] = message_id
+        envelope.update(raw_data)
+    
+    return result
 
 
 # ==================== Source Management Endpoints ====================
