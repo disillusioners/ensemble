@@ -181,11 +181,12 @@ Add at module level in `event_bus.py` (not in the `EventBus` class — so `persi
 def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     """Serialize a LangChain message to dict matching REST API format.
     
-    Must handle all 4 thinking extraction paths:
+    Must handle all 5 thinking extraction paths:
       1. additional_kwargs.get("reasoning_content")
       2. additional_kwargs.get("thinking")  
       3. msg.reasoning_content attribute
-      4. msg.content as list with type="reasoning" blocks
+      4. msg.thinking attribute (Claude models)
+      5. msg.content as list with type="reasoning" blocks
     
     Args:
         msg: LangChain BaseMessage (HumanMessage, AIMessage, ToolMessage, etc.)
@@ -200,13 +201,16 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     role = role_map.get(msg.type, msg.type)
     content = getattr(msg, 'content', '') or ''
     
-    # Thinking extraction (4 paths, matching manager.py:1276-1302)
+    # Thinking extraction (5 paths, matching manager.py patterns)
     thinking = None
     if hasattr(msg, 'additional_kwargs'):
         kwargs = msg.additional_kwargs or {}
         thinking = kwargs.get("reasoning_content") or kwargs.get("thinking")
     if not thinking and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
         thinking = msg.reasoning_content
+    # Direct thinking attribute (Claude models)
+    if not thinking and hasattr(msg, 'thinking') and msg.thinking:
+        thinking = msg.thinking
     if not thinking and isinstance(content, list):
         for block in content:
             if isinstance(block, dict):
@@ -242,7 +246,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
                 })
     
     return {
-        "id": msg.id,                          # LangGraph's ID
+        "id": getattr(msg, 'id', None) or str(uuid.uuid4()),  # Fallback needed — LangGraph msg.id can be None
         "role": role,
         "content": content_str,
         "thinking": thinking,
@@ -251,6 +255,8 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
         "created_at": None,                    # Filled from checkpoint timestamps in persistence.py; None in SSE path (frontend shows no timestamp during streaming)
     }
 ```
+
+> ⚠️ **`msg.id` can be `None`**: LangGraph message IDs can be `None` for certain message types or providers. The `getattr(..., 'id', None) or str(uuid.uuid4())` fallback is required to avoid runtime errors. The plan's `broadcast_checkpoint_event()` example at line 349 also has this fallback, but it belongs in `serialize_message()` as the authoritative location.
 
 > ⚠️ **`created_at` note**: In the SSE streaming path (checkpoint events), `created_at` will be `None` because checkpointing does not include timestamps. Timestamps are only populated when loading from the REST API via checkpoint history. Frontend should display no timestamp (or a placeholder) during active streaming. This is an accepted regression for correctness.
 
@@ -284,7 +290,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
 | 317-357 | `get_streaming_queue()`, `get_streaming_events()` | Reuse for checkpoint queue |
 | 363-436 | `subscribe_all()`, `unsubscribe_all()`, `_broadcast_to_global()` | Keep for global subscribers |
 | 480-516 | `cleanup_instance()`, `shutdown()` | Still needed |
-| 522-558 | `broadcast_sync()` | Keep but simplify |
+| 522-558 | `broadcast_sync()` | Keep but simplify — **must remove call to deleted `broadcast_streaming_event()` and add checkpoint event routing for message events**. Currently maps event types to `EventKind` and routes streaming events. After streaming events are removed, `broadcast_sync()` will attempt to call the deleted `broadcast_streaming_event()`. Concrete changes: remove streaming event branch, keep lifecycle event routing (INSTANCE_STARTED, etc.), add checkpoint event routing for message events. |
 
 ---
 
@@ -433,16 +439,43 @@ The parent instance will emit a checkpoint event when it processes the report me
 
 **Action**: Remove the call to `self._message_service.on_child_error_report()` from `_send_error_report()`. The error report message is already persisted to the DB — the parent will pick it up on its next checkpoint.
 
+#### 3.3a Update `broadcast_checkpoint_event()` to notify global subscribers
+
+> ⚠️ **CRITICAL — Missing from original plan.** The `ResponseDispatcher` (`daemon/sources/dispatcher.py:62,178`) subscribes to ALL events via `subscribe_all()` and filters for `event_type == "completed"` to route agent responses back to external sources (Telegram, Discord, etc.). The plan removes the `completed` event type entirely but provides **no replacement signal**.
+
+After the rewrite, ALL external source routing will silently stop working.
+
+**Required fix** — In `event_bus.py`, `broadcast_checkpoint_event()` must call `_broadcast_to_global()` alongside `notify()`:
+
+```python
+async def broadcast_checkpoint_event(self, instance_id: str, ...):
+    # ... existing queue.put_nowait(event) ...
+    self.notify(instance_id)
+    # ADD THIS: Notify global subscribers (ResponseDispatcher, etc.)
+    await self._broadcast_to_global(instance_id, "checkpoint", event)
+```
+
+Also update `ResponseDispatcher._handle_event()` to filter for the new completion signal:
+
+```python
+# Before: if event_type == "completed":
+# After:  if event_type in ("checkpoint", "message_completed") and event_data.get("reason") == "message_complete"
+```
+
+Alternatively, emit a dedicated `completed` event via `broadcast_sync()` at the end of processing to signal the dispatcher without duplicating the complex event creation logic.
+
 #### 3.4 `TaskProcessor` usage of EventBus
 
 > ⚠️ **MISSING from original plan.** `TaskProcessor` (created at manager.py:518) likely calls EventBus methods.
 
 Search for all EventBus convenience method calls in `TaskProcessor` and related files:
 ```bash
-grep -n "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event" daemon/
+grep -n "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_error_event" daemon/
 ```
 
-These call sites need to be removed. `TaskProcessor` should no longer emit lifecycle events — checkpoints replace them.
+**All of these call sites must be removed.** `TaskProcessor` should no longer emit lifecycle events — checkpoints replace them.
+
+> ⚠️ **Also in `task_processor.py:218-226`**: The exception handler calls `create_error_event()`. This is **not** listed in the plan's removal table. If only the explicitly listed methods are removed, `create_error_event` will remain as dead code pointing to a method that may no longer exist. Add it to the removal list and specify what replaces it.
 
 #### 3.5 `_create_completion_events()` (lines 1807–1859)
 
@@ -465,6 +498,10 @@ After the rewrite, verify this method is still called from:
 **What to change**:
 
 #### 4.1 Rewrite `stream_events()` (lines 822-951)
+
+> ⚠️ **Reconnection support must be explicitly addressed.** The current SSE endpoint supports `Last-Event-ID` header for cursor-based reconnection (`api.py:862-880`). The simplified `stream_events()` below does not mention this feature.
+>
+> **Decision required**: Either (A) intentionally drop reconnection support (document as accepted regression), or (B) preserve it using checkpoint sequence numbers as cursors. If (B), the implementation must read `Last-Event-ID` from the request headers and seek to the appropriate checkpoint on reconnect.
 
 ```python
 @api_router.get("/instances/{instance_id}/events")
@@ -947,6 +984,9 @@ Search all files for `compute_message_id` and replace:
 4. SSE endpoint (`/instances/{id}/events`) — verify only `connected`, `checkpoint`, `error`, `keepalive` events are emitted
 5. `serialize_message()` with `tool_outputs` map — verify tool outputs are embedded in assistant message's `tool_calls[]` field
 6. `broadcast_checkpoint_event()` — concurrent emissions don't cause race conditions in queue/notify
+7. **`serialize_message()` with `msg.id = None`** — verify fallback to `uuid.uuid4()` works (HIGH — prevents runtime errors)
+8. **`serialize_message()` with all thinking formats** — verify all 5 extraction paths including direct `msg.thinking` attribute
+9. **`ResponseDispatcher` routing after rewrite** — verify external sources (Telegram, Discord) still receive responses via `_broadcast_to_global()` calls
 
 ### Integration Tests Needed
 
@@ -957,6 +997,9 @@ Search all files for `compute_message_id` and replace:
 5. Reconnect → verify initial checkpoint is sent on new SSE connection
 6. Child agent completes → verify parent receives checkpoint with child's report message (not a separate `child_completed` event)
 7. Error during processing → verify SSE emits `error` event, not `processing_failed`
+8. **Multi-turn message ID consistency** — Send msg1 → verify checkpoint → send msg2 → verify BOTH messages have consistent IDs → refresh → verify REST API matches SSE
+9. **Backend restart → SSE reconnect** — Verify client reconnects and receives current state from checkpoint after backend crash
+10. **External source routing (Telegram/Discord)** — Verify ResponseDispatcher receives checkpoint events and routes responses correctly
 
 ### Paths NOT Previously Covered by Tests
 
@@ -976,15 +1019,19 @@ Search all files for `compute_message_id` and replace:
 | Risk | Mitigation |
 |------|-----------|
 | Circular import: `event_bus.py` → `manager.py` for `parse_think_tags` | **Step 0**: Move `parse_think_tags` + `_THINK_PATTERN` to `daemon/utils.py` before any other changes |
-| LangGraph `msg.id` might be `None` for some message types | Add assertion/log in `serialize_message()`, fallback to `str(uuid.uuid4())` |
-| Thinking extraction has 4 provider-specific paths | Port all 4 paths to `serialize_message()` — verify each is actually used |
+| LangGraph `msg.id` might be `None` for some message types | **Added to plan**: `getattr(msg, 'id', None) or str(uuid.uuid4())` fallback in `serialize_message()` |
+| Thinking extraction has 4 provider-specific paths | **Updated**: Port all 5 paths to `serialize_message()` including `msg.thinking` direct attribute (missing from original plan) |
 | `tool_outputs` map needs ToolMessages that are excluded from output | Build map before filtering, pass to `serialize_message()` |
 | Frontend field rename `message_id` → `id` breaks all references | Search entire frontend for `.message_id` and update all 72+ references across 5 files |
 | No real-time feedback during LLM inference (30-60s) | Acceptable for long-running task focus. Can add `status` events later. |
 | Large message list on each checkpoint | Acceptable for now. Add diff mode later if needed. |
 | `created_at` is `None` during SSE streaming | Accept regression. Frontend shows no timestamp during streaming; REST API populates after reload. |
-| `TaskProcessor` calls EventBus lifecycle methods | Must audit and remove in Step 3.4 before deleting `create_*_event` methods. |
+| `TaskProcessor` calls EventBus lifecycle methods | Must audit and remove in Step 3.4 before deleting `create_*_event` methods. Include `create_error_event` — missing from original removal list. |
 | Post-streaming logic in `_process_message_with_tracking()` (lines 1407–1479) was missing from plan | Now documented in Section 2.3. DB writes from `on_assistant_message_completed()` must be migrated inline. |
+| `ResponseDispatcher` loses event stream (external sources silent) | **Added**: `broadcast_checkpoint_event()` must call `_broadcast_to_global()`. Update dispatcher to filter for checkpoint events as completion signal. |
+| `broadcast_sync()` still calls deleted `broadcast_streaming_event()` | **Added to Section 1.4**: Remove streaming branch, add checkpoint routing. |
+| `Last-Event-ID` reconnection support silently dropped | **Added to Section 4.1**: Explicit decision required — document as regression or implement cursor-based seek. |
+| `send_message()` inconsistency with new system | **Added Step 4.5**: Audit call sites, update or document as deprecated. |
 
 ---
 
@@ -1055,6 +1102,16 @@ Verify no remaining references:
 grep -r "MessageService\|on_assistant_message_completed\|on_child_completion_report\|on_child_error_report\|on_user_message_stored" daemon/ --include="*.py"
 ```
 
+### 4.5 Audit `send_message()` call sites
+
+> ⚠️ **MISSING from original plan.** `send_message()` (`manager.py:751-867`) is a synchronous-style method that also extracts thinking and builds tool_calls. If it's still called anywhere, it will have inconsistent behavior with the new system.
+
+```bash
+grep -rn "send_message" daemon/ --include="*.py"
+```
+
+Either update `send_message()` to use the new serialization approach, or document it as deprecated if superseded by the queue path.
+
 ### 5. **`daemon/api.py`** — Rewrite SSE endpoint
 
 Rewrite `stream_events()` (lines 822–951) using the pattern in Section 4.1.
@@ -1122,16 +1179,27 @@ Run these before starting to scope the impact:
 
 4. **`TaskProcessor` EventBus usage** — Find and audit all EventBus lifecycle event calls:
    ```bash
-   grep -rn "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event" daemon/ --include="*.py"
+   grep -rn "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_error_event" daemon/ --include="*.py"
    ```
-   These call sites must be removed in Step 3.
+   **Include `create_error_event`** — the plan's original removal list was missing this.
 
 5. **`MessageService` call sites** — Verify all call sites are addressed before deletion:
    ```bash
    grep -rn "self._message_service\|on_assistant_message_completed\|on_child_completion_report\|on_child_error_report" daemon/ --include="*.py"
    ```
 
-6. **Thinking extraction provider coverage** — Confirm all 4 extraction paths are needed for your LLM providers. If any path is unused, document which providers need which paths and remove dead paths.
+6. **`send_message()` call sites** — Audit whether it needs updating for the new serialization:
+   ```bash
+   grep -rn "send_message" daemon/ --include="*.py"
+   ```
+
+7. **`ResponseDispatcher` integration** — Verify the dispatcher will still receive events after checkpoint rewrite:
+   ```bash
+   grep -rn "_broadcast_to_global\|subscribe_all\|ResponseDispatcher" daemon/sources/
+   ```
+   `broadcast_checkpoint_event()` must call `_broadcast_to_global()` or external sources (Telegram, Discord) will silently stop routing.
+
+6. **Thinking extraction provider coverage** — Confirm all 5 extraction paths are needed for your LLM providers. If any path is unused, document which providers need which paths and remove dead paths.
 
 7. **`_create_completion_events()` call sites** — Verify this method is still called after the rewrite:
    ```bash
