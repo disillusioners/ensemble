@@ -340,8 +340,15 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
         for node_name, node_data in data.items():
             node_messages = node_data.get("messages", [])
             if node_messages:
-                # Accumulate messages from stream (avoids redundant graph.aget() call)
-                all_state_messages.extend(node_messages)
+                # Key by msg.id to handle modifications (LangGraph nodes may update
+                # existing messages, e.g., appending tool_calls). Replace on collision
+                # to avoid duplicate messages in the accumulated list.
+                msg_index = {m.id: i for i, m in enumerate(all_state_messages) if hasattr(m, 'id')}
+                for m in node_messages:
+                    if hasattr(m, 'id') and m.id in msg_index:
+                        all_state_messages[msg_index[m.id]] = m  # Replace existing
+                    else:
+                        all_state_messages.append(m)
                 
                 # Build tool_outputs map from ToolMessages
                 tool_outputs = {}
@@ -349,15 +356,15 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                     if hasattr(m, 'tool_call_id'):
                         tool_outputs[m.tool_call_id] = m.content
                 
-                # Serialize all messages using shared helper
+                # Serialize all messages (full state for frontend replacement)
                 serialized = [
                     serialize_message(m, tool_outputs) 
                     for m in all_state_messages
                     if m.type != "tool"  # Skip raw ToolMessages
                 ]
                 
-                # Get checkpoint ID from latest message
-                checkpoint_id = getattr(node_messages[-1], 'id', str(uuid.uuid4()))
+                # Get checkpoint ID from config (not msg.id — different semantics)
+                checkpoint_id = config.get("configurable", {}).get("checkpoint_id", str(uuid.uuid4()))
                 
                 await self._event_bus.broadcast_checkpoint_event(
                     instance_id=instance_id,
@@ -1034,6 +1041,10 @@ interface SSEEvent {
 | Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty |
 | `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code |
 | `broadcast_checkpoint_event()` sends checkpoints to dispatcher queue via `_broadcast_to_global()` | The dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` from checkpoint events if optimization needed. |
+| **Unbounded message accumulation produces duplicates and O(n²) data** | `all_state_messages.extend()` never clears. LangGraph nodes may *modify* existing messages (append tool_calls), creating duplicates. Fix: key by `msg.id` and replace on collision. After emitting, reset accumulator or track `last_emitted_count` to emit only delta. Consider calling `aget_state()` once after the loop for final canonical state. |
+| **`msg.id` used as `checkpoint_id` — wrong semantics** | Line 360 sets `checkpoint_id = msg.id`. This conflates message ID with checkpoint ID. If reconnection is re-added, clients seek to wrong thing. Fix: use `config.get("configurable", {}).get("checkpoint_id")` from LangGraph run config, or rename field to `last_message_id`. |
+| **`message_id` → `id` frontend rename (73 occurrences) — isolate in separate PR** | Buried as one table row. Interleaving with SSE changes guarantees hard-to-debug failures. Fix: execute as **Step 0.5** (standalone commit before any SSE changes). Run `npm build` after rename to verify. |
+| **`send_message()` tool conflation** | Section 3.5 conflates `manager.send_message()` (ainvoke, SSE-silent) with `send_message` tool (enqueue_message → queue → produces checkpoints fine). Integration test #11 should test both paths independently. |
 
 ---
 
@@ -1041,22 +1052,21 @@ interface SSEEvent {
 
 > Steps 1 and 2 are swapped. `persistence.py` just needs import updates and can be done before adding `serialize_message()` to event_bus.py.
 
-### **Step 0 (PREREQUISITE)**: Create `daemon/utils.py`
+### **Step 0.5 (ISOLATED PR)**: Frontend `message_id` → `id` rename
 
-> **Circular import fix.** `parse_think_tags` and `_THINK_PATTERN` live in `manager.py`, but `event_bus.py` and `persistence.py` both need to use them.
+> **CRITICAL**: Execute this as a standalone commit/PR before any SSE changes. Do not combine with other steps.
 
-```bash
-touch daemon/utils.py
-```
+Steps:
+1. Run: `grep -r "message_id" frontend/src --include="*.ts" -l` to find all 73 occurrences
+2. Replace all `.message_id` with `.id` in frontend files
+3. Update interface definitions: `Message.message_id` → `Message.id`, `MessageResponse.message_id` → `MessageResponse.id`
+4. Update `trackBy` functions to use `message.id`
+5. Run `npm build` to verify compilation
+6. Commit this change separately
 
-Move from `daemon/manager.py`:
-- `_THINK_PATTERN` (compiled regex, **line 249**) → `daemon/utils.py`
-- `parse_think_tags()` (**lines 252–272**, 21 lines) → `daemon/utils.py`
+**Files affected**: `chat.component.ts`, `sse.service.ts`, `models/index.ts`, `chat-interface.component.ts`, and others found in step 1.
 
-Update imports:
-- `daemon/manager.py`: `from .utils import parse_think_tags`
-- `daemon/persistence.py`: `from daemon.utils import parse_think_tags` (replace line 166 import)
-- `daemon/services/event_bus.py`: `from daemon.utils import parse_think_tags` (in `serialize_message()`)
+**Note**: Some placeholder IDs like `temp-${Date.now()}` at `chat.component.ts:658` must reconcile with LangGraph's UUID-based IDs during this step.
 
 ---
 
