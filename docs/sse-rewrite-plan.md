@@ -19,9 +19,12 @@
 
 ## Current State Problems
 
-### 1. Duplicate `message_received`
-- Emitted twice in `manager.py:enqueue_message()` — once via `session.add(event)` (line 968) and again via `create_message_received_event()` (line 985)
-- SSE shows two identical events (ids 1296, 1297)
+### 1. Duplicate `message_received` (Audit Gap)
+- Written to DB inside `enqueue_message()` transaction (`session.add(event)` at line 968) with `kind=MESSAGE_RECEIVED`
+- **Not broadcast via SSE** — no call to `EventBus.create_message_received_event()` in `enqueue_message()`
+- `message_service.py:on_child_completion_report()` emits `message_received` via SSE separately (for child report delivery to parent)
+- The DB write is for audit/analytics only — not part of the real-time stream
+- After this rewrite, child report delivery uses checkpoint events instead (parent emits when it processes the report)
 
 ### 2. Wrong `message_id` on Streaming Events
 - `tool_call`, `content_chunk`, `thinking` events use the **user's** message_id
@@ -146,7 +149,9 @@ async def broadcast_checkpoint_event(
     self.notify(instance_id)
 ```
 
-#### 1.2 Add `_serialize_message()` module-level function
+#### 1.2 Add `_serialize_message()` module-level function (NEW)
+
+> ⚠️ This function does not currently exist. It is being **added** as a new module-level helper.
 
 Add at module level (not in EventBus class — so `persistence.py` can reuse it):
 
@@ -365,8 +370,13 @@ but the SSE emission happens via checkpoint events, not explicit lifecycle event
 Current flow in `_process_child_completion_and_notify_parent()` (line 1861):
 1. Build report message
 2. Create `MessageQueue` + `Task` entries
-3. Call `create_message_received_event()` ← REMOVE
-4. Call `create_child_completed_event()` ← REMOVE
+3. Call `self._message_service.on_child_completion_report()` ← **REMOVE** (DB write moved directly into this method)
+4. Call `create_child_completed_event()` ← **REMOVE** (replaced by parent's checkpoint)
+
+After changes:
+1. Build report message
+2. Create `MessageQueue` + `Task` entries
+3. Insert message record to DB directly ← NEW (moved from `on_child_completion_report()`)
 
 The parent instance will emit a checkpoint event when it processes the report message.
 
@@ -543,17 +553,24 @@ message first appeared.
 
 ### 7. Backend: `daemon/services/message_service.py` (163 lines)
 
-**What to delete**: The entire file.
+> ⚠️ **Deletion is NOT straightforward.** `MessageService` has two concerns:
+> 1. **SSE broadcast** (replaced by checkpoint events) — can be removed
+> 2. **DB persistence** (inserts message records) — **must be preserved**
 
-All methods are replaced by checkpoint events:
-- `on_user_message_stored()` → checkpoint emitted when message enters graph
-- `on_assistant_message_completed()` → checkpoint emitted when agent node completes
-- `on_child_completion_report()` → checkpoint emitted when parent processes report
-- `on_child_error_report()` → checkpoint emitted when parent processes error
+**DB persistence logic that must be moved before deletion:**
 
-**Note**: The manager's `_process_child_completion_and_notify_parent()` must still
-enqueue messages to the parent's queue, but it no longer calls MessageService methods.
-The checkpoint event will fire when the parent processes the message.
+| Method | Lines | What it does | Where to move |
+|--------|-------|-------------|---------------|
+| `on_user_message_stored()` | 29–53 | Inserts message record to DB after user message queued | `manager.py:enqueue_message()` |
+| `on_assistant_message_completed()` | 55–111 | Inserts assistant message record + tool message records | `manager.py:_process_message_with_tracking()` |
+
+**Deletion plan:**
+1. Move DB write from `on_user_message_stored()` into `enqueue_message()` (before or after existing DB ops)
+2. Move DB writes from `on_assistant_message_completed()` into `_process_message_with_tracking()` (after assistant content is finalized)
+3. Delete `message_service.py` entirely
+4. Remove `MessageService` instantiation and `self._message_service` from `manager.py`
+
+**Child report handling** (via `on_child_completion_report()`) — still needs DB write to persist the report message to the parent's message queue. This should remain in `manager.py:_process_child_completion_and_notify_parent()` directly.
 
 ---
 
@@ -796,7 +813,7 @@ Search all files for `compute_message_id` and replace:
 
 | File | Reason |
 |------|--------|
-| `daemon/services/message_service.py` | Replaced by checkpoint events |
+| `daemon/services/message_service.py` | DB persistence logic moved to `manager.py`; SSE broadcast replaced by checkpoints. File is now empty/unused. |
 
 ### Backend — Files to Clean Up
 
@@ -834,6 +851,7 @@ Search all files for `compute_message_id` and replace:
 2. `broadcast_checkpoint_event()` — verify queue delivery
 3. `get_instance_messages()` — verify LangGraph IDs are used
 4. SSE endpoint — verify only `checkpoint` events are emitted
+5. `serialize_message()` with `tool_outputs` map — verify tool outputs are embedded in assistant message's `tool_calls[]` field
 
 ### Integration Tests Needed
 
@@ -862,11 +880,30 @@ Search all files for `compute_message_id` and replace:
 
 1. **`daemon/services/event_bus.py`** — Add `serialize_message()` + `broadcast_checkpoint_event()`, remove old methods
 2. **`daemon/persistence.py`** — Use `serialize_message()`, remove `compute_message_id()`
-3. **`daemon/manager.py`** — Replace streaming with checkpoints, remove `compute_message_id` usage
+3. **`daemon/manager.py`** — Move DB writes from `message_service.py` into `enqueue_message()` and `_process_message_with_tracking()`; replace streaming with checkpoints; remove `compute_message_id` usage
 4. **`daemon/api.py`** — Rewrite SSE endpoint
 5. **`daemon/message_models.py`** — Clean up
-6. **Delete `daemon/services/message_service.py`**
-7. **`frontend/src/app/models/index.ts`** — Update interfaces
+6. **Delete `daemon/services/message_service.py`** — Only after DB writes have been moved to `manager.py`
+7. **`frontend/src/app/models/index.ts`** — Update interfaces (`message_id` → `id`)
 8. **`frontend/src/app/services/sse.service.ts`** — Rewrite
-9. **`frontend/src/app/pages/chat/chat.component.ts`** — Simplify
+9. **`frontend/src/app/pages/chat/chat.component.ts`** — Simplify (remove delta effects, remove `message_id` lookups)
 10. **Update tests**
+
+---
+
+## Pre-Implementation Verification
+
+Run these before starting to scope the impact:
+
+1. **Frontend `message_id` references** — Count all files that need updating:
+
+   ```bash
+   grep -r "message_id" frontend/src --include="*.ts" -l | wc -l
+   grep -r "\.message_id" frontend/src --include="*.ts" -c
+   ```
+
+2. **`parse_think_tags()` circular import risk** — `event_bus.py` cannot import from `manager.py` (EventBus is injected into manager, so a circular dependency exists). If `parse_think_tags()` is only in `manager.py`, move it to a shared utility module (e.g., `daemon/utils.py`) before `serialize_message()` tries to use it.
+
+3. **Thinking extraction provider coverage** — Confirm all 4 extraction paths are needed for your LLM providers. If any path is unused, document which providers need which paths and remove dead paths.
+
+4. **`on_child_completion_report()` DB write scope** — Verify exactly what this method writes to DB (message record, task record, etc.) so the replacement in `manager.py` is complete.
