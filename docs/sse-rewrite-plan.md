@@ -211,6 +211,12 @@ async def broadcast_checkpoint_event(
     
     serialized = [serialize_message(msg, tool_outputs) for msg in messages]
     
+    # ⚠️ CR4 FIX: Skip empty checkpoints — LangGraph nodes may complete without
+    # new messages (conditional edges, routing nodes). Emitting an empty messages[]
+    # would wipe the frontend's message list.
+    if not serialized:
+        return
+    
     event = {
         "instance_id": instance_id,
         "event_type": "checkpoint",
@@ -536,8 +542,10 @@ Alternatively, emit a dedicated `completed` event via `broadcast_sync()` at the 
 **Recommended approach (C1)**: Keep emitting a lightweight `completed` event specifically for the dispatcher (not SSE). This preserves the dispatcher's expected payload structure `{source, content, message_type}` without polluting the SSE stream:
 
 ```python
-# In manager.py or task_processor.py, after all processing completes:
-await self._event_bus.broadcast_sync(
+# ⚠️ CR5 FIX: Use _broadcast_to_global() directly — broadcast_sync() uses
+# asyncio.run_coroutine_threadsafe() which is for SYNC callers, not async.
+# In task_processor.py:ProcessMessageProcessor.process(), after message completes:
+await self._event_bus._broadcast_to_global(
     instance_id=instance_id,
     event_type="completed",
     data={
@@ -548,6 +556,12 @@ await self._event_bus.broadcast_sync(
     }
 )
 ```
+
+> ⚠️ **⚠️ CR6 FIX**: Also update `ResponseDispatcher._handle_global_event()` to skip `checkpoint` events:
+> ```python
+> if event_type == 'checkpoint':
+>     return  # Dispatcher only handles 'completed' events
+> ```
 
 The SSE stream only has `connected`/`checkpoint`/`error`/`keepalive`. The dispatcher receives `completed` via `_broadcast_to_global()`.
 
@@ -617,7 +631,9 @@ async def stream_events(instance_id: str, request: Request):
         }
         
         # 2. Send initial checkpoint (current state)
-        current_messages = await manager.get_messages(instance_id)
+        # ⚠️ C1 FIX: manager.get_messages() doesn't exist — use persistence directly
+        checkpointer = await persistence.get_checkpointer(manager._db_path)
+        current_messages = await persistence.get_instance_messages(checkpointer, instance_id)
         if current_messages:
             yield {
                 "event": "checkpoint",
@@ -942,9 +958,17 @@ interface Message {
   tool_calls?: ToolCall[] | null;
   created_at?: string;
 }
+
+interface MessageResponse {
+  id: string;                              // ⚠️ CR7: was message_id — matches LangGraph
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+  instance_id?: string;
+}
 ```
 
-Key change: `message_id` → `id` (matching LangGraph's field name).
+Key change: `message_id` → `id` (matching LangGraph's field name) for both `Message` and `MessageResponse`.
 
 #### 11.2 Delete SSE-specific types
 
@@ -1153,6 +1177,132 @@ The plan's code uses `all_state_messages.extend(node_messages)` but never declar
 all_state_messages: list = []
 ```
 
+---
+
+## Critical Issues from Council Review
+
+> ⚠️ **Added from council review.** The following critical issues must be fixed before implementation begins.
+
+### CR1. `process_and_complete()` is completely unexamined (CRITICAL)
+
+`manager.py:process_and_complete()` is the task completion entry point and almost certainly calls EventBus methods (`create_instance_completed_event`, `create_agent_message_delta`, etc.). The plan doesn't mention it at all.
+
+**Action**: Before implementation, fully audit `process_and_complete()`:
+```bash
+grep -n "create_instance_completed_event\|create_agent_message_delta\|create_processing_completed_event\|broadcast_streaming_event" daemon/manager.py
+```
+
+Delete or redirect all EventBus calls in this method. Add results to the plan's affected-files table.
+
+### CR2. `create_instance_completed_event()` call sites not audited (CRITICAL)
+
+Section 1.3 marks `create_instance_completed_event()` (event_bus.py lines 161–169) for deletion, but doesn't trace all callers. If it's called from `process_and_complete()`, deleting the method without updating call sites will cause `AttributeError` at runtime.
+
+**Action**: Before implementing Step 1:
+```bash
+grep -rn "create_instance_completed_event\|instance_completed\|INSTANCE_COMPLETED" daemon/ --include="*.py"
+```
+Map every call site, then either update callers to use the new `completed` event approach or delete them.
+
+### CR3. Error handler in `_process_message_with_tracking()` guards deleted code (CRITICAL)
+
+Around manager.py line 1374, an exception handler calls `create_error_event()`. The plan keeps `create_error_event()` (Section 1.4) but doesn't specify:
+1. What exception handler remains after the streaming loop is removed
+2. Which exceptions the handler catches post-rewrite
+
+**Action**: Clarify in Section 2.1: The error handler remains for graph execution errors, not streaming errors. Update the exception scope to match.
+
+### CR4. Empty checkpoint wipes frontend messages (MEDIUM→HIGH)
+
+If a LangGraph node completes with no new messages (conditional edge, routing node), `broadcast_checkpoint_event()` fires with an empty `messages[]`. The frontend's `messages.set(checkpoint_data.messages)` would wipe all existing messages.
+
+**Action**: In `broadcast_checkpoint_event()` (Section 1.1), skip emission when `messages` is empty:
+```python
+if not serialized:
+    return  # No messages to broadcast
+```
+
+### CR5. `broadcast_sync()` wrong for async contexts (MEDIUM)
+
+Section 3.3a recommends `broadcast_sync()` for the `completed` event, but `broadcast_sync()` uses `asyncio.run_coroutine_threadsafe()` internally — designed for **synchronous** callers. `task_processor.py` and `manager.py` are **async** contexts.
+
+**Action**: Update Section 3.3a to recommend:
+- **From async context**: call `_broadcast_to_global()` directly
+- **From sync context only**: use `broadcast_sync()`
+
+### CR6. `ResponseDispatcher` integration underspecified (MEDIUM)
+
+Section 3.3a's C1 fix (lightweight `completed` event for dispatcher) doesn't specify:
+1. **Where** to emit the event (task_processor.py? manager.py?)
+2. **Exact event structure**
+3. **How** the dispatcher's handler parses it
+
+**Action**: Add concrete code to Section 3.3a:
+```python
+# In task_processor.py:ProcessMessageProcessor.process(), after message completes
+await self._event_bus._broadcast_to_global(
+    instance_id=instance_id,
+    event_type="completed",
+    data={
+        "source": source,
+        "content": final_message_content,
+        "message_type": "final",
+        "instance_id": instance_id,
+    }
+)
+```
+
+Also add to Section 3.3a: "Update `ResponseDispatcher._handle_global_event()` to skip events with `type == 'checkpoint'` — the dispatcher only cares about the `completed` event."
+
+### CR7. `MessageResponse.message_id` not renamed (MEDIUM)
+
+Section 11.1 changes `Message.message_id → Message.id` but doesn't mention `MessageResponse` (models/index.ts:49-57), which also has a `message_id` field.
+
+**Action**: Add to Section 11.1's field-renaming table:
+| `MessageResponse` | 52 | `message_id` | `id` |
+
+### CR8. Implementation order: Steps 1-2 should be swapped (LOW)
+
+Step 0 creates `daemon/utils.py` with `parse_think_tags`. Step 1 adds `serialize_message()` to `event_bus.py`. Step 2 updates `persistence.py` imports.
+
+The dependency graph requires Step 2 (persistence imports from event_bus) to come **before** Step 1 (event_bus's `serialize_message()`) to avoid import errors during partial deploys.
+
+**Action**: Reorder as:
+1. Step 0: Create `daemon/utils.py` with `parse_think_tags`
+2. Step 1: Update `persistence.py` imports → `daemon.utils`
+3. Step 2: Add `serialize_message()` to `event_bus.py`
+4. Step 3: Update `manager.py` imports
+
+---
+
+## Priority-Ordered Testing Gaps
+
+> ⚠️ **Added from council review.** Prioritized list of tests that must pass before merge.
+
+### P0 — Must have before merge
+
+| Test | Why |
+|------|-----|
+| SSE reconnect returns correct `messages[]` | Validates entire checkpoint-based approach |
+| `ResponseDispatcher` receives/parses new `completed` event | Prevents silent failure of external sources (Telegram, Discord) |
+| `process_and_complete()` emits correct events after audit | Validates unexamined code path |
+
+### P1 — Should have before merge
+
+| Test | Why |
+|------|-----|
+| Empty checkpoint doesn't wipe frontend messages | Prevents UI data loss |
+| `broadcast_checkpoint_event()` with no global subscribers | Validates no crash when dispatcher is absent |
+| `create_instance_completed_event()` all callers updated | Prevents AttributeError at runtime |
+
+### P2 — Good to have
+
+| Test | Why |
+|------|-----|
+| Concurrent checkpoint emissions don't block graph | Backpressure handling |
+| `stream_mode=["updates"]` produces same final state | LangGraph behavior verification |
+| Frontend `messages.set()` on rapid successive checkpoints | No stale references or render glitches |
+
 #### M8. `stream_mode=["updates"]` drops token-level streaming explicitly
 
 The plan replaces the `"messages"` stream mode with `"updates"`. This means **no streaming tokens during inference** — only full messages after each node completes. This is intentional per the plan's principles ("correctness over real-time feedback") but should be **explicitly documented** as a behavior change.
@@ -1213,6 +1363,8 @@ Step 0 says `parse_think_tags()` is at "~line 252". It is actually lines **252�
 
 ## Implementation Order
 
+> ⚠️ **CR8**: Steps 1 and 2 must be swapped. `persistence.py` already exists and just needs its import updated. Adding `serialize_message()` to `event_bus.py` first avoids a window where partial deploys could fail.
+
 ### **Step 0 (PREREQUISITE)**: Create `daemon/utils.py`
 
 > ⚠️ **Circular import fix.** `parse_think_tags` and `_THINK_PATTERN` live in `manager.py`, but `event_bus.py` and `persistence.py` both need to use them. Moving them to a shared utils module breaks the circular dependency.
@@ -1232,7 +1384,19 @@ Update imports:
 
 ---
 
-### 1. **`daemon/services/event_bus.py`** — Add `serialize_message()` + `broadcast_checkpoint_event()`, remove old methods
+### 1. **`daemon/persistence.py`** — Update imports, remove `compute_message_id()` ← MOVED UP
+
+> ⚠️ **CR8**: Do this BEFORE adding `serialize_message()` to event_bus.py. This file just needs import updates.
+
+Steps:
+1. Update `parse_think_tags` import to `from daemon.utils import parse_think_tags`
+2. Rewrite `get_instance_messages()` to use `serialize_message()` and LangGraph `msg.id` (serialize_message will be added in next step)
+3. Remove `compute_message_id()` function
+4. Add `_collect_timestamps()` helper if not already extracted
+
+> **Note**: `serialize_message` will be imported from `daemon.services.event_bus` — do this after Step 2 completes.
+
+### 2. **`daemon/services/event_bus.py`** — Add `serialize_message()` + `broadcast_checkpoint_event()`, remove old methods ← MOVED DOWN
 
 Steps:
 1. Add `serialize_message()` at module level (imports `parse_think_tags` from `daemon.utils`)
@@ -1243,13 +1407,7 @@ Steps:
 6. **M6**: Audit `broadcast_sync()` — if no callers found, delete it entirely instead of maintaining. If callers exist, simplify (remove streaming branch, keep `completed` event routing for dispatcher).
 7. Keep `broadcast_sync()` with `completed` event routing if dispatcher integration is needed (C1)
 
-### 2. **`daemon/persistence.py`** — Use `serialize_message()`, remove `compute_message_id()`
-
-Steps:
-1. Update `parse_think_tags` import to `from daemon.utils import parse_think_tags`
-2. Rewrite `get_instance_messages()` to use `serialize_message()` and LangGraph `msg.id`
-3. Remove `compute_message_id()` function
-4. Add `_collect_timestamps()` helper if not already extracted
+> After this step, update `persistence.py` to import `serialize_message` from `daemon.services.event_bus`.
 
 ### 3. **`daemon/manager.py` + `task_processor.py`** — Full migration (streaming → checkpoints + MessageService removal)
 
