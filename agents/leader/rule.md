@@ -70,6 +70,11 @@ Need to do something?
 - **Search first** using `project_search()` or `project_list()`
 - **Confirm project** with user if multiple matches (skip in TrueAuto)
 
+### Approver Instance
+- **ALWAYS spawn a NEW approver instance** for each plan check
+- **NEVER reuse an existing approver instance** — always spawn fresh
+- **Rationale:** A new approver provides independent evaluation without prior context bias
+
 ### Git Management
 - **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations, terminate when done
 - **Use `latest` as integration branch** — ensure it exists, create from main if needed

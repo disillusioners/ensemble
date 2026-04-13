@@ -128,6 +128,8 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **Instance reuse:** The same Planner and Reviewer instances are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
 
+**Approver:** ALWAYS spawn a fresh approver instance. Never reuse.
+
 ### Loop Limit
 **Max 3 cycles** of (Planner → Reviewer). After 3 cycles, present best plan to user with notes.
 
