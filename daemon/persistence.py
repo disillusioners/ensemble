@@ -10,6 +10,7 @@ Threading Notes:
 """
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,23 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 logger = logging.getLogger(__name__)
+
+
+def compute_message_id(instance_id: str, role: str, content: str) -> str:
+    """Generate a deterministic message ID based on instance, role, and content.
+    
+    Used by both SSE emission and checkpoint loading to ensure message IDs are
+    consistent across real-time events and API calls.
+    
+    Args:
+        instance_id: The instance identifier.
+        role: Message role (user, assistant, system).
+        content: Message content (first 100 chars used for hashing).
+        
+    Returns:
+        A deterministic UUID5 based on the message identity.
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
 
 
 async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
@@ -171,8 +189,8 @@ async def get_instance_messages(
                         "output": tool_outputs.get(tc_id),
                     })
         
-        # Generate a message ID based on content hash (for consistency)
-        msg_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
+        # Generate a deterministic message ID (same formula used by SSE emission)
+        msg_id = compute_message_id(instance_id, role, content)
         
         # Use tracked timestamp if available, fallback to checkpoint timestamp
         original_msg_id = getattr(msg, 'id', None)

@@ -18,6 +18,7 @@ from .config import Config
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .persistence import (
+    compute_message_id,
     get_instance_messages,
     get_checkpointer,
 )
@@ -899,17 +900,23 @@ class InstanceManager:
         from .repositories.message_queue.models import MessageQueue, MessageType, MessageStatus
         from .repositories.event.models import Event, EventKind
         
-        message_id = str(uuid.uuid4())
-        
         # Determine message type based on source
         if source.startswith("report:"):
             msg_type = MessageType.COMPLETION_REPORT.value
+            # System-generated reports use random IDs (not user messages)
+            message_id = str(uuid.uuid4())
         elif source.startswith("error_report:"):
             msg_type = MessageType.ERROR_REPORT.value
+            # System-generated errors use random IDs (not user messages)
+            message_id = str(uuid.uuid4())
         elif source.startswith("agent:"):
             msg_type = MessageType.AGENT.value
+            # Agent-to-agent messages use random IDs
+            message_id = str(uuid.uuid4())
         else:
             msg_type = MessageType.HUMAN.value
+            # User messages use deterministic IDs (matches checkpoint loading)
+            message_id = compute_message_id(instance_id, "user", message)
         
         with Session(self._engine) as session:
             # 1. Insert the message

@@ -7,11 +7,11 @@ Single entry point:
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.message_models import ToolCallInfo, UnifiedMessage
+from daemon.persistence import compute_message_id
 from daemon.repositories.event.models import EventKind
 
 if TYPE_CHECKING:
@@ -66,7 +66,8 @@ class MessageService:
         This is THE key addition. Call this after LangGraph has stored
         the assistant message. It broadcasts the full message via SSE.
         """
-        assistant_message_id = str(uuid.uuid4())
+        # Use deterministic message ID (matches checkpoint loading)
+        assistant_message_id = compute_message_id(instance_id, "assistant", content)
         
         message = UnifiedMessage(
             message_id=assistant_message_id,
