@@ -10,7 +10,6 @@
 - Send the message → **DONE**
 - Do NOT poll, check, or wait
 - Do NOT call `get_instance_info()`, `list_instances()`, or any status check
-- Report appears as a new message: `"{AgentName} has done: {summary}"`
 - **TRUST the system. The completion report will arrive.**
 
 ### `spawn_instance` is FIRE AND FORGET
