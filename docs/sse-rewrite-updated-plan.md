@@ -175,6 +175,10 @@ async def broadcast_checkpoint_event(
     await self._broadcast_to_global(instance_id, "checkpoint", data=event)
 ```
 
+> **Decision needed**: `broadcast_checkpoint_event()` calls `_broadcast_to_global()` to reach the `ResponseDispatcher`. However, checkpoint events will also flow to the dispatcher queue even though they're filtered out. Options:
+> - **Option A (recommended)**: Keep the `_broadcast_to_global()` call — dispatcher filters them out, acceptable overhead
+> - **Option B**: Remove `_broadcast_to_global()` from `broadcast_checkpoint_event()` — only `completed` events need to reach the dispatcher
+
 #### 1.2 Add `serialize_message()` module-level function
 
 Add at module level in `event_bus.py` (not in the `EventBus` class — so `persistence.py` can reuse it):
@@ -274,7 +278,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
 | 122-134 | `create_processing_failed_event()` | Replaced by checkpoint |
 | 136-146 | `create_child_completed_event()` | Replaced by checkpoint |
 | 148-159 | `create_child_failed_event()` | Replaced by checkpoint |
-| 161-169 | `create_instance_completed_event()` | Replaced by checkpoint |
+| 161-169 | `create_instance_completed_event()` | DEAD CODE — zero callers confirmed. Delete without auditing callers. |
 | 171-181 | `create_error_event()` | Keep minimal version |
 | 198-200 | Legacy event type mapping | No more legacy |
 | 225-280 | `broadcast_streaming_event()` | Replaced by checkpoint |
@@ -292,7 +296,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
 | 317-357 | `get_streaming_queue()`, `get_streaming_events()` | Reuse for checkpoint queue |
 | 363-436 | `subscribe_all()`, `unsubscribe_all()`, `_broadcast_to_global()` | Keep for global subscribers |
 | 480-516 | `cleanup_instance()`, `shutdown()` | Still needed |
-| 522-558 | `broadcast_sync()` | Audit first — delete if no callers; otherwise simplify |
+| 522-558 | `broadcast_sync()` | **Delete entirely.** Zero callers confirmed, and it calls `broadcast_streaming_event()` which is also deleted. |
 
 ---
 
@@ -364,11 +368,15 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                 break  # Only emit once per update
 ```
 
+> **Important**: Change `stream_mode=["updates", "messages"]` at the current streaming loop (around line 1156) to `stream_mode=["updates"]` — removing `"messages"` is what drops token-level streaming. The proposed code above already uses `["updates"]`.
+
 > **Behavior change**: `stream_mode=["updates"]` drops token-level streaming entirely. Users will see no output until a node completes. This is an accepted regression per the project's long-running task focus.
 
 **Important**: We accumulate messages from the `astream` output directly — **no `graph.aget()` call** inside the loop.
 
 #### 2.3 Remove post-streaming logic after `finally` block (lines 1407–1479)
+
+> **Note on `graph.aget_state()`**: The `graph.aget_state()` call at line ~1413 (after the streaming loop) may become redundant after the rewrite. With `stream_mode=["updates"]`, messages are accumulated via `all_state_messages.extend(node_messages)` in the streaming loop. Verify that all messages are correctly accumulated from stream events before removing `graph.aget_state()`. If not, keep it as a fallback to ensure complete message history.
 
 The code after line 1406 (`finally` block) handles:
 - Finalizing the assistant message
@@ -411,6 +419,10 @@ Find and remove:
 
 Child completion reports should still enqueue messages to parent instances, but the SSE emission happens via checkpoint events.
 
+> **Note on `on_user_message_stored()`**: This method exists in `message_service.py` but has zero callers in the codebase. No migration needed — delete it with the rest of the file.
+
+> **Also**: The `elif self._event_repo:` fallback path at `task_processor.py:129-140` is unreachable in production since `_event_bus` is always set. Delete this entire branch as part of Step 3.
+
 #### 3.2 Simplify child completion flow
 
 Current flow in `_process_child_completion_and_notify_parent()` (lines 1861–1948):
@@ -436,12 +448,15 @@ Also remove `self._event_bus.create_child_failed_event()` at line 2046.
 
 #### 3.4 `ResponseDispatcher` integration
 
+**Insertion point**: `daemon/task_processor.py:171` — replace the existing `on_assistant_message_completed()` call with the `_broadcast_to_global()` code below.
+
 The `ResponseDispatcher` (`daemon/sources/dispatcher.py:62,178`) subscribes to ALL events via `subscribe_all()` and filters for `event_type == "completed"` to route agent responses back to external sources (Telegram, Discord, etc.).
 
 **After the rewrite**: Keep emitting a lightweight `completed` event specifically for the dispatcher. This preserves the dispatcher's expected payload structure `{source, content, message_type}` without polluting the SSE stream:
 
 ```python
-# In task_processor.py:ProcessMessageProcessor.process(), after message completes:
+# In task_processor.py:ProcessMessageProcessor.process() at line 171,
+# replacing: await self._message_service.on_assistant_message_completed(...)
 # Use _broadcast_to_global() directly — broadcast_sync() uses asyncio.run_coroutine_threadsafe()
 # which is for synchronous callers, not async contexts.
 await self._event_bus._broadcast_to_global(
@@ -456,11 +471,7 @@ await self._event_bus._broadcast_to_global(
 )
 ```
 
-Update `ResponseDispatcher._handle_global_event()` to skip `checkpoint` events:
-```python
-if event_type == 'checkpoint':
-    return  # Dispatcher only handles 'completed' events
-```
+`ResponseDispatcher._handle_global_event()` already filters for `event_type == "completed"`. Since checkpoint events have `event_type == "checkpoint"`, they are already ignored by the dispatcher. No changes needed to the dispatcher code — verify this by checking `daemon/sources/dispatcher.py:178`.
 
 The SSE stream only has `connected`/`checkpoint`/`error`/`keepalive`. The dispatcher receives `completed` via `_broadcast_to_global()`.
 
@@ -469,26 +480,30 @@ The SSE stream only has `connected`/`checkpoint`/`error`/`keepalive`. The dispat
 **Keep this method.** The Event table is used for audit/analytics. These raw inserts are the audit log, separate from the SSE stream.
 
 After the rewrite, verify this method is still called from:
-- `process_and_complete()` — for `INSTANCE_COMPLETED`
 - `_process_child_completion_and_notify_parent()` — for `CHILD_COMPLETED`
+- `_process_instance_completion()` — for `INSTANCE_COMPLETED` (rename if needed; audit for actual call site)
 
 After removing the duplicate `create_child_completed_event()` call, `CHILD_COMPLETED` will only be written once (via this method) — fixing the existing bug.
 
-#### 3.6 Audit `process_and_complete()` before implementation
+### 3.6 Audit `_create_completion_events()` call sites
 
-`process_and_complete()` is the task completion entry point. Audit before deleting `create_instance_completed_event()`:
+`_create_completion_events()` writes raw Event rows for audit. Verify it is called from:
+- `_process_instance_completion()` (or equivalent) — for `INSTANCE_COMPLETED`
+- `_process_child_completion_and_notify_parent()` — for `CHILD_COMPLETED`
+
+Audit before implementation:
 ```bash
-grep -n "create_instance_completed_event\|create_agent_message_delta\|create_processing_completed_event\|broadcast_streaming_event" daemon/manager.py
+grep -rn "_create_completion_events" daemon/ --include="*.py"
 ```
-
-Delete or redirect all EventBus calls in this method.
 
 #### 3.7 Audit all `create_*_event()` call sites
 
 Before implementing Step 1, audit all callers:
 ```bash
-grep -rn "create_instance_completed_event\|instance_completed\|INSTANCE_COMPLETED\|create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_child_completed_event\|create_child_failed_event" daemon/ --include="*.py"
+grep -rn "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_child_completed_event\|create_child_failed_event" daemon/ --include="*.py"
 ```
+
+Note: `create_instance_completed_event()` has zero callers — no grep needed, just delete it.
 
 Map every call site, then either update callers or delete them.
 
@@ -982,6 +997,8 @@ interface SSEEvent {
 8. **Multi-turn message ID consistency** — Send msg1 → verify checkpoint → send msg2 → verify BOTH messages have consistent IDs → refresh → verify REST API matches SSE
 9. **Backend restart → SSE reconnect** — Verify client reconnects and receives current state
 10. **External source routing (Telegram/Discord)** — Verify ResponseDispatcher still routes responses
+11. **`send_message()` SSE invisibility** — Verify that calling `send_message()` from the API or as an agent tool does NOT emit any SSE events. The parent instance's SSE stream should not show the sent message until it processes the message.
+12. **Concurrent SSE clients** — Two SSE clients connected to the same instance should receive identical checkpoint events.
 
 ### Paths NOT Previously Covered by Tests
 
@@ -1008,7 +1025,7 @@ interface SSEEvent {
 | `created_at` is `None` during SSE streaming | Accept regression. REST API populates after reload. |
 | `TaskProcessor` calls EventBus lifecycle methods | Audit and remove in Step 3 before deleting `create_*_event` methods |
 | `ResponseDispatcher` loses event stream (external sources silent) | Keep lightweight `completed` event via `_broadcast_to_global()` for dispatcher |
-| `broadcast_sync()` still calls deleted `broadcast_streaming_event()` | Remove streaming branch, add checkpoint routing. Audit for callers first — delete if unused. |
+| `broadcast_sync()` calls deleted `broadcast_streaming_event()` | **Delete `broadcast_sync()` entirely.** Zero callers confirmed. |
 | `Last-Event-ID` reconnection support silently dropped | Document as regression or implement cursor-based seek later |
 | `send_message()` inconsistency with new system | Document as SSE-invisible. `ainvoke()` bypasses SSE. |
 | `on_assistant_message_completed()` call is in `task_processor.py`, not `manager.py` | Update call site reference to `task_processor.py:171`. Migrate DB logic there. |
@@ -1016,6 +1033,7 @@ interface SSEEvent {
 | `create_child_failed_event()` call in `_send_error_report()` not in plan | Add to removal list at `manager.py:2046` |
 | Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty |
 | `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code |
+| `broadcast_checkpoint_event()` sends checkpoints to dispatcher queue via `_broadcast_to_global()` | The dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` from checkpoint events if optimization needed. |
 
 ---
 
@@ -1089,8 +1107,8 @@ Steps:
 7. Remove `MessageService` instantiation and `self._message_service` declaration from `manager.py`
 
 **task_processor.py sub-steps:**
-8. At line 171: Replace `await self._message_service.on_assistant_message_completed(...)` with inline DB write
-9. Audit fallback `_event_repo` path at lines 129-140 — clean up orphaned event creation
+8. At `task_processor.py:171`: Replace `await self._message_service.on_assistant_message_completed(...)` with the `completed` event broadcast via `_broadcast_to_global()` (see Section 3.4). Also migrate the DB write (the part that persists the message record) inline — move the logic from `MessageService.on_assistant_message_completed()` into this call site.
+9. **DELETE** the `elif self._event_repo:` fallback branch at `task_processor.py:129-140` — this code is unreachable in production (dead code)
 10. Remove `MessageService` instantiation and `self._message_service` declaration from `task_processor.py`
 
 ---
@@ -1205,9 +1223,6 @@ grep -n "create_child_failed_event" daemon/manager.py
 
 # 10. _create_completion_events() call sites
 grep -rn "_create_completion_events" daemon/ --include="*.py"
-
-# 11. process_and_complete() EventBus usage
-grep -n "create_instance_completed_event\|broadcast_streaming_event" daemon/manager.py
 ```
 
 ---
