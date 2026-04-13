@@ -980,16 +980,6 @@ class InstanceManager:
         if self._worker_pool is not None:
             self._worker_pool.notify_work()
         
-        # Broadcast event asynchronously (fire and forget)
-        try:
-            await self._event_bus.create_message_received_event(
-                instance_id=instance_id,
-                message_id=message_id,
-                content=unified_msg.to_dict(),
-            )
-        except Exception as e:
-            logger.warning(f"Failed to broadcast message_received event: {e}")
-        
         logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
         
         return AsyncMessageResult(
@@ -1060,6 +1050,11 @@ class InstanceManager:
         tool_call_map = {}  # Track tool calls by ID to match with outputs
         thinking_content = None
         final_content = ""
+        
+        # Track assistant message ID for streaming events (tool_call, content_chunk, thinking, tool_complete)
+        # These events belong to the assistant's message, not the user's message
+        accumulated_assistant_content = ""
+        current_assistant_msg_id = compute_message_id(instance_id, "assistant", "")
         
         # Content chunk batching to reduce event rate
         content_buffer = ""
@@ -1190,7 +1185,7 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="thinking",
-                                            message_id=message_id,
+                                            message_id=current_assistant_msg_id,
                                             delta={
                                                 "type": "thinking",
                                                 "content": thinking_content,
@@ -1214,7 +1209,7 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="tool_call",
-                                            message_id=message_id,
+                                            message_id=current_assistant_msg_id,
                                             delta={
                                                 "type": "tool_call",
                                                 "tool_call": {
@@ -1255,7 +1250,7 @@ class InstanceManager:
                                         await self._event_bus.broadcast_streaming_event(
                                             instance_id=instance_id,
                                             event_type="tool_complete",
-                                            message_id=message_id,
+                                            message_id=current_assistant_msg_id,
                                             delta={
                                                 "type": "tool_complete",
                                                 "tool_call": tool_call_data,
@@ -1271,6 +1266,12 @@ class InstanceManager:
                                 content_buffer += chunk.content
                                 content_buffer_size += len(chunk.content)
                                 event_count += 1
+                                
+                                # Update accumulated assistant content and recompute message ID
+                                accumulated_assistant_content += chunk.content
+                                current_assistant_msg_id = compute_message_id(
+                                    instance_id, "assistant", accumulated_assistant_content
+                                )
                             
                             # Accumulate reasoning_content from delta chunks (e.g., GLM extended thinking)
                             chunk_reasoning = None
@@ -1314,7 +1315,7 @@ class InstanceManager:
                                     await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
                                         event_type="thinking",
-                                        message_id=message_id,
+                                        message_id=current_assistant_msg_id,
                                         delta={
                                             "type": "thinking",
                                             "content": thinking_buffer,
@@ -1335,7 +1336,7 @@ class InstanceManager:
                                     await self._event_bus.broadcast_streaming_event(
                                         instance_id=instance_id,
                                         event_type="content_chunk",
-                                        message_id=message_id,
+                                        message_id=current_assistant_msg_id,
                                         delta={
                                             "type": "chunk",
                                             "content": content_buffer,
@@ -1382,7 +1383,7 @@ class InstanceManager:
                 await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
                     event_type="content_chunk",
-                    message_id=message_id,
+                    message_id=current_assistant_msg_id,
                     delta={
                         "type": "chunk",
                         "content": content_buffer,
@@ -1395,7 +1396,7 @@ class InstanceManager:
                 await self._event_bus.broadcast_streaming_event(
                     instance_id=instance_id,
                     event_type="thinking",
-                    message_id=message_id,
+                    message_id=current_assistant_msg_id,
                     delta={
                         "type": "thinking",
                         "content": thinking_buffer,
