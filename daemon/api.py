@@ -846,6 +846,7 @@ async def stream_events(instance_id: str, request: Request):
         nonlocal connection_id
         current_task = asyncio.current_task()
         connected_at = time.monotonic()
+        seen_event_ids: set[str] = set()  # Track sent event IDs to prevent duplicates
         
         # Track this connection
         async with _sse_lock:
@@ -856,6 +857,15 @@ async def stream_events(instance_id: str, request: Request):
             }
         
         try:
+            # Helper to yield event only if not already sent
+            async def yield_if_new(event_id: str, formatted_event: dict):
+                """Yield event only if this event_id hasn't been sent yet."""
+                if event_id not in seen_event_ids:
+                    seen_event_ids.add(event_id)
+                    return formatted_event
+                logger.debug(f"Skipping duplicate event {event_id}")
+                return None
+            
             # Send initial connection event
             yield {"event": "connected", "data": json.dumps({"instance_id": instance_id})}
 
@@ -875,8 +885,12 @@ async def stream_events(instance_id: str, request: Request):
             if last_event_id > 0:
                 missed_events = event_repo.get_events_since(instance_id, last_event_id)
                 for event in missed_events:
-                    yield format_sse_event(event)
-                    last_event_id = max(last_event_id, event.id)
+                    formatted = format_sse_event(event)
+                    event_id_str = str(event.id)
+                    result = await yield_if_new(event_id_str, formatted)
+                    if result is not None:
+                        yield result
+                        last_event_id = max(last_event_id, event.id)
                 logger.debug(f"Replayed {len(missed_events)} events for instance {instance_id}")
 
             # Get notification signal for this instance
@@ -928,9 +942,16 @@ async def stream_events(instance_id: str, request: Request):
                     all_events.append(("streaming", time.time(), e))  # Use current time for streaming events
                 all_events.sort(key=lambda x: (x[1], 0 if x[0] == "streaming" else 1))
                 
-                # Yield merged events
+                # Yield merged events (with deduplication)
                 for kind, _, event in all_events:
-                    yield format_sse_event(event)
+                    formatted = format_sse_event(event)
+                    # Extract event_id from formatted SSE response
+                    event_id_str = formatted.get("id", "0")
+                    if event_id_str in seen_event_ids:
+                        logger.debug(f"Skipping duplicate event {event_id_str} ({event.kind if hasattr(event, 'kind') else event.get('event_type', 'unknown')})")
+                        continue
+                    seen_event_ids.add(event_id_str)
+                    yield formatted
                     if kind == "db":
                         last_event_id = max(last_event_id, event.id)
                     event_count += 1
