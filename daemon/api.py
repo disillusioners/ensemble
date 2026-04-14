@@ -838,7 +838,7 @@ async def stream_events(instance_id: str, request: Request):
         
         # 2. Send initial checkpoint (current state)
         instance = manager.get_instance(instance_id)
-        checkpointer = await get_checkpointer(manager._db_path)
+        checkpointer = await get_checkpointer(manager.db_path)
         current_messages = await get_instance_messages(checkpointer, instance_id)
         if current_messages:
             yield {
