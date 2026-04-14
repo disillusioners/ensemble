@@ -158,3 +158,5 @@ Write tests alongside each phase, not just at the end. Each phase should have pa
 | Missing sequence numbers | Add `checkpoint_sequence` to Phase 1 |
 | Thinking extraction scattered | Extract to `extract_thinking()` in PR 0 |
 | PR boundary incomplete | Include test files and task_processor.py call sites |
+| Streaming integration tests become obsolete | Rewrite in Phase 8 |
+| LangGraph version mismatch | Lock version in `pyproject.toml`. Future upgrades need separate plan. |

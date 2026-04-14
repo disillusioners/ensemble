@@ -24,10 +24,10 @@
 | Child completion SSE gap: parent sees child report only after checkpoint | Accept as regression OR emit immediate `message_received` event on child completion for instant parent notification |
 | `send_message()` SSE bypass: direct `graph.ainvoke()` with no streaming | Document as known limitation — affects agent-to-agent communication (`tools/instance.py:267`), not just API calls. SSE stream never updates when agent calls `send_message()` on watched instance. |
 | Queue ordering under concurrency: out-of-order checkpoints cause UI flicker | **Mitigation**: Add sequence numbers to checkpoint events; frontend sorts by sequence on receipt |
-| No rollback path | Add `sse_v2: true/false` feature flag in config.yaml |
-| Out-of-order checkpoints cause UI flicker | Add `checkpoint_sequence` for correct ordering |
-| `broadcast_streaming_event` test files break | Update in same PR (test file rewrites included) |
+| `broadcast_streaming_event` test files break | Update in same PR (test file rewrites included in Phase 8) |
 | `task_processor.py` call sites break | Include in same PR as Phase 3b |
+| Streaming integration tests become obsolete | Rewrite `tests/test_events.py`, `tests/integration/test_sse_streaming.py`, `tests/integration/test_streaming_errors.py`, `tests/integration/test_streaming_performance.py` in Phase 8 |
+| LangGraph version mismatch | Lock LangGraph version in `pyproject.toml`. Future version upgrades require separate verification plan. |
 
 ---
 
@@ -41,9 +41,11 @@ The following behavior changes are intentional and accepted:
 | `created_at` is `None` during SSE streaming | Timestamps only populated when loading from REST API after completion |
 | `Last-Event-ID` reconnection support dropped | Simplifies SSE endpoint; can be re-added with checkpoint sequence numbers |
 | `send_message()` bypasses SSE entirely | Used for programmatic/API calls, not user-facing streaming |
+| `send_message()` SSE bypass: agent-to-agent communication | Frontend should poll REST API when using `send_message()` directly on watched instance (`tools/instance.py:267`). SSE stream will not update. |
+| No tool progress indication during streaming | User won't see which tool is active until it completes. Acceptable for long-running task focus. |
 | Large message list sent on each checkpoint | Acceptable for current scale; diff mode can be added later |
 | Some `EventKind` enum values become dead code | Doesn't break anything; can clean up later |
 | Child completion SSE gap: parent sees child's report only after parent's next checkpoint | Parent's SSE stream doesn't instantly reflect child completion — delay until parent processes report via checkpoint |
 | `enqueue_message()` DB writes become audit-only | SSE no longer reads from event table. Verify no external systems depend on `Event(kind=MESSAGE_RECEIVED)` for real-time features. |
 | `_create_completion_events()` DB writes become audit-only | SSE endpoint no longer reads these events. Document as audit-only. |
-| Feature flag complexity | If toggle added, config must stay in sync across deployments |
+| Feature flag complexity | **Rejected**: Project is not in production. Rollback = `git revert`. Phase 0.5 serves as the abort gate. |

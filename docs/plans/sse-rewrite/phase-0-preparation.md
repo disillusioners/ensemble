@@ -48,3 +48,28 @@ Expected output after completion:
 - `daemon/utils.py` contains the function
 - `daemon/manager.py` imports from `.utils`
 - `daemon/persistence.py` imports from `daemon.utils`
+
+---
+
+## Phase 0.5: LangGraph Stream Format Verification (MANDATORY)
+
+> **Hard gate**: Phase 1 cannot start until this passes.
+
+Add diagnostic logging to verify LangGraph's actual `astream()` format matches assumptions:
+
+```python
+# In manager.py, add before streaming loop
+async for event in graph.astream(graph_input, config, stream_mode=["updates", "messages"]):
+    if isinstance(event, tuple):
+        mode, data = event
+    else:
+        mode, data = "updates", event
+    
+    logger.info(f"LangGraph stream event: mode={mode}, "
+                f"data_keys={data.keys() if isinstance(data, dict) else type(data)}")
+    # Continue with existing logic
+```
+
+**Abort condition**: If stream format differs significantly from expected, reassess the checkpoint-based approach entirely. Document findings and create new plan before proceeding.
+
+**Note**: LangGraph version is locked in `pyproject.toml`. Format verification is valid only for the current version. Future LangGraph upgrades require separate verification.

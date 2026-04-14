@@ -10,16 +10,18 @@
 
 ---
 
-## 1. Tests to DELETE
+## 1. Tests to REWRITE or DELETE
 
-| Test File | What |
-|-----------|------|
+| Test File | Action |
+|-----------|--------|
+| `tests/test_events.py` | Rewrite for new event types |
+| `tests/integration/test_sse_streaming.py` | Rewrite for checkpoint model |
+| `tests/integration/test_streaming_errors.py` | Rewrite for error handling |
+| `tests/integration/test_streaming_performance.py` | Rewrite for checkpoint perf |
 | Tests for `compute_message_id` | Delete (function removed) |
 | Tests for `MessageService` | Delete (file removed) |
 | Tests for `EventBus.broadcast_streaming_event` | Replace with `broadcast_checkpoint_event` |
-| Tests for `format_sse_event` | Delete (function removed) |
 | Tests for `EventBus` convenience methods | Delete (`create_processing_started_event`, `create_child_completed_event`, etc.) |
-| Tests for `parse_think_tags` in manager context | Move to utils test |
 
 ---
 
