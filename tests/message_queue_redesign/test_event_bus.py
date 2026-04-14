@@ -1,8 +1,8 @@
-"""Tests for Phase 4 EventBus service.
+"""Tests for Phase 4 EventBus service (checkpoint-based).
 
-Tests the hybrid event delivery system combining:
+Tests the checkpoint-based event delivery system combining:
+- Checkpoint events (full message state via asyncio.Queue)
 - Lifecycle events (persisted to DB via EventRepository)
-- Streaming events (in-memory via asyncio.Queue)
 - Per-instance notifications (asyncio.Event)
 - Global subscriber support (ResponseDispatcher)
 """
@@ -20,7 +20,7 @@ from sqlmodel import SQLModel
 
 from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.event.repository import EventRepository
-from daemon.services.event_bus import EventBus, STREAMING_EVENT_TYPES
+from daemon.services.event_bus import EventBus
 
 
 # ============================================================================
@@ -66,6 +66,122 @@ def message_id():
 
 
 # ============================================================================
+# Test Class: EventBus Checkpoint Events
+# ============================================================================
+
+
+class TestEventBusCheckpointEvents:
+    """Tests for checkpoint events that deliver full message state."""
+
+    @pytest.mark.asyncio
+    async def test_broadcast_checkpoint_event_queues_message(
+        self, event_bus, instance_id
+    ):
+        """Checkpoint event is queued for SSE delivery."""
+        messages = [
+            {"message_id": "msg-1", "role": "user", "content": "Hello"},
+            {"message_id": "msg-2", "role": "assistant", "content": "Hi there!"},
+        ]
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+        )
+
+        # Verify checkpoint was queued
+        events = await event_bus.get_streaming_events(instance_id)
+        assert len(events) == 1
+        assert events[0]["event_type"] == "checkpoint"
+        assert events[0]["checkpoint_id"] == "seq_0"
+        assert len(events[0]["messages"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_broadcast_checkpoint_event_not_persisted(
+        self, event_bus, event_repo, instance_id
+    ):
+        """Checkpoint event is NOT written to DB (only queued for SSE)."""
+        messages = [
+            {"message_id": "msg-1", "role": "user", "content": "Hello"},
+        ]
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+        )
+
+        # Verify NO event was persisted to DB
+        events = event_repo.get_by_instance(instance_id)
+        assert len(events) == 0
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_with_tool_outputs(
+        self, event_bus, instance_id
+    ):
+        """Checkpoint event includes tool_outputs map."""
+        messages = [
+            {"message_id": "msg-1", "role": "assistant", "content": "", "tool_calls": [
+                {"id": "tool-1", "name": "bash", "arguments": {"cmd": "ls"}}
+            ]},
+        ]
+        tool_outputs = {"tool-1": "file1.txt\nfile2.txt"}
+        
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_1",
+            tool_outputs=tool_outputs,
+        )
+
+        events = await event_bus.get_streaming_events(instance_id)
+        assert len(events) == 1
+        assert events[0]["tool_outputs"]["tool-1"] == "file1.txt\nfile2.txt"
+
+    @pytest.mark.asyncio
+    async def test_multiple_checkpoints_queued(
+        self, event_bus, instance_id
+    ):
+        """Multiple checkpoint events are available in the streaming queue."""
+        # Broadcast multiple checkpoints
+        for i in range(3):
+            messages = [{"message_id": f"msg-{i}", "role": "user", "content": f"Test {i}"}]
+            await event_bus.broadcast_checkpoint_event(
+                instance_id=instance_id,
+                messages=messages,
+                checkpoint_id=f"seq_{i}",
+            )
+
+        # Drain the streaming queue
+        events = await event_bus.get_streaming_events(instance_id)
+
+        assert len(events) == 3
+        assert all(e["event_type"] == "checkpoint" for e in events)
+        assert events[0]["checkpoint_id"] == "seq_0"
+        assert events[1]["checkpoint_id"] == "seq_1"
+        assert events[2]["checkpoint_id"] == "seq_2"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_queue_max_size(
+        self, event_bus, instance_id
+    ):
+        """Checkpoint queue respects max size and drops oldest events."""
+        # EventBus has default streaming_queue_size=100, test with small size
+        small_bus = EventBus(event_repo=MagicMock(), streaming_queue_size=3)
+
+        # Try to put more events than queue size
+        for i in range(5):
+            messages = [{"message_id": f"msg-{i}", "role": "user", "content": f"Test {i}"}]
+            await small_bus.broadcast_checkpoint_event(
+                instance_id=instance_id,
+                messages=messages,
+                checkpoint_id=f"seq_{i}",
+            )
+
+        # Queue should have at most 3 events (oldest dropped)
+        events = await small_bus.get_streaming_events(instance_id)
+        assert len(events) <= 3
+
+
+# ============================================================================
 # Test Class: EventBus Lifecycle Events (DB Persistence)
 # ============================================================================
 
@@ -74,14 +190,15 @@ class TestEventBusLifecycleEvents:
     """Tests for lifecycle events that are persisted to the database."""
 
     @pytest.mark.asyncio
-    async def test_create_message_received_event(
+    async def test_create_event_persists_to_db(
         self, event_bus, event_repo, instance_id, message_id
     ):
-        """Lifecycle event with kind message_received is persisted to DB."""
-        await event_bus.create_message_received_event(
+        """Event with kind is persisted to DB."""
+        await event_bus.create_event(
             instance_id=instance_id,
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={"source": "api", "priority": 1},
             message_id=message_id,
-            content={"source": "api", "priority": 1},
         )
 
         # Verify event was persisted to DB
@@ -95,118 +212,6 @@ class TestEventBusLifecycleEvents:
         data = json.loads(events[0].data) if events[0].data else {}
         assert data["source"] == "api"
         assert data["priority"] == 1
-
-    @pytest.mark.asyncio
-    async def test_create_processing_started_event(
-        self, event_bus, event_repo, instance_id, message_id
-    ):
-        """Lifecycle event with kind processing_started is persisted to DB."""
-        await event_bus.create_processing_started_event(
-            instance_id=instance_id,
-            message_id=message_id,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.PROCESSING_STARTED.value
-        assert events[0].message_id == message_id
-
-    @pytest.mark.asyncio
-    async def test_create_processing_completed_event(
-        self, event_bus, event_repo, instance_id, message_id
-    ):
-        """Lifecycle event with kind processing_completed includes result data."""
-        result = {"status": "success", "output": "Done"}
-        await event_bus.create_processing_completed_event(
-            instance_id=instance_id,
-            message_id=message_id,
-            result=result,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.PROCESSING_COMPLETED.value
-
-        # Data is stored as JSON string in DB
-        data = json.loads(events[0].data) if events[0].data else {}
-        assert data["status"] == "success"
-        assert data["output"] == "Done"
-
-    @pytest.mark.asyncio
-    async def test_create_processing_failed_event(
-        self, event_bus, event_repo, instance_id, message_id
-    ):
-        """Lifecycle event with kind processing_failed includes error info."""
-        error_info = {"code": "TIMEOUT", "message": "Processing timed out"}
-        await event_bus.create_processing_failed_event(
-            instance_id=instance_id,
-            message_id=message_id,
-            error=error_info,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.PROCESSING_FAILED.value
-
-        # Data is stored as JSON string in DB
-        data = json.loads(events[0].data) if events[0].data else {}
-        assert data["code"] == "TIMEOUT"
-        assert data["message"] == "Processing timed out"
-
-    @pytest.mark.asyncio
-    async def test_create_child_completed_event(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Lifecycle event with kind child_completed includes child_id."""
-        child_id = str(uuid.uuid4())
-        await event_bus.create_child_completed_event(
-            instance_id=instance_id,
-            child_id=child_id,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.CHILD_COMPLETED.value
-
-        # Data is stored as JSON string in DB
-        data = json.loads(events[0].data) if events[0].data else {}
-        assert data["child_id"] == child_id
-
-    @pytest.mark.asyncio
-    async def test_create_child_failed_event(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Lifecycle event with kind child_failed includes child_id and error."""
-        child_id = str(uuid.uuid4())
-        error_info = {"message": "Child process crashed"}
-        await event_bus.create_child_failed_event(
-            instance_id=instance_id,
-            child_id=child_id,
-            error=error_info,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.CHILD_FAILED.value
-
-        # Data is stored as JSON string in DB
-        data = json.loads(events[0].data) if events[0].data else {}
-        assert data["child_id"] == child_id
-        assert data["error"]["message"] == "Child process crashed"
-
-    @pytest.mark.asyncio
-    async def test_create_instance_completed_event(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Lifecycle event with kind instance_completed is persisted to DB."""
-        await event_bus.create_instance_completed_event(
-            instance_id=instance_id,
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.INSTANCE_COMPLETED.value
-        assert events[0].message_id is None
 
     @pytest.mark.asyncio
     async def test_create_error_event(
@@ -228,89 +233,20 @@ class TestEventBusLifecycleEvents:
         assert data["type"] == "validation"
         assert data["message"] == "Invalid input"
 
-
-# ============================================================================
-# Test Class: EventBus Streaming Events (In-Memory Only)
-# ============================================================================
-
-
-class TestEventBusStreamingEvents:
-    """Tests for streaming events that are NOT persisted to DB."""
-
     @pytest.mark.asyncio
-    async def test_streaming_event_not_persisted(
+    async def test_create_event_with_string_kind(
         self, event_bus, event_repo, instance_id
     ):
-        """content_chunk streaming event is NOT written to DB."""
-        await event_bus.broadcast_streaming_event(
+        """Event with string kind is converted to EventKind."""
+        await event_bus.create_event(
             instance_id=instance_id,
-            event_type="content_chunk",
-            data={"text": "Hello world"},
+            kind="message_received",
+            data={"test": True},
         )
 
-        # Verify NO event was persisted to DB
         events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 0
-
-    @pytest.mark.asyncio
-    async def test_streaming_events_in_queue(
-        self, event_bus, instance_id
-    ):
-        """Multiple streaming events are available in the streaming queue."""
-        # Broadcast multiple streaming events
-        for i in range(3):
-            await event_bus.broadcast_streaming_event(
-                instance_id=instance_id,
-                event_type="content_chunk",
-                data={"chunk": i, "text": f"chunk_{i}"},
-            )
-
-        # Drain the streaming queue
-        events = await event_bus.get_streaming_events(instance_id)
-
-        assert len(events) == 3
-        assert all(e["event_type"] == "content_chunk" for e in events)
-        assert events[0]["data"]["chunk"] == 0
-        assert events[1]["data"]["chunk"] == 1
-        assert events[2]["data"]["chunk"] == 2
-
-    @pytest.mark.asyncio
-    async def test_streaming_events_all_types(
-        self, event_bus, instance_id
-    ):
-        """All streaming event types (content_chunk, thinking, tool_call, tool_complete)."""
-        for event_type in STREAMING_EVENT_TYPES:
-            await event_bus.broadcast_streaming_event(
-                instance_id=instance_id,
-                event_type=event_type,
-                data={"type": event_type},
-            )
-
-        events = await event_bus.get_streaming_events(instance_id)
-        assert len(events) == len(STREAMING_EVENT_TYPES)
-
-        received_types = {e["event_type"] for e in events}
-        assert received_types == STREAMING_EVENT_TYPES
-
-    @pytest.mark.asyncio
-    async def test_streaming_queue_max_size(
-        self, event_bus, instance_id
-    ):
-        """Streaming queue respects max size and drops oldest events."""
-        # EventBus has default streaming_queue_size=100, test with small size
-        small_bus = EventBus(event_repo=MagicMock(), streaming_queue_size=3)
-
-        # Try to put more events than queue size
-        for i in range(5):
-            await small_bus.broadcast_streaming_event(
-                instance_id=instance_id,
-                event_type="content_chunk",
-                data={"i": i},
-            )
-
-        # Queue should have at most 3 events (oldest dropped)
-        events = await small_bus.get_streaming_events(instance_id)
-        assert len(events) <= 3
+        assert len(events) == 1
+        assert events[0].kind == EventKind.MESSAGE_RECEIVED.value
 
 
 # ============================================================================
@@ -320,6 +256,27 @@ class TestEventBusStreamingEvents:
 
 class TestEventBusNotification:
     """Tests for asyncio.Event notification per instance."""
+
+    @pytest.mark.asyncio
+    async def test_notification_set_on_checkpoint(
+        self, event_bus, instance_id
+    ):
+        """asyncio.Event is set after broadcasting a checkpoint."""
+        notification = event_bus.get_notification(instance_id)
+
+        # Event should not be set initially
+        assert not notification.is_set()
+
+        # Broadcast a checkpoint
+        messages = [{"message_id": "msg-1", "role": "user", "content": "Hello"}]
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+        )
+
+        # Notification should now be set
+        assert notification.is_set()
 
     @pytest.mark.asyncio
     async def test_notification_set_on_lifecycle_event(
@@ -332,29 +289,10 @@ class TestEventBusNotification:
         assert not notification.is_set()
 
         # Create a lifecycle event
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
-        )
-
-        # Notification should now be set
-        assert notification.is_set()
-
-    @pytest.mark.asyncio
-    async def test_notification_set_on_streaming_event(
-        self, event_bus, instance_id
-    ):
-        """asyncio.Event is set after broadcasting a streaming event."""
-        notification = event_bus.get_notification(instance_id)
-
-        # Event should not be set initially
-        assert not notification.is_set()
-
-        # Broadcast a streaming event
-        await event_bus.broadcast_streaming_event(
-            instance_id=instance_id,
-            event_type="content_chunk",
-            data={"text": "Hello"},
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={"source": "api"},
         )
 
         # Notification should now be set
@@ -373,9 +311,10 @@ class TestEventBusNotification:
         assert notif_a is not notif_b
 
         # Set notification for instance A only
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_a,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={},
         )
 
         # Only instance A's notification should be set
@@ -388,9 +327,10 @@ class TestEventBusNotification:
         notification = event_bus.get_notification(instance_id)
 
         # Create event to set notification
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={},
         )
         assert notification.is_set()
 
@@ -414,14 +354,13 @@ class TestEventBusCursorDelivery:
         """Events are retrievable by cursor position."""
         # Create 5 lifecycle events
         for i in range(5):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_id,
-                message_id=f"msg-{i}",
-                content={"index": i},
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"index": i},
             )
 
         # Get events after cursor 3 (should return events 4, 5)
-        # Note: EventRepository.get_events_since uses 'after_id' parameter
         events = event_repo.get_events_since(instance_id, after_id=3)
 
         assert len(events) == 2
@@ -435,9 +374,10 @@ class TestEventBusCursorDelivery:
         """Returns empty list when cursor is at the latest event."""
         # Create 3 lifecycle events
         for i in range(3):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_id,
-                message_id=f"msg-{i}",
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"index": i},
             )
 
         # Get events after cursor 3 (no new events)
@@ -455,16 +395,18 @@ class TestEventBusCursorDelivery:
 
         # Create events for instance A
         for i in range(3):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_a,
-                message_id=f"msg-a-{i}",
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"index": i},
             )
 
         # Create events for instance B
         for i in range(2):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_b,
-                message_id=f"msg-b-{i}",
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"index": i},
             )
 
         # Get events for each instance
@@ -531,17 +473,19 @@ class TestEventBusCleanup:
         self, event_bus, instance_id
     ):
         """cleanup_instance removes streaming queue and notification."""
-        # Create streaming event to populate queue
-        await event_bus.broadcast_streaming_event(
+        # Create checkpoint to populate queue
+        messages = [{"message_id": "msg-1", "role": "user", "content": "Hello"}]
+        await event_bus.broadcast_checkpoint_event(
             instance_id=instance_id,
-            event_type="content_chunk",
-            data={"text": "Hello"},
+            messages=messages,
+            checkpoint_id="seq_0",
         )
 
         # Create lifecycle event to set notification
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={},
         )
 
         # Verify state exists
@@ -563,14 +507,16 @@ class TestEventBusCleanup:
 
         # Add state for multiple instances
         for inst_id in instance_ids:
-            await event_bus.broadcast_streaming_event(
+            messages = [{"message_id": f"msg-{inst_id}", "role": "user", "content": "test"}]
+            await event_bus.broadcast_checkpoint_event(
                 instance_id=inst_id,
-                event_type="content_chunk",
-                data={"text": "test"},
+                messages=messages,
+                checkpoint_id="seq_0",
             )
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=inst_id,
-                message_id=str(uuid.uuid4()),
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={},
             )
 
         # Verify state exists
@@ -595,6 +541,29 @@ class TestEventBusGlobalSubscribers:
     """Tests for global subscriber support (ResponseDispatcher pattern)."""
 
     @pytest.mark.asyncio
+    async def test_subscribe_all_receives_checkpoint_events(
+        self, event_bus, instance_id
+    ):
+        """Global subscriber receives checkpoint events."""
+        # Subscribe
+        queue = event_bus.subscribe_all("test_subscriber")
+
+        # Broadcast checkpoint
+        messages = [{"message_id": "msg-1", "role": "user", "content": "Hello"}]
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+        )
+
+        # Subscriber should receive the event
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == instance_id
+        assert event["event_type"] == "checkpoint"
+        # Data is wrapped in 'data' key
+        assert event["data"]["checkpoint_id"] == "seq_0"
+
+    @pytest.mark.asyncio
     async def test_subscribe_all_receives_lifecycle_events(
         self, event_bus, instance_id
     ):
@@ -603,36 +572,16 @@ class TestEventBusGlobalSubscribers:
         queue = event_bus.subscribe_all("test_subscriber")
 
         # Create lifecycle event
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={"source": "api"},
         )
 
         # Subscriber should receive the event
         event = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert event["instance_id"] == instance_id
         assert event["event_type"] == "message_received"
-
-    @pytest.mark.asyncio
-    async def test_subscribe_all_receives_streaming_events(
-        self, event_bus, instance_id
-    ):
-        """Global subscriber receives streaming events."""
-        # Subscribe
-        queue = event_bus.subscribe_all("test_subscriber")
-
-        # Broadcast streaming event
-        await event_bus.broadcast_streaming_event(
-            instance_id=instance_id,
-            event_type="content_chunk",
-            data={"text": "Hello world"},
-        )
-
-        # Subscriber should receive the event
-        event = await asyncio.wait_for(queue.get(), timeout=1.0)
-        assert event["instance_id"] == instance_id
-        assert event["event_type"] == "content_chunk"
-        assert event["data"]["text"] == "Hello world"
 
     @pytest.mark.asyncio
     async def test_unsubscribe_stops_delivery(
@@ -646,9 +595,10 @@ class TestEventBusGlobalSubscribers:
         event_bus.unsubscribe_all("test_subscriber")
 
         # Create lifecycle event
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={},
         )
 
         # Queue should be empty (or subscriber not in dict)
@@ -661,9 +611,10 @@ class TestEventBusGlobalSubscribers:
         queue2 = event_bus.subscribe_all("subscriber_2")
 
         # Create lifecycle event
-        await event_bus.create_message_received_event(
+        await event_bus.create_event(
             instance_id=instance_id,
-            message_id=str(uuid.uuid4()),
+            kind=EventKind.MESSAGE_RECEIVED,
+            data={},
         )
 
         # Both subscribers should receive
@@ -693,50 +644,46 @@ class TestEventBusGlobalSubscribers:
 
 
 class TestEventBusMergeOrdering:
-    """Tests for merging DB events with streaming events.
+    """Tests for merging DB events with checkpoint events.
 
-    FIX W7: Events from DB (lifecycle) and streaming queue should be merged
-    by timestamp. When same timestamp, streaming events come first.
+    Events from DB (lifecycle) and checkpoint queue should be merged
+    by timestamp or sequence.
     """
 
     @pytest.mark.asyncio
-    async def test_merge_db_and_streaming_events(
+    async def test_db_and_checkpoint_events_separate(
         self, event_bus, event_repo, instance_id
     ):
-        """DB events (ordered by id) and streaming events (ordered by timestamp) merge correctly."""
+        """DB events (ordered by id) and checkpoint events (in queue) are separate."""
         # Create 3 lifecycle events (persisted to DB)
         for i in range(3):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_id,
-                message_id=f"db-msg-{i}",
-                content={"source": "db", "index": i},
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"source": "db", "index": i},
             )
 
-        # Create 2 streaming events (in-memory only)
-        await event_bus.broadcast_streaming_event(
-            instance_id=instance_id,
-            event_type="content_chunk",
-            data={"text": "chunk_1"},
-        )
-        await event_bus.broadcast_streaming_event(
-            instance_id=instance_id,
-            event_type="thinking",
-            data={"text": "thinking"},
-        )
+        # Create 2 checkpoint events (in-memory only)
+        for i in range(2):
+            messages = [{"message_id": f"msg-{i}", "role": "user", "content": f"chunk_{i}"}]
+            await event_bus.broadcast_checkpoint_event(
+                instance_id=instance_id,
+                messages=messages,
+                checkpoint_id=f"seq_{i}",
+            )
 
         # Get DB events via repository
         db_events = event_repo.get_events_since(instance_id, after_id=0)
         assert len(db_events) == 3
 
-        # Get streaming events via EventBus
-        streaming_events = await event_bus.get_streaming_events(instance_id)
-        assert len(streaming_events) == 2
+        # Get checkpoint events via EventBus
+        checkpoint_events = await event_bus.get_streaming_events(instance_id)
+        assert len(checkpoint_events) == 2
 
-        # Verify streaming events are NOT in DB (they have no id from DB)
-        for sev in streaming_events:
-            # Streaming events don't have an 'id' field since they're not persisted
-            assert "id" not in sev
-            assert sev["event_type"] in STREAMING_EVENT_TYPES
+        # Verify checkpoint events are NOT in DB (they have no id from DB)
+        for cev in checkpoint_events:
+            assert "id" not in cev
+            assert cev["event_type"] == "checkpoint"
 
     @pytest.mark.asyncio
     async def test_multi_client_sse_different_positions(
@@ -750,9 +697,10 @@ class TestEventBusMergeOrdering:
 
         # Create 5 lifecycle events
         for i in range(5):
-            await event_bus.create_message_received_event(
+            await event_bus.create_event(
                 instance_id=instance_id,
-                message_id=f"msg-{i}",
+                kind=EventKind.MESSAGE_RECEIVED,
+                data={"index": i},
             )
 
         # Client A starts at position 0 (gets all events)
@@ -765,32 +713,6 @@ class TestEventBusMergeOrdering:
         assert events_b[0].id == 4
         assert events_b[1].id == 5
 
-    @pytest.mark.asyncio
-    async def test_cursor_advances_correctly(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Cursor position advances as client processes events."""
-        # Create events
-        for i in range(5):
-            await event_bus.create_message_received_event(
-                instance_id=instance_id,
-                message_id=f"msg-{i}",
-            )
-
-        # Simulate client reading events one by one
-        cursor = 0
-        received_ids = []
-
-        # Read first batch of events (should get all 5)
-        events = event_repo.get_events_since(instance_id, after_id=cursor)
-        assert len(events) == 5
-        cursor = max(e.id for e in events)
-        received_ids.extend([e.id for e in events])
-
-        # Read again - should be empty now
-        events = event_repo.get_events_since(instance_id, after_id=cursor)
-        assert len(events) == 0
-
 
 # ============================================================================
 # Test Class: EventBus Sync Operations
@@ -800,8 +722,8 @@ class TestEventBusMergeOrdering:
 class TestEventBusSyncOperations:
     """Tests for synchronous broadcast operations."""
 
-    def test_broadcast_sync_works_from_thread(self, event_bus, instance_id):
-        """broadcast_sync can be called from a non-async thread."""
+    def test_broadcast_sync_legacy_stub(self, event_bus, instance_id):
+        """broadcast_sync is a legacy stub that does nothing."""
         import threading
 
         # Need to set event loop for sync operations
@@ -809,73 +731,93 @@ class TestEventBusSyncOperations:
         asyncio.set_event_loop(loop)
 
         try:
-            # Call broadcast_sync from a thread
+            # Call broadcast_sync from a thread (legacy stub)
             def sync_broadcast():
                 event_bus.broadcast_sync(
-                    instance_id=instance_id,
-                    event_type="content_chunk",
-                    data={"text": "sync test"},
+                    event={
+                        "instance_id": instance_id,
+                        "event_type": "checkpoint",
+                    }
                 )
 
             thread = threading.Thread(target=sync_broadcast)
             thread.start()
             thread.join(timeout=2)
 
-            # Event should have been queued
-            # (We can't easily verify async completion from sync test,
-            # but the call should not raise)
+            # Legacy stub does nothing, so no exception should be raised
 
         finally:
             loop.close()
 
 
 # ============================================================================
-# Test Class: EventBus Legacy Support
+# Test Class: EventBus Checkpoint Integration
 # ============================================================================
 
 
-class TestEventBusLegacySupport:
-    """Tests for backward compatibility with legacy event types."""
+class TestEventBusCheckpointIntegration:
+    """Integration tests for checkpoint events with full message state."""
 
     @pytest.mark.asyncio
-    async def test_legacy_message_queued_maps_to_message_received(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Legacy event type 'message_queued' maps to MESSAGE_RECEIVED."""
-        await event_bus.create_event(
-            instance_id=instance_id,
-            kind="message_queued",
-            message_id=str(uuid.uuid4()),
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.MESSAGE_RECEIVED.value
-
-    @pytest.mark.asyncio
-    async def test_legacy_completed_maps_to_processing_completed(
-        self, event_bus, event_repo, instance_id
-    ):
-        """Legacy event type 'completed' maps to PROCESSING_COMPLETED."""
-        await event_bus.create_event(
-            instance_id=instance_id,
-            kind="completed",
-            message_id=str(uuid.uuid4()),
-            data={"result": "success"},
-        )
-
-        events = event_repo.get_by_instance(instance_id)
-        assert len(events) == 1
-        assert events[0].kind == EventKind.PROCESSING_COMPLETED.value
-
-    @pytest.mark.asyncio
-    async def test_unknown_event_type_raises_value_error(
+    async def test_checkpoint_carries_full_message_history(
         self, event_bus, instance_id
     ):
-        """Unknown event type string raises ValueError."""
-        with pytest.raises(ValueError):
-            await event_bus.create_event(
-                instance_id=instance_id,
-                kind="custom_event",
-                data={"custom": True},
-            )
+        """Checkpoint events contain full message history for frontend replacement."""
+        # Simulate a conversation with multiple turns
+        messages = [
+            {"message_id": "msg-1", "role": "user", "content": "Hello"},
+            {"message_id": "msg-2", "role": "assistant", "content": "Hi there!"},
+            {"message_id": "msg-3", "role": "user", "content": "How are you?"},
+            {"message_id": "msg-4", "role": "assistant", "content": "I'm good!"},
+        ]
+        
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+        )
+
+        events = await event_bus.get_streaming_events(instance_id)
+        assert len(events) == 1
+        assert len(events[0]["messages"]) == 4
+        
+        # Verify message roles
+        roles = [m["role"] for m in events[0]["messages"]]
+        assert roles == ["user", "assistant", "user", "assistant"]
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_with_nested_tool_calls(
+        self, event_bus, instance_id
+    ):
+        """Checkpoint events properly serialize tool calls with nested structure."""
+        messages = [
+            {"message_id": "msg-1", "role": "assistant", "content": "", "tool_calls": [
+                {"id": "tc-1", "name": "bash", "arguments": {"command": "ls -la"}},
+                {"id": "tc-2", "name": "read_file", "arguments": {"path": "test.txt"}},
+            ]},
+        ]
+        
+        tool_outputs = {
+            "tc-1": "total 8\n-rw-r-- 1 user staff 256 Jan 15 10:30 test.txt",
+            "tc-2": "Hello, World!",
+        }
+        
+        await event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=messages,
+            checkpoint_id="seq_0",
+            tool_outputs=tool_outputs,
+        )
+
+        events = await event_bus.get_streaming_events(instance_id)
+        msg = events[0]["messages"][0]
+        
+        # Verify tool_calls are serialized
+        assert len(msg["tool_calls"]) == 2
+        assert msg["tool_calls"][0]["id"] == "tc-1"
+        # Note: output is NOT included in message's tool_calls - it's in tool_outputs map
+        assert msg["tool_calls"][0]["name"] == "bash"
+        
+        # Verify tool_outputs are available separately
+        assert events[0]["tool_outputs"]["tc-1"] == tool_outputs["tc-1"]
+        assert events[0]["tool_outputs"]["tc-2"] == tool_outputs["tc-2"]

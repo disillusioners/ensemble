@@ -10,7 +10,7 @@ import { SseService } from '../../services/sse.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent } from '../../components/message-input/message-input.component';
-import type { Agent, InstanceInfo, Message, MessageDelta } from '../../models';
+import type { Agent, InstanceInfo, Message } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
 
@@ -37,7 +37,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly sseService = inject(SseService);
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private routeSubscription: Subscription | null = null;
-  private messagesSubscription: Subscription | null = null;
 
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
@@ -75,277 +74,18 @@ export class ChatComponent implements OnInit, OnDestroy {
       localStorage.setItem('ensemble-show-toolcalls', String(this.showToolCalls()));
     });
 
-    // Simplified: Handle message deltas directly - update messages in-place
-    // FIX: Swap-and-clear pattern prevents race condition where deltas arrive during processing
+    // Simple checkpoint effect - SSE messages are the source of truth
     effect(() => {
-      const deltas = this.sseService.messageDeltas();
+      const sseMessages = this.sseService.messages();
       const currentInstance = this.currentInstance();
       
-      if (!currentInstance || deltas.length === 0) return;
+      if (!currentInstance || sseMessages.length === 0) return;
       
-      console.log('[Chat] Processing', deltas.length, 'message deltas');
+      console.log('[Chat] Updating messages from checkpoint, count:', sseMessages.length);
       
-      // Atomically swap: take ownership and clear immediately to prevent race condition
-      this.sseService.messageDeltas.set([]);
-      
-      // Process all deltas, updating the messages array
-      this.messages.update(msgs => {
-        let updated = [...msgs];
-        
-        for (const delta of deltas) {
-          // Only process deltas for current instance
-          if (delta.instance_id !== currentInstance.instance_id) continue;
-          
-          let msgIndex = updated.findIndex(m => m.message_id === delta.message_id);
-          
-          switch (delta.type) {
-            case 'processing_started':
-              // Only add placeholder if not exists (deduplication)
-              // If message already exists (e.g., from message_received like child reports), preserve it
-              if (msgIndex === -1) {
-                const placeholder: Message = {
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                };
-                updated.push(placeholder);
-                msgIndex = updated.length - 1;
-                console.log('[Chat] Added placeholder for message:', delta.message_id);
-              } else {
-                // Message already exists (e.g., child report from message_received)
-                // Convert role to assistant since it's now being processed
-                // but preserve the existing content
-                console.log('[Chat] Message already exists, skipping placeholder:', delta.message_id);
-              }
-              break;
-
-            case 'message_received':
-              // Add new message (user input, child reports, etc.) as user role
-              // Child completion reports have source like "child:instance_id"
-              // Skip if no content (empty message_received events come before the one with content)
-              if (!delta.content) {
-                console.log('[Chat] Skipping empty message_received:', delta.message_id);
-                break;
-              }
-              // Skip if message with same content already exists (user just sent this)
-              const existingSameContent = updated.find(m => 
-                m.role === 'user' && m.content === delta.content
-              );
-              if (existingSameContent) {
-                console.log('[Chat] Skipping duplicate message_received (user already sent this):', delta.message_id);
-                break;
-              }
-              if (msgIndex === -1) {
-                const newMessage: Message = {
-                  message_id: delta.message_id,
-                  role: 'user', // Child reports are treated as user input to the parent
-                  content: delta.content || '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                };
-                updated.push(newMessage);
-                console.log('[Chat] Added message_received:', delta.message_id, 'source:', delta.source);
-              }
-              break;
-              
-            case 'content_chunk':
-              // Handle streaming content - but don't overwrite child reports
-              // If existing message has role="user", create new message for assistant
-              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
-                // Existing message is a child report - create new message for assistant
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              } else if (msgIndex === -1) {
-                // No existing message - create new one
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              }
-              // Append content
-              updated[msgIndex] = {
-                ...updated[msgIndex],
-                content: (updated[msgIndex].content || '') + (delta.content || ''),
-              };
-              break;
-              
-            case 'thinking':
-              // Handle thinking content - but don't overwrite child reports
-              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
-                // Create new message for assistant
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: '',
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              } else if (msgIndex === -1) {
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: '',
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              }
-              updated[msgIndex] = {
-                ...updated[msgIndex],
-                thinking: delta.content,
-              };
-              break;
-              
-            case 'tool_call':
-              // Handle tool calls - but don't overwrite child reports
-              if (msgIndex >= 0 && updated[msgIndex].role === 'user') {
-                // Create new message for assistant
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              } else if (msgIndex === -1) {
-                updated.push({
-                  message_id: delta.message_id,
-                  role: 'assistant',
-                  content: '',
-                  thinking: undefined,
-                  thinking_extracted: undefined,
-                  tool_calls: [],
-                  created_at: new Date().toISOString(),
-                  instance_id: delta.instance_id,
-                });
-                msgIndex = updated.length - 1;
-              }
-              // FIX: Deduplicate by tool_call.id
-              const existingTool = updated[msgIndex].tool_calls?.find(
-                tc => tc.id === delta.tool_call?.id
-              );
-              if (!existingTool) {
-                const toolCalls = [...(updated[msgIndex].tool_calls || [])];
-                toolCalls.push({
-                  id: delta.tool_call?.id || `tool-${Date.now()}`,
-                  name: delta.tool_call?.name || '',
-                  arguments: delta.tool_call?.arguments || {},
-                  output: '',
-                });
-                updated[msgIndex] = { ...updated[msgIndex], tool_calls: toolCalls };
-              }
-              break;
-              
-            case 'tool_complete':
-              if (msgIndex >= 0 && delta.tool_call?.id) {
-                const toolCalls = (updated[msgIndex].tool_calls || []).map(tc => {
-                  if (tc.id === delta.tool_call?.id) {
-                    return { ...tc, output: delta.tool_call?.output || '' };
-                  }
-                  return tc;
-                });
-                updated[msgIndex] = { ...updated[msgIndex], tool_calls: toolCalls };
-              }
-              break;
-              
-            case 'processing_completed':
-              console.log('[Chat] Message completed:', delta.message_id, 'success:', delta.success);
-              this.isSending.set(false);
-              break;
-              
-            case 'processing_failed':
-              console.error('[Chat] Message failed:', delta.message_id, 'error:', delta.error);
-              this.isSending.set(false);
-              break;
-              
-            case 'message_completed':
-              // Finalize message with canonical content from message_completed event
-              // Key rule: if existing message has role="user" (child report), create NEW assistant message
-              // If existing message has role="assistant" (regular streaming), update existing
-              const msg = delta as typeof delta & { message: NonNullable<typeof delta.message> };
-              const existingMsg = msgIndex >= 0 ? updated[msgIndex] : null;
-              const isUserMessage = existingMsg?.role === 'user';
-              
-              console.log('[Chat] Message finalized:', delta.message_id, 
-                         '-> canonical:', msg.message?.message_id,
-                         'existingRole:', existingMsg?.role,
-                         'isUserMessage:', isUserMessage);
-              
-              if (msgIndex >= 0 && msg.message && isUserMessage) {
-                // Existing is user message (child report) - CREATE NEW assistant message
-                console.log('[Chat] Creating new assistant message for response');
-                updated.push({
-                  message_id: msg.message.message_id || delta.message_id,
-                  role: (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: msg.message.content || '',
-                  thinking: msg.message.thinking ?? undefined,
-                  thinking_extracted: msg.message.thinking_extracted ?? undefined,
-                  tool_calls: msg.message.tool_calls || [],
-                  created_at: msg.message.created_at || new Date().toISOString(),
-                });
-              } else if (msgIndex >= 0 && msg.message) {
-                // Existing is assistant message - UPDATE existing
-                updated[msgIndex] = {
-                  ...updated[msgIndex],
-                  content: msg.message.content ?? updated[msgIndex].content,
-                  thinking: msg.message.thinking ?? updated[msgIndex].thinking,
-                  thinking_extracted: msg.message.thinking_extracted ?? updated[msgIndex].thinking_extracted,
-                  tool_calls: msg.message.tool_calls || updated[msgIndex].tool_calls,
-                };
-              } else if (msg.message) {
-                // No existing message - CREATE new
-                console.log('[Chat] Creating new message (no existing):', msg.message.message_id);
-                updated.push({
-                  message_id: msg.message.message_id || delta.message_id,
-                  role: (msg.message.role as 'user' | 'assistant' | 'system') || 'assistant',
-                  content: msg.message.content || '',
-                  thinking: msg.message.thinking ?? undefined,
-                  thinking_extracted: msg.message.thinking_extracted ?? undefined,
-                  tool_calls: msg.message.tool_calls || [],
-                  created_at: msg.message.created_at || new Date().toISOString(),
-                });
-              }
-              break;
-          }
-        }
-        
-        return updated;
-      });
+      // Convert SSE messages to view model
+      this.messages.set(sseMessages.map(m => this.toViewModel(m)));
+      this.isSending.set(false);
     }, { allowSignalWrites: true });
 
     // Fallback: Reset isSending if streaming stopped but isSending is still true
@@ -357,42 +97,32 @@ export class ChatComponent implements OnInit, OnDestroy {
         this.isSending.set(false);
       }
     }, { allowSignalWrites: true });
-
-    // Handle title updates from SSE
-    effect(() => {
-      const titleUpdate = this.sseService.titleUpdates();
-      const currentInstance = this.currentInstance();
-      if (titleUpdate && titleUpdate.instance_id === currentInstance?.instance_id) {
-        this.instances.update(prev => prev.map(i => 
-          i.instance_id === titleUpdate.instance_id 
-            ? { ...i, title: titleUpdate.title }
-            : i
-        ));
-        if (this.currentInstance()?.instance_id === titleUpdate.instance_id) {
-          this.currentInstance.update(i => i ? { ...i, title: titleUpdate.title } : null);
-        }
-        this.sseService.titleUpdates.set(null);
-      }
-    }, { allowSignalWrites: true });
     
     // Handle SSE errors
     effect(() => {
       const latestError = this.sseService.latestError();
       const currentInstance = this.currentInstance();
       if (latestError && currentInstance && latestError.instance_id === currentInstance?.instance_id) {
-        console.error('Message processing error:', latestError);
+        console.error('[Chat] SSE error:', latestError);
         this.isSending.set(false);
         this.sseService.latestError.set(null);
       }
     }, { allowSignalWrites: true });
   }
 
+  /**
+   * Convert SSE message to view model (adds instance_id).
+   */
+  private toViewModel(m: Message): Message {
+    const currentInstance = this.currentInstance();
+    return {
+      ...m,
+      instance_id: m.instance_id || currentInstance?.instance_id,
+    };
+  }
+
   ngOnDestroy(): void {
     this.stopPolling();
-    if (this.messagesSubscription) {
-      this.messagesSubscription.unsubscribe();
-      this.messagesSubscription = null;
-    }
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
@@ -492,52 +222,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  private loadMessages(instanceId: string): void {
-    // FIX: Cancel previous subscription to prevent race conditions
-    if (this.messagesSubscription) {
-      this.messagesSubscription.unsubscribe();
-      this.messagesSubscription = null;
-    }
-    
-    this.messagesSubscription = this.api.getMessages(instanceId).subscribe({
-      next: (msgs) => {
-        // FIX: Only set messages if still on the same instance
-        const currentInstance = this.currentInstance();
-        if (currentInstance?.instance_id === instanceId) {
-          // Merge SSE-added messages with HTTP-loaded messages
-          // This preserves child reports and other SSE-added content
-          const currentMessages = this.messages();
-          
-          // Create a map of existing messages by message_id
-          const existingMap = new Map(currentMessages.map(m => [m.message_id, m]));
-          
-          // Merge: prefer existing (SSE-added) messages, fill in missing from HTTP
-          const merged = msgs.map(httpMsg => {
-            const existing = existingMap.get(httpMsg.message_id);
-            if (existing) {
-              // Preserve SSE-added message (may have more content or different state)
-              return existing;
-            }
-            return httpMsg;
-          });
-          
-          // Add any SSE-only messages that weren't in HTTP response
-          for (const existingMsg of currentMessages) {
-            if (!merged.find(m => m.message_id === existingMsg.message_id)) {
-              merged.push(existingMsg);
-            }
-          }
-          
-          // Sort by creation time
-          merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-          
-          this.messages.set(merged);
-        }
-      },
-      error: (err) => console.error('Failed to load messages:', err)
-    });
-  }
-
   private startPolling(): void {
     this.pollInterval = setInterval(() => {
       this.loadInstances();
@@ -573,7 +257,6 @@ export class ChatComponent implements OnInit, OnDestroy {
       console.log('[Chat] Using instance from list, connecting SSE');
       this.currentInstance.set(instance);
       this.messages.set([]);
-      this.loadMessages(instanceId);
       this.sseService.connect(instanceId);
     } else {
       // Try to get instance from API
@@ -584,7 +267,6 @@ export class ChatComponent implements OnInit, OnDestroy {
           this.instanceNotFound.set(null);
           this.currentInstance.set(instanceData);
           this.messages.set([]);
-          this.loadMessages(instanceId);
           this.sseService.connect(instanceId);
         },
         error: (err) => {
@@ -666,16 +348,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     
     this.api.sendMessage(instance.instance_id, content).subscribe({
       next: (_response) => {
-        // The assistant response will come via SSE
-        // Note: We don't need to update the user message's ID since the queue message_id
-        // is different from the message IDs used in the UI
+        // The assistant response will come via SSE checkpoint events
       },
       error: (err) => {
         console.error('Failed to send message:', err);
         this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
         this.messages.update(prev => prev.map(m => 
           m.message_id === userMessage.message_id 
-            ? { ...m, error: 'Failed to send' }
+            ? { ...m, content: m.content + ' [Failed to send]' }
             : m
         ));
         this.isSending.set(false);

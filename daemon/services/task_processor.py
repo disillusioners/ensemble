@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from .event_bus import EventBus
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
-from daemon.message_models import ToolCallInfo
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
     from daemon.repositories.task.repository import TaskRepository
     from daemon.repositories.event.repository import EventRepository
-    from daemon.services.message_service import MessageService
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +53,6 @@ class ProcessMessageProcessor(BaseProcessor):
         event_repo: "EventRepository | None",
         message_repository=None,
         event_bus: "EventBus | None" = None,
-        message_service: "MessageService | None" = None,
     ):
         """Initialize the message processor.
 
@@ -66,14 +62,12 @@ class ProcessMessageProcessor(BaseProcessor):
             event_repo: Optional EventRepository for event creation.
             message_repository: Optional MessageQueueRepository for message updates.
             event_bus: Optional EventBus for event creation.
-            message_service: Optional MessageService for unified SSE emission.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
         self._message_repo = message_repository
         self._event_bus = event_bus
-        self._message_service = message_service
 
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
@@ -120,25 +114,6 @@ class ProcessMessageProcessor(BaseProcessor):
         message_source = message.source if message else None
         is_retry = task.retry_count > 0
         
-        # Create processing_started event
-        if self._event_bus:
-            await self._event_bus.create_processing_started_event(
-                instance_id=task.instance_id,
-                message_id=task.message_id,
-            )
-        elif self._event_repo:
-            await asyncio.to_thread(
-                self._event_repo.create_event,
-                instance_id=task.instance_id,
-                kind="processing_started",
-                data={
-                    "task_id": task.id,
-                    "message_id": task.message_id,
-                    "worker_id": task.worker_id,
-                    "is_retry": is_retry,
-                },
-            )
-        
         try:
             # Process the message via manager's existing logic (LangGraph execution)
             result = await self._manager._process_message_with_tracking(
@@ -151,30 +126,18 @@ class ProcessMessageProcessor(BaseProcessor):
                 message_source=message_source,
             )
             
-            # NEW: Emit message_completed event with full assistant response
-            # This broadcasts the complete message (content, thinking, tool_calls) via SSE
-            # NOTE: on_assistant_message_completed also emits processing_completed internally
-            # so we don't need a separate create_processing_completed_event call here
-            if self._message_service and result:
-                tool_calls = None
-                if getattr(result, 'tool_calls', None):
-                    tool_calls = [
-                        ToolCallInfo(
-                            id=tc.get("id", str(uuid.uuid4())),
-                            name=tc.get("name", ""),
-                            arguments=tc.get("arguments", {}),
-                            output=tc.get("output"),
-                        )
-                        for tc in result.tool_calls
-                    ]
-                
-                await self._message_service.on_assistant_message_completed(
+            # Broadcast completed event via EventBus for SSE delivery
+            # Checkpoint events are already emitted by manager, this is for final completion signal
+            if self._event_bus and result:
+                await self._event_bus._broadcast_to_global(
                     instance_id=task.instance_id,
-                    original_message_id=task.message_id,
-                    content=result.content or "",
-                    thinking=getattr(result, 'thinking', None),
-                    thinking_extracted=getattr(result, 'thinking_extracted', None),
-                    tool_calls=tool_calls,
+                    event_type="completed",
+                    data={
+                        "source": message_source,
+                        "content": result.content or "",
+                        "message_type": "final",
+                        "instance_id": task.instance_id,
+                    }
                 )
             
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
@@ -321,7 +284,6 @@ class TaskProcessor:
         instance_manager,
         event_repo: "EventRepository | None" = None,
         event_bus: "EventBus | None" = None,
-        message_service: "MessageService | None" = None,
         graph_timeout_minutes: float = 40.0,
     ):
         """Initialize the task processor.
@@ -331,14 +293,12 @@ class TaskProcessor:
             instance_manager: InstanceManager for message processing.
             event_repo: Optional EventRepository for event creation.
             event_bus: Optional EventBus for event creation.
-            message_service: Optional MessageService for unified SSE emission.
             graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
         self._event_bus = event_bus
-        self._message_service = message_service
         self._graph_timeout_minutes = graph_timeout_minutes
 
         # Create type-specific processors
@@ -347,7 +307,6 @@ class TaskProcessor:
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
                 event_bus=event_bus,
-                message_service=message_service,
             ),
             "send_report": SendReportProcessor(
                 instance_manager, task_repo, event_repo,

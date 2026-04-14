@@ -10,7 +10,6 @@ Threading Notes:
 """
 
 import logging
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,23 +17,6 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 logger = logging.getLogger(__name__)
-
-
-def compute_message_id(instance_id: str, role: str, content: str) -> str:
-    """Generate a deterministic message ID based on instance, role, and content.
-    
-    Used by both SSE emission and checkpoint loading to ensure message IDs are
-    consistent across real-time events and API calls.
-    
-    Args:
-        instance_id: The instance identifier.
-        role: Message role (user, assistant, system).
-        content: Message content (first 100 chars used for hashing).
-        
-    Returns:
-        A deterministic UUID5 based on the message identity.
-    """
-    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"{instance_id}:{role}:{content[:100]}"))
 
 
 async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
@@ -84,9 +66,10 @@ async def get_instance_messages(
     Returns:
         List of message dictionaries with role, content, thinking, tool_calls.
     """
-    import uuid
     from typing import cast
     from langgraph.checkpoint.base import CheckpointTuple
+    
+    from daemon.utils import serialize_message
     
     config = {"configurable": {"thread_id": instance_id}}
     
@@ -127,86 +110,34 @@ async def get_instance_messages(
             if msg_id and msg_id not in msg_timestamps:
                 msg_timestamps[msg_id] = ts
     
-    result = []
-    
     # Build a map of tool_call_id -> output from ToolMessages
     tool_outputs = {}
     for msg in messages:
         if hasattr(msg, 'tool_call_id'):  # It's a ToolMessage
             tool_outputs[msg.tool_call_id] = msg.content
     
+    result = []
+    
     for msg in messages:
         msg_type = getattr(msg, 'type', 'unknown')
         
-        # Map message types to roles
-        role_map = {
-            'human': 'user',
-            'ai': 'assistant',
-            'system': 'system',
-            'tool': 'tool',
-        }
-        role = role_map.get(msg_type, msg_type)
-        
-        # Skip tool messages in the main list (they're included in tool_calls)
+        # Skip tool messages (they're included in tool_calls of AIMessages)
         if msg_type == 'tool':
             continue
         
-        content = getattr(msg, 'content', '') or ''
+        # Serialize the message using shared utility
+        serialized = serialize_message(msg, tool_outputs)
         
-        # Extract thinking from additional_kwargs
-        thinking = None
-        if hasattr(msg, 'additional_kwargs'):
-            kwargs = msg.additional_kwargs or {}
-            if kwargs.get("thinking"):
-                thinking = kwargs["thinking"]
-            elif kwargs.get("reasoning_content"):
-                thinking = kwargs["reasoning_content"]
-        
-        # Parse <think/> tags from content using shared utility
-        from daemon.manager import parse_think_tags
-        content, thinking_extracted = parse_think_tags(content)
-        
-        # Extract tool_calls for AI messages
-        tool_calls = None
-        if msg_type == 'ai' and hasattr(msg, 'tool_calls') and msg.tool_calls:
-            tool_calls = []
-            for tc in msg.tool_calls:
-                # Handle both dict and object formats
-                if isinstance(tc, dict):
-                    tc_id = tc.get("id", "")
-                    tool_calls.append({
-                        "id": tc_id,
-                        "name": tc.get("name", ""),
-                        "arguments": tc.get("args", {}),
-                        "output": tool_outputs.get(tc_id),
-                    })
-                else:
-                    tc_id = getattr(tc, "id", "")
-                    tool_calls.append({
-                        "id": tc_id,
-                        "name": getattr(tc, "name", ""),
-                        "arguments": getattr(tc, "args", {}),
-                        "output": tool_outputs.get(tc_id),
-                    })
-        
-        # Generate a deterministic message ID (same formula used by SSE emission)
-        msg_id = compute_message_id(instance_id, role, content)
-        
-        # Use tracked timestamp if available, fallback to checkpoint timestamp
-        original_msg_id = getattr(msg, 'id', None)
-        created_at = msg_timestamps.get(original_msg_id) if original_msg_id else None
+        # Get message ID and use it to look up timestamp
+        msg_id = serialized["message_id"]
+        created_at = msg_timestamps.get(msg_id)
         if not created_at:
             created_at = state.get("ts")
         
-        result.append({
-            "message_id": msg_id,
-            "instance_id": instance_id,
-            "role": role,
-            "content": content,
-            "thinking": thinking,
-            "thinking_extracted": thinking_extracted,
-            "tool_calls": tool_calls,
-            "created_at": created_at,
-        })
+        # Add instance_id and created_at
+        serialized["instance_id"] = instance_id
+        serialized["created_at"] = created_at
+        
+        result.append(serialized)
     
     return result

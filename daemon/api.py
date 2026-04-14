@@ -76,6 +76,7 @@ from .models import (
 )
 from .manager import InstanceManager
 from .config import Config, load_config
+from .persistence import get_checkpointer, get_instance_messages
 from .services.event_bus import EventBus
 from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
@@ -156,11 +157,6 @@ credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
 job_processor: JobProcessor = None
 job_queue_mgmt_service: JobQueueMgmtService = None
-
-# SSE connection tracking: {connection_id: {instance_id, connected_at, task}}
-_sse_connections: dict[str, dict] = {}
-_sse_lock = asyncio.Lock()
-SSE_CONNECTION_TTL_SECONDS = 3600  # 1 hour max connection lifetime
 
 
 @asynccontextmanager
@@ -822,206 +818,70 @@ async def get_messages(instance_id: str):
 # 9. GET /instances/{instance_id}/events - SSE stream
 @api_router.get("/instances/{instance_id}/events")
 async def stream_events(instance_id: str, request: Request):
-    """SSE stream for instance events with DB-backed cursor delivery."""
-    # Reject new connections during shutdown
+    """SSE stream delivering checkpoint events."""
     if manager.is_shutting_down:
         raise HTTPException(status_code=503, detail="Server is shutting down")
     
-    # Check instance exists
     try:
         manager.get_instance(instance_id)
     except KeyError:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
-            ).model_dump()
-        )
-
-    connection_id = str(uuid.uuid4())  # Unique ID for this connection
-
+        raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
+    
+    event_bus: EventBus = request.app.state.event_bus
+    
     async def event_generator() -> AsyncGenerator[dict, None]:
-        """Generate SSE events for the instance using EventBus."""
-        nonlocal connection_id
-        current_task = asyncio.current_task()
-        connected_at = time.monotonic()
+        # 1. Connected event
+        yield {
+            "event": "connected",
+            "data": json.dumps({"instance_id": instance_id}),
+        }
         
-        # Track this connection
-        async with _sse_lock:
-            _sse_connections[connection_id] = {
-                "instance_id": instance_id,
-                "connected_at": connected_at,
-                "task": current_task
-            }
-        
-        try:
-            # Send initial connection event
-            yield {"event": "connected", "data": json.dumps({"instance_id": instance_id})}
-
-            # Get Last-Event-ID from header for cursor-based reconnection
-            last_event_id = 0
-            if "Last-Event-ID" in request.headers:
-                try:
-                    last_event_id = int(request.headers.get("Last-Event-ID", 0))
-                except ValueError:
-                    logger.warning(f"Invalid Last-Event-ID header: {request.headers.get('Last-Event-ID')}")
-
-            # Get EventBus and EventRepository from app state
-            event_bus: EventBus = request.app.state.event_bus
-            event_repo = request.app.state.event_repository
-            
-            # First, replay missed events from DB (reconnection support)
-            if last_event_id > 0:
-                missed_events = event_repo.get_events_since(instance_id, last_event_id)
-                for event in missed_events:
-                    yield format_sse_event(event)
-                    last_event_id = max(last_event_id, event.id)
-                logger.debug(f"Replayed {len(missed_events)} events for instance {instance_id}")
-
-            # Get notification signal for this instance
-            notification = event_bus.get_notification(instance_id)
-            
-            event_count = 0
-            while True:
-                # Check for client disconnect
-                if await request.is_disconnected():
-                    logger.info(f"Client disconnected from instance {instance_id} after {event_count} events")
-                    break
-                
-                # Check connection TTL
-                if time.monotonic() - connected_at > SSE_CONNECTION_TTL_SECONDS:
-                    logger.info(f"SSE connection TTL expired for instance {instance_id} after {event_count} events")
-                    yield {"event": "shutdown", "data": json.dumps({"reason": "connection_timeout"})}
-                    break
-                
-                # Check if manager is shutting down
-                if manager.is_shutting_down:
-                    yield {"event": "shutdown", "data": json.dumps({"reason": "server_shutdown"})}
-                    break
-
-                try:
-                    # Wait for notification or timeout (keepalive every 30s)
-                    await asyncio.wait_for(notification.wait(), timeout=30)
-                    notification.clear()
-                except asyncio.TimeoutError:
-                    # Send keepalive
-                    yield {"event": "keepalive", "data": "{}"}
-                    continue
-                
-                # Read streaming events from in-memory queue
-                streaming_events = await event_bus.get_streaming_events(instance_id)
-                
-                # Read lifecycle events from DB using cursor
-                db_events = event_repo.get_events_since(instance_id, last_event_id)
-                
-                # Merge DB and streaming events
-                # DB events: ordered by auto-increment id
-                # Streaming events: ordered by timestamp
-                # Merge by created_at, streaming events first if same timestamp
-                all_events = []
-                for e in db_events:
-                    # Convert datetime to timestamp for consistent comparison
-                    created_ts = e.created_at.timestamp() if hasattr(e.created_at, 'timestamp') else e.created_at
-                    all_events.append(("db", created_ts, e))
-                for e in streaming_events:
-                    all_events.append(("streaming", time.time(), e))  # Use current time for streaming events
-                all_events.sort(key=lambda x: (x[1], 0 if x[0] == "streaming" else 1))
-                
-                # Yield merged events
-                for kind, _, event in all_events:
-                    yield format_sse_event(event)
-                    if kind == "db":
-                        last_event_id = max(last_event_id, event.id)
-                    event_count += 1
-
-        except Exception as e:
-            # Catch-all for generator errors
-            logger.exception(f"Fatal error in event generator for instance {instance_id}")
+        # 2. Send initial checkpoint (current state)
+        instance = manager.get_instance(instance_id)
+        checkpointer = await get_checkpointer(manager._db_path)
+        current_messages = await get_instance_messages(checkpointer, instance_id)
+        if current_messages:
             yield {
-                "event": "error",
-                "data": json.dumps({"error": "Fatal stream error", "details": str(e)})
+                "event": "checkpoint",
+                "data": json.dumps({
+                    "instance_id": instance_id,
+                    "messages": current_messages,
+                    "checkpoint_id": "initial",
+                }),
             }
-        finally:
-            # Clean up connection tracking
-            async with _sse_lock:
-                _sse_connections.pop(connection_id, None)
-            logger.debug(f"SSE disconnected from instance {instance_id}")
-
+        
+        # 3. Listen for new checkpoints
+        notification = event_bus.get_notification(instance_id)
+        
+        while True:
+            if await request.is_disconnected():
+                break
+            
+            if manager.is_shutting_down:
+                yield {"event": "error", "data": json.dumps({"error": "server_shutdown"})}
+                break
+            
+            try:
+                await asyncio.wait_for(notification.wait(), timeout=30)
+                notification.clear()
+            except asyncio.TimeoutError:
+                yield {"event": "keepalive", "data": "{}"}
+                continue
+            
+            # Drain checkpoint events from queue
+            events = await event_bus.get_streaming_events(instance_id)
+            for event in events:
+                yield {
+                    "event": event["event_type"],
+                    "id": event.get("event_id", ""),
+                    "data": json.dumps({
+                        "instance_id": event["instance_id"],
+                        "messages": event["messages"],
+                        "checkpoint_id": event.get("checkpoint_id", ""),
+                    }),
+                }
+    
     return EventSourceResponse(event_generator(), ping=30)
-
-
-def format_sse_event(event, legacy_compat: bool = False) -> dict:
-    """Format event for SSE response with unified envelope.
-    
-    Args:
-        event: Either an Event dataclass (streaming), Event model (DB), or dict
-        legacy_compat: If True, include flat fields alongside new envelope structure
-    
-    Returns:
-        Dict with id, event, and data keys for SSE formatting
-    """
-    from daemon.repositories.event.models import EventKind
-    from daemon.services.event_bus import STREAMING_EVENT_TYPES
-    
-    # Extract event metadata based on type
-    if hasattr(event, 'kind'):  # Event model from DB
-        event_type = event.kind
-        event_id = event.id
-        message_id = event.message_id
-        instance_id = event.instance_id
-        raw_data = json.loads(event.data) if event.data else {}
-    elif isinstance(event, dict):  # Streaming event from EventBus
-        event_type = event.get("event_type", "unknown")
-        event_id = event.get("event_id", "0")  # Now includes prefixed ID
-        message_id = event.get("message_id")
-        instance_id = event.get("instance_id", "")
-        raw_data = event.get("delta") or event.get("data") or {}
-    else:
-        return {"event": "error", "data": json.dumps({"error": "Unknown event type"})}
-    
-    # Build unified envelope
-    envelope: dict[str, Any] = {
-        "instance_id": instance_id,
-    }
-    
-    # Add message_id if present
-    if message_id:
-        envelope["message_id"] = message_id
-    
-    # Categorize event and add appropriate payload
-    if event_type == EventKind.MESSAGE_RECEIVED.value:
-        # message_received: raw_data is the message payload
-        envelope["message"] = raw_data
-    elif event_type == EventKind.MESSAGE_COMPLETED.value:
-        # message_completed: raw_data is the full message
-        envelope["message"] = raw_data
-    elif event_type in STREAMING_EVENT_TYPES:
-        # Streaming: raw_data is the delta
-        envelope["delta"] = raw_data
-    elif event_type in (EventKind.PROCESSING_STARTED.value, EventKind.PROCESSING_COMPLETED.value,
-                         EventKind.PROCESSING_FAILED.value, EventKind.ERROR.value,
-                         EventKind.CHILD_COMPLETED.value, EventKind.CHILD_FAILED.value,
-                         EventKind.INSTANCE_COMPLETED.value):
-        # Lifecycle status events
-        envelope["status"] = raw_data
-    else:
-        # Fallback: include as-is
-        envelope["data"] = raw_data
-    
-    # Build SSE response
-    result: dict[str, Any] = {
-        "id": str(event_id),
-        "event": event_type,
-        "data": json.dumps(envelope),
-    }
-    
-    # Legacy compatibility: add flat fields alongside new structure
-    if legacy_compat:
-        envelope["message_id"] = message_id
-        envelope.update(raw_data)
-    
-    return result
 
 
 # ==================== Source Management Endpoints ====================

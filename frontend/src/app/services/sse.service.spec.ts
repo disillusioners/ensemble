@@ -7,6 +7,7 @@ class MockEventSource {
   onmessage: ((e: MessageEvent) => void) | null = null;
   onerror: ((e: Event) => void) | null = null;
   onopen: ((e: Event) => void) | null = null;
+  onclose: (() => void) | null = null;
   readyState: number = 0;
   private listeners: Map<string, Function[]> = new Map();
 
@@ -16,6 +17,9 @@ class MockEventSource {
 
   close() {
     this.readyState = 2;
+    if (this.onclose) {
+      this.onclose();
+    }
   }
 
   addEventListener(type: string, handler: Function) {
@@ -34,25 +38,20 @@ class MockEventSource {
 // Testable SseService implementation (mirrors actual service for testing)
 class TestSseService {
   private readonly API_BASE = '/api';
-  private readonly MAX_RECONNECT_ATTEMPTS = 5;
 
   private eventSource: MockEventSource | null = null;
-  private reconnectAttempts = 0;
-  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
-  private isConnected = false;
   private currentInstanceId: string | null = null;
 
   // Signals for reactive state
   isStreaming = signal(false);
   events = signal<SSEEvent[]>([]);
-  latestCompletedMessage = signal<Message | null>(null);
-  latestError = signal<{ message_id: string; error: string; instance_id?: string | null } | null>(null);
-  statusUpdates = signal<Map<string, string>>(new Map());
-  partialMessages = signal<Map<string, Message>>(new Map());
-  titleUpdates = signal<{ instance_id: string; title: string } | null>(null);
+  latestError = signal<{ message: string; instance_id?: string } | null>(null);
+  
+  // Messages from checkpoint events
+  messages = signal<Message[]>([]);
 
   connect(instanceId: string): void {
-    if (this.currentInstanceId === instanceId && this.isConnected && this.eventSource) {
+    if (this.currentInstanceId === instanceId && this.eventSource) {
       return;
     }
 
@@ -65,7 +64,7 @@ class TestSseService {
   private connectInternal(): void {
     if (!this.currentInstanceId) return;
 
-    if (this.isConnected && this.eventSource) {
+    if (this.eventSource) {
       return;
     }
 
@@ -74,44 +73,91 @@ class TestSseService {
     this.eventSource = eventSource;
     this.isStreaming.set(true);
 
-    // Simulate connected event
-    this.isConnected = true;
-
-    // Simulate cancelled event handler (mirrors actual service behavior)
-    eventSource.addEventListener('cancelled', (e: MessageEvent) => {
+    // Connected event handler
+    eventSource.addEventListener('connected', (e: MessageEvent) => {
       try {
         const data = JSON.parse(e.data);
-        if (data.type === 'cancelled') {
-          this.isStreaming.set(false);
-        }
-      } catch (err) {
-        // Ignore parse errors
+        this.events.update(evts => [...evts, { type: 'connected', data }]);
+      } catch {
+        this.events.update(evts => [...evts, { type: 'connected', data: {} }]);
       }
     });
+
+    // Checkpoint event handler
+    eventSource.addEventListener('checkpoint', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        this.events.update(evts => [...evts, { type: 'checkpoint', data }]);
+        
+        if (data.messages && Array.isArray(data.messages)) {
+          const mappedMessages: Message[] = data.messages.map((m: any) => ({
+            message_id: m.message_id,
+            role: m.role,
+            content: m.content || '',
+            thinking: m.thinking || null,
+            thinking_extracted: m.thinking_extracted || null,
+            tool_calls: m.tool_calls || null,
+            created_at: m.created_at || new Date().toISOString(),
+          }));
+          this.messages.set(mappedMessages);
+        }
+      } catch (err) {
+        // Ignore parse errors in test
+      }
+    });
+
+    // Error event handler
+    eventSource.addEventListener('error', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        this.events.update(evts => [...evts, { type: 'error', data }]);
+        this.isStreaming.set(false);
+        
+        if (data.error) {
+          this.latestError.set({
+            message: String(data.error),
+            instance_id: data.instance_id || this.currentInstanceId || undefined,
+          });
+        }
+      } catch {
+        // If we can't parse, it's a connection error
+        this.isStreaming.set(false);
+      }
+    });
+
+    // Keepalive event handler
+    eventSource.addEventListener('keepalive', () => {
+      // No action needed
+    });
+
+    // Connection error handler
+    eventSource.onerror = () => {
+      this.isStreaming.set(false);
+    };
+
+    // Close handler
+    eventSource.onclose = () => {
+      this.isStreaming.set(false);
+    };
+  }
+
+  private handleClose(): void {
+    this.isStreaming.set(false);
   }
 
   disconnect(): void {
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
-    this.isConnected = false;
-    this.reconnectAttempts = 0;
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;
     }
-    this.isStreaming.set(false);
     this.currentInstanceId = null;
+    this.isStreaming.set(false);
   }
 
   clearEvents(): void {
     this.events.set([]);
-    this.latestCompletedMessage.set(null);
     this.latestError.set(null);
-    this.statusUpdates.set(new Map());
-    this.partialMessages.set(new Map());
-    this.titleUpdates.set(null);
+    this.messages.set([]);
   }
 
   // Expose for testing
@@ -151,27 +197,104 @@ describe('SseService', () => {
     });
   });
 
-  describe('cancelled SSE event handling', () => {
-    it('should set isStreaming to false when cancelled event is received', () => {
-      service.connect('instance-123');
-      expect(service.isStreaming()).toBe(true);
-
-      // Simulate the cancelled event
-      service.getEventSource()?.simulateEvent('cancelled', { type: 'cancelled', instance_id: 'instance-123' });
-
-      expect(service.isStreaming()).toBe(false);
+  describe('messages signal', () => {
+    it('should exist', () => {
+      expect(service.messages).toBeDefined();
+      expect(typeof service.messages).toBe('function');
     });
 
-    it('should handle cancelled event from different instance', () => {
+    it('should start as empty array', () => {
+      expect(service.messages()).toEqual([]);
+    });
+
+    it('should update messages from checkpoint event', () => {
       service.connect('instance-123');
-      expect(service.isStreaming()).toBe(true);
+      
+      const checkpointData = {
+        messages: [
+          {
+            message_id: 'msg-1',
+            role: 'user',
+            content: 'Hello',
+            created_at: '2024-01-01T00:00:00Z'
+          },
+          {
+            message_id: 'msg-2',
+            role: 'assistant',
+            content: 'Hi there!',
+            thinking: 'This is my response',
+            created_at: '2024-01-01T00:00:01Z'
+          }
+        ]
+      };
 
-      // Note: This test verifies the event was received, 
-      // regardless of which instance it came from
-      service.getEventSource()?.simulateEvent('cancelled', { type: 'cancelled', instance_id: 'other-instance' });
+      service.getEventSource()?.simulateEvent('checkpoint', checkpointData);
+      
+      expect(service.messages().length).toBe(2);
+      expect(service.messages()[0].message_id).toBe('msg-1');
+      expect(service.messages()[1].message_id).toBe('msg-2');
+      expect(service.messages()[1].thinking).toBe('This is my response');
+    });
+  });
 
-      // The cancelled event still sets isStreaming to false (no instance check in test)
-      expect(service.isStreaming()).toBe(false);
+  describe('events signal', () => {
+    it('should exist', () => {
+      expect(service.events).toBeDefined();
+      expect(typeof service.events).toBe('function');
+    });
+
+    it('should start as empty array', () => {
+      expect(service.events()).toEqual([]);
+    });
+
+    it('should add connected event to events array', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('connected', {});
+      
+      expect(service.events().length).toBe(1);
+      expect(service.events()[0].type).toBe('connected');
+    });
+
+    it('should add checkpoint event to events array', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('checkpoint', { messages: [] });
+      
+      expect(service.events().length).toBe(1);
+      expect(service.events()[0].type).toBe('checkpoint');
+    });
+  });
+
+  describe('latestError signal', () => {
+    it('should exist', () => {
+      expect(service.latestError).toBeDefined();
+      expect(typeof service.latestError).toBe('function');
+    });
+
+    it('should start as null', () => {
+      expect(service.latestError()).toBeNull();
+    });
+
+    it('should set error from error event', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('error', { error: 'Something went wrong' });
+      
+      expect(service.latestError()).not.toBeNull();
+      expect(service.latestError()?.message).toBe('Something went wrong');
+    });
+  });
+
+  describe('clearEvents()', () => {
+    it('should clear all signals', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('connected', {});
+      service.getEventSource()?.simulateEvent('checkpoint', { messages: [{ message_id: 'test' }] });
+      service.getEventSource()?.simulateEvent('error', { error: 'test error' });
+
+      service.clearEvents();
+
+      expect(service.events()).toEqual([]);
+      expect(service.messages()).toEqual([]);
+      expect(service.latestError()).toBeNull();
     });
   });
 });
