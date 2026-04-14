@@ -256,8 +256,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     if (instance) {
       console.log('[Chat] Using instance from list, connecting SSE');
       this.currentInstance.set(instance);
-      this.messages.set([]);
-      this.sseService.connect(instanceId);
+      this.loadInstanceMessages(instanceId);
     } else {
       // Try to get instance from API
       console.log('[Chat] Instance not in list, fetching from API');
@@ -266,8 +265,7 @@ export class ChatComponent implements OnInit, OnDestroy {
           console.log('[Chat] Got instance from API, connecting SSE');
           this.instanceNotFound.set(null);
           this.currentInstance.set(instanceData);
-          this.messages.set([]);
-          this.sseService.connect(instanceId);
+          this.loadInstanceMessages(instanceId);
         },
         error: (err) => {
           console.warn('[Chat] Instance not found:', instanceId, 'error:', err);
@@ -279,6 +277,26 @@ export class ChatComponent implements OnInit, OnDestroy {
         }
       });
     }
+  }
+
+  /**
+   * Load initial messages via REST API, then connect SSE for real-time updates.
+   */
+  private loadInstanceMessages(instanceId: string): void {
+    this.api.getMessages(instanceId).subscribe({
+      next: (messages) => {
+        console.log('[Chat] Loaded', messages.length, 'messages from API');
+        this.messages.set(messages.map(m => this.toViewModel(m)));
+      },
+      error: (err) => {
+        console.warn('[Chat] Failed to load messages:', err);
+        this.messages.set([]);
+      },
+      complete: () => {
+        // Connect SSE after API messages are loaded
+        this.sseService.connect(instanceId);
+      }
+    });
   }
 
   protected onDeleteInstance(instanceId: string): void {
