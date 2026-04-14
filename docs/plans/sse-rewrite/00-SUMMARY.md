@@ -85,16 +85,25 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 | [Phase 0](./phase-0-preparation.md) | Preparation | Extract `parse_think_tags` to `daemon/utils.py` |
 | [Phase 1](./phase-1-backend-core.md) | Backend Core | Add serialization helpers, rewrite persistence |
 | [Phase 2](./phase-2-eventbus.md) | EventBus Rewrite | Add `broadcast_checkpoint_event()`, remove old methods |
-| [Phase 3](./phase-3-manager-migration.md) | Manager Migration | Remove streaming, add checkpoints, delete MessageService |
+| [Phase 3a](./phase-3-manager-migration.md) | Manager Migration — Core | Remove streaming from `_process_message_with_tracking`, add checkpoint emission with final-state safety net |
+| [Phase 3b](./phase-3-manager-migration.md) | Manager Migration — Cleanup | Remove MessageService from task_processor, child completion, error report |
 | [Phase 4](./phase-4-cleanup.md) | Cleanup | Delete MessageService, rewrite API endpoint |
 | [Phase 5](./phase-5-frontend-models.md) | Frontend Models | Update interfaces, rename `message_id` → `id` |
 | [Phase 6](./phase-6-frontend-sse.md) | Frontend SSE Service | Full rewrite of SSE service |
 | [Phase 7](./phase-7-frontend-chat.md) | Frontend Chat Component | Remove delta effects, simplify |
-| [Phase 8](./phase-8-tests.md) | Tests & Polish | Update tests, verify |
+| [Phase 8](./phase-8-tests.md) | Tests & Polish | Write tests alongside each phase; final verification pass |
 
 ---
 
 ## Critical Notes
+
+### ⚠️ Point of No Return
+
+**Phase 3a is the point of no return.** After this change:
+- `_process_message_with_tracking` no longer emits streaming tokens
+- Checkpoint snapshots become the only delivery mechanism
+
+Do all backend phases (1–4) on a feature branch and run the full test suite before merging to main.
 
 ### PR Boundaries
 
@@ -102,6 +111,11 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 |--------|-------------------|
 | Phase 0 | Isolated PR (prerequisite) |
 | Phase 1 + Phase 5 | **SAME PR** — `message_id` → `id` rename |
+| Phases 3a + 3b + 4 | **SAME PR** — Backend migration (verify 3a works first) |
+
+### Testing Philosophy
+
+Write tests alongside each phase, not just at the end. Each phase should have passing tests before proceeding to the next.
 
 ### Accepted Regressions
 

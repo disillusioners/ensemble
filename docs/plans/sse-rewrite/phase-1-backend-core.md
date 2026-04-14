@@ -65,8 +65,6 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
         Note: msg.id=None uses _stable_message_id() (hash-based) for deterministic
         fallback, not random UUIDs — prevents duplicate messages on re-emission.
     """
-    from daemon.utils import parse_think_tags  # lazy import to avoid circular dep
-    
     role_map = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
     role = role_map.get(msg.type, msg.type)
     content = getattr(msg, 'content', '') or ''

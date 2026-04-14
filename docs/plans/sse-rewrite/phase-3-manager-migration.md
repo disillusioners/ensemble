@@ -43,6 +43,7 @@ Replace the streaming loop (around line 1156) with:
 # NOTE: all_state_messages is reset per-call to prevent unbounded growth.
 # Initial state comes from get_instance_messages() on SSE connect.
 all_state_messages: list = []
+event_index = 0  # Sequence counter for checkpoint_id
 
 async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
     if isinstance(event, tuple):
@@ -88,13 +89,17 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
             if not isinstance(m, ToolMessage)
         ]
         
-        # Get checkpoint ID from config
-        checkpoint_id = config.get("configurable", {}).get("checkpoint_id", str(uuid.uuid4()))
-        
+        # Build a simple sequence number from event index (avoids depending on config)
+        # NOTE: LangGraph's config does NOT contain checkpoint_id after streaming.
+        # checkpoint_id is only available in the checkpoint metadata, not in the
+        # runtime config passed to astream(). We use an incrementing sequence instead.
+        sequence_id = f"seq_{event_index}"
+        event_index += 1
+
         await self._event_bus.broadcast_checkpoint_event(
             instance_id=instance_id,
-            messages=serialized,
-            checkpoint_id=checkpoint_id,
+            messages=serialized,  # list[dict] — pre-serialized, not BaseMessage objects
+            checkpoint_id=sequence_id,
             tool_outputs=tool_outputs,
         )
 ```
@@ -125,7 +130,51 @@ finally:
 
 **Post-loop safety net**: Keep `graph.aget_state()` as a fallback after the streaming loop.
 
-### 1.4 Remove `compute_message_id()` imports and usage
+### 1.6 Final-state safety net after streaming loop
+
+After the `async for event in graph.astream(...)` loop completes, add a final checkpoint
+to guard against accumulation bugs where `all_state_messages` diverges from actual
+LangGraph state:
+
+```python
+# After the streaming for-loop completes
+# Emit final authoritative checkpoint from LangGraph state
+try:
+    final_state = await graph.aget_state(config)
+    if final_state and final_state.values:
+        final_messages = final_state.values.get("messages", [])
+        # Rebuild serialized messages (same logic as in-loop)
+        final_tool_outputs = {}
+        for m in final_messages:
+            if hasattr(m, 'tool_call_id'):
+                tc_id = getattr(m, 'tool_call_id', '')
+                if tc_id:
+                    content = getattr(m, 'content', '') or ''
+                    final_tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
+        
+        final_serialized = [
+            serialize_message(m, final_tool_outputs)
+            for m in final_messages
+            if not isinstance(m, ToolMessage)
+        ]
+        
+        # Use a special final checkpoint_id
+        final_sequence_id = f"seq_{event_index}_final"
+        
+        await self._event_bus.broadcast_checkpoint_event(
+            instance_id=instance_id,
+            messages=final_serialized,  # list[dict] — pre-serialized, not BaseMessage objects
+            checkpoint_id=final_sequence_id,
+            tool_outputs=final_tool_outputs,
+        )
+except Exception as e:
+    logger.warning(f"Final state fetch failed for {instance_id}: {e}")
+```
+
+> **Note**: `messages` passed to `broadcast_checkpoint_event()` must be pre-serialized
+> `list[dict]` (the output of `serialize_message()`), NOT `list[BaseMessage]`.
+
+### 1.7 Remove `compute_message_id()` imports and usage
 
 | Line | What |
 |------|------|
@@ -134,7 +183,7 @@ finally:
 | 1057 | `current_assistant_msg_id = compute_message_id(...)` — remove entirely |
 | 1272-1274 | `current_assistant_msg_id = compute_message_id(...)` — remove entirely |
 
-### 1.5 Remove `MessageService` instantiation
+### 1.8 Remove `MessageService` instantiation
 
 Delete:
 - `MessageService` instantiation

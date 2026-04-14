@@ -22,6 +22,9 @@
 | `broadcast_checkpoint_event()` sends to dispatcher queue unnecessarily | Dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` call if optimization needed. |
 | `MessageService` "DB migration" phantom | **CORRECTED**: `MessageService` methods are SSE-only wrappers. No DB writes to migrate. Just delete call sites and file. |
 | Frontend/backend API mismatch window | **Steps 0.5 and 1 in same PR** — no window for mismatch. |
+| Child completion SSE gap: parent sees child report only after checkpoint | Accept as regression OR emit immediate `message_received` event on child completion for instant parent notification |
+| `send_message()` SSE bypass: direct `graph.ainvoke()` with no streaming | Document as known limitation — SSE stream never updates when agent calls `send_message()` on watched instance |
+| Queue ordering under concurrency: out-of-order checkpoints cause UI flicker | **Mitigation**: Add sequence numbers to checkpoint events; frontend sorts by sequence on receipt |
 
 ---
 
@@ -37,3 +40,4 @@ The following behavior changes are intentional and accepted:
 | `send_message()` bypasses SSE entirely | Used for programmatic/API calls, not user-facing streaming |
 | Large message list sent on each checkpoint | Acceptable for current scale; diff mode can be added later |
 | Some `EventKind` enum values become dead code | Doesn't break anything; can clean up later |
+| Child completion SSE gap: parent sees child's report only after parent's next checkpoint | Parent's SSE stream doesn't instantly reflect child completion — delay until parent processes report via checkpoint |

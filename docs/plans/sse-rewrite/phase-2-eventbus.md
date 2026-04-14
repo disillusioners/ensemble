@@ -16,7 +16,7 @@
 async def broadcast_checkpoint_event(
     self,
     instance_id: str,
-    messages: list,  # list[BaseMessage] from LangGraph state
+    messages: list[dict],  # Pre-serialized from Phase 3
     checkpoint_id: str,
     tool_outputs: dict | None = None,  # tool_call_id -> output content
 ) -> None:
@@ -28,21 +28,23 @@ async def broadcast_checkpoint_event(
     
     Args:
         instance_id: The instance this checkpoint belongs to.
-        messages: Full list of messages from LangGraph channel_values.
+        messages: Pre-serialized list of message dicts from Phase 3.
         checkpoint_id: Checkpoint ID from LangGraph state.
         tool_outputs: Map of tool_call_id -> output content for embedding
                       in tool_calls[].output.
     """
     from daemon.utils import serialize_message  # lazy import
     
-    # Build tool_outputs from ToolMessages if not provided
+    # Build tool_outputs from tool messages if not provided
     if tool_outputs is None:
         tool_outputs = {}
         for msg in messages:
-            if hasattr(msg, 'tool_call_id'):
+            if isinstance(msg, dict) and msg.get("type") == "tool":
+                tool_outputs[msg["tool_call_id"]] = msg["content"]
+            elif hasattr(msg, 'tool_call_id'):
                 tool_outputs[msg.tool_call_id] = msg.content
     
-    serialized = [serialize_message(msg, tool_outputs) for msg in messages]
+    serialized = [serialize_message(msg, tool_outputs) if isinstance(msg, dict) else msg for msg in messages]
     
     # Skip empty checkpoints — LangGraph nodes may complete without new messages
     # (conditional edges, routing nodes). Emitting an empty messages[] would wipe
@@ -64,7 +66,6 @@ async def broadcast_checkpoint_event(
     except asyncio.QueueFull:
         logger.warning(f"Queue full for instance {instance_id}, dropping checkpoint")
     
-    queue.put_nowait(event)
     self.notify(instance_id)
     await self._broadcast_to_global(instance_id, "checkpoint", data=event)
 ```
