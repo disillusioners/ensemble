@@ -172,18 +172,45 @@ async def broadcast_checkpoint_event(
     
     self.notify(instance_id)
     # Notify global subscribers (ResponseDispatcher, etc.)
+    # Note: dispatcher filters for event_type=="completed", so checkpoint events
+    # are silently ignored. This is acceptable overhead. If optimization is needed
+    # later, remove this call — checkpoint events don't need dispatcher routing.
     await self._broadcast_to_global(instance_id, "checkpoint", data=event)
 ```
 
-> **Decision needed**: `broadcast_checkpoint_event()` calls `_broadcast_to_global()` to reach the `ResponseDispatcher`. However, checkpoint events will also flow to the dispatcher queue even though they're filtered out. Options:
-> - **Option A (recommended)**: Keep the `_broadcast_to_global()` call — dispatcher filters them out, acceptable overhead
-> - **Option B**: Remove `_broadcast_to_global()` from `broadcast_checkpoint_event()` — only `completed` events need to reach the dispatcher
+> **Decision resolved**: `_broadcast_to_global()` is called for checkpoint events. The `ResponseDispatcher` filters for `event_type=="completed"`, so checkpoint events are silently ignored. This is acceptable overhead (~1 queue put per checkpoint). If optimization is needed later, remove the `_broadcast_to_global()` call — checkpoint events don't need dispatcher routing.
 
 #### 1.2 Add `serialize_message()` module-level function
 
 Add at module level in `event_bus.py` (not in the `EventBus` class — so `persistence.py` can reuse it):
 
 ```python
+import hashlib
+
+
+def _stable_message_id(msg) -> str:
+    """Generate a stable ID for messages without msg.id.
+    
+    Uses a hash of role + content + tool_call_id so the same message
+    always gets the same ID across re-emissions. This prevents duplicates
+    when LangGraph re-emits the same message in a checkpoint.
+    
+    Args:
+        msg: LangChain BaseMessage with potentially no .id attribute.
+    
+    Returns:
+        A deterministic 16-char hex string prefixed with "fallback-".
+    """
+    role = msg.type if hasattr(msg, 'type') else str(msg.__class__.__name__)
+    content = getattr(msg, 'content', '') or ''
+    content_str = content if isinstance(content, str) else str(content)
+    tc_id = getattr(msg, 'tool_call_id', '') or ''
+    
+    key = f"{role}:{content_str[:200]}:{tc_id}"
+    digest = hashlib.md5(key.encode('utf-8', errors='replace')).hexdigest()[:16]
+    return f"fallback-{digest}"
+
+
 def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     """Serialize a LangChain message to dict matching REST API format.
     
@@ -200,6 +227,8 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     
     Returns:
         Dict with id, role, content, thinking, tool_calls, created_at.
+        Note: msg.id=None uses _stable_message_id() (hash-based) for deterministic
+        fallback, not random UUIDs — prevents duplicate messages on re-emission.
     """
     from daemon.utils import parse_think_tags  # lazy import to avoid circular dep
     
@@ -251,8 +280,12 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
                 })
     
     return {
-        # LangGraph msg.id can be None — use uuid fallback to prevent runtime errors
-        "id": getattr(msg, 'id', None) or str(uuid.uuid4()),
+        # LangGraph msg.id can be None — use stable fallback to prevent duplicates.
+        # A random uuid fallback would generate a NEW ID every re-emission, causing
+        # the frontend to show duplicate messages when the same checkpoint is re-sent.
+        # Using a deterministic hash of (role, content[:200], tool_call_id) ensures
+        # the same message always gets the same ID across emissions.
+        "id": getattr(msg, 'id', None) or _stable_message_id(msg),
         "role": role,
         "content": content_str,
         "thinking": thinking,
@@ -295,8 +328,8 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
 | 286-311 | `get_notification()`, `notify()` | SSE endpoint needs these |
 | 317-357 | `get_streaming_queue()`, `get_streaming_events()` | Reuse for checkpoint queue |
 | 363-436 | `subscribe_all()`, `unsubscribe_all()`, `_broadcast_to_global()` | Keep for global subscribers |
+| 440 | `broadcast_sync()` | **Simplify to `completed`-only routing.** External sources (Telegram/Discord) need `completed` events. After removing streaming events, the streaming branch is dead. Rewrite as: check `event.get("event_type") == "completed"`, forward to dispatcher only. Delete streaming queue logic. |
 | 480-516 | `cleanup_instance()`, `shutdown()` | Still needed |
-| 522-558 | `broadcast_sync()` | **Delete entirely.** Zero callers confirmed, and it calls `broadcast_streaming_event()` which is also deleted. |
 
 ---
 
@@ -328,7 +361,7 @@ Replace the streaming loop (around line 1156 where `graph.astream()` is called) 
 ```python
 all_state_messages: list = []
 
-async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
+    async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
     if isinstance(event, tuple):
         mode, data = event
     else:
@@ -350,17 +383,26 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                     else:
                         all_state_messages.append(m)
                 
-                # Build tool_outputs map from ToolMessages
+                # CRITICAL: Build tool_outputs from ALL messages (including ToolMessages)
+                # BEFORE filtering. serialize_message() needs tool_outputs to embed in
+                # the assistant's tool_calls[].output field, but ToolMessages are
+                # excluded from the output list. Build the map from the full list.
                 tool_outputs = {}
                 for m in all_state_messages:
                     if hasattr(m, 'tool_call_id'):
-                        tool_outputs[m.tool_call_id] = m.content
+                        tc_id = getattr(m, 'tool_call_id', '')
+                        if tc_id:
+                            content = getattr(m, 'content', '') or ''
+                            tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
                 
-                # Serialize all messages (full state for frontend replacement)
+                # Serialize all messages (full state for frontend replacement).
+                # Filter out ToolMessages — their output is embedded in the
+                # parent AIMessage's tool_calls[].output field.
+                from langchain_core.messages import ToolMessage
                 serialized = [
                     serialize_message(m, tool_outputs) 
                     for m in all_state_messages
-                    if m.type != "tool"  # Skip raw ToolMessages
+                    if not isinstance(m, ToolMessage)
                 ]
                 
                 # Get checkpoint ID from config (not msg.id — different semantics)
@@ -381,20 +423,41 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
 
 **Important**: We accumulate messages from the `astream` output directly — **no `graph.aget()` call** inside the loop.
 
-#### 2.3 Remove post-streaming logic after `finally` block (lines 1407–1479)
-
-> **Note on `graph.aget_state()`**: The `graph.aget_state()` call at line ~1413 (after the streaming loop) may become redundant after the rewrite. With `stream_mode=["updates"]`, messages are accumulated via `all_state_messages.extend(node_messages)` in the streaming loop. Verify that all messages are correctly accumulated from stream events before removing `graph.aget_state()`. If not, keep it as a fallback to ensure complete message history.
+#### 2.3 Simplified post-streaming code
 
 The code after line 1406 (`finally` block) handles:
 - Finalizing the assistant message
 - Calling `self._message_service.on_assistant_message_completed()` (line ~1410)
 - Calling `self._send_error_report()` on failure
 
-**What to do with this section**:
-- The call to `on_assistant_message_completed()` (DB write) must be replaced with inline DB persistence (see Section 3)
-- The `finally` block should still be kept for its primary purpose: ensuring `is_processing = False` and cleanup
-- Delete the streaming event broadcasts from within it (covered by 2.1 above)
-- `_send_error_report()` call site must be updated (see Section 3.3)
+After removing streaming broadcasts, the post-loop section simplifies to:
+
+```python
+# After the streaming for-loop completes (or raises)
+try:
+    # _send_error_report() is called by the outer exception handler for graph errors
+    # No changes needed there — error reports still flow to parent via message queue
+    
+    # Broadcast final completion event for ResponseDispatcher
+    # (Dispatcher filters for event_type == "completed")
+    await self._event_bus._broadcast_to_global(
+        instance_id=instance_id,
+        event_type="completed",
+        data={
+            "source": source,
+            "content": final_message_content,
+            "message_type": "final",
+            "instance_id": instance_id,
+        }
+    )
+finally:
+    # Ensure processing flag is always reset
+    self._active_instances.discard(instance_id)
+    # Note: graph.aget_state() is no longer called here — all messages
+    # were accumulated from stream events. Verify completeness in Step 3.5.
+```
+
+**Decision required**: If Step 3.5 reveals that stream events don't capture all messages (e.g., some messages appear only in the final state), keep the `graph.aget_state()` call as a fallback — but only to get the canonical final state once after the loop, not inside the loop.
 
 #### 2.4 Remove `compute_message_id()` imports and usage
 
@@ -988,24 +1051,30 @@ interface SSEEvent {
 4. SSE endpoint (`/instances/{id}/events`) — verify only `connected`, `checkpoint`, `error`, `keepalive` events are emitted
 5. `serialize_message()` with `tool_outputs` map — verify tool outputs are embedded in assistant message's `tool_calls[]` field
 6. `broadcast_checkpoint_event()` — concurrent emissions don't cause race conditions
-7. **`serialize_message()` with `msg.id = None`** — verify fallback to `uuid.uuid4()` works
+7. **`serialize_message()` with `msg.id = None`** — verify `_stable_message_id()` fallback produces consistent IDs across calls (call twice with same msg → same ID)
 8. **`serialize_message()` with all thinking formats** — verify all 5 extraction paths
 9. **`ResponseDispatcher` routing after rewrite** — verify external sources still receive responses via `_broadcast_to_global()` calls
+10. **`_stable_message_id()` determinism** — same (role, content, tool_call_id) → same ID; different content → different ID. Test with boundary cases (empty content, unicode, 200-char content limit).
+11. **`broadcast_checkpoint_event()` empty messages** — verify skip (no emission) when serialized list is empty
 
 ### Integration Tests Needed
 
-1. Send message → verify SSE delivers checkpoint with LangGraph IDs
-2. Send message → verify GET /messages returns same IDs as SSE
+> **CRITICAL INVARIANT**: Every integration test should verify that message IDs delivered via SSE match the IDs returned by the REST API (`GET /instances/{id}/messages`). This is the core promise of the rewrite.
+
+1. **⚡ Send message → verify SSE delivers checkpoint with LangGraph IDs** (verify IDs match REST API)
+2. **⚡ Send message → verify GET /messages returns same IDs as SSE** (ID consistency invariant)
 3. Tool call → verify checkpoint includes tool_calls with outputs
 4. Multi-turn → verify messages accumulate correctly across checkpoints
 5. Reconnect → verify initial checkpoint is sent on new SSE connection
 6. Child agent completes → verify parent receives checkpoint with child's report message
 7. Error during processing → verify SSE emits `error` event
-8. **Multi-turn message ID consistency** — Send msg1 → verify checkpoint → send msg2 → verify BOTH messages have consistent IDs → refresh → verify REST API matches SSE
+8. **⚡ Multi-turn message ID consistency** — Send msg1 → verify checkpoint → send msg2 → verify BOTH messages have consistent IDs → refresh → verify REST API matches SSE
 9. **Backend restart → SSE reconnect** — Verify client reconnects and receives current state
 10. **External source routing (Telegram/Discord)** — Verify ResponseDispatcher still routes responses
 11. **`send_message()` SSE invisibility** — Verify that calling `send_message()` from the API or as an agent tool does NOT emit any SSE events. The parent instance's SSE stream should not show the sent message until it processes the message.
 12. **Concurrent SSE clients** — Two SSE clients connected to the same instance should receive identical checkpoint events.
+13. **`msg.id = None` → stable fallback ID** — Send a message that results in a None msg.id; verify the fallback ID is deterministic (reconnect gives same ID)
+14. **LangGraph stream format verification** — Run the Step 3.5 script; document actual format for downstream implementation
 
 ### Paths NOT Previously Covered by Tests
 
@@ -1040,11 +1109,13 @@ interface SSEEvent {
 | `create_child_failed_event()` call in `_send_error_report()` not in plan | Add to removal list at `manager.py:2046` |
 | Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty |
 | `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code |
-| `broadcast_checkpoint_event()` sends checkpoints to dispatcher queue via `_broadcast_to_global()` | The dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` from checkpoint events if optimization needed. |
+| `broadcast_checkpoint_event()` sends checkpoints to dispatcher queue via `_broadcast_to_global()` | The dispatcher filters them out (event_type="checkpoint" != "completed"). Resolved: acceptable overhead, or remove if optimization needed. |
 | **Unbounded message accumulation produces duplicates and O(n²) data** | `all_state_messages.extend()` never clears. LangGraph nodes may *modify* existing messages (append tool_calls), creating duplicates. Fix: key by `msg.id` and replace on collision. After emitting, reset accumulator or track `last_emitted_count` to emit only delta. Consider calling `aget_state()` once after the loop for final canonical state. |
 | **`msg.id` used as `checkpoint_id` — wrong semantics** | Line 360 sets `checkpoint_id = msg.id`. This conflates message ID with checkpoint ID. If reconnection is re-added, clients seek to wrong thing. Fix: use `config.get("configurable", {}).get("checkpoint_id")` from LangGraph run config, or rename field to `last_message_id`. |
 | **`message_id` → `id` frontend rename (73 occurrences) — isolate in separate PR** | Buried as one table row. Interleaving with SSE changes guarantees hard-to-debug failures. Fix: execute as **Step 0.5** (standalone commit before any SSE changes). Run `npm build` after rename to verify. |
 | **`send_message()` tool conflation** | Section 3.5 conflates `manager.send_message()` (ainvoke, SSE-silent) with `send_message` tool (enqueue_message → queue → produces checkpoints fine). Integration test #11 should test both paths independently. |
+| **`_stable_message_id()` hash collision risk** | MD5 of `(role, content[:200], tool_call_id)` has theoretical 64-bit collision space. For this use case (identifying duplicate messages within a session), this is acceptable. Document that IDs are NOT globally unique — only session-scoped stable identifiers. |
+| **LangGraph `stream_mode=["updates"]` format is unverified** | The plan assumes `node_data.get("messages", [])` extracts messages correctly. LangGraph's updates mode returns `{node_name: {output_key: value}}` — messages may be nested differently. **CRITICAL**: Write a verification script against the exact LangGraph version in `pyproject.toml` before Step 3 begins. See Step 3.5. |
 
 ---
 
@@ -1052,7 +1123,45 @@ interface SSEEvent {
 
 > Steps 1 and 2 are swapped. `persistence.py` just needs import updates and can be done before adding `serialize_message()` to event_bus.py.
 
-### **Step 0.5 (ISOLATED PR)**: Frontend `message_id` → `id` rename
+### **Step 0 (ISOLATED, BEFORE ALL OTHER STEPS)**: Create `daemon/utils.py`
+
+> **Critical dependency**. `parse_think_tags` and `_THINK_PATTERN` currently live in `manager.py` (~lines 252–272). They must be moved to `daemon/utils.py` so `event_bus.py` can import them without creating a circular dependency (event_bus → manager → event_bus).
+
+Steps:
+1. Create `daemon/utils.py`:
+```python
+import re
+from typing import Tuple
+
+_THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
+
+
+def parse_think_tags(content: str) -> Tuple[str, str | None]:
+    """Extract <think>...</think> content from LLM response.
+    
+    Args:
+        content: The full response string from the LLM.
+    
+    Returns:
+        Tuple of (cleaned_content, extracted_thinking).
+        If no think tags found, returns (content, None).
+    """
+    # Copy exact implementation from manager.py:252-272
+    match = _THINK_PATTERN.search(content)
+    if not match:
+        return content, None
+    
+    thinking = match.group(1).strip()
+    cleaned = _THINK_PATTERN.sub('', content).strip()
+    return cleaned, thinking
+```
+2. Update `manager.py` import: `from .utils import parse_think_tags`
+3. Verify: `grep -rn "parse_think_tags" daemon/ --include="*.py"` shows imports from `.utils`
+4. Commit this change separately before any other SSE changes
+
+---
+
+### **Step 0.5 (ISOLATED PR, AFTER STEP 0)**: Frontend `message_id` → `id` rename
 
 > **CRITICAL**: Execute this as a standalone commit/PR before any SSE changes. Do not combine with other steps.
 
@@ -1090,7 +1199,7 @@ Steps:
 3. Delete the old methods (see Section 1.3 table)
 4. Delete `STREAMING_EVENT_TYPES`, `LEGACY_EVENT_MAP`
 5. Delete `_next_streaming_id()`, `cleanup_old()`
-6. Audit `broadcast_sync()` — if no callers found, delete it entirely. If callers exist, simplify (remove streaming branch, keep `completed` event routing for dispatcher).
+6. Audit `broadcast_sync()` — simplify to `completed`-only routing. After removing streaming events, the streaming branch is dead. Rewrite to check `event.get("event_type") == "completed"`, forward to dispatcher only.
 
 > After this step, update `persistence.py` to import `serialize_message` from `daemon.services.event_bus`.
 
@@ -1120,6 +1229,58 @@ Steps:
 8. At `task_processor.py:171`: Replace `await self._message_service.on_assistant_message_completed(...)` with the `completed` event broadcast via `_broadcast_to_global()` (see Section 3.4). Also migrate the DB write (the part that persists the message record) inline — move the logic from `MessageService.on_assistant_message_completed()` into this call site.
 9. **DELETE** the `elif self._event_repo:` fallback branch at `task_processor.py:129-140` — this code is unreachable in production (dead code)
 10. Remove `MessageService` instantiation and `self._message_service` declaration from `task_processor.py`
+
+---
+
+### **Step 3.5 (VERIFY BEFORE PROCEEDING)**: LangGraph Stream Format Verification
+
+> **DO NOT SKIP THIS STEP.** The checkpoint-based approach depends on correctly extracting messages from `stream_mode=["updates"]`. If the format is wrong, all downstream code is broken.
+
+Write and run a verification script against the project's LangGraph version:
+
+```python
+# verify_langgraph_stream.py — run against production pyproject.toml LangGraph version
+import asyncio
+from langgraph.checkpoint.sqlite import AsyncSqliteSaver
+import aiosqlite
+
+async def verify_stream_format():
+    db_path = "data/ensemble.db"
+    async with aiosqlite.connect(db_path) as conn:
+        checkpointer = AsyncSqliteSaver(conn)
+        
+        # Import the actual graph from the project
+        from daemon.graph import build_graph
+        graph = build_graph()
+        
+        # Run with a simple test input
+        config = {"configurable": {"thread_id": "test-verify"}}
+        graph_input = {"messages": [{"role": "user", "content": "test"}]}
+        
+        async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
+            print("=== EVENT ===")
+            print(f"type: {type(event)}")
+            print(f"value: {event}")
+            if isinstance(event, tuple):
+                mode, data = event
+                print(f"mode: {mode}")
+                print(f"data keys: {data.keys() if hasattr(data, 'keys') else 'N/A'}")
+                for node_name, node_data in data.items():
+                    print(f"  node: {node_name}, data type: {type(node_data)}")
+                    if hasattr(node_data, 'keys'):
+                        print(f"  data keys: {node_data.keys()}")
+                        for k, v in node_data.items():
+                            print(f"    {k}: {type(v)} = {repr(v)[:200]}")
+```
+
+**What to verify:**
+- Does `mode == "updates"`? What is `data` structure?
+- Are messages accessible via `node_data.get("messages", [])`?
+- What is the shape of each message object?
+- Does each message have an `.id` attribute? Is it populated?
+- What is the full call chain from astream → checkpoint → SSE?
+
+**If the format is different**, update the extraction code in Step 3 (`_process_message_with_tracking`) before proceeding.
 
 ---
 
@@ -1204,8 +1365,11 @@ See Testing Plan section above.
 Run these before starting to scope the impact:
 
 ```bash
-# 1. daemon/utils.py doesn't exist yet
-ls daemon/utils.py
+# 0. daemon/utils.py should NOT exist yet (will be created in Step 0)
+ls daemon/utils.py 2>/dev/null && echo "EXISTS - remove/rename first" || echo "OK - will create in Step 0"
+
+# 1. parse_think_tags() currently lives in manager.py (not in utils)
+grep -rn "def parse_think_tags\|THINK_PATTERN" daemon/ --include="*.py"
 
 # 2. Frontend message_id references
 grep -r "message_id" frontend/src --include="*.ts" -l | wc -l
@@ -1225,7 +1389,7 @@ grep -rn "send_message" daemon/ --include="*.py"
 # 7. ResponseDispatcher integration
 grep -rn "_broadcast_to_global\|subscribe_all" daemon/sources/
 
-# 8. broadcast_sync() callers — delete if none
+# 8. broadcast_sync() callers — simplify to completed-only routing
 grep -rn "broadcast_sync" daemon/ --include="*.py"
 
 # 9. _send_error_report() second EventBus call
@@ -1233,6 +1397,9 @@ grep -n "create_child_failed_event" daemon/manager.py
 
 # 10. _create_completion_events() call sites
 grep -rn "_create_completion_events" daemon/ --include="*.py"
+
+# 11. LangGraph version (for stream format verification)
+grep "langgraph" pyproject.toml
 ```
 
 ---
