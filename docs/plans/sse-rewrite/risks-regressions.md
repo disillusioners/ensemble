@@ -6,7 +6,7 @@
 | LangGraph `msg.id` might be `None` for some message types | `_stable_message_id()` fallback using deterministic hash of (role, content[:200], tool_call_id) — prevents duplicates on re-emission. |
 | Thinking extraction has 5 provider-specific paths | Port all 5 paths to `serialize_message()`. |
 | `tool_outputs` map needs ToolMessages that are excluded from output | Build map before filtering, pass to `serialize_message()`. |
-| Frontend field rename `message_id` → `id` breaks all references | **Steps 0.5 and 1 in same PR**. Search entire frontend for `.message_id` and update all references. |
+| No rename needed: JSON API keeps `message_id` | `serialize_message()` maps LangGraph's `msg.id` → `message_id`. No frontend/backend changes needed. |
 | No real-time feedback during LLM inference | Acceptable for long-running task focus. |
 | Large message list on each checkpoint | Acceptable for now. Add diff mode later if needed. |
 | `created_at` is `None` during SSE streaming | Accept regression. REST API populates after reload. |
@@ -21,7 +21,6 @@
 | Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty. |
 | `broadcast_checkpoint_event()` sends to dispatcher queue unnecessarily | Dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` call if optimization needed. |
 | `MessageService` "DB migration" phantom | **CORRECTED**: `MessageService` methods are SSE-only wrappers. No DB writes to migrate. Just delete call sites and file. |
-| Frontend/backend API mismatch window | **Steps 0.5 and 1 in same PR** — no window for mismatch. |
 | Child completion SSE gap: parent sees child report only after checkpoint | Accept as regression OR emit immediate `message_received` event on child completion for instant parent notification |
 | `send_message()` SSE bypass: direct `graph.ainvoke()` with no streaming | Document as known limitation — SSE stream never updates when agent calls `send_message()` on watched instance |
 | Queue ordering under concurrency: out-of-order checkpoints cause UI flicker | **Mitigation**: Add sequence numbers to checkpoint events; frontend sorts by sequence on receipt |

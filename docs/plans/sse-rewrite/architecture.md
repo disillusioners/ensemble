@@ -19,11 +19,13 @@
 
 ---
 
-## Message Format (Identical in SSE and REST API)
+## Unified Message Format
+
+> **Note**: JSON API and frontend use `message_id` (semantically clear). This maps to LangGraph's internal `msg.id`. No rename needed.
 
 ```json
 {
-  "id": "msg-uuid-from-langgraph",
+  "message_id": "msg-uuid-from-langgraph",
   "role": "assistant",
   "content": "Hello!",
   "thinking": null,
@@ -47,7 +49,7 @@
 │  ...                                                             │
 │                                                                  │
 │  Each checkpoint event contains ALL messages from state,        │
-│  with LangGraph's msg.id as the message identity.               │
+│  with LangGraph's msg.id mapped to `message_id`.                 │
 └─────────────────────────────────────────────────────────────────┘
                                │
                                ▼
@@ -69,9 +71,9 @@
 
 ## Key Design Decisions
 
-### 1. LangGraph's `msg.id` is Source of Truth
+### 1. LangGraph's `msg.id` mapped to `message_id`
 
-No more `compute_message_id()`. The ID assigned by LangGraph is the single source of truth for message identity.
+No more `compute_message_id()`. The ID assigned by LangGraph is the single source of truth, mapped to `message_id` in the JSON API. Frontend and REST API keep `message_id` (semantically clear).
 
 ### 2. Full State Replacement
 

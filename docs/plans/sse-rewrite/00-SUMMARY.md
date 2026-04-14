@@ -33,9 +33,11 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 
 ### Unified Message Format
 
+> **Note**: JSON API and frontend use `message_id` (semantically clear). This maps to LangGraph's internal `msg.id`.
+
 ```json
 {
-  "id": "msg-uuid-from-langgraph",
+  "message_id": "msg-uuid-from-langgraph",
   "role": "assistant",
   "content": "Hello!",
   "thinking": null,
@@ -72,9 +74,9 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 ### Frontend — Modified Files
 | File | Action |
 |------|--------|
-| `frontend/src/app/models/index.ts` | Delete SSE types, update Message (`message_id` → `id`) |
+| `frontend/src/app/models/index.ts` | Delete SSE-specific types (keep `message_id`) |
 | `frontend/src/app/services/sse.service.ts` | Full rewrite |
-| `frontend/src/app/pages/chat/chat.component.ts` | Remove delta effects, remove `message_id` lookups |
+| `frontend/src/app/pages/chat/chat.component.ts` | Remove delta effects, simplify |
 
 ---
 
@@ -88,7 +90,7 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 | [Phase 3a](./phase-3-manager-migration.md) | Manager Migration — Core | Remove streaming from `_process_message_with_tracking`, add checkpoint emission with final-state safety net |
 | [Phase 3b](./phase-3-manager-migration.md) | Manager Migration — Cleanup | Remove MessageService from task_processor, child completion, error report |
 | [Phase 4](./phase-4-cleanup.md) | Cleanup | Delete MessageService, rewrite API endpoint |
-| [Phase 5](./phase-5-frontend-models.md) | Frontend Models | Update interfaces, rename `message_id` → `id` |
+| [Phase 5](./phase-5-frontend-models.md) | Frontend Models | Delete SSE-specific types (keep `message_id`) |
 | [Phase 6](./phase-6-frontend-sse.md) | Frontend SSE Service | Full rewrite of SSE service |
 | [Phase 7](./phase-7-frontend-chat.md) | Frontend Chat Component | Remove delta effects, simplify |
 | [Phase 8](./phase-8-tests.md) | Tests & Polish | Write tests alongside each phase; final verification pass |
@@ -96,6 +98,8 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 ---
 
 ## Critical Notes
+
+> **Note**: JSON API and frontend keep `message_id` (semantically clear). Only the internal LangGraph/persistence layer uses `msg.id`. No rename across the stack.
 
 ### ⚠️ Point of No Return
 
@@ -110,7 +114,6 @@ Do all backend phases (1–4) on a feature branch and run the full test suite be
 | Phases | Must Ship Together |
 |--------|-------------------|
 | Phase 0 | Isolated PR (prerequisite) |
-| Phase 1 + Phase 5 | **SAME PR** — `message_id` → `id` rename |
 | Phases 3a + 3b + 4 | **SAME PR** — Backend migration (verify 3a works first) |
 
 ### Testing Philosophy

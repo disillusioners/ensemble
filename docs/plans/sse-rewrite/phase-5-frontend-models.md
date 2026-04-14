@@ -1,75 +1,33 @@
-# Phase 5: Frontend Models — Interface Updates
+# Phase 5: Frontend Models — Cleanup
 
-> **⚠️ CRITICAL**: This phase must ship with Phase 1 (backend `message_id` → `id` rename) in the **same PR/commit**.
+> **Note**: No rename needed. JSON API and frontend keep `message_id` (semantically clear).
+> `serialize_message()` maps LangGraph's `msg.id` → `message_id` internally.
 
 ---
 
 ## Goals
 
-1. Update `Message` and `MessageResponse` interfaces: `message_id` → `id`
-2. Delete SSE-specific types
-3. Add simplified SSE event types
+1. Delete SSE-specific types (no longer needed)
+2. Add simplified SSE event types
+3. Keep `message_id` unchanged in interfaces
 
 ---
 
-## 1. Update Interfaces
+## 1. Delete SSE-Specific Types
 
-### Before:
-```typescript
-interface Message {
-  message_id: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  // ...
-}
-
-interface MessageResponse {
-  message_id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  // ...
-}
-```
-
-### After:
-```typescript
-interface Message {
-  id: string;                              // LangGraph's msg.id (was message_id)
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
-  thinking?: string | null;
-  thinking_extracted?: string | null;
-  tool_calls?: ToolCall[] | null;
-  created_at?: string;
-}
-
-interface MessageResponse {
-  id: string;                              // was message_id — matches LangGraph
-  role: 'user' | 'assistant';
-  content: string;
-  created_at: string;
-  instance_id?: string;
-}
-```
+| What | Why |
+|------|-----|
+| `EventType` union (14 types) | Only `connected`, `checkpoint`, `error`, `keepalive` |
+| `SSEEventEnvelope` | No more envelopes |
+| `SSEDelta` | No more deltas |
+| `SSEStatus` | No more status events |
+| `MessageDeltaType` union (9 types) | No more deltas |
+| `CanonicalMessage` | No more canonical messages |
+| `MessageDelta` | No more deltas |
 
 ---
 
-## 2. Delete SSE-Specific Types
-
-| Lines | What | Why |
-|-------|------|-----|
-| 91-106 | `EventType` union (14 types) | Only `connected`, `checkpoint`, `error`, `keepalive` |
-| 108-114 | `SSEEventEnvelope` | No more envelopes |
-| 117-123 | `SSEEventEnvelope` | No more envelopes |
-| 125-130 | `SSEDelta` | No more deltas |
-| 132-138 | `SSEStatus` | No more status events |
-| 142-151 | `MessageDeltaType` union (9 types) | No more deltas |
-| 154-164 | `CanonicalMessage` | No more canonical messages |
-| 166-186 | `MessageDelta` | No more deltas |
-
----
-
-## 3. Add Simplified SSE Types
+## 2. Add Simplified SSE Types
 
 ```typescript
 type SseEventType = 'connected' | 'checkpoint' | 'error' | 'keepalive';
@@ -82,41 +40,45 @@ interface SSEEvent {
 
 ---
 
-## 4. Keep Unchanged
+## 3. Keep Unchanged
 
-| Lines | What |
-|-------|------|
-| 2-13 | `InstanceStatus`, `InstanceInfo` |
-| 15-21 | `InstanceListResponse` |
-| 38-43 | `ToolCall` (unchanged) |
-| 45-57 | `MessageCreate` |
-| 67-76 | Agent types |
-| 192-202 | Source types |
+| What | Why |
+|------|-----|
+| `Message.message_id` | Keeps `message_id` — semantically clear |
+| `MessageResponse.message_id` | Keeps `message_id` — matches API |
+| `ToolCall` | Unchanged |
+| `MessageCreate` | Unchanged |
+| Agent types | Unchanged |
+| Source types | Unchanged |
 
 ---
 
-## 5. Find All References
+## 4. Keep `message_id` — No Rename
 
-```bash
-grep -r "message_id" frontend/src --include="*.ts" -l
+The frontend and JSON API continue to use `message_id`:
+
+```typescript
+interface Message {
+  message_id: string;  // ← Keep this (maps to LangGraph msg.id internally)
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  thinking?: string | null;
+  thinking_extracted?: string | null;
+  tool_calls?: ToolCall[] | null;
+  created_at?: string;
+}
 ```
-
-Expected to find files like:
-- `chat.component.ts`
-- `sse.service.ts`
-- `models/index.ts`
-- `chat-interface.component.ts`
 
 ---
 
 ## Verification
 
 ```bash
-# Verify no more message_id references in models
-grep -rn "message_id" frontend/src/app/models/index.ts
+# Verify message_id is still in models
+grep -n "message_id" frontend/src/app/models/index.ts
 
-# Verify new id field is used
-grep -rn "\.id" frontend/src/app/models/index.ts | grep -i message
+# Verify no SSE-specific types remain
+grep -n "SSEDelta\|CanonicalMessage\|MessageDelta\|EventType" frontend/src/app/models/index.ts
 
 # Build to verify compilation
 cd frontend && npm run build

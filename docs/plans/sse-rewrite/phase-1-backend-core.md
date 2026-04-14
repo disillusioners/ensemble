@@ -61,7 +61,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
         tool_outputs: Optional map of tool_call_id -> output content.
     
     Returns:
-        Dict with id, role, content, thinking, tool_calls, created_at.
+        Dict with message_id, role, content, thinking, tool_calls, created_at.
         Note: msg.id=None uses _stable_message_id() (hash-based) for deterministic
         fallback, not random UUIDs — prevents duplicate messages on re-emission.
     """
@@ -113,8 +113,9 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
                 })
     
     return {
-        # LangGraph msg.id can be None — use stable fallback to prevent duplicates.
-        "id": getattr(msg, 'id', None) or _stable_message_id(msg),
+        # LangGraph msg.id mapped to message_id (external API field name).
+        # msg.id=None uses _stable_message_id() for deterministic fallback.
+        "message_id": getattr(msg, 'id', None) or _stable_message_id(msg),
         "role": role,
         "content": content_str,
         "thinking": thinking,
