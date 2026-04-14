@@ -102,9 +102,9 @@ Test ainvoke path after `compute_message_id()` removal.
 
 Verify zero production callers before deletion.
 
-### 2.17 Multi-node update event
+### 2.17 Multi-node update — NO message loss (BUGFIX)
 
-Test when LangGraph emits `{"agent": {...}, "tools": {...}}` to ensure no messages are dropped.
+Test when LangGraph emits `{"agent": {...}, "tools": {...}}` to ensure no messages are dropped. This fixes the bug documented in problems.md.
 
 ### 2.18 Frontend disconnect/reconnect
 

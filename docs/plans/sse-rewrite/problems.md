@@ -28,6 +28,7 @@
 - **14+ event types handled** in frontend `sse.service.ts` (lines 85-452)
 - Frontend `models/index.ts` defines ~20 types for SSE alone (lines 91-186)
 - Frontend `sse.service.ts` is **537 lines** for event handling
+- Plus: `task_processor.py` call sites for EventBus convenience methods not documented in PR boundary
 
 ## 5. Double `CHILD_COMPLETED` Event Creation (BUG)
 
@@ -40,3 +41,10 @@
 - `sse.service.ts` registers **two** `addEventListener('error', ...)` handlers (lines 300–333 and 418–452)
 - They handle different envelope formats, indicating inconsistent backend error formatting
 - After rewrite: single event model eliminates this
+
+## 7. Multi-Node Update Silent Message Loss (BUG)
+
+- `manager.py` lines 1166–1171 only capture the **last** node's message
+- If multiple nodes emit messages in the same step (possible in complex graphs), messages are **silently lost**
+- Current code: `latest_msg = data["agent"]["messages"][-1]`
+- This rewrite fixes it by accumulating ALL nodes' messages

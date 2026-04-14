@@ -17,6 +17,7 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 2. **SSE delivers checkpoint snapshots** after each node completes
 3. **Frontend replaces entire message list** on each checkpoint event
 4. **Correctness over real-time feedback** (project focuses on long-running tasks)
+5. **Sequence numbers for ordering** — checkpoint events include monotonically incrementing sequence number to handle out-of-order delivery
 
 ---
 
@@ -84,6 +85,7 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 
 | Phase | Name | Description |
 |-------|------|-------------|
+| [Phase -1](#) | extract_thinking() Utility | Extract thinking extraction to `daemon/utils.py` with full test coverage |
 | [Phase 0](./phase-0-preparation.md) | Preparation | Extract `parse_think_tags` to `daemon/utils.py` |
 | [Phase 0.5](./verification.md#step-35-langgraph-stream-format-verification) | **VERIFICATION** | Verify LangGraph stream format (MANDATORY before Phase 1) |
 | [Phase 1](./phase-1-backend-core.md) | Backend Core | Add serialization helpers, rewrite persistence |
@@ -110,6 +112,7 @@ If Phase 3 breaks in production:
 2. **If LangGraph stream format is wrong (Phase 0.5 failure)**: Reassess the approach entirely — the checkpoint-based architecture depends on correct format
 3. **If only manager.py changes broke**: Revert to Phase 2 state (EventBus already updated), restore streaming code in manager
 4. **If EventBus changes broke**: Revert to Phase 2 state, restore old event methods
+5. **Feature flag path**: If feature flag `sse_v2: true` is added to config.yaml, toggle back to old behavior
 
 > **No hot-fix path**: The architecture change is fundamental. Streaming events cannot be restored
 > without restoring `broadcast_streaming_event()` and content buffering code.
@@ -118,6 +121,7 @@ If Phase 3 breaks in production:
 
 | PR | Phases | Must Ship Together |
 |----|--------|-------------------|
+| PR 0 | **extract_thinking() prerequisite** | Isolated PR — extract thinking extraction logic to `daemon/utils.py` with comprehensive tests covering all 5 provider paths |
 | PR 1 | Phase 0 | Isolated PR (prerequisite) |
 | PR 2 | Phase 0.5 | Isolated verification (no code changes) |
 | PR 3 | **Phases 1 + 2 + 3a + 3b + 4** | **ALL backend changes** — must ship together |
@@ -151,3 +155,6 @@ Write tests alongside each phase, not just at the end. Each phase should have pa
 | Multi-node update loses messages | Remove `break` — accumulate ALL nodes |
 | `isStreaming` never reset | Set `false` on SSE `onerror`/`onclose` |
 | `all_state_messages` grows unbounded | Reset `[]` at start of each `_process_message_with_tracking()` call |
+| Missing sequence numbers | Add `checkpoint_sequence` to Phase 1 |
+| Thinking extraction scattered | Extract to `extract_thinking()` in PR 0 |
+| PR boundary incomplete | Include test files and task_processor.py call sites |

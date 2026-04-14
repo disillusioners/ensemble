@@ -5,9 +5,11 @@
 | Event | Payload | When |
 |-------|---------|------|
 | `connected` | `{instance_id}` | Client connects |
-| `checkpoint` | `{instance_id, messages[], checkpoint_id}` | After each LangGraph node completes |
+| `checkpoint` | `{instance_id, messages[], checkpoint_id, checkpoint_sequence}` | After each LangGraph node completes |
 | `error` | `{error, details}` | Unrecoverable failure |
 | `keepalive` | `{}` | Every 30s timeout |
+
+> **Sequence numbers**: Each checkpoint includes `checkpoint_sequence` — a monotonically incrementing integer per instance. This ensures correct ordering when checkpoints arrive out of order (e.g., due to network reordering or reconnection mid-stream).
 
 > **Cancellation handling**: User-initiated cancellation maps to `error` event: `{"error": "cancelled"}`. No separate event type needed.
 

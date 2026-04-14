@@ -38,6 +38,9 @@ grep -rn "_create_completion_events" daemon/ --include="*.py"
 
 # 11. LangGraph version (for stream format verification)
 grep "langgraph" pyproject.toml
+
+# 12. Extract thinking call sites (verify consolidation plan)
+grep -rn "additional_kwargs.*thinking\|reasoning_content\|msg.thinking" daemon/ --include="*.py"
 ```
 
 ---
@@ -95,6 +98,7 @@ async def verify_stream_format():
 - Are messages accessible via `node_data.get("messages", [])`?
 - What is the shape of each message object?
 - Does each message have an `.id` attribute? Is it populated?
+- Does each checkpoint include a `checkpoint_sequence` number?
 - What is the full call chain from astream → checkpoint → SSE?
 
 **If the format is different**, update the extraction code in Step 3 (`_process_message_with_tracking`) before proceeding.

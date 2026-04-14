@@ -129,6 +129,33 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
 
 ---
 
+### 1.3 Add `get_next_sequence()` helper
+
+```python
+# Add to daemon/utils.py
+_sequence_counter: dict[str, int] = {}
+
+def get_next_sequence(instance_id: str) -> int:
+    """Get next monotonically incrementing sequence number for an instance.
+    
+    Args:
+        instance_id: The instance to get sequence for.
+    
+    Returns:
+        The next sequence number (starts at 1).
+    """
+    current = _sequence_counter.get(instance_id, 0)
+    next_seq = current + 1
+    _sequence_counter[instance_id] = next_seq
+    return next_seq
+```
+
+### 1.4 Update `serialize_message()` docstring
+
+The docstring should clearly reference the 5 thinking paths documented above in section 1.2.
+
+---
+
 ## 2. `daemon/persistence.py` — Rewrite `get_instance_messages()`
 
 **Location**: Lines 74-212
