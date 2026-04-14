@@ -1416,3 +1416,150 @@ The following behavior changes are intentional and accepted:
 | `send_message()` bypasses SSE entirely | Used for programmatic/API calls, not user-facing streaming |
 | Large message list sent on each checkpoint | Acceptable for current scale; diff mode can be added later |
 | Some `EventKind` enum values become dead code | Doesn't break anything; can clean up later |
+
+---
+
+## Oracle Review Findings (2026-04-14)
+
+### Critical Corrections
+
+**1. Section 7 is factually wrong — no DB migration needed**
+
+`MessageService` methods are **pure SSE emission wrappers**, not DB persistence:
+
+| Method | What it actually does | What the plan said |
+|--------|---------------------|-------------------|
+| `on_assistant_message_completed()` | Creates `Event` rows (SSE), computes message_id | "Inserts assistant message record" |
+| `on_child_completion_report()` | Calls `create_message_received_event()` (SSE) | "Inserts child report message record" |
+| `on_child_error_report()` | Calls `create_message_received_event()` (SSE) | "Inserts child error report" |
+
+**Action**: Correct Section 7 — remove "migrate DB write" instructions. Just delete call sites and the file.
+
+**2. `break` statement in checkpoint loop loses data (Section 2.2, line 417)**
+
+```python
+for node_name, node_data in data.items():
+    # ...
+    break  # Only emit once per update  ← BUG: drops subsequent nodes
+```
+
+If LangGraph emits an update with multiple nodes (e.g., parallel execution), subsequent nodes are silently dropped.
+
+**Fix**: Remove `break`. Restructure to accumulate messages from ALL nodes before emitting:
+
+```python
+any_new = False
+for node_name, node_data in data.items():
+    node_messages = node_data.get("messages", [])
+    if node_messages:
+        any_new = True
+        for m in node_messages:
+            # Key by msg.id, replace on collision
+            # ...
+
+if any_new:
+    await self._event_bus.broadcast_checkpoint_event(...)
+```
+
+**3. Frontend `message_id` → `id` rename must be same PR as backend**
+
+Step 0.5 and Step 1 in separate PRs creates an API mismatch window where frontend expects `id` but backend returns `message_id`.
+
+**Fix**: Merge Step 0.5 and Step 1 into one commit. Backend `persistence.py` field rename and frontend `models/index.ts` rename must land together.
+
+**4. `all_state_messages` grows unbounded across turns**
+
+Each call to `_process_message_with_tracking()` appends to `all_state_messages`. With 100 turns, every checkpoint serializes all 100 messages.
+
+**Fix**: Reset `all_state_messages = []` at the start of `_process_message_with_tracking()`. Initial state comes from `get_instance_messages()` on SSE connect. The accumulated list only needs the current turn.
+
+---
+
+### Gap Fixes
+
+**5. `isStreaming` signal never set to `false`**
+
+Section 9 shows `isStreaming.set(true)` on checkpoint but never sets it back to `false`.
+
+**Fix**: Set `isStreaming.set(false)` on SSE `onerror`/`onclose`, or emit a final event with `stream_end` sentinel.
+
+**6. Cancellation flow undefined**
+
+No SSE event defined for user-initiated cancellation after removing `cancelled` event type.
+
+**Fix**: Map cancellation to `error` event: `{"error": "cancelled"}`.
+
+**7. `instance_completed` and `title_updated` removal needs spec**
+
+- `title_updated`: Add lightweight `title_updated` event type (making 4 types), or have frontend poll via instance API
+- `instance_completed`: Include `completed: true` flag in final checkpoint, or emit a `completed` event
+
+**8. `_broadcast_to_global()` keyword arg constraint**
+
+The signature has positional params that map misleadingly (`event_id` is 3rd positional, not `data`).
+
+**Fix**: Add explicit note: "Always use keyword args: `data={...}`". The plan already does this correctly — document it as a constraint.
+
+---
+
+### Simplification Opportunities
+
+**9. Move `serialize_message()` to `daemon/utils.py`**
+
+`persistence.py` importing from `event_bus.py` (services layer) creates coupling. Consider placing `serialize_message()` alongside `parse_think_tags()` in `daemon/utils.py`.
+
+Benefits:
+- Both are pure serialization helpers
+- `persistence.py` doesn't depend on event system
+- Easier to test in isolation
+
+**10. Keep `aget_state()` as post-loop safety net (Section 2.3)**
+
+Instead of deleting `graph.aget_state()`, keep it as a one-time call after the streaming loop:
+
+```python
+if not all_state_messages:
+    final_result = await graph.aget_state(config)
+    # Extract from final_result
+```
+
+Use accumulated messages as primary source, fall back to `aget_state()` if needed.
+
+---
+
+### Testing Additions
+
+| # | Test | Why |
+|---|------|-----|
+| 1 | `MessageService` deletion verification | Confirm all methods have zero callers before deleting |
+| 2 | `_process_message_with_tracking()` `MessageResult` completeness | Verify returned `MessageResult` has all fields |
+| 3 | `send_message()` tool still works | Test ainvoke path after `compute_message_id()` removal |
+| 4 | `broadcast_sync()` callers audit | Verify zero production callers before deletion |
+| 5 | Multi-node update event | Test when LangGraph emits `{"agent": {...}, "tools": {...}}` |
+| 6 | `_stable_message_id()` collision | Two identical (role+content+tc_id) → same ID |
+| 7 | Checkpoint serialization perf | 50 messages with tool_calls < 100ms |
+| 8 | `ResponseDispatcher` routing | Verify `completed` event includes `source` field |
+| 9 | Frontend disconnect/reconnect | SSE connects to empty instance → receives only `connected` → sends message → receives checkpoint |
+
+---
+
+### New Risks
+
+| Risk | Mitigation |
+|------|-----------|
+| **`MessageService` "DB migration" phantom** — Following plan literally would search for non-existent DB writes | Correct Section 7: SSE-only. Just remove call sites and delete file. |
+| **Multi-node update coalescing** — `break` loses messages from subsequent nodes | Remove `break`, accumulate all nodes before emit |
+| **`isStreaming` signal staleness** — Never set to `false` after stream ends | Set on SSE disconnect/error, or emit sentinel |
+| **`all_state_messages` unbounded growth** — Memory concern across turns | Reset at start of each `_process_message_with_tracking()` call |
+
+---
+
+### Confirmed Correct (No Changes Needed)
+
+- ✓ `_broadcast_to_global()` usage with keyword args — correct
+- ✓ Step 0 (move `parse_think_tags` to utils) — correct dependency order
+- ✓ `ResponseDispatcher` preserved via `_broadcast_to_global("completed")` — correct
+- ✓ Step 3.5 verification gate before implementation — critical and correct
+- ✓ Empty checkpoint skip in `broadcast_checkpoint_event()` — correct
+- ✓ `_create_completion_events()` for audit — correct (not SSE)
+- ✓ `broadcast_sync()` only for dispatcher — correct
