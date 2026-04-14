@@ -1,0 +1,39 @@
+# Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| Circular import: `utils.py` → `event_bus.py` → `utils.py` | **Step 0**: Move `parse_think_tags` + `_THINK_PATTERN` to `daemon/utils.py` before any other changes. Use lazy imports inside functions. |
+| LangGraph `msg.id` might be `None` for some message types | `_stable_message_id()` fallback using deterministic hash of (role, content[:200], tool_call_id) — prevents duplicates on re-emission. |
+| Thinking extraction has 5 provider-specific paths | Port all 5 paths to `serialize_message()`. |
+| `tool_outputs` map needs ToolMessages that are excluded from output | Build map before filtering, pass to `serialize_message()`. |
+| Frontend field rename `message_id` → `id` breaks all references | **Steps 0.5 and 1 in same PR**. Search entire frontend for `.message_id` and update all references. |
+| No real-time feedback during LLM inference | Acceptable for long-running task focus. |
+| Large message list on each checkpoint | Acceptable for now. Add diff mode later if needed. |
+| `created_at` is `None` during SSE streaming | Accept regression. REST API populates after reload. |
+| Multi-node update coalescing — `break` loses messages from subsequent nodes | **Remove `break`**. Accumulate messages from ALL nodes before emitting. |
+| `isStreaming` signal never reset after stream ends | Set `isStreaming.set(false)` on SSE `onerror`/`onclose`. |
+| `all_state_messages` grows unbounded across turns | **Reset `all_state_messages = []`** at the start of each `_process_message_with_tracking()` call. |
+| `ResponseDispatcher` loses event stream (external sources silent) | Keep lightweight `completed` event via `_broadcast_to_global()` for dispatcher. |
+| `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code. |
+| `_broadcast_to_global()` positional arg confusion | **Always use keyword args**: `data={...}`. Document as constraint. |
+| `send_message()` inconsistency with new system | Document as SSE-invisible. `ainvoke()` bypasses SSE. |
+| `create_child_failed_event()` call in `_send_error_report()` not in original plan | Add to removal list at `manager.py:2046`. |
+| Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty. |
+| `broadcast_checkpoint_event()` sends to dispatcher queue unnecessarily | Dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` call if optimization needed. |
+| `MessageService` "DB migration" phantom | **CORRECTED**: `MessageService` methods are SSE-only wrappers. No DB writes to migrate. Just delete call sites and file. |
+| Frontend/backend API mismatch window | **Steps 0.5 and 1 in same PR** — no window for mismatch. |
+
+---
+
+# Accepted Regressions
+
+The following behavior changes are intentional and accepted:
+
+| Regression | Rationale |
+|------------|-----------|
+| No real-time token streaming during LLM inference | Project focuses on long-running tasks; correctness over real-time feedback |
+| `created_at` is `None` during SSE streaming | Timestamps only populated when loading from REST API after completion |
+| `Last-Event-ID` reconnection support dropped | Simplifies SSE endpoint; can be re-added with checkpoint sequence numbers |
+| `send_message()` bypasses SSE entirely | Used for programmatic/API calls, not user-facing streaming |
+| Large message list sent on each checkpoint | Acceptable for current scale; diff mode can be added later |
+| Some `EventKind` enum values become dead code | Doesn't break anything; can clean up later |
