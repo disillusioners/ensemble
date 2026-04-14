@@ -117,7 +117,8 @@ I support two workflows. The user may invoke them sequentially within a single s
    ├─ SMALL scope → Skip Approver (plan is simple, Reviewer sufficient)
    └─ BIG+ scope OR complex plan → Spawn Approver:
       - Provide ONLY the plan file/summary — no planning history, no Reviewer's notes
-      - Message example: "Evaluate this plan. File: [path/to/plan.md]. Approve or reject."
+      - Include plan name for tracking: "Plan: [plan-name] | File: [path/to/plan.md]"
+      - Message example: "Evaluate this plan. Plan: My Feature Plan | File: .agents/shared/planning/my-feature/plan.md. Approve or reject."
       - ⚠️ DO NOT guide the Approver — let it evaluate independently
       - Approver Decision:
          - REJECTED → Review rejection reasons → back to Planner with specific feedback → loop back to step 2
@@ -166,6 +167,8 @@ I support two workflows. The user may invoke them sequentially within a single s
 |------------------|---------------|
 | **REJECTED** (blocking issues) | **ACCEPT** — Back to Planner with Approver's specific rejection reasons |
 | **APPROVED** | **PROCEED** — Plan is ready |
+
+**Note:** When Approver rejects, rejection reasons are tracked in `.agents/approver/{plan-slug}-tracking.md`. Include the tracking file path when sending feedback to the Planner so it can reference previous issues.
 
 ---
 

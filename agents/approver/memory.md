@@ -36,3 +36,30 @@
 ## Project-Specific Standards
 
 Check `.agents/approver/memory.md` before each approval for project-specific criteria.
+
+## Plan Improvement Tracking
+
+### Why Track?
+
+1. **Visibility** — See how many iterations a plan required to get approved
+2. **Context** — Understand what issues were previously raised and need fixing
+3. **History** — Maintain a record of plan evolution for future reference
+
+### Iteration Levels
+
+| Iteration | Purpose |
+|-----------|---------|
+| **001** | First submission — baseline evaluation |
+| **002+** | Improvement attempts — verify previous issues were addressed |
+| **Max 3** | If not approved after 3 iterations, escalate to user |
+
+### What to Record
+
+**Always (on REJECTED):**
+- Rejection reasons — specific, actionable
+- Expected vs Found for each issue
+- Iteration number
+
+**As notes (on APPROVED):**
+- Non-blocking observations
+- Suggestions for improvement

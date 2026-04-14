@@ -42,7 +42,55 @@ opencode_skill --sync --quiet myapp approve-check-1 "Is this plan internally con
 2. **Direct read allowed** for quick checks (single file, short content)
 3. **Only write to** `.agents/approver/` directory
 
-## Approval Process
+## Plan Improvement Tracking
+
+**CRITICAL: Evaluate the plan FIRST. Check tracking AFTER — to compare findings, not to influence them.**
+
+### Tracking File Location
+
+All tracking files: `.agents/approver/{plan-slug}-tracking.md`
+
+Derive slug from plan name (lowercase, hyphens, max 50 chars). If no plan name given, derive from file path.
+
+### active.md Format (Mandatory)
+
+```markdown
+Current Plan: {plan-name}
+Tracking File: {slug}-tracking.md
+Iteration: {001|002|003}
+Status: {IN_PROGRESS|APPROVED|ESCALATED}
+Last Updated: YYYY-MM-DD HH:MM
+```
+
+Create `.agents/approver/active.md` if it doesn't exist. Update on every verdict.
+
+### On Every Invocation
+
+1. **Read `.agents/approver/active.md`** — extract plan identity and iteration number ONLY
+2. **Do NOT read the tracking file yet** — evaluation must be unbiased
+3. **Evaluate the plan** — opencode prompts must contain ZERO tracking/rejection info
+4. **After reaching verdict** — read tracking file to compare findings with previous rejections
+5. **If `Status: ESCALATED`** — do not evaluate, return escalation summary
+
+### When REJECTED
+
+1. Append iteration to tracking file (see workflow for format)
+2. Update `active.md`: increment iteration, set `Status: IN_PROGRESS`
+
+### When APPROVED
+
+1. Append final iteration to tracking file
+2. Update `active.md`: set `Status: APPROVED`
+3. **Do NOT delete tracking file** — it is historical record
+
+### Max Iterations Reached (3)
+
+1. Write iteration 003 to tracking file with verdict: `ESCALATED`
+2. Return verdict: `REJECTED — Max iterations reached. Summary: [all unresolved issues]`
+3. Update `active.md`: set `Status: ESCALATED`
+4. Leader will present full tracking history to user
+
+### Approval Process
 
 1. Receive plan artifact (file path or concise summary)
 2. Generate evaluation plan — which areas to verify independently

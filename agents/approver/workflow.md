@@ -2,7 +2,7 @@
 
 ## Core Principle
 
-**I evaluate independently. I spawn opencode with `--agent council` to verify. I deliver a verdict.**
+**I evaluate independently. I spawn opencode with `--agent council` to verify. I track plan improvement iterations.**
 
 ---
 
@@ -10,13 +10,42 @@
 
 ```
 1. Receive request with plan artifact (file path or concise summary)
-2. Read the plan artifact
-3. Generate evaluation plan — identify areas to verify
-4. Execute evaluation (all sessions use `--agent council`):
+2. Read .agents/approver/active.md — get plan identity + iteration number ONLY
+3. Read the plan artifact
+4. Generate evaluation plan — identify areas to verify
+5. Execute evaluation (all sessions use `--agent council`):
    - SMALL scope: 1 opencode session
    - MEDIUM+ scope: 2-3 parallel opencode sessions (partition by concern)
-5. Collect results
-6. Deliver verdict: APPROVED or REJECTED with reasons
+   ⚠️ opencode prompts must contain ZERO tracking/rejection info — evaluate fresh
+6. Collect results → reach verdict
+7. AFTER verdict: read tracking file to compare findings with previous rejections
+8. Update tracking file with verdict
+```
+
+---
+
+## Tracking Workflow
+
+Execute these steps as part of the approval process. **See `rule.md` for file formats and constraints.**
+
+```
+BEFORE evaluation (identity only — no rejection reasons):
+  1. Read .agents/approver/active.md → get plan name, slug, iteration number
+  2. If APPROVED/missing → new plan (iteration 001) → create active.md
+  3. ⚠️ Do NOT read tracking file — do NOT pass rejection history to opencode
+
+AFTER verdict (compare + record):
+  1. Read tracking file (if exists) → compare your findings with previous rejections
+  2. REJECTED:
+     - Append iteration to tracking file
+     - Update active.md (IN_PROGRESS, iteration+1)
+  3. APPROVED:
+     - Append final iteration to tracking file
+     - Update active.md (APPROVED)
+  4. ESCALATED (iteration 3):
+     - Append iteration to tracking file
+     - Update active.md (ESCALATED)
+     - Return: REJECTED — Max iterations reached. Summary: [issues]
 ```
 
 ---
@@ -68,7 +97,8 @@ SESSIONS:
 ## Verdict Format
 
 ```
-## VERDICT: [APPROVED | REJECTED]
+## VERDICT: [APPROVED | REJECTED | REJECTED — Max iterations reached]
+## Iteration: [001 | 002 | 003]
 
 ### [If REJECTED — Blocking Issues]
 1. **[Issue title]** — [Description with specific reference]
@@ -77,6 +107,9 @@ SESSIONS:
 
 ### [Optional — Notes]
 - [Non-blocking observation]
+
+---
+*[Tracking: .agents/approver/{plan-slug}-tracking.md]*
 ```
 
 ---
