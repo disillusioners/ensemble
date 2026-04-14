@@ -6,6 +6,9 @@ Run these before starting to scope the impact:
 # 0. daemon/utils.py should NOT exist yet (will be created in Step 0)
 ls daemon/utils.py 2>/dev/null && echo "EXISTS - remove/rename first" || echo "OK - will create in Step 0"
 
+# 0b. Multi-node update bug — verify break statement EXISTS before assuming fix needed
+grep -B5 -A15 "for node_name, node_data" daemon/manager.py | grep -i break && echo "BREAK FOUND - needs removal" || echo "NO BREAK - bug already fixed or doesn't exist"
+
 # 1. parse_think_tags() currently lives in manager.py (not in utils)
 grep -rn "def parse_think_tags\|THINK_PATTERN" daemon/ --include="*.py"
 
@@ -27,8 +30,11 @@ grep -rn "send_message" daemon/ --include="*.py"
 # 7. ResponseDispatcher integration
 grep -rn "_broadcast_to_global\|subscribe_all" daemon/sources/
 
-# 8. broadcast_sync() callers — simplify to completed-only routing
+# 8. broadcast_sync() callers — MUST audit before Phase 2
 grep -rn "broadcast_sync" daemon/ --include="*.py"
+
+# 8b. All EventKind streaming event usages (verify all removed in PR 3)
+grep -rn "EventKind.MESSAGE_RECEIVED\|EventKind.MESSAGE_COMPLETED\|EventKind.PROCESSING_STARTED\|EventKind.PROCESSING_COMPLETED" daemon/ --include="*.py"
 
 # 9. _send_error_report() second EventBus call
 grep -n "create_child_failed_event" daemon/manager.py
@@ -107,7 +113,15 @@ async def verify_stream_format():
 - Are messages accessible via `node_data.get("messages", [])`?
 - What is the shape of each message object?
 - Does each message have an `.id` attribute? Is it populated?
+- **CRITICAL**: Does `msg.id` remain consistent when the same message is re-emitted in a checkpoint?
+  - This tests deduplication safety: if `msg.id` is `None` on first emission but populated on re-emission (or vice versa), the `_stable_message_id()` fallback produces DIFFERENT IDs, breaking deduplication.
+  - Test by: running astream twice with the same input, comparing message IDs.
 - Does each checkpoint include a `checkpoint_sequence` number?
 - What is the full call chain from astream → checkpoint → SSE?
 
 **If the format is different**, update the extraction code in Step 3 (`_process_message_with_tracking`) before proceeding.
+
+**If `msg.id` is inconsistent across re-emissions**, the fallback hash approach breaks. Mitigation options:
+1. Use message content hash as primary ID (abandoning LangGraph's `msg.id`)
+2. Cache first-seen `msg.id` and reuse it on re-emission
+3. Accept that re-emitted messages will create new entries (frontend receives duplicates)

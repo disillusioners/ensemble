@@ -105,6 +105,8 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
 ```
 
 > **CRITICAL**: Do NOT add a `break` inside the node loop. Accumulate from ALL nodes before emitting.
+> 
+> **Council Review Note**: Code inspection shows the current implementation at ~line 1160 already iterates through all nodes without a `break`. Verify the actual current state before assuming a bug exists to fix.
 
 ### 1.3 Simplified post-streaming code
 

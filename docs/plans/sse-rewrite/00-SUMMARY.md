@@ -106,16 +106,15 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 
 ### Rollback Strategy
 
-If Phase 3 breaks in production:
+**Simplified**: Since PR 3 bundles all backend changes, rollback = `git revert PR 3`. No partial rollback possible.
 
-1. **Revert the feature branch** — since project is pre-production, rollback = `git revert` or branch reset
-2. **If LangGraph stream format is wrong (Phase 0.5 failure)**: Reassess the approach entirely — the checkpoint-based architecture depends on correct format
-3. **If only manager.py changes broke**: Revert to Phase 2 state (EventBus already updated), restore streaming code in manager
-4. **If EventBus changes broke**: Revert to Phase 2 state, restore old event methods
-5. **Feature flag path**: If feature flag `sse_v2: true` is added to config.yaml, toggle back to old behavior
+| Scenario | Action |
+|----------|--------|
+| Phase 0.5 fails | Reassess approach entirely. Checkpoint architecture depends on correct LangGraph format. |
+| PR 3 breaks after merge | `git revert PR 3`. Phase 0.5 is the only abort gate. |
+| Feature flag | **Rejected** — project is not in production. |
 
-> **No hot-fix path**: The architecture change is fundamental. Streaming events cannot be restored
-> without restoring `broadcast_streaming_event()` and content buffering code.
+> **No partial rollback within PR 3**: Phases 1-4 are interdependent. You cannot revert to "Phase 2 state" without cherry-picking, which is error-prone. If anything breaks, revert the entire PR.
 
 ### PR Boundaries
 
@@ -124,9 +123,9 @@ If Phase 3 breaks in production:
 | PR 0 | **extract_thinking() prerequisite** | Isolated PR — extract thinking extraction logic to `daemon/utils.py` with comprehensive tests covering all 5 provider paths |
 | PR 1 | Phase 0 | Isolated PR (prerequisite) |
 | PR 2 | Phase 0.5 | Isolated verification (no code changes) |
-| PR 3 | **Phases 1 + 2 + 3a + 3b + 4** | **ALL backend changes** — must ship together |
+| PR 3 | **Phases 1 + 2 + 3a + 3b + 4** | **ALL backend changes** — must ship together. **MUST include E2E test** validating SSE messages == REST API messages. Test serves as CI gate. |
 | PR 4 | Phases 5 + 6 + 7 | All frontend changes |
-| PR 5 | Phase 8 | Tests and final verification |
+| PR 5 | Phase 8 | Remaining tests and polish (E2E already in PR 3) |
 
 > **⚠️ Why Phases 1+2+3+4 must ship together**: Phase 2 removes `broadcast_streaming_event()` from
 > EventBus, Phase 3 removes the call sites from manager. If merged separately, code breaks.

@@ -222,7 +222,10 @@ curl -N http://localhost:8079/instances/test/events
 
 ## 5. Critical E2E Test — Full Flow Verification
 
-**This is the entire point of the SSE rewrite. Must pass before merge.**
+**This is the entire point of the SSE rewrite. Must pass before PR 3 can merge.**
+
+> **Council Review Note**: This test validates that SSE messages match REST API messages (same IDs, same content).
+> It MUST be written as part of PR 3, not PR 5, and MUST pass in CI before PR 3 merges.
 
 ### Test: User Message → SSE Checkpoint → Messages Match REST API
 
