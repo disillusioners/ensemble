@@ -73,3 +73,13 @@ async for event in graph.astream(graph_input, config, stream_mode=["updates", "m
 **Abort condition**: If stream format differs significantly from expected, reassess the checkpoint-based approach entirely. Document findings and create new plan before proceeding.
 
 **Note**: LangGraph version is locked in `pyproject.toml`. Format verification is valid only for the current version. Future LangGraph upgrades require separate verification.
+
+### Phase 0.5 Additional Verification (Do before Phase 4)
+
+Before Phase 4 cleanup, verify that `ResponseDispatcher` in `daemon/sources/dispatcher.py` correctly filters checkpoint events:
+
+```bash
+grep -rn "event_type" daemon/sources/dispatcher.py | grep -i "filter\|checkpoint\|completed"
+```
+
+Expected: Dispatcher should only process `event_type='completed'`, ignoring `event_type='checkpoint'`. If the filter is missing, add it before Phase 4.

@@ -193,7 +193,16 @@ Delete:
 
 ## 2. `daemon/task_processor.py` — Remove MessageService Calls
 
-### 2.1 At line 171
+### 2.1 At line 124-128 (processing_started_event)
+
+**DELETE** — This call to `event_bus.create_processing_started_event()` must be removed when Phase 2 removes the EventBus method:
+
+```python
+# DELETE entire block around lines 124-128
+await self._event_bus.create_processing_started_event(instance_id=instance_id)
+```
+
+### 2.2 At line 171
 
 Replace:
 ```python
@@ -214,11 +223,11 @@ await self._event_bus._broadcast_to_global(
 )
 ```
 
-### 2.2 DELETE dead code
+### 2.3 DELETE dead code
 
 - The `elif self._event_repo:` fallback branch at lines 129-140 — **dead code**
 
-### 2.3 Remove `MessageService` instantiation
+### 2.4 Remove `MessageService` instantiation
 
 Delete `MessageService` instantiation and `self._message_service` declaration.
 

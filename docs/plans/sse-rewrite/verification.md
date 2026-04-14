@@ -33,13 +33,22 @@ grep -rn "broadcast_sync" daemon/ --include="*.py"
 # 9. _send_error_report() second EventBus call
 grep -n "create_child_failed_event" daemon/manager.py
 
-# 10. _create_completion_events() call sites
+# 10. task_processor.py create_processing_started_event call (Phase 3b addition)
+grep -n "create_processing_started_event" daemon/task_processor.py
+
+# 11. ResponseDispatcher checkpoint filtering — VERIFY before Phase 4
+grep -rn "event_type" daemon/sources/dispatcher.py | grep -i "filter\|checkpoint\|completed"
+
+# 12. Sequence counter restart behavior — verify code comment exists
+grep -rn "restart\|reset\|counter" daemon/utils.py
+
+# 13. _create_completion_events() call sites
 grep -rn "_create_completion_events" daemon/ --include="*.py"
 
-# 11. LangGraph version (for stream format verification)
+# 14. LangGraph version (for stream format verification)
 grep "langgraph" pyproject.toml
 
-# 12. Extract thinking call sites (verify consolidation plan)
+# 15. Extract thinking call sites (verify consolidation plan)
 grep -rn "additional_kwargs.*thinking\|reasoning_content\|msg.thinking" daemon/ --include="*.py"
 ```
 
