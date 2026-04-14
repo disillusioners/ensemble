@@ -85,6 +85,7 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 | Phase | Name | Description |
 |-------|------|-------------|
 | [Phase 0](./phase-0-preparation.md) | Preparation | Extract `parse_think_tags` to `daemon/utils.py` |
+| [Phase 0.5](./verification.md#step-35-langgraph-stream-format-verification) | **VERIFICATION** | Verify LangGraph stream format (MANDATORY before Phase 1) |
 | [Phase 1](./phase-1-backend-core.md) | Backend Core | Add serialization helpers, rewrite persistence |
 | [Phase 2](./phase-2-eventbus.md) | EventBus Rewrite | Add `broadcast_checkpoint_event()`, remove old methods |
 | [Phase 3a](./phase-3-manager-migration.md) | Manager Migration — Core | Remove streaming from `_process_message_with_tracking`, add checkpoint emission with final-state safety net |
@@ -101,20 +102,30 @@ Rewrite SSE system so that messages delivered via SSE are **identical** to messa
 
 > **Note**: JSON API and frontend keep `message_id` (semantically clear). Only the internal LangGraph/persistence layer uses `msg.id`. No rename across the stack.
 
-### ⚠️ Point of No Return
+### Rollback Strategy
 
-**Phase 3a is the point of no return.** After this change:
-- `_process_message_with_tracking` no longer emits streaming tokens
-- Checkpoint snapshots become the only delivery mechanism
+If Phase 3 breaks in production:
 
-Do all backend phases (1–4) on a feature branch and run the full test suite before merging to main.
+1. **Revert the feature branch** — since project is pre-production, rollback = `git revert` or branch reset
+2. **If LangGraph stream format is wrong (Phase 0.5 failure)**: Reassess the approach entirely — the checkpoint-based architecture depends on correct format
+3. **If only manager.py changes broke**: Revert to Phase 2 state (EventBus already updated), restore streaming code in manager
+4. **If EventBus changes broke**: Revert to Phase 2 state, restore old event methods
+
+> **No hot-fix path**: The architecture change is fundamental. Streaming events cannot be restored
+> without restoring `broadcast_streaming_event()` and content buffering code.
 
 ### PR Boundaries
 
-| Phases | Must Ship Together |
-|--------|-------------------|
-| Phase 0 | Isolated PR (prerequisite) |
-| Phases 3a + 3b + 4 | **SAME PR** — Backend migration (verify 3a works first) |
+| PR | Phases | Must Ship Together |
+|----|--------|-------------------|
+| PR 1 | Phase 0 | Isolated PR (prerequisite) |
+| PR 2 | Phase 0.5 | Isolated verification (no code changes) |
+| PR 3 | **Phases 1 + 2 + 3a + 3b + 4** | **ALL backend changes** — must ship together |
+| PR 4 | Phases 5 + 6 + 7 | All frontend changes |
+| PR 5 | Phase 8 | Tests and final verification |
+
+> **⚠️ Why Phases 1+2+3+4 must ship together**: Phase 2 removes `broadcast_streaming_event()` from
+> EventBus, Phase 3 removes the call sites from manager. If merged separately, code breaks.
 
 ### Testing Philosophy
 

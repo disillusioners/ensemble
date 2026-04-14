@@ -1,6 +1,8 @@
 # Phase 1: Backend Core — Serialization & Persistence
 
-> **⚠️ CRITICAL**: This phase must ship with Phase 5 (frontend `message_id` → `id` rename) in the **same PR/commit**.
+> **⚠️ Phase 1 changes message ID format**: `compute_message_id()` (deterministic hash) is replaced
+> with LangGraph's native `msg.id` (UUIDs). The REST API response field `message_id` stays the same,
+> but VALUES change. Verify no external systems or frontend logic depends on the old ID format.
 
 ---
 

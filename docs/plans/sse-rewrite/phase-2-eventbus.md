@@ -33,8 +33,6 @@ async def broadcast_checkpoint_event(
         tool_outputs: Map of tool_call_id -> output content for embedding
                       in tool_calls[].output.
     """
-    from daemon.utils import serialize_message  # lazy import
-    
     # Build tool_outputs from tool messages if not provided
     if tool_outputs is None:
         tool_outputs = {}
@@ -44,19 +42,19 @@ async def broadcast_checkpoint_event(
             elif hasattr(msg, 'tool_call_id'):
                 tool_outputs[msg.tool_call_id] = msg.content
     
-    serialized = [serialize_message(msg, tool_outputs) if isinstance(msg, dict) else msg for msg in messages]
-    
+    # Messages arrive PRE-SERIALIZED from Phase 3 (list[dict], not BaseMessage objects).
+    # Do NOT re-serialize — the caller (manager.py) already did this.
     # Skip empty checkpoints — LangGraph nodes may complete without new messages
     # (conditional edges, routing nodes). Emitting an empty messages[] would wipe
     # the frontend's message list.
-    if not serialized:
+    if not messages:
         return
     
     event = {
         "instance_id": instance_id,
         "event_type": "checkpoint",
         "event_id": checkpoint_id,
-        "messages": serialized,
+        "messages": messages,
         "checkpoint_id": checkpoint_id,
     }
     

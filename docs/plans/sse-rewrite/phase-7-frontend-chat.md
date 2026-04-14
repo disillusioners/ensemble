@@ -57,16 +57,20 @@ SSE messages ARE the source of truth. On connect, initial state comes from first
 ### 8. Update `trackBy` function
 
 ```typescript
-// Before
+// Before (current)
 trackBy(index: number, message: any): string {
   return message.message_id;
 }
 
-// After
+// After (stays message_id — backend sends message_id, not id)
 trackBy(index: number, message: any): string {
-  return message.id;
+  return message.message_id;
 }
 ```
+
+> **⚠️ IMPORTANT**: Phase 6's SSE service must map `m.message_id` (not `m.id`) from backend
+> events. The backend sends `message_id` field. `m.id` does not exist and would cause
+> `trackBy` to return `undefined`, breaking Angular `*ngFor` with full DOM re-renders.
 
 ---
 

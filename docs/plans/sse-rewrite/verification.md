@@ -44,7 +44,12 @@ grep "langgraph" pyproject.toml
 
 ## Step 3.5: LangGraph Stream Format Verification
 
-> **DO NOT SKIP THIS STEP.** The checkpoint-based approach depends on correctly extracting messages from `stream_mode=["updates"]`. If the format is wrong, all downstream code is broken.
+> **⚠️ CRITICAL**: This is a **MANDATORY** pre-requisite before Phase 1. The checkpoint-based
+> approach depends on correctly extracting messages from `stream_mode=["updates"]`. If the
+> format is wrong, all downstream code is broken.
+
+> **Naming**: This is called "Step 3.5" because it must be completed BEFORE Phase 1 begins,
+> but it depends on Phase 0's `utils.py` creation. In practice, treat it as **Phase 0.5**.
 
 Write and run a verification script against the project's LangGraph version:
 

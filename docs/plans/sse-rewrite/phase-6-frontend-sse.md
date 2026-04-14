@@ -47,7 +47,7 @@ private handleEvent(event: MessageEvent) {
       this.isStreaming.set(true);
       this.messages.set(
         data.messages.map((m: any) => ({
-          id: m.id,
+          message_id: m.message_id,  // NOTE: use message_id, not m.id
           role: m.role,
           content: m.content || '',
           thinking: m.thinking || null,

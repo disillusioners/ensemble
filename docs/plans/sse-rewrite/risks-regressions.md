@@ -22,7 +22,7 @@
 | `broadcast_checkpoint_event()` sends to dispatcher queue unnecessarily | Dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` call if optimization needed. |
 | `MessageService` "DB migration" phantom | **CORRECTED**: `MessageService` methods are SSE-only wrappers. No DB writes to migrate. Just delete call sites and file. |
 | Child completion SSE gap: parent sees child report only after checkpoint | Accept as regression OR emit immediate `message_received` event on child completion for instant parent notification |
-| `send_message()` SSE bypass: direct `graph.ainvoke()` with no streaming | Document as known limitation — SSE stream never updates when agent calls `send_message()` on watched instance |
+| `send_message()` SSE bypass: direct `graph.ainvoke()` with no streaming | Document as known limitation — affects agent-to-agent communication (`tools/instance.py:267`), not just API calls. SSE stream never updates when agent calls `send_message()` on watched instance. |
 | Queue ordering under concurrency: out-of-order checkpoints cause UI flicker | **Mitigation**: Add sequence numbers to checkpoint events; frontend sorts by sequence on receipt |
 
 ---
@@ -40,3 +40,5 @@ The following behavior changes are intentional and accepted:
 | Large message list sent on each checkpoint | Acceptable for current scale; diff mode can be added later |
 | Some `EventKind` enum values become dead code | Doesn't break anything; can clean up later |
 | Child completion SSE gap: parent sees child's report only after parent's next checkpoint | Parent's SSE stream doesn't instantly reflect child completion — delay until parent processes report via checkpoint |
+| `enqueue_message()` DB writes become audit-only | SSE no longer reads from event table. Verify no external systems depend on `Event(kind=MESSAGE_RECEIVED)` for real-time features. |
+| `_create_completion_events()` DB writes become audit-only | SSE endpoint no longer reads these events. Document as audit-only. |
