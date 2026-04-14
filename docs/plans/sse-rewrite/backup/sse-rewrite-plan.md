@@ -67,13 +67,7 @@
 | `error` | `{error, details}` | Unrecoverable failure |
 | `keepalive` | `{}` | Every 30s timeout |
 
-> **Cancellation handling**: User-initiated cancellation maps to `error` event: `{"error": "cancelled"}`. No separate event type needed.
-
 **Removed entirely**: `content_chunk`, `thinking`, `tool_call`, `tool_complete`, `message_received`, `message_completed`, `processing_started`, `processing_completed`, `processing_failed`, `child_completed`, `child_failed`, `instance_completed`, `title_updated`, `cancelled`, `message_queued`, `completed`, `status_changed`
-
-> **Title updates**: Frontend polls via instance API for title changes. No SSE event needed.
-
-> **Instance completion**: Final checkpoint includes `completed: true` flag. No separate event needed.
 
 ### Message Format (Identical in SSE and REST API)
 
@@ -103,19 +97,16 @@
 │  Each checkpoint event contains ALL messages from state,        │
 │  with LangGraph's msg.id as the message identity.               │
 └─────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
+                              │
+                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Frontend                                                       │
 │                                                                  │
 │  On "checkpoint" event:                                         │
-│    this.messages.set(normalize(event.messages))                │
+│    this.messages.set(normalize(event.messages))                 │
 │                                                                  │
-│  On SSE disconnect/error:                                       │
-│    this.isStreaming.set(false)                                  │
-│                                                                  │
-│  No delta merging, no message_id tracking, no accumulation.    │
-│  Just replace the list.                                          │
+│  No delta merging, no message_id tracking, no accumulation.     │
+│  Just replace the list.                                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -123,11 +114,75 @@
 
 ## Implementation Details
 
-### 1. Backend: `daemon/utils.py` — Shared Serialization Helpers
+### 1. Backend: `daemon/services/event_bus.py`
 
-> **Design decision**: `serialize_message()` lives here (not in `event_bus.py`) alongside `parse_think_tags()`. Both are pure serialization helpers that `persistence.py` and `event_bus.py` import from. This avoids coupling `persistence.py` to the services layer and makes unit testing easier.
+#### 1.1 Add `broadcast_checkpoint_event()` method
 
-#### 1.1 Add `_stable_message_id()` helper
+Add new method on the `EventBus` class:
+
+```python
+async def broadcast_checkpoint_event(
+    self,
+    instance_id: str,
+    messages: list,  # list[BaseMessage] from LangGraph state
+    checkpoint_id: str,
+    tool_outputs: dict | None = None,  # tool_call_id -> output content
+) -> None:
+    """Broadcast a checkpoint event containing full message state.
+    
+    This replaces all individual streaming events (content_chunk, thinking,
+    tool_call, tool_complete) and lifecycle events (message_received,
+    message_completed, processing_started, etc.).
+    
+    Args:
+        instance_id: The instance this checkpoint belongs to.
+        messages: Full list of messages from LangGraph channel_values.
+        checkpoint_id: Checkpoint ID from LangGraph state.
+        tool_outputs: Map of tool_call_id -> output content for embedding
+                      in tool_calls[].output.
+    """
+    # Build tool_outputs from ToolMessages if not provided
+    if tool_outputs is None:
+        tool_outputs = {}
+        for msg in messages:
+            if hasattr(msg, 'tool_call_id'):
+                tool_outputs[msg.tool_call_id] = msg.content
+    
+    serialized = [serialize_message(msg, tool_outputs) for msg in messages]
+    
+    # Skip empty checkpoints — LangGraph nodes may complete without new messages
+    # (conditional edges, routing nodes). Emitting an empty messages[] would wipe
+    # the frontend's message list.
+    if not serialized:
+        return
+    
+    event = {
+        "instance_id": instance_id,
+        "event_type": "checkpoint",
+        "event_id": checkpoint_id,
+        "messages": serialized,
+        "checkpoint_id": checkpoint_id,
+    }
+    
+    queue = self.get_streaming_queue(instance_id)
+    try:
+        queue.put_nowait(event)
+    except asyncio.QueueFull:
+        logger.warning(f"Queue full for instance {instance_id}, dropping checkpoint")
+    
+    self.notify(instance_id)
+    # Notify global subscribers (ResponseDispatcher, etc.)
+    # Note: dispatcher filters for event_type=="completed", so checkpoint events
+    # are silently ignored. This is acceptable overhead. If optimization is needed
+    # later, remove this call — checkpoint events don't need dispatcher routing.
+    await self._broadcast_to_global(instance_id, "checkpoint", data=event)
+```
+
+> **Decision resolved**: `_broadcast_to_global()` is called for checkpoint events. The `ResponseDispatcher` filters for `event_type=="completed"`, so checkpoint events are silently ignored. This is acceptable overhead (~1 queue put per checkpoint). If optimization is needed later, remove the `_broadcast_to_global()` call — checkpoint events don't need dispatcher routing.
+
+#### 1.2 Add `serialize_message()` module-level function
+
+Add at module level in `event_bus.py` (not in the `EventBus` class — so `persistence.py` can reuse it):
 
 ```python
 import hashlib
@@ -154,11 +209,8 @@ def _stable_message_id(msg) -> str:
     key = f"{role}:{content_str[:200]}:{tc_id}"
     digest = hashlib.md5(key.encode('utf-8', errors='replace')).hexdigest()[:16]
     return f"fallback-{digest}"
-```
 
-#### 1.2 Add `serialize_message()` function
 
-```python
 def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     """Serialize a LangChain message to dict matching REST API format.
     
@@ -243,79 +295,11 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     }
 ```
 
-> **`_broadcast_to_global()` constraint**: Always use keyword args: `data={...}`. The positional params map misleadingly (`event_id` is 3rd positional, not `data`).
+**Notes**:
+- **`msg.id` can be `None`**: LangGraph message IDs can be `None` for certain message types or providers. The `getattr(..., 'id', None) or str(uuid.uuid4())` fallback is required.
+- **`created_at`**: In the SSE streaming path, `created_at` will be `None` because checkpointing does not include timestamps. Timestamps are only populated when loading from the REST API via checkpoint history.
 
----
-
-### 2. Backend: `daemon/services/event_bus.py`
-
-#### 2.1 Add `broadcast_checkpoint_event()` method
-
-Add new method on the `EventBus` class:
-
-```python
-async def broadcast_checkpoint_event(
-    self,
-    instance_id: str,
-    messages: list,  # list[BaseMessage] from LangGraph state
-    checkpoint_id: str,
-    tool_outputs: dict | None = None,  # tool_call_id -> output content
-) -> None:
-    """Broadcast a checkpoint event containing full message state.
-    
-    This replaces all individual streaming events (content_chunk, thinking,
-    tool_call, tool_complete) and lifecycle events (message_received,
-    message_completed, processing_started, etc.).
-    
-    Args:
-        instance_id: The instance this checkpoint belongs to.
-        messages: Full list of messages from LangGraph channel_values.
-        checkpoint_id: Checkpoint ID from LangGraph state.
-        tool_outputs: Map of tool_call_id -> output content for embedding
-                      in tool_calls[].output.
-    """
-    from daemon.utils import serialize_message  # lazy import
-    
-    # Build tool_outputs from ToolMessages if not provided
-    if tool_outputs is None:
-        tool_outputs = {}
-        for msg in messages:
-            if hasattr(msg, 'tool_call_id'):
-                tool_outputs[msg.tool_call_id] = msg.content
-    
-    serialized = [serialize_message(msg, tool_outputs) for msg in messages]
-    
-    # Skip empty checkpoints — LangGraph nodes may complete without new messages
-    # (conditional edges, routing nodes). Emitting an empty messages[] would wipe
-    # the frontend's message list.
-    if not serialized:
-        return
-    
-    event = {
-        "instance_id": instance_id,
-        "event_type": "checkpoint",
-        "event_id": checkpoint_id,
-        "messages": serialized,
-        "checkpoint_id": checkpoint_id,
-    }
-    
-    queue = self.get_streaming_queue(instance_id)
-    try:
-        queue.put_nowait(event)
-    except asyncio.QueueFull:
-        logger.warning(f"Queue full for instance {instance_id}, dropping checkpoint")
-    
-    self.notify(instance_id)
-    # Notify global subscribers (ResponseDispatcher, etc.)
-    # Note: dispatcher filters for event_type=="completed", so checkpoint events
-    # are silently ignored. This is acceptable overhead. If optimization is needed
-    # later, remove this call — checkpoint events don't need dispatcher routing.
-    await self._broadcast_to_global(instance_id, "checkpoint", data=event)
-```
-
-> **Decision resolved**: `_broadcast_to_global()` is called for checkpoint events. The `ResponseDispatcher` filters for `event_type=="completed"`, so checkpoint events are silently ignored. This is acceptable overhead (~1 queue put per checkpoint). If optimization is needed later, remove the `_broadcast_to_global()` call — checkpoint events don't need dispatcher routing.
-
-#### 2.2 Code to DELETE from event_bus.py
+#### 1.3 Code to DELETE from event_bus.py
 
 | Lines | What | Why |
 |-------|------|-----|
@@ -335,7 +319,7 @@ async def broadcast_checkpoint_event(
 | 469-478 | `cleanup_old()` | Events no longer in DB |
 | 551-552 | Legacy handling in `broadcast_sync()` | No more legacy |
 
-#### 2.3 What to KEEP from event_bus.py
+#### 1.4 What to KEEP from event_bus.py
 
 | Lines | What | Why |
 |-------|------|-----|
@@ -349,11 +333,11 @@ async def broadcast_checkpoint_event(
 
 ---
 
-### 3. Backend: `daemon/manager.py` — `_process_message_with_tracking()`
+### 2. Backend: `daemon/manager.py` — `_process_message_with_tracking()`
 
 **Location**: Lines **991–1479** (method signature at 991, body 1001–1479)
 
-#### 3.1 Remove ALL streaming event broadcasts
+#### 2.1 Remove ALL streaming event broadcasts
 
 Delete these blocks from `_process_message_with_tracking()`:
 
@@ -370,15 +354,11 @@ Delete these blocks from `_process_message_with_tracking()`:
 | 1336-1347 | `content_chunk` event broadcast |
 | 1380-1391 | Content/thinking flush broadcasts in `finally` block |
 
-#### 3.2 Add checkpoint broadcast after each node update
-
-> **CRITICAL FIX**: The original draft had a `break` after the first node with messages. This drops messages from subsequent nodes in multi-node updates (e.g., parallel execution). Fixed below — accumulate from ALL nodes before emitting.
+#### 2.2 Add checkpoint broadcast after each node update
 
 Replace the streaming loop (around line 1156 where `graph.astream()` is called) with:
 
 ```python
-# NOTE: all_state_messages is reset per-call to prevent unbounded growth.
-# Initial state comes from get_instance_messages() on SSE connect.
 all_state_messages: list = []
 
     async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
@@ -389,14 +369,10 @@ all_state_messages: list = []
         data = event
     
     if mode == "updates":
-        # Accumulate messages from ALL nodes — do NOT break early.
-        # LangGraph may emit updates from multiple nodes in a single event
-        # (e.g., parallel execution). Dropping subsequent nodes was a bug.
-        any_new = False
+        # Check if any node produced new messages
         for node_name, node_data in data.items():
             node_messages = node_data.get("messages", [])
             if node_messages:
-                any_new = True
                 # Key by msg.id to handle modifications (LangGraph nodes may update
                 # existing messages, e.g., appending tool_calls). Replace on collision
                 # to avoid duplicate messages in the accumulated list.
@@ -406,48 +382,48 @@ all_state_messages: list = []
                         all_state_messages[msg_index[m.id]] = m  # Replace existing
                     else:
                         all_state_messages.append(m)
-        
-        if not any_new:
-            continue
-        
-        # CRITICAL: Build tool_outputs from ALL messages (including ToolMessages)
-        # BEFORE filtering. serialize_message() needs tool_outputs to embed in
-        # the assistant's tool_calls[].output field, but ToolMessages are
-        # excluded from the output list. Build the map from the full list.
-        tool_outputs = {}
-        for m in all_state_messages:
-            if hasattr(m, 'tool_call_id'):
-                tc_id = getattr(m, 'tool_call_id', '')
-                if tc_id:
-                    content = getattr(m, 'content', '') or ''
-                    tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
-        
-        # Serialize all messages (full state for frontend replacement).
-        # Filter out ToolMessages — their output is embedded in the
-        # parent AIMessage's tool_calls[].output field.
-        from langchain_core.messages import ToolMessage
-        serialized = [
-            serialize_message(m, tool_outputs) 
-            for m in all_state_messages
-            if not isinstance(m, ToolMessage)
-        ]
-        
-        # Get checkpoint ID from config (not msg.id — different semantics)
-        checkpoint_id = config.get("configurable", {}).get("checkpoint_id", str(uuid.uuid4()))
-        
-        await self._event_bus.broadcast_checkpoint_event(
-            instance_id=instance_id,
-            messages=serialized,
-            checkpoint_id=checkpoint_id,
-            tool_outputs=tool_outputs,
-        )
+                
+                # CRITICAL: Build tool_outputs from ALL messages (including ToolMessages)
+                # BEFORE filtering. serialize_message() needs tool_outputs to embed in
+                # the assistant's tool_calls[].output field, but ToolMessages are
+                # excluded from the output list. Build the map from the full list.
+                tool_outputs = {}
+                for m in all_state_messages:
+                    if hasattr(m, 'tool_call_id'):
+                        tc_id = getattr(m, 'tool_call_id', '')
+                        if tc_id:
+                            content = getattr(m, 'content', '') or ''
+                            tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
+                
+                # Serialize all messages (full state for frontend replacement).
+                # Filter out ToolMessages — their output is embedded in the
+                # parent AIMessage's tool_calls[].output field.
+                from langchain_core.messages import ToolMessage
+                serialized = [
+                    serialize_message(m, tool_outputs) 
+                    for m in all_state_messages
+                    if not isinstance(m, ToolMessage)
+                ]
+                
+                # Get checkpoint ID from config (not msg.id — different semantics)
+                checkpoint_id = config.get("configurable", {}).get("checkpoint_id", str(uuid.uuid4()))
+                
+                await self._event_bus.broadcast_checkpoint_event(
+                    instance_id=instance_id,
+                    messages=serialized,
+                    checkpoint_id=checkpoint_id,
+                    tool_outputs=tool_outputs,
+                )
+                break  # Only emit once per update
 ```
+
+> **Important**: Change `stream_mode=["updates", "messages"]` at the current streaming loop (around line 1156) to `stream_mode=["updates"]` — removing `"messages"` is what drops token-level streaming. The proposed code above already uses `["updates"]`.
 
 > **Behavior change**: `stream_mode=["updates"]` drops token-level streaming entirely. Users will see no output until a node completes. This is an accepted regression per the project's long-running task focus.
 
 **Important**: We accumulate messages from the `astream` output directly — **no `graph.aget()` call** inside the loop.
 
-#### 3.3 Simplified post-streaming code
+#### 2.3 Simplified post-streaming code
 
 The code after line 1406 (`finally` block) handles:
 - Finalizing the assistant message
@@ -481,15 +457,9 @@ finally:
     # were accumulated from stream events. Verify completeness in Step 3.5.
 ```
 
-> **Post-loop safety net**: Keep `graph.aget_state()` as a one-time fallback call after the streaming loop, in case the stream missed some messages. Use accumulated messages as primary source, fall back to `aget_state()` if needed:
+**Decision required**: If Step 3.5 reveals that stream events don't capture all messages (e.g., some messages appear only in the final state), keep the `graph.aget_state()` call as a fallback — but only to get the canonical final state once after the loop, not inside the loop.
 
-```python
-if not all_state_messages:
-    final_result = await graph.aget_state(config)
-    # Extract from final_result
-```
-
-#### 3.4 Remove `compute_message_id()` imports and usage
+#### 2.4 Remove `compute_message_id()` imports and usage
 
 | Line | What |
 |------|------|
@@ -500,52 +470,53 @@ if not all_state_messages:
 
 **For user messages in `enqueue_message()`**: Use `str(uuid.uuid4())` instead of `compute_message_id()`. The LangGraph ID will be assigned when the message enters the graph.
 
-#### 3.5 `message_received` in `enqueue_message()`
+#### 2.5 `message_received` in `enqueue_message()`
 
 The `MESSAGE_RECEIVED` Event row in `enqueue_message()` (lines 958-975) stays for audit/analytics. No change needed.
 
 ---
 
-### 4. Backend: `daemon/manager.py` — completion/report handling
+### 3. Backend: `daemon/manager.py` — completion/report handling
 
-#### 4.1 Remove `MessageService` call sites
+#### 3.1 Remove `MessageService.on_assistant_message_completed()` calls
 
-> **CORRECTION**: `MessageService` methods are **pure SSE emission wrappers** — they do NOT persist to the DB. The original plan incorrectly described "migrating DB writes." The actual action is simpler: delete call sites and delete the file.
+**The actual call site is in `task_processor.py`, NOT `manager.py`**:
 
-**Delete these call sites** (the methods do nothing useful after streaming removal):
+Find and remove:
+- `task_processor.py:171`: `await self._message_service.on_assistant_message_completed(...)` — migrate DB write inline here
+- `self._event_bus.create_processing_completed_event()` — called by MessageService
+- `self._event_bus.create_message_received_event()` — for child reports
 
-| File | Line | What to delete |
-|------|------|---------------|
-| `task_processor.py` | 171 | `await self._message_service.on_assistant_message_completed(...)` |
-| `task_processor.py` | 129-140 | `elif self._event_repo:` fallback branch — **dead code** |
-| `manager.py` | `_process_child_completion_and_notify_parent()` | `self._event_bus.create_child_completed_event()` (BUG: creates duplicate CHILD_COMPLETED; checkpoint replaces it) |
-| `manager.py` | `_send_error_report()` | `self._message_service.on_child_error_report()` and `self._event_bus.create_child_failed_event()` at line 2046 |
+Child completion reports should still enqueue messages to parent instances, but the SSE emission happens via checkpoint events.
 
-**Delete these** from `manager.py`:
-- `MessageService` instantiation
-- `self._message_service` declaration
+> **Note on `on_user_message_stored()`**: This method exists in `message_service.py` but has zero callers in the codebase. No migration needed — delete it with the rest of the file.
 
-**Delete these** from `task_processor.py`:
-- `MessageService` instantiation
-- `self._message_service` declaration
+> **Also**: The `elif self._event_repo:` fallback path at `task_processor.py:129-140` is unreachable in production since `_event_bus` is always set. Delete this entire branch as part of Step 3.
 
-#### 4.2 Simplify child completion flow
+#### 3.2 Simplify child completion flow
 
 Current flow in `_process_child_completion_and_notify_parent()` (lines 1861–1948):
 1. Build report message
 2. Create `MessageQueue` + `Task` entries
 3. Call `_create_completion_events()` ← **Keep** (raw Event rows for audit)
-4. Call `self._message_service.on_child_completion_report()` ← **Remove** (SSE-only, no-op after rewrite)
-5. Call `self._event_bus.create_child_completed_event()` ← **Remove** (BUG: duplicate CHILD_COMPLETED; checkpoint replaces it)
+4. Call `self._message_service.on_child_completion_report()` ← **Remove** DB write (moved inline)
+5. Call `self._event_bus.create_child_completed_event()` ← **Remove** (BUG: creates duplicate CHILD_COMPLETED; checkpoint replaces it)
 
 After changes:
 1. Build report message
 2. Create `MessageQueue` + `Task` entries
-3. `_create_completion_events()` — keep for audit log
+3. Insert message record to DB directly ← **NEW** (moved from `on_child_completion_report()`)
+4. `_create_completion_events()` — keep for audit log
 
 The parent instance will emit a checkpoint event when it processes the report message.
 
-#### 4.3 `ResponseDispatcher` integration
+#### 3.3 Update `_send_error_report()` (lines 1950–2066)
+
+Remove the call to `self._message_service.on_child_error_report()` from `_send_error_report()`. The error report message is already persisted to the DB — the parent will pick it up on its next checkpoint.
+
+Also remove `self._event_bus.create_child_failed_event()` at line 2046.
+
+#### 3.4 `ResponseDispatcher` integration
 
 **Insertion point**: `daemon/task_processor.py:171` — replace the existing `on_assistant_message_completed()` call with the `_broadcast_to_global()` code below.
 
@@ -574,7 +545,7 @@ await self._event_bus._broadcast_to_global(
 
 The SSE stream only has `connected`/`checkpoint`/`error`/`keepalive`. The dispatcher receives `completed` via `_broadcast_to_global()`.
 
-#### 4.4 `_create_completion_events()` (lines 1807–1859)
+#### 3.5 `_create_completion_events()` (lines 1807–1859)
 
 **Keep this method.** The Event table is used for audit/analytics. These raw inserts are the audit log, separate from the SSE stream.
 
@@ -584,9 +555,20 @@ After the rewrite, verify this method is still called from:
 
 After removing the duplicate `create_child_completed_event()` call, `CHILD_COMPLETED` will only be written once (via this method) — fixing the existing bug.
 
-#### 4.5 Audit all `create_*_event()` call sites
+### 3.6 Audit `_create_completion_events()` call sites
 
-Before implementing, audit all callers:
+`_create_completion_events()` writes raw Event rows for audit. Verify it is called from:
+- `_process_instance_completion()` (or equivalent) — for `INSTANCE_COMPLETED`
+- `_process_child_completion_and_notify_parent()` — for `CHILD_COMPLETED`
+
+Audit before implementation:
+```bash
+grep -rn "_create_completion_events" daemon/ --include="*.py"
+```
+
+#### 3.7 Audit all `create_*_event()` call sites
+
+Before implementing Step 1, audit all callers:
 ```bash
 grep -rn "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_child_completed_event\|create_child_failed_event" daemon/ --include="*.py"
 ```
@@ -595,17 +577,17 @@ Note: `create_instance_completed_event()` has zero callers — no grep needed, j
 
 Map every call site, then either update callers or delete them.
 
-#### 4.6 Error handler scope
+#### 3.8 Error handler scope
 
 The exception handler in `_process_message_with_tracking()` (around line 1374) calls `create_error_event()`. Keep `create_error_event()` but clarify: the error handler remains for **graph execution errors**, not streaming errors. Update the exception scope post-rewrite.
 
 ---
 
-### 5. Backend: `daemon/api.py` — SSE endpoint
+### 4. Backend: `daemon/api.py` — SSE endpoint
 
 **Location**: `stream_events()` at lines **822–951**; `format_sse_event()` at lines **954–1024**
 
-#### 5.1 Rewrite `stream_events()` (lines 822-951)
+#### 4.1 Rewrite `stream_events()` (lines 822-951)
 
 > **Reconnection support**: The current SSE endpoint supports `Last-Event-ID` header for cursor-based reconnection (`api.py:862-880`). The simplified implementation below drops reconnection support. Document as accepted regression, or implement cursor-based seek using checkpoint sequence numbers if needed later.
 
@@ -678,21 +660,21 @@ async def stream_events(instance_id: str, request: Request):
     return EventSourceResponse(event_generator(), ping=30)
 ```
 
-#### 5.2 Delete `format_sse_event()` (lines 954-1024)
+#### 4.2 Delete `format_sse_event()` (lines 954-1024)
 
 No longer needed. Events are formatted inline in `stream_events()`.
 
-#### 5.3 Remove merge logic
+#### 4.3 Remove merge logic
 
 The current code merges DB events and streaming events (lines 922-936). This entire merge is deleted — only checkpoint events from the queue are used.
 
 ---
 
-### 6. Backend: `daemon/persistence.py` — REST API messages
+### 5. Backend: `daemon/persistence.py` — REST API messages
 
 **Location**: Lines 74-212
 
-#### 6.1 Rewrite `get_instance_messages()` to use LangGraph IDs
+#### 5.1 Rewrite `get_instance_messages()` to use LangGraph IDs
 
 ```python
 async def get_instance_messages(
@@ -700,7 +682,7 @@ async def get_instance_messages(
     instance_id: str,
 ) -> list[dict[str, Any]]:
     """Get message history from LangGraph checkpoints using native msg.id."""
-    from daemon.utils import serialize_message
+    from daemon.services.event_bus import serialize_message
     
     config = {"configurable": {"thread_id": instance_id}}
     state = await checkpointer.aget(config)
@@ -733,21 +715,21 @@ async def get_instance_messages(
     return result
 ```
 
-#### 6.2 Remove `compute_message_id()` function (lines 23-37)
+#### 5.2 Remove `compute_message_id()` function (lines 23-37)
 
 No longer used anywhere. Delete entirely.
 
-#### 6.3 Keep `get_checkpointer()` (lines 40-71)
+#### 5.3 Keep `get_checkpointer()` (lines 40-71)
 
 Unchanged.
 
-#### 6.4 Keep `_collect_timestamps()` helper
+#### 5.4 Keep `_collect_timestamps()` helper
 
 Extract the timestamp tracking logic from current `get_instance_messages()` (lines 104-128) into a helper function.
 
 ---
 
-### 7. Backend: `daemon/message_models.py`
+### 6. Backend: `daemon/message_models.py`
 
 **What to delete**:
 
@@ -762,15 +744,32 @@ Extract the timestamp tracking logic from current `get_instance_messages()` (lin
 
 ---
 
-### 8. Backend: `daemon/services/message_service.py`
+### 7. Backend: `daemon/services/message_service.py`
 
-> **CORRECTION**: `MessageService` methods are **pure SSE emission wrappers**, not DB persistence. The original plan described "migrating DB writes" — this is wrong. The methods call `EventBus.create_*_event()` which creates `Event` rows. After removing those event types, the methods are dead code.
->
-> **Action**: Delete call sites (Step 3), then delete the file entirely. No migration needed.
+> **Deletion is NOT straightforward.** `MessageService` has two concerns:
+> 1. **SSE broadcast** (replaced by checkpoint events) — can be removed
+> 2. **DB persistence** (inserts message records) — **must be preserved**
+
+**DB persistence logic that must be moved before deletion:**
+
+| Method | Lines | What it does | Where to move |
+|--------|-------|-------------|---------------|
+| `on_assistant_message_completed()` | 55–111 | Inserts assistant message record + tool message records | `task_processor.py:ProcessMessageProcessor.process()` (line 171) |
+| `on_child_completion_report()` | 113–136 | Inserts child report message record to parent's queue | `manager.py:_process_child_completion_and_notify_parent()` |
+| `on_child_error_report()` | 138–163 | Inserts child error report message record | Remove call from `_send_error_report()` (Section 3.3) |
+
+**Deletion plan:**
+1. Move DB write from `on_assistant_message_completed()` into `task_processor.py:171`
+2. Move DB write from `on_child_completion_report()` into `_process_child_completion_and_notify_parent()`
+3. Remove call to `on_child_error_report()` from `_send_error_report()` (Section 3.3)
+4. Delete `message_service.py` entirely
+5. Remove `MessageService` instantiation and all `self._message_service` call sites from `manager.py` AND `task_processor.py`
+
+**Also audit `task_processor.py:129-140`**: The fallback when `_event_bus` is None uses `_event_repo.create_event()` directly. If `_event_bus` is always set in production, delete this path. If it can fire, update to use the new `completed` event approach.
 
 ---
 
-### 9. Backend: `daemon/repositories/event/`
+### 8. Backend: `daemon/repositories/event/`
 
 **Decision**: Keep the Event table and repository for now. It's used for:
 - Error event tracking (still useful)
@@ -780,7 +779,7 @@ But remove all lifecycle event creation except `error`.
 
 ---
 
-### 10. Frontend: `frontend/src/app/services/sse.service.ts`
+### 9. Frontend: `frontend/src/app/services/sse.service.ts`
 
 **Rewrite entirely**.
 
@@ -833,7 +832,7 @@ private handleEvent(event: MessageEvent) {
       break;
       
     case 'error':
-      this.isStreaming.set(false);  // ← FIXED: was missing
+      this.isStreaming.set(false);
       this.latestError.set(data);
       break;
       
@@ -841,14 +840,7 @@ private handleEvent(event: MessageEvent) {
       break;
   }
 }
-
-// Handle disconnect/error — set isStreaming to false
-private handleClose() {
-  this.isStreaming.set(false);
-}
 ```
-
-> **FIXED**: `isStreaming` must be set to `false` on SSE `onerror`/`onclose`. The original draft only set it to `true` on checkpoint but never reset it.
 
 #### Methods to DELETE
 
@@ -860,13 +852,13 @@ private handleClose() {
 
 ---
 
-### 11. Frontend: `frontend/src/app/pages/chat/chat.component.ts`
+### 10. Frontend: `frontend/src/app/pages/chat/chat.component.ts`
 
-#### 11.1 Delete the main delta-processing effect (lines 80–349)
+#### 10.1 Delete the main delta-processing effect (lines 80–349)
 
 The 270-line effect that handles `processing_started`, `message_received`, `content_chunk`, `thinking`, `tool_call`, `tool_complete`, `processing_completed`, `message_completed` — **all deleted**.
 
-#### 11.2 Replace with simple checkpoint effect
+#### 10.2 Replace with simple checkpoint effect
 
 ```typescript
 effect(() => {
@@ -878,11 +870,13 @@ effect(() => {
 });
 ```
 
-#### 11.3 Delete title update effect (lines 362–376)
+#### 10.3 Delete title update effect (lines 362–376)
 
-Title updates come from the instance API (polling), not SSE.
+Title updates come from the instance API, not SSE.
 
-#### 11.4 Replace error handling effect
+#### 10.4 Delete error handling effect (lines 379–387)
+
+Replace with simpler error handler:
 
 ```typescript
 effect(() => {
@@ -894,23 +888,23 @@ effect(() => {
 });
 ```
 
-#### 11.5 Evaluate fallback `isSending` reset effect (lines 352–359)
+#### 10.5 Evaluate fallback `isSending` reset effect (lines 352–359)
 
-After the rewrite, `isSending` is reset when the first checkpoint arrives (Section 11.2). This may be redundant.
+After the rewrite, `isSending` is reset when the first checkpoint arrives (Section 10.2). This may be redundant.
 
-#### 11.6 Delete `message_id`-based lookup logic (line 99)
+#### 10.6 Delete `message_id`-based lookup logic (line 99)
 
 No merging needed — `messages` signal is replaced entirely on each checkpoint.
 
-#### 11.7 Delete HTTP message merge logic (lines 511–528)
+#### 10.7 Delete HTTP message merge logic (lines 511–528)
 
 SSE messages ARE the source of truth. On connect, initial state comes from first checkpoint event. No merge needed.
 
 ---
 
-### 12. Frontend: `frontend/src/app/models/index.ts`
+### 11. Frontend: `frontend/src/app/models/index.ts`
 
-#### 12.1 Update interfaces
+#### 11.1 Update interfaces
 
 ```typescript
 interface Message {
@@ -932,7 +926,7 @@ interface MessageResponse {
 }
 ```
 
-#### 12.2 Delete SSE-specific types
+#### 11.2 Delete SSE-specific types
 
 | Lines | What | Why |
 |-------|------|-----|
@@ -945,7 +939,7 @@ interface MessageResponse {
 | 154-164 | `CanonicalMessage` | No more canonical messages |
 | 166-186 | `MessageDelta` | No more deltas |
 
-#### 12.3 Simplified SSE types
+#### 11.3 Simplified SSE types
 
 ```typescript
 type SseEventType = 'connected' | 'checkpoint' | 'error' | 'keepalive';
@@ -956,7 +950,7 @@ interface SSEEvent {
 }
 ```
 
-#### 12.4 Keep unchanged
+#### 11.4 Keep unchanged
 
 | Lines | What |
 |-------|------|
@@ -969,7 +963,7 @@ interface SSEEvent {
 
 ---
 
-### 13. Backend: Remove `compute_message_id()` usage everywhere
+### 12. Backend: Remove `compute_message_id()` usage everywhere
 
 | File | Line | Current | New |
 |------|------|---------|-----|
@@ -983,7 +977,7 @@ interface SSEEvent {
 
 ---
 
-### 14. Backend: What to keep unchanged
+### 13. Backend: What to keep unchanged
 
 | File/Section | Why |
 |-------------|-----|
@@ -1003,18 +997,17 @@ interface SSEEvent {
 
 | File | Action | Approx Lines Changed |
 |------|--------|---------------------|
-| `daemon/utils.py` | **NEW** — add `serialize_message()`, `_stable_message_id()`, move `parse_think_tags()` | ~150 added |
-| `daemon/services/event_bus.py` | Major rewrite | ~400 deleted, ~80 added |
-| `daemon/manager.py` | Remove streaming, add checkpoints, delete MessageService | ~300 deleted, ~100 added |
+| `daemon/services/event_bus.py` | Major rewrite | ~400 deleted, ~100 added |
+| `daemon/manager.py` | Remove streaming, add checkpoints, migrate MessageService | ~300 deleted, ~100 added |
 | `daemon/api.py` | Rewrite SSE endpoint | ~200 deleted, ~60 added |
-| `daemon/persistence.py` | Use LangGraph IDs, import from utils | ~100 deleted, ~50 added |
-| `daemon/task_processor.py` | Remove EventBus lifecycle calls, MessageService | ~30 deleted, ~10 added |
+| `daemon/persistence.py` | Use LangGraph IDs, shared serialization | ~100 deleted, ~50 added |
+| `daemon/task_processor.py` | Remove EventBus lifecycle calls | TBD — audit first |
 
 ### Backend — Files to Delete
 
 | File | Reason |
 |------|--------|
-| `daemon/services/message_service.py` | Pure SSE emission wrappers — all event types removed. No migration needed. Just delete call sites and file. |
+| `daemon/services/message_service.py` | DB persistence logic moved inline; SSE broadcast replaced by checkpoints. |
 
 ### Backend — Files to Clean Up
 
@@ -1028,9 +1021,9 @@ interface SSEEvent {
 
 | File | Action | Approx Lines Changed |
 |------|--------|---------------------|
-| `frontend/src/app/models/index.ts` | Delete SSE types, update Message (`message_id` → `id`) | ~100 deleted, ~20 added |
 | `frontend/src/app/services/sse.service.ts` | Full rewrite | ~450 deleted, ~80 added |
 | `frontend/src/app/pages/chat/chat.component.ts` | Remove delta effects, remove `message_id` lookups | ~300 deleted, ~30 added |
+| `frontend/src/app/models/index.ts` | Delete SSE types, update Message (`message_id` → `id`) | ~100 deleted, ~20 added |
 | `frontend/src/app/pages/chat/chat-interface.component.ts` | Update `trackBy` function | ~1 line |
 | `frontend/src/app/services/sse.service.spec.ts` | Update test mocks | ~1 line |
 
@@ -1048,7 +1041,7 @@ interface SSEEvent {
 | Tests for `EventBus.broadcast_streaming_event` | Replace with `broadcast_checkpoint_event` |
 | Tests for `format_sse_event` | Delete (function removed) |
 | Tests for `EventBus` convenience methods | Delete (`create_processing_started_event`, `create_child_completed_event`, etc.) |
-| Tests for `parse_think_tags` in manager context | Move to utils test |
+| Tests for `parse_think_tags` in manager context | Move to `daemon/utils.py` |
 
 ### New Unit Tests Needed
 
@@ -1063,35 +1056,114 @@ interface SSEEvent {
 9. **`ResponseDispatcher` routing after rewrite** — verify external sources still receive responses via `_broadcast_to_global()` calls
 10. **`_stable_message_id()` determinism** — same (role, content, tool_call_id) → same ID; different content → different ID. Test with boundary cases (empty content, unicode, 200-char content limit).
 11. **`broadcast_checkpoint_event()` empty messages** — verify skip (no emission) when serialized list is empty
-12. **`MessageService` deletion verification** — confirm all methods have zero callers before deleting file
-13. **`_process_message_with_tracking()` `MessageResult` completeness** — verify returned `MessageResult` has all fields after refactoring
-14. **`send_message()` tool still works** — test ainvoke path after `compute_message_id()` removal
-15. **`broadcast_sync()` callers audit** — verify zero production callers before deletion
-16. **Multi-node update event** — test when LangGraph emits `{"agent": {...}, "tools": {...}}` to ensure no messages are dropped
-17. **`ResponseDispatcher` routing** — verify `completed` event includes `source` field
-18. **Frontend disconnect/reconnect** — SSE connects to empty instance → receives only `connected` → sends message → receives checkpoint
-19. **Checkpoint serialization perf** — 50 messages with tool_calls < 100ms
+
+### Integration Tests Needed
+
+> **CRITICAL INVARIANT**: Every integration test should verify that message IDs delivered via SSE match the IDs returned by the REST API (`GET /instances/{id}/messages`). This is the core promise of the rewrite.
+
+1. **⚡ Send message → verify SSE delivers checkpoint with LangGraph IDs** (verify IDs match REST API)
+2. **⚡ Send message → verify GET /messages returns same IDs as SSE** (ID consistency invariant)
+3. Tool call → verify checkpoint includes tool_calls with outputs
+4. Multi-turn → verify messages accumulate correctly across checkpoints
+5. Reconnect → verify initial checkpoint is sent on new SSE connection
+6. Child agent completes → verify parent receives checkpoint with child's report message
+7. Error during processing → verify SSE emits `error` event
+8. **⚡ Multi-turn message ID consistency** — Send msg1 → verify checkpoint → send msg2 → verify BOTH messages have consistent IDs → refresh → verify REST API matches SSE
+9. **Backend restart → SSE reconnect** — Verify client reconnects and receives current state
+10. **External source routing (Telegram/Discord)** — Verify ResponseDispatcher still routes responses
+11. **`send_message()` SSE invisibility** — Verify that calling `send_message()` from the API or as an agent tool does NOT emit any SSE events. The parent instance's SSE stream should not show the sent message until it processes the message.
+12. **Concurrent SSE clients** — Two SSE clients connected to the same instance should receive identical checkpoint events.
+13. **`msg.id = None` → stable fallback ID** — Send a message that results in a None msg.id; verify the fallback ID is deterministic (reconnect gives same ID)
+14. **LangGraph stream format verification** — Run the Step 3.5 script; document actual format for downstream implementation
+
+### Paths NOT Previously Covered by Tests
+
+| Path | Why |
+|------|-----|
+| `_create_completion_events()` | Raw Event creation for audit log — ensure it still runs after rewrite |
+| `_send_error_report()` after `on_child_error_report()` removal | Error reports must still be persisted |
+| `TaskProcessor` + EventBus integration | Remove lifecycle events from task processing path |
+| `_process_child_completion_and_notify_parent()` after duplicate removal | CHILD_COMPLETED should only be written once |
 
 ---
 
-## Implementation Steps
+## Risks and Mitigations
 
-> **CRITICAL**: `message_id` → `id` rename (Step 0.5) and backend persistence changes (Step 1) must be in the **same PR/commit**. Frontend and backend must ship together to avoid API mismatch.
+| Risk | Mitigation |
+|------|-----------|
+| Circular import: `event_bus.py` → `manager.py` for `parse_think_tags` | **Step 0**: Move `parse_think_tags` + `_THINK_PATTERN` to `daemon/utils.py` before any other changes |
+| LangGraph `msg.id` might be `None` for some message types | `getattr(msg, 'id', None) or str(uuid.uuid4())` fallback in `serialize_message()` |
+| Thinking extraction has 5 provider-specific paths | Port all 5 paths to `serialize_message()` |
+| `tool_outputs` map needs ToolMessages that are excluded from output | Build map before filtering, pass to `serialize_message()` |
+| Frontend field rename `message_id` → `id` breaks all references | Search entire frontend for `.message_id` and update all references |
+| No real-time feedback during LLM inference | Acceptable for long-running task focus. |
+| Large message list on each checkpoint | Acceptable for now. Add diff mode later if needed. |
+| `created_at` is `None` during SSE streaming | Accept regression. REST API populates after reload. |
+| `TaskProcessor` calls EventBus lifecycle methods | Audit and remove in Step 3 before deleting `create_*_event` methods |
+| `ResponseDispatcher` loses event stream (external sources silent) | Keep lightweight `completed` event via `_broadcast_to_global()` for dispatcher |
+| `broadcast_sync()` calls deleted `broadcast_streaming_event()` | **Delete `broadcast_sync()` entirely.** Zero callers confirmed. |
+| `Last-Event-ID` reconnection support silently dropped | Document as regression or implement cursor-based seek later |
+| `send_message()` inconsistency with new system | Document as SSE-invisible. `ainvoke()` bypasses SSE. |
+| `on_assistant_message_completed()` call is in `task_processor.py`, not `manager.py` | Update call site reference to `task_processor.py:171`. Migrate DB logic there. |
+| `_broadcast_to_global()` signature: positional arg maps to `event_id`, not `data` | Use `data=event` keyword arg |
+| `create_child_failed_event()` call in `_send_error_report()` not in plan | Add to removal list at `manager.py:2046` |
+| Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty |
+| `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code |
+| `broadcast_checkpoint_event()` sends checkpoints to dispatcher queue via `_broadcast_to_global()` | The dispatcher filters them out (event_type="checkpoint" != "completed"). Resolved: acceptable overhead, or remove if optimization needed. |
+| **Unbounded message accumulation produces duplicates and O(n²) data** | `all_state_messages.extend()` never clears. LangGraph nodes may *modify* existing messages (append tool_calls), creating duplicates. Fix: key by `msg.id` and replace on collision. After emitting, reset accumulator or track `last_emitted_count` to emit only delta. Consider calling `aget_state()` once after the loop for final canonical state. |
+| **`msg.id` used as `checkpoint_id` — wrong semantics** | Line 360 sets `checkpoint_id = msg.id`. This conflates message ID with checkpoint ID. If reconnection is re-added, clients seek to wrong thing. Fix: use `config.get("configurable", {}).get("checkpoint_id")` from LangGraph run config, or rename field to `last_message_id`. |
+| **`message_id` → `id` frontend rename (73 occurrences) — isolate in separate PR** | Buried as one table row. Interleaving with SSE changes guarantees hard-to-debug failures. Fix: execute as **Step 0.5** (standalone commit before any SSE changes). Run `npm build` after rename to verify. |
+| **`send_message()` tool conflation** | Section 3.5 conflates `manager.send_message()` (ainvoke, SSE-silent) with `send_message` tool (enqueue_message → queue → produces checkpoints fine). Integration test #11 should test both paths independently. |
+| **`_stable_message_id()` hash collision risk** | MD5 of `(role, content[:200], tool_call_id)` has theoretical 64-bit collision space. For this use case (identifying duplicate messages within a session), this is acceptable. Document that IDs are NOT globally unique — only session-scoped stable identifiers. |
+| **LangGraph `stream_mode=["updates"]` format is unverified** | The plan assumes `node_data.get("messages", [])` extracts messages correctly. LangGraph's updates mode returns `{node_name: {output_key: value}}` — messages may be nested differently. **CRITICAL**: Write a verification script against the exact LangGraph version in `pyproject.toml` before Step 3 begins. See Step 3.5. |
 
-### **Step 0 (ISOLATED PR)**: Extract `parse_think_tags` to `daemon/utils.py`
+---
+
+## Implementation Order
+
+> Steps 1 and 2 are swapped. `persistence.py` just needs import updates and can be done before adding `serialize_message()` to event_bus.py.
+
+### **Step 0 (ISOLATED, BEFORE ALL OTHER STEPS)**: Create `daemon/utils.py`
+
+> **Critical dependency**. `parse_think_tags` and `_THINK_PATTERN` currently live in `manager.py` (~lines 252–272). They must be moved to `daemon/utils.py` so `event_bus.py` can import them without creating a circular dependency (event_bus → manager → event_bus).
 
 Steps:
-1. Copy `parse_think_tags()` + `_THINK_PATTERN` from `manager.py` to new `daemon/utils.py`
+1. Create `daemon/utils.py`:
+```python
+import re
+from typing import Tuple
+
+_THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
+
+
+def parse_think_tags(content: str) -> Tuple[str, str | None]:
+    """Extract <think>...</think> content from LLM response.
+    
+    Args:
+        content: The full response string from the LLM.
+    
+    Returns:
+        Tuple of (cleaned_content, extracted_thinking).
+        If no think tags found, returns (content, None).
+    """
+    # Copy exact implementation from manager.py:252-272
+    match = _THINK_PATTERN.search(content)
+    if not match:
+        return content, None
+    
+    thinking = match.group(1).strip()
+    cleaned = _THINK_PATTERN.sub('', content).strip()
+    return cleaned, thinking
+```
 2. Update `manager.py` import: `from .utils import parse_think_tags`
-3. Update `persistence.py` import: `from daemon.utils import parse_think_tags`
-4. Verify: `grep -rn "parse_think_tags" daemon/ --include="*.py"` shows imports from `.utils`
-5. Commit this change separately before any other SSE changes
+3. Verify: `grep -rn "parse_think_tags" daemon/ --include="*.py"` shows imports from `.utils`
+4. Commit this change separately before any other SSE changes
 
 ---
 
-### **Step 0.5 (SAME PR AS STEP 1)**: Frontend `message_id` → `id` rename
+### **Step 0.5 (ISOLATED PR, AFTER STEP 0)**: Frontend `message_id` → `id` rename
 
-> **CRITICAL**: Execute this in the **same PR/commit** as Step 1. Do not separate them.
+> **CRITICAL**: Execute this as a standalone commit/PR before any SSE changes. Do not combine with other steps.
 
 Steps:
 1. Run: `grep -r "message_id" frontend/src --include="*.ts" -l` to find all 73 occurrences
@@ -1099,7 +1171,7 @@ Steps:
 3. Update interface definitions: `Message.message_id` → `Message.id`, `MessageResponse.message_id` → `MessageResponse.id`
 4. Update `trackBy` functions to use `message.id`
 5. Run `npm build` to verify compilation
-6. Commit alongside Step 1
+6. Commit this change separately
 
 **Files affected**: `chat.component.ts`, `sse.service.ts`, `models/index.ts`, `chat-interface.component.ts`, and others found in step 1.
 
@@ -1107,50 +1179,54 @@ Steps:
 
 ---
 
-### **Step 1**: `daemon/utils.py` — Add serialization helpers, `daemon/persistence.py` — Remove `compute_message_id()`
+### **Step 1**: `daemon/persistence.py` — Update imports, remove `compute_message_id()`
 
 Steps:
-1. Add `_stable_message_id()` and `serialize_message()` to `daemon/utils.py` (from Section 1)
-2. Update `parse_think_tags` import in `persistence.py` to `from daemon.utils import parse_think_tags`
-3. Rewrite `get_instance_messages()` to use `serialize_message()` and LangGraph `msg.id`
-4. Remove `compute_message_id()` function
-5. Add `_collect_timestamps()` helper if not already extracted
+1. Update `parse_think_tags` import to `from daemon.utils import parse_think_tags`
+2. Rewrite `get_instance_messages()` to use `serialize_message()` and LangGraph `msg.id`
+3. Remove `compute_message_id()` function
+4. Add `_collect_timestamps()` helper if not already extracted
+
+> `serialize_message` will be imported from `daemon.services.event_bus` — do this after Step 2 completes.
 
 ---
 
-### **Step 2**: `daemon/services/event_bus.py` — Add `broadcast_checkpoint_event()`, remove old methods
+### **Step 2**: `daemon/services/event_bus.py` — Add `serialize_message()` + `broadcast_checkpoint_event()`, remove old methods
 
 Steps:
-1. Add `broadcast_checkpoint_event()` method (imports `serialize_message` from `daemon.utils`)
-2. Import `serialize_message` from `daemon.utils` (lazy import to avoid circular dependency)
-3. Delete the old methods (see Section 2.2 table)
+1. Add `serialize_message()` at module level
+2. Add `broadcast_checkpoint_event()` method on EventBus class
+3. Delete the old methods (see Section 1.3 table)
 4. Delete `STREAMING_EVENT_TYPES`, `LEGACY_EVENT_MAP`
 5. Delete `_next_streaming_id()`, `cleanup_old()`
 6. Audit `broadcast_sync()` — simplify to `completed`-only routing. After removing streaming events, the streaming branch is dead. Rewrite to check `event.get("event_type") == "completed"`, forward to dispatcher only.
+
+> After this step, update `persistence.py` to import `serialize_message` from `daemon.services.event_bus`.
 
 ---
 
 ### **Step 3**: `daemon/manager.py` + `daemon/task_processor.py` — Full migration
 
-> **This is the largest and most complex step.** `MessageService` call sites must be deleted before deleting the file.
+> This is the largest and most complex step. All `MessageService` call sites must be migrated before deleting the file.
 
 **Manager.py sub-steps:**
 1. Update `parse_think_tags` import to `from .utils import parse_think_tags`
-2. Import `serialize_message` from `daemon.utils`
+2. Import `serialize_message` from `daemon.services.event_bus`
 3. In `enqueue_message()`: replace `compute_message_id()` with `str(uuid.uuid4())`
 4. In `_process_message_with_tracking()`:
-   - Remove streaming broadcast code blocks (Section 3.1)
-   - Replace streaming loop with checkpoint broadcast — **no `break` inside the node loop** (Section 3.2)
+   - Remove streaming broadcast code blocks (Section 2.1)
+   - Replace streaming loop with checkpoint broadcast (Section 2.2)
    - Remove remaining `compute_message_id()` usage
 5. In `_process_child_completion_and_notify_parent()`:
    - Remove call to `self._event_bus.create_child_completed_event()` (BUG fix — was duplicate)
+   - Migrate DB write from `on_child_completion_report()` inline
 6. In `_send_error_report()`:
    - Remove call to `self._message_service.on_child_error_report()`
    - Remove `self._event_bus.create_child_failed_event()` at line 2046
 7. Remove `MessageService` instantiation and `self._message_service` declaration from `manager.py`
 
 **task_processor.py sub-steps:**
-8. At `task_processor.py:171`: Replace `await self._message_service.on_assistant_message_completed(...)` with the `completed` event broadcast via `_broadcast_to_global()` (see Section 4.3).
+8. At `task_processor.py:171`: Replace `await self._message_service.on_assistant_message_completed(...)` with the `completed` event broadcast via `_broadcast_to_global()` (see Section 3.4). Also migrate the DB write (the part that persists the message record) inline — move the logic from `MessageService.on_assistant_message_completed()` into this call site.
 9. **DELETE** the `elif self._event_repo:` fallback branch at `task_processor.py:129-140` — this code is unreachable in production (dead code)
 10. Remove `MessageService` instantiation and `self._message_service` declaration from `task_processor.py`
 
@@ -1228,7 +1304,7 @@ grep -rn "send_message" daemon/ --include="*.py"
 
 ### **Step 5**: `daemon/api.py` — Rewrite SSE endpoint
 
-Rewrite `stream_events()` using the pattern in Section 5.1. Delete `format_sse_event()`.
+Rewrite `stream_events()` using the pattern in Section 4.1. Delete `format_sse_event()`.
 
 ---
 
@@ -1241,25 +1317,23 @@ Keep: `MessageRole`, `ToolCallInfo`
 
 ### **Step 7**: Frontend: `frontend/src/app/models/index.ts` — Update interfaces
 
-> **SAME PR as backend Step 1** (see Step 0.5).
-
 1. Change `Message.message_id` → `Message.id`
 2. Change `MessageResponse.message_id` → `MessageResponse.id`
-3. Delete SSE-specific types (Section 12.2)
-4. Add simplified `SSEEvent` type (Section 12.3)
+3. Delete SSE-specific types (Section 11.2)
+4. Add simplified `SSEEvent` type (Section 11.3)
 
 ---
 
 ### **Step 8**: Frontend: `frontend/src/app/services/sse.service.ts` — Rewrite
 
-Full rewrite per Section 10. Remove all delta handling. Add `messages` signal. Set `isStreaming.set(false)` on `onerror`/`onclose`.
+Full rewrite per Section 9. Remove all delta handling. Add `messages` signal.
 
 ---
 
 ### **Step 9**: Frontend: `frontend/src/app/pages/chat/chat.component.ts` — Simplify
 
 1. Delete delta-processing effect (lines 80–349)
-2. Replace with checkpoint effect (Section 11.2)
+2. Replace with checkpoint effect (Section 10.2)
 3. Delete title update effect (lines 362–376) and error handling effect (lines 379–387)
 4. Evaluate fallback `isSending` reset effect (lines 352–359)
 5. Remove `message_id`-based lookups and HTTP merge logic
@@ -1306,7 +1380,7 @@ grep -rn "parse_think_tags" daemon/ --include="*.py"
 # 4. TaskProcessor EventBus usage — find ALL create_*_event calls
 grep -rn "create_processing_started_event\|create_processing_completed_event\|create_processing_failed_event\|create_error_event\|create_instance_completed_event\|create_child_completed_event\|create_child_failed_event" daemon/ --include="*.py"
 
-# 5. MessageService call sites — ALL should be deleted
+# 5. MessageService call sites
 grep -rn "self._message_service\|on_assistant_message_completed\|on_child_completion_report\|on_child_error_report" daemon/ --include="*.py"
 
 # 6. send_message() call sites
@@ -1345,27 +1419,147 @@ The following behavior changes are intentional and accepted:
 
 ---
 
-## Risks and Mitigations
+## Oracle Review Findings (2026-04-14)
+
+### Critical Corrections
+
+**1. Section 7 is factually wrong — no DB migration needed**
+
+`MessageService` methods are **pure SSE emission wrappers**, not DB persistence:
+
+| Method | What it actually does | What the plan said |
+|--------|---------------------|-------------------|
+| `on_assistant_message_completed()` | Creates `Event` rows (SSE), computes message_id | "Inserts assistant message record" |
+| `on_child_completion_report()` | Calls `create_message_received_event()` (SSE) | "Inserts child report message record" |
+| `on_child_error_report()` | Calls `create_message_received_event()` (SSE) | "Inserts child error report" |
+
+**Action**: Correct Section 7 — remove "migrate DB write" instructions. Just delete call sites and the file.
+
+**2. `break` statement in checkpoint loop loses data (Section 2.2, line 417)**
+
+```python
+for node_name, node_data in data.items():
+    # ...
+    break  # Only emit once per update  ← BUG: drops subsequent nodes
+```
+
+If LangGraph emits an update with multiple nodes (e.g., parallel execution), subsequent nodes are silently dropped.
+
+**Fix**: Remove `break`. Restructure to accumulate messages from ALL nodes before emitting:
+
+```python
+any_new = False
+for node_name, node_data in data.items():
+    node_messages = node_data.get("messages", [])
+    if node_messages:
+        any_new = True
+        for m in node_messages:
+            # Key by msg.id, replace on collision
+            # ...
+
+if any_new:
+    await self._event_bus.broadcast_checkpoint_event(...)
+```
+
+**3. Frontend `message_id` → `id` rename must be same PR as backend**
+
+Step 0.5 and Step 1 in separate PRs creates an API mismatch window where frontend expects `id` but backend returns `message_id`.
+
+**Fix**: Merge Step 0.5 and Step 1 into one commit. Backend `persistence.py` field rename and frontend `models/index.ts` rename must land together.
+
+**4. `all_state_messages` grows unbounded across turns**
+
+Each call to `_process_message_with_tracking()` appends to `all_state_messages`. With 100 turns, every checkpoint serializes all 100 messages.
+
+**Fix**: Reset `all_state_messages = []` at the start of `_process_message_with_tracking()`. Initial state comes from `get_instance_messages()` on SSE connect. The accumulated list only needs the current turn.
+
+---
+
+### Gap Fixes
+
+**5. `isStreaming` signal never set to `false`**
+
+Section 9 shows `isStreaming.set(true)` on checkpoint but never sets it back to `false`.
+
+**Fix**: Set `isStreaming.set(false)` on SSE `onerror`/`onclose`, or emit a final event with `stream_end` sentinel.
+
+**6. Cancellation flow undefined**
+
+No SSE event defined for user-initiated cancellation after removing `cancelled` event type.
+
+**Fix**: Map cancellation to `error` event: `{"error": "cancelled"}`.
+
+**7. `instance_completed` and `title_updated` removal needs spec**
+
+- `title_updated`: Add lightweight `title_updated` event type (making 4 types), or have frontend poll via instance API
+- `instance_completed`: Include `completed: true` flag in final checkpoint, or emit a `completed` event
+
+**8. `_broadcast_to_global()` keyword arg constraint**
+
+The signature has positional params that map misleadingly (`event_id` is 3rd positional, not `data`).
+
+**Fix**: Add explicit note: "Always use keyword args: `data={...}`". The plan already does this correctly — document it as a constraint.
+
+---
+
+### Simplification Opportunities
+
+**9. Move `serialize_message()` to `daemon/utils.py`**
+
+`persistence.py` importing from `event_bus.py` (services layer) creates coupling. Consider placing `serialize_message()` alongside `parse_think_tags()` in `daemon/utils.py`.
+
+Benefits:
+- Both are pure serialization helpers
+- `persistence.py` doesn't depend on event system
+- Easier to test in isolation
+
+**10. Keep `aget_state()` as post-loop safety net (Section 2.3)**
+
+Instead of deleting `graph.aget_state()`, keep it as a one-time call after the streaming loop:
+
+```python
+if not all_state_messages:
+    final_result = await graph.aget_state(config)
+    # Extract from final_result
+```
+
+Use accumulated messages as primary source, fall back to `aget_state()` if needed.
+
+---
+
+### Testing Additions
+
+| # | Test | Why |
+|---|------|-----|
+| 1 | `MessageService` deletion verification | Confirm all methods have zero callers before deleting |
+| 2 | `_process_message_with_tracking()` `MessageResult` completeness | Verify returned `MessageResult` has all fields |
+| 3 | `send_message()` tool still works | Test ainvoke path after `compute_message_id()` removal |
+| 4 | `broadcast_sync()` callers audit | Verify zero production callers before deletion |
+| 5 | Multi-node update event | Test when LangGraph emits `{"agent": {...}, "tools": {...}}` |
+| 6 | `_stable_message_id()` collision | Two identical (role+content+tc_id) → same ID |
+| 7 | Checkpoint serialization perf | 50 messages with tool_calls < 100ms |
+| 8 | `ResponseDispatcher` routing | Verify `completed` event includes `source` field |
+| 9 | Frontend disconnect/reconnect | SSE connects to empty instance → receives only `connected` → sends message → receives checkpoint |
+
+---
+
+### New Risks
 
 | Risk | Mitigation |
 |------|-----------|
-| Circular import: `utils.py` → `event_bus.py` → `utils.py` | **Step 0**: Move `parse_think_tags` + `_THINK_PATTERN` to `daemon/utils.py` before any other changes. Use lazy imports inside functions. |
-| LangGraph `msg.id` might be `None` for some message types | `_stable_message_id()` fallback using deterministic hash of (role, content[:200], tool_call_id) — prevents duplicates on re-emission. |
-| Thinking extraction has 5 provider-specific paths | Port all 5 paths to `serialize_message()`. |
-| `tool_outputs` map needs ToolMessages that are excluded from output | Build map before filtering, pass to `serialize_message()`. |
-| Frontend field rename `message_id` → `id` breaks all references | **Steps 0.5 and 1 in same PR**. Search entire frontend for `.message_id` and update all references. |
-| No real-time feedback during LLM inference | Acceptable for long-running task focus. |
-| Large message list on each checkpoint | Acceptable for now. Add diff mode later if needed. |
-| `created_at` is `None` during SSE streaming | Accept regression. REST API populates after reload. |
-| Multi-node update coalescing — `break` loses messages from subsequent nodes | **Remove `break`**. Accumulate messages from ALL nodes before emitting. |
-| `isStreaming` signal never reset after stream ends | Set `isStreaming.set(false)` on SSE `onerror`/`onclose`. |
-| `all_state_messages` grows unbounded across turns | **Reset `all_state_messages = []`** at the start of each `_process_message_with_tracking()` call. |
-| `ResponseDispatcher` loses event stream (external sources silent) | Keep lightweight `completed` event via `_broadcast_to_global()` for dispatcher. |
-| `broadcast_sync()` wrong for async contexts | Use `_broadcast_to_global()` directly from async code. |
-| `_broadcast_to_global()` positional arg confusion | **Always use keyword args**: `data={...}`. Document as constraint. |
-| `send_message()` inconsistency with new system | Document as SSE-invisible. `ainvoke()` bypasses SSE. |
-| `create_child_failed_event()` call in `_send_error_report()` not in original plan | Add to removal list at `manager.py:2046`. |
-| Empty checkpoint wipes frontend messages | Skip emission in `broadcast_checkpoint_event()` when `serialized` is empty. |
-| `broadcast_checkpoint_event()` sends to dispatcher queue unnecessarily | Dispatcher filters them out (event_type="checkpoint" != "completed"). Acceptable overhead, or remove `_broadcast_to_global()` call if optimization needed. |
-| `MessageService` "DB migration" phantom | **CORRECTED**: `MessageService` methods are SSE-only wrappers. No DB writes to migrate. Just delete call sites and file. |
-| Frontend/backend API mismatch window | **Steps 0.5 and 1 in same PR** — no window for mismatch. |
+| **`MessageService` "DB migration" phantom** — Following plan literally would search for non-existent DB writes | Correct Section 7: SSE-only. Just remove call sites and delete file. |
+| **Multi-node update coalescing** — `break` loses messages from subsequent nodes | Remove `break`, accumulate all nodes before emit |
+| **`isStreaming` signal staleness** — Never set to `false` after stream ends | Set on SSE disconnect/error, or emit sentinel |
+| **`all_state_messages` unbounded growth** — Memory concern across turns | Reset at start of each `_process_message_with_tracking()` call |
+
+---
+
+### Confirmed Correct (No Changes Needed)
+
+- ✓ `_broadcast_to_global()` usage with keyword args — correct
+- ✓ Step 0 (move `parse_think_tags` to utils) — correct dependency order
+- ✓ `ResponseDispatcher` preserved via `_broadcast_to_global("completed")` — correct
+- ✓ Step 3.5 verification gate before implementation — critical and correct
+- ✓ Empty checkpoint skip in `broadcast_checkpoint_event()` — correct
+- ✓ `_create_completion_events()` for audit — correct (not SSE)
+- ✓ `broadcast_sync()` only for dispatcher — correct
