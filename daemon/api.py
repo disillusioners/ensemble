@@ -76,7 +76,7 @@ from .models import (
 )
 from .manager import InstanceManager
 from .config import Config, load_config
-from .persistence import get_checkpointer, get_instance_messages
+from .persistence import get_checkpointer
 from .services.event_bus import EventBus
 from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
@@ -836,21 +836,7 @@ async def stream_events(instance_id: str, request: Request):
             "data": json.dumps({"instance_id": instance_id}),
         }
         
-        # 2. Send initial checkpoint (current state)
-        instance = manager.get_instance(instance_id)
-        checkpointer = await get_checkpointer(manager.db_path)
-        current_messages = await get_instance_messages(checkpointer, instance_id)
-        if current_messages:
-            yield {
-                "event": "checkpoint",
-                "data": json.dumps({
-                    "instance_id": instance_id,
-                    "messages": current_messages,
-                    "checkpoint_id": "initial",
-                }),
-            }
-        
-        # 3. Listen for new checkpoints
+        # 2. Listen for new checkpoints
         notification = event_bus.get_notification(instance_id)
         
         while True:
