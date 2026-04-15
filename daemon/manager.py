@@ -1098,6 +1098,18 @@ class InstanceManager:
             # First attempt - add message to conversation
             graph_input = {"messages": [message]}
         
+        # Pre-emit user message before graph starts so frontend shows it immediately
+        from langchain_core.messages import HumanMessage
+        user_msg = HumanMessage(content=message)
+        user_serialized = serialize_message(user_msg)
+        user_serialized["instance_id"] = instance_id
+        await self._event_bus.broadcast_message_event(
+            instance_id=instance_id,
+            message=user_serialized,
+            event_type="user_message",
+            checkpoint_id="user",
+        )
+
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
         event_index = 0  # Sequence counter for checkpoint_id
@@ -1152,6 +1164,9 @@ class InstanceManager:
                             # Skip ToolMessages — they get baked into tool_calls
                             if isinstance(m, ToolMessage):
                                 continue
+                            # Skip HumanMessages — already emitted before graph started
+                            if hasattr(m, 'type') and m.type == 'human':
+                                continue
                             
                             # Serialize the NEW message only
                             msg_serialized = serialize_message(m, tool_outputs)
@@ -1203,6 +1218,9 @@ class InstanceManager:
                 for msg in final_messages:
                     if isinstance(msg, ToolMessage):
                         continue  # Skip ToolMessages
+                    # Skip HumanMessages — already emitted before graph started
+                    if hasattr(msg, 'type') and msg.type == 'human':
+                        continue
                     
                     msg_serialized = serialize_message(msg, final_tool_outputs)
                     msg_serialized["instance_id"] = instance_id
