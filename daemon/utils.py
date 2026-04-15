@@ -2,6 +2,8 @@
 
 import hashlib
 import re
+import uuid
+from datetime import datetime, timezone
 
 # Pattern for parsing <think/> tags
 _THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
@@ -30,26 +32,27 @@ def parse_think_tags(content: str) -> tuple[str, str | None]:
     return content, None
 
 
-def _stable_message_id(msg) -> str:
-    """Generate a stable ID for messages without msg.id.
-    
-    Uses a hash of role + content + tool_call_id so the same message
-    always gets the same ID across re-emissions.
+
+def _extract_timestamp(msg) -> str:
+    """Extract timestamp from message metadata or return current UTC time.
     
     Args:
-        msg: LangChain BaseMessage with potentially no .id attribute.
+        msg: LangChain message with potentially no timestamp.
     
     Returns:
-        A deterministic 16-char hex string prefixed with "fallback-".
+        ISO format timestamp string (always non-null).
     """
-    role = msg.type if hasattr(msg, 'type') else str(msg.__class__.__name__)
-    content = getattr(msg, 'content', '') or ''
-    content_str = content if isinstance(content, str) else str(content)
-    tc_id = getattr(msg, 'tool_call_id', '') or ''
-    
-    key = f"{role}:{content_str[:200]}:{tc_id}"
-    digest = hashlib.md5(key.encode('utf-8', errors='replace')).hexdigest()[:16]
-    return f"fallback-{digest}"
+    if hasattr(msg, 'response_metadata') and msg.response_metadata:
+        metadata = msg.response_metadata
+        # Only check known timestamp keys — no fuzzy matching
+        for key in ('created_at', 'timestamp'):
+            val = metadata.get(key)
+            if val:
+                if isinstance(val, str) and len(val) >= 10:
+                    return val
+                if hasattr(val, 'isoformat'):
+                    return val.isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
@@ -117,13 +120,13 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
                 })
     
     return {
-        "message_id": getattr(msg, 'id', None) or _stable_message_id(msg),
+        "message_id": getattr(msg, 'id', None) or str(uuid.uuid4()),
         "role": role,
         "content": content_str,
         "thinking": thinking,
         "thinking_extracted": thinking_extracted,
         "tool_calls": tool_calls,
-        "created_at": None,
+        "created_at": _extract_timestamp(msg),
     }
 
 

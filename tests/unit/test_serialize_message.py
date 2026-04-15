@@ -222,23 +222,22 @@ class TestSerializeMessageThinkingExtraction:
 class TestSerializeMessageWithNoneId:
     """Tests for serialize_message() when msg.id is None."""
 
-    def test_fallback_id_generated_when_msg_id_is_none(self):
-        """_stable_message_id() fallback produces consistent IDs."""
-        from daemon.utils import serialize_message, _stable_message_id
+    def test_uuid_generated_when_msg_id_is_none(self):
+        """UUID fallback is generated when msg.id is None."""
+        from daemon.utils import serialize_message
 
         msg = HumanMessage(content="Test message")
-        # Ensure no id
         msg.id = None
 
         result = serialize_message(msg)
 
-        # Should have a fallback ID
         assert result["message_id"] is not None
-        assert result["message_id"].startswith("fallback-")
-        assert len(result["message_id"]) == 16 + 9  # "fallback-" + 16 hex chars
+        # Should be a valid UUID string
+        import uuid
+        uuid.UUID(result["message_id"])  # Raises ValueError if not a valid UUID
 
-    def test_same_content_produces_same_fallback_id(self):
-        """Identical messages get the same fallback ID."""
+    def test_none_id_gets_unique_ids(self):
+        """Each call with msg.id=None gets a unique UUID."""
         from daemon.utils import serialize_message
 
         msg1 = HumanMessage(content="Same content")
@@ -249,15 +248,16 @@ class TestSerializeMessageWithNoneId:
         result1 = serialize_message(msg1)
         result2 = serialize_message(msg2)
 
-        assert result1["message_id"] == result2["message_id"]
+        # Each serialization generates a new UUID
+        assert result1["message_id"] != result2["message_id"]
 
-    def test_different_content_produces_different_fallback_id(self):
-        """Different messages get different fallback IDs."""
+    def test_different_roles_get_unique_ids(self):
+        """Different roles with no id get unique UUIDs."""
         from daemon.utils import serialize_message
 
         msg1 = HumanMessage(content="Content A")
         msg1.id = None
-        msg2 = HumanMessage(content="Content B")
+        msg2 = AIMessage(content="Content A")
         msg2.id = None
 
         result1 = serialize_message(msg1)
@@ -267,84 +267,35 @@ class TestSerializeMessageWithNoneId:
 
 
 # ============================================================================
-# Test _stable_message_id() Determinism
+# Test message_id with real msg.id takes priority over UUID fallback
 # ============================================================================
 
 
-class TestStableMessageIdDeterminism:
-    """Tests for _stable_message_id() determinism and edge cases."""
+class TestMessageIdPriority:
+    """Tests that msg.id is used when available, UUID only as fallback."""
 
-    def test_same_role_content_tool_call_id_same_id(self):
-        """Same (role, content, tool_call_id) produces same ID."""
-        from daemon.utils import _stable_message_id
+    def test_real_id_takes_priority(self):
+        """When msg.id is set, it is used as message_id."""
+        from daemon.utils import serialize_message
 
-        msg1 = AIMessage(content="Test", tool_call_id="call_123")
-        msg2 = AIMessage(content="Test", tool_call_id="call_123")
+        msg = HumanMessage(content="Test")
+        msg.id = "real-msg-id-123"
 
-        id1 = _stable_message_id(msg1)
-        id2 = _stable_message_id(msg2)
+        result = serialize_message(msg)
 
-        assert id1 == id2
+        assert result["message_id"] == "real-msg-id-123"
 
-    def test_different_content_different_id(self):
-        """Different content produces different ID."""
-        from daemon.utils import _stable_message_id
+    def test_none_id_triggers_uuid(self):
+        """When msg.id is None, a UUID is generated."""
+        from daemon.utils import serialize_message
 
-        msg1 = AIMessage(content="Content A")
-        msg2 = AIMessage(content="Content B")
-
-        id1 = _stable_message_id(msg1)
-        id2 = _stable_message_id(msg2)
-
-        assert id1 != id2
-
-    def test_different_tool_call_id_different_id(self):
-        """Different tool_call_id produces different ID."""
-        from daemon.utils import _stable_message_id
-
-        msg1 = ToolMessage(content="Result", tool_call_id="call_1")
-        msg2 = ToolMessage(content="Result", tool_call_id="call_2")
-
-        id1 = _stable_message_id(msg1)
-        id2 = _stable_message_id(msg2)
-
-        assert id1 != id2
-
-    def test_empty_content_still_produces_id(self):
-        """Empty content produces a valid fallback ID."""
-        from daemon.utils import _stable_message_id
-
-        msg = HumanMessage(content="")
+        msg = HumanMessage(content="Test")
         msg.id = None
 
-        result = _stable_message_id(msg)
+        result = serialize_message(msg)
 
-        assert result.startswith("fallback-")
-        assert len(result) > 0
-
-    def test_unicode_content_handled(self):
-        """Unicode content is handled without errors."""
-        from daemon.utils import _stable_message_id
-
-        msg = HumanMessage(content="Hello 🌍 with émojis and 日本語")
-
-        result = _stable_message_id(msg)
-
-        assert result.startswith("fallback-")
-
-    def test_200_char_limit_on_content(self):
-        """Content beyond 200 chars is truncated for ID generation."""
-        from daemon.utils import _stable_message_id
-
-        # Create messages where only content beyond 200 differs
-        short_msg = HumanMessage(content="A" * 200)
-        long_msg = HumanMessage(content="A" * 200 + "B" * 100)
-
-        id_short = _stable_message_id(short_msg)
-        id_long = _stable_message_id(long_msg)
-
-        # Both should produce the same ID since only truncated content differs
-        assert id_short == id_long
+        import uuid
+        uuid.UUID(result["message_id"])  # Validates it's a UUID
 
 
 # ============================================================================

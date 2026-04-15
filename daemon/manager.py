@@ -1101,7 +1101,6 @@ class InstanceManager:
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
         event_index = 0  # Sequence counter for checkpoint_id
-        seen_message_ids: set[str] = set()  # Track seen IDs for diffing
 
         # Stream through graph execution
         try:
@@ -1141,9 +1140,6 @@ class InstanceManager:
                                     content = getattr(m, 'content', '') or ''
                                     tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
                         
-                        # Build index for replacement tracking
-                        msg_index: dict[str, int] = {m.id: i for i, m in enumerate(all_state_messages) if hasattr(m, 'id')}
-                        
                         # Build sequence ID for checkpoint_id
                         sequence_id = f"seq_{event_index}"
                         event_index += 1
@@ -1151,18 +1147,8 @@ class InstanceManager:
                         # Import ToolMessage here to avoid circular imports
                         from langchain_core.messages import ToolMessage
                         
-                        # Emit individual NEW messages only (updated messages not re-emitted)
+                        # Emit individual messages
                         for m in all_state_messages:
-                            msg_id = getattr(m, 'id', None)
-                            
-                            if msg_id and msg_id in seen_message_ids:
-                                # Updated message — replace in place (don't re-emit)
-                                continue
-                            
-                            # NEW message — add and emit individually
-                            if msg_id:
-                                seen_message_ids.add(msg_id)
-                            
                             # Skip ToolMessages — they get baked into tool_calls
                             if isinstance(m, ToolMessage):
                                 continue
@@ -1212,15 +1198,11 @@ class InstanceManager:
                 
                 final_sequence_id = f"seq_{event_index}_final"
                 
-                # Emit any remaining NEW messages individually
+                # Emit any remaining messages individually
                 from langchain_core.messages import ToolMessage
                 for msg in final_messages:
                     if isinstance(msg, ToolMessage):
                         continue  # Skip ToolMessages
-                    
-                    msg_id = getattr(msg, 'id', None)
-                    if msg_id and msg_id in seen_message_ids:
-                        continue  # Already emitted during streaming
                     
                     msg_serialized = serialize_message(msg, final_tool_outputs)
                     msg_serialized["instance_id"] = instance_id

@@ -22,18 +22,21 @@ export class SseService {
 
   /**
    * Append or update a message in the list with deduplication by message_id.
+   * Messages are sorted by created_at to maintain correct chronological order.
    */
   private upsertMessage(message: Message): void {
     this.messages.update(msgs => {
       const existsIndex = msgs.findIndex(m => m.message_id === message.message_id);
+      let result: Message[];
       if (existsIndex >= 0) {
-        // Update existing (replace with latest version)
-        const updated = [...msgs];
-        updated[existsIndex] = message;
-        return updated;
+        result = [...msgs];
+        result[existsIndex] = message;
+      } else {
+        result = [...msgs, message];
       }
-      // Append new message (maintain insertion order)
-      return [...msgs, message];
+      // Sort by created_at to maintain correct chronological order
+      result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      return result;
     });
   }
 
