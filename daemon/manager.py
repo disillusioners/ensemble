@@ -227,6 +227,24 @@ class CancellationCallbackHandler(BaseCallbackHandler):
         self._check_cancellation()
 
 
+def _get_message_event_type(msg: dict) -> str:
+    """Determine event type based on message content.
+
+    Args:
+        msg: Serialized message dict
+
+    Returns:
+        Event type string: "user_message" | "assistant_message" | "thinking" | "tool_call"
+    """
+    if msg.get("role") == "user":
+        return "user_message"
+    if msg.get("tool_calls"):
+        return "tool_call"
+    if msg.get("thinking") or msg.get("thinking_extracted"):
+        return "thinking"
+    return "assistant_message"
+
+
 @dataclass
 class MessageResult:
     """Result of sending a message to an instance."""
@@ -1083,6 +1101,7 @@ class InstanceManager:
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
         event_index = 0  # Sequence counter for checkpoint_id
+        seen_message_ids: set[str] = set()  # Track seen IDs for diffing
 
         # Stream through graph execution
         try:
@@ -1122,24 +1141,44 @@ class InstanceManager:
                                     content = getattr(m, 'content', '') or ''
                                     tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
                         
-                        # Serialize all messages (full state for frontend replacement)
-                        from langchain_core.messages import ToolMessage
-                        serialized = [
-                            serialize_message(m, tool_outputs) 
-                            for m in all_state_messages
-                            if not isinstance(m, ToolMessage)
-                        ]
+                        # Build index for replacement tracking
+                        msg_index: dict[str, int] = {m.id: i for i, m in enumerate(all_state_messages) if hasattr(m, 'id')}
                         
-                        # Build sequence ID from event index
+                        # Build sequence ID for checkpoint_id
                         sequence_id = f"seq_{event_index}"
                         event_index += 1
-
-                        await self._event_bus.broadcast_checkpoint_event(
-                            instance_id=instance_id,
-                            messages=serialized,
-                            checkpoint_id=sequence_id,
-                            tool_outputs=tool_outputs,
-                        )
+                        
+                        # Import ToolMessage here to avoid circular imports
+                        from langchain_core.messages import ToolMessage
+                        
+                        # Emit individual NEW messages only (updated messages not re-emitted)
+                        for m in all_state_messages:
+                            msg_id = getattr(m, 'id', None)
+                            
+                            if msg_id and msg_id in seen_message_ids:
+                                # Updated message — replace in place (don't re-emit)
+                                continue
+                            
+                            # NEW message — add and emit individually
+                            if msg_id:
+                                seen_message_ids.add(msg_id)
+                            
+                            # Skip ToolMessages — they get baked into tool_calls
+                            if isinstance(m, ToolMessage):
+                                continue
+                            
+                            # Serialize the NEW message only
+                            msg_serialized = serialize_message(m, tool_outputs)
+                            msg_serialized["instance_id"] = instance_id
+                            
+                            # Emit individually
+                            event_type = _get_message_event_type(msg_serialized)
+                            await self._event_bus.broadcast_message_event(
+                                instance_id=instance_id,
+                                message=msg_serialized,
+                                event_type=event_type,
+                                checkpoint_id=sequence_id,
+                            )
                         
                         # Track final content from last AI message
                         for msg in reversed(all_state_messages):
@@ -1171,22 +1210,28 @@ class InstanceManager:
                             content = getattr(m, 'content', '') or ''
                             final_tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
                 
-                # Serialize final messages
-                from langchain_core.messages import ToolMessage
-                final_serialized = [
-                    serialize_message(m, final_tool_outputs)
-                    for m in final_messages
-                    if not isinstance(m, ToolMessage)
-                ]
-                
                 final_sequence_id = f"seq_{event_index}_final"
                 
-                await self._event_bus.broadcast_checkpoint_event(
-                    instance_id=instance_id,
-                    messages=final_serialized,
-                    checkpoint_id=final_sequence_id,
-                    tool_outputs=final_tool_outputs,
-                )
+                # Emit any remaining NEW messages individually
+                from langchain_core.messages import ToolMessage
+                for msg in final_messages:
+                    if isinstance(msg, ToolMessage):
+                        continue  # Skip ToolMessages
+                    
+                    msg_id = getattr(msg, 'id', None)
+                    if msg_id and msg_id in seen_message_ids:
+                        continue  # Already emitted during streaming
+                    
+                    msg_serialized = serialize_message(msg, final_tool_outputs)
+                    msg_serialized["instance_id"] = instance_id
+                    
+                    event_type = _get_message_event_type(msg_serialized)
+                    await self._event_bus.broadcast_message_event(
+                        instance_id=instance_id,
+                        message=msg_serialized,
+                        event_type=event_type,
+                        checkpoint_id=final_sequence_id,
+                    )
                 
                 # Extract final content and thinking from last AI message
                 for msg in reversed(final_messages):

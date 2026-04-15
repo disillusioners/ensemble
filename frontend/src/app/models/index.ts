@@ -35,6 +35,27 @@ export interface Message {
   instance_id?: string;
 }
 
+// SSE event types
+export type MessageEventType = 
+  | 'user_message' 
+  | 'assistant_message' 
+  | 'thinking' 
+  | 'tool_call'
+  | 'checkpoint'     // Keep for initial load / reconnect
+  | 'connected'
+  | 'error'
+  | 'keepalive';
+
+export interface SSEMessageEvent {
+  type: MessageEventType;
+  data: {
+    instance_id: string;
+    message?: Message;        // For individual events
+    messages?: Message[];      // For checkpoint events
+    checkpoint_id?: string;
+  };
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -88,7 +109,14 @@ export interface AgentCreate {
 }
 
 // Simplified SSE Event types (from checkpoint-based backend)
-export type SseEventType = 'connected' | 'checkpoint' | 'error' | 'keepalive';
+export type SseEventType = 
+  | 'connected' 
+  | 'error' 
+  | 'keepalive'
+  | 'user_message'
+  | 'assistant_message'
+  | 'thinking'
+  | 'tool_call';
 
 export interface SSEEvent {
   type: SseEventType;

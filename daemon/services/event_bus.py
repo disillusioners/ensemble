@@ -111,6 +111,44 @@ class EventBus:
         await self._broadcast_to_global(instance_id, "checkpoint", data=event)
 
     # -------------------------------------------------------------------------
+    # Individual Message Event Method
+    # -------------------------------------------------------------------------
+
+    async def broadcast_message_event(
+        self,
+        instance_id: str,
+        message: dict,
+        event_type: str = "message",
+        checkpoint_id: str | None = None,
+    ) -> None:
+        """Broadcast a single message event.
+
+        Args:
+            instance_id: The instance this message belongs to.
+            message: Pre-serialized message dict (MUST include tool_outputs baked in).
+            event_type: Type of message event for frontend routing.
+            checkpoint_id: Optional checkpoint ID for ordering.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": event_type,
+            "event_id": message.get("message_id", ""),
+            "message": message,  # Single message dict
+            "checkpoint_id": checkpoint_id,
+        }
+
+        queue = self.get_streaming_queue(instance_id)
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.error(f"Queue full for {instance_id}, dropping message")
+
+        self.notify(instance_id)
+
+        # CRITICAL: Also broadcast to global subscribers (ResponseDispatcher, etc.)
+        await self._broadcast_to_global(instance_id, event_type, data=event)
+
+    # -------------------------------------------------------------------------
     # Error Event Method (persists to DB + notifies)
     # -------------------------------------------------------------------------
 

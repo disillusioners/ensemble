@@ -21,6 +21,39 @@ export class SseService {
   constructor(private ngZone: NgZone) {}
 
   /**
+   * Append or update a message in the list with deduplication by message_id.
+   */
+  private upsertMessage(message: Message): void {
+    this.messages.update(msgs => {
+      const existsIndex = msgs.findIndex(m => m.message_id === message.message_id);
+      if (existsIndex >= 0) {
+        // Update existing (replace with latest version)
+        const updated = [...msgs];
+        updated[existsIndex] = message;
+        return updated;
+      }
+      // Append new message (maintain insertion order)
+      return [...msgs, message];
+    });
+  }
+
+  /**
+   * Map raw SSE message data to Message type.
+   */
+  private mapToMessage(data: any): Message {
+    return {
+      message_id: data.message_id,
+      role: data.role,
+      content: data.content || '',
+      thinking: data.thinking || null,
+      thinking_extracted: data.thinking_extracted || null,
+      tool_calls: data.tool_calls || null,
+      created_at: data.created_at || new Date().toISOString(),
+      instance_id: data.instance_id,
+    };
+  }
+
+  /**
    * Connects to SSE stream for the specified instance.
    */
   connect(instanceId: string): void {
@@ -63,30 +96,53 @@ export class SseService {
       });
     });
 
-    // Checkpoint event - full message state snapshot
-    eventSource.addEventListener('checkpoint', (e: MessageEvent) => {
+    // Individual message events
+    eventSource.addEventListener('user_message', (e: MessageEvent) => {
       this.ngZone.run(() => {
         try {
           const data = JSON.parse(e.data);
-          console.log('[SSE] checkpoint event received');
-          
-          this.events.update(evts => [...evts, { type: 'checkpoint', data }]);
-          
-          // Update messages from checkpoint data
-          if (data.messages && Array.isArray(data.messages)) {
-            const mappedMessages: Message[] = data.messages.map((m: any) => ({
-              message_id: m.message_id,
-              role: m.role,
-              content: m.content || '',
-              thinking: m.thinking || null,
-              thinking_extracted: m.thinking_extracted || null,
-              tool_calls: m.tool_calls || null,
-              created_at: m.created_at || new Date().toISOString(),
-            }));
-            this.messages.set(mappedMessages);
-          }
+          const message = this.mapToMessage(data.message);
+          this.upsertMessage(message);
+          this.events.update(evts => [...evts, { type: 'user_message', data }]);
         } catch (err) {
-          console.error('[SSE] Failed to parse checkpoint:', err);
+          console.error('[SSE] Failed to parse user_message:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('assistant_message', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const message = this.mapToMessage(data.message);
+          this.upsertMessage(message);
+          this.events.update(evts => [...evts, { type: 'assistant_message', data }]);
+        } catch (err) {
+          console.error('[SSE] Failed to parse assistant_message:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('thinking', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const message = this.mapToMessage(data.message);
+          this.upsertMessage(message);
+        } catch (err) {
+          console.error('[SSE] Failed to parse thinking:', err);
+        }
+      });
+    });
+
+    eventSource.addEventListener('tool_call', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const message = this.mapToMessage(data.message);
+          this.upsertMessage(message);
+        } catch (err) {
+          console.error('[SSE] Failed to parse tool_call:', err);
         }
       });
     });

@@ -854,7 +854,7 @@ async def stream_events(instance_id: str, request: Request):
                 yield {"event": "keepalive", "data": "{}"}
                 continue
             
-            # Drain checkpoint events from queue
+            # Drain individual message events from queue
             events = await event_bus.get_streaming_events(instance_id)
             for event in events:
                 yield {
@@ -862,7 +862,7 @@ async def stream_events(instance_id: str, request: Request):
                     "id": event.get("event_id", ""),
                     "data": json.dumps({
                         "instance_id": event["instance_id"],
-                        "messages": event["messages"],
+                        "message": event["message"],
                         "checkpoint_id": event.get("checkpoint_id", ""),
                     }),
                 }

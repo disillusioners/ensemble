@@ -74,17 +74,15 @@ export class ChatComponent implements OnInit, OnDestroy {
       localStorage.setItem('ensemble-show-toolcalls', String(this.showToolCalls()));
     });
 
-    // Simple checkpoint effect - SSE messages are the source of truth
+    // Simple effect - SSE messages are the source of truth
     effect(() => {
       const sseMessages = this.sseService.messages();
-      const currentInstance = this.currentInstance();
+      if (sseMessages.length === 0) return;
       
-      if (!currentInstance || sseMessages.length === 0) return;
+      console.log('[Chat] Updating messages from SSE, count:', sseMessages.length);
       
-      console.log('[Chat] Updating messages from checkpoint, count:', sseMessages.length);
-      
-      // Convert SSE messages to view model
-      this.messages.set(sseMessages.map(m => this.toViewModel(m)));
+      // Messages already deduplicated and typed from SSE service
+      this.messages.set(sseMessages);
       this.isSending.set(false);
     }, { allowSignalWrites: true });
 
