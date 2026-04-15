@@ -170,6 +170,11 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **Note:** When Approver rejects, rejection reasons are tracked in `.agents/approver/{plan-slug}-tracking.md`. Include the tracking file path when sending feedback to the Planner so it can reference previous issues.
 
+### Approver Call Limit
+**Max 3 calls** to Approver per plan. After 3 rejections:
+- **TrueAuto mode:** Proceed with implementation — planning cannot foresee everything, and fixing issues during implementation is the best solution
+- **Normal mode:** Present best plan to user with notes and let user decide
+
 ---
 
 ## Implementation Workflow
