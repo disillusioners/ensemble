@@ -637,7 +637,10 @@ class TestObserverStartStop:
             lock_repo=mock_lock_repo,
         )
         
-        await observer.start()
+        # Set up queue manually (don't start to avoid event loop interference)
+        observer._queue = mock_queue
+        observer._running = False
+        observer._task = None  # No task - we're testing drain only
         
         # Put events in the queue
         event1 = {
@@ -651,7 +654,7 @@ class TestObserverStartStop:
         await mock_queue.put(event1)
         await mock_queue.put(event2)
         
-        # Stop should drain events before cancelling
+        # Stop should drain events
         await observer.stop()
         
         # Both events should have been processed

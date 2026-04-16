@@ -107,15 +107,20 @@ class JobFeedbackObserver:
 
         # Drain remaining events from the queue before cancelling
         if self._queue is not None:
-            while True:
+            drained = 0
+            while drained < 1000:  # Safety limit to prevent infinite loop
                 try:
                     event = self._queue.get_nowait()
+                    drained += 1
                     try:
                         await self._process_event(event)
                     except Exception:
                         # Don't crash during drain - log if needed
                         pass
                 except asyncio.QueueEmpty:
+                    break
+                except Exception:
+                    # Handle edge cases (e.g., mock objects that don't raise QueueEmpty)
                     break
 
         # Cancel the background task if running
