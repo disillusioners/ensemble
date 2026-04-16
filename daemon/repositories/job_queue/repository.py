@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any, Optional
 
@@ -10,6 +11,8 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import JobItem, JobStatus
+
+logger = logging.getLogger(__name__)
 
 
 class JobRepository:
@@ -250,6 +253,71 @@ class JobRepository:
             return jobs, total
 
     # --------------------------------------------------------
+    # STATE TRANSITIONS
+    # --------------------------------------------------------
+
+    def atomic_transition(
+        self,
+        job_id: str,
+        from_status: Optional[str],
+        to_status: str,
+        **extra_updates: Any,
+    ) -> Optional[JobItem]:
+        """
+        Atomically transition a job's status within a single session.
+
+        Uses SELECT + UPDATE within the same session to ensure atomicity.
+        Checks current status to detect concurrent modification or stale state.
+
+        Args:
+            job_id: The job to transition.
+            from_status: Current expected status (None for creation).
+            to_status: Target status.
+            **extra_updates: Additional fields to set in the same statement.
+
+        Returns:
+            The updated JobItem, or None if job not found.
+
+        Raises:
+            InvalidTransitionError: If the transition is invalid or rowcount=0.
+        """
+        # Lazy import to avoid circular dependency with services package
+        from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
+
+        transition_name = job_state_machine.get_transition_name(from_status, to_status)
+
+        with SQLModelSession(self.engine) as session:
+            job = session.get(JobItem, job_id)
+            if job is None:
+                return None
+
+            # Verify current status matches expected
+            if job.status != from_status:
+                raise InvalidTransitionError(
+                    job_id=job_id,
+                    from_status=job.status,
+                    to_status=to_status,
+                )
+
+            # Validate transition is allowed
+            job_state_machine.validate_transition(from_status, to_status)
+
+            # Apply the transition
+            job.status = to_status
+            for key, value in extra_updates.items():
+                setattr(job, key, value)
+
+            session.commit()
+            session.refresh(job)
+
+            logger.info(
+                "Job transition: %s | %s -> %s (%s) | extra_fields=%s",
+                job_id, from_status, to_status, transition_name, list(extra_updates.keys())
+            )
+
+            return job
+
+    # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
 
@@ -318,76 +386,28 @@ class JobRepository:
         job_id: str,
         instance_id: str,
     ) -> Optional[JobItem]:
-        """Atomically mark a job as processing (started) within a single session.
-        
-        This method performs the PENDING->PROCESSING transition atomically
-        by using a single SQLModel session. This prevents race conditions
-        where multiple workers might try to start the same job.
-        
-        Can only be called on PENDING jobs.
-        
-        Args:
-            job_id: Job identifier.
-            instance_id: Instance ID that is processing this job.
-            
-        Returns:
-            Updated JobItem if found, None otherwise.
-            
-        Raises:
-            ValueError: If job is not in PENDING state.
-        """
-        with SQLModelSession(self.engine) as db_session:
-            # SELECT and verify in the same session
-            job = db_session.get(JobItem, job_id)
-            if job is None:
-                return None
-            
-            if job.status != JobStatus.PENDING.value:
-                raise ValueError(
-                    f"Cannot start job in '{job.status}' state, must be PENDING"
-                )
-            
-            # UPDATE within the same session
-            now = datetime.utcnow().isoformat()
-            job.status = JobStatus.PROCESSING.value
-            job.started_at = now
-            job.instance_id = instance_id
-            
-            db_session.commit()
-            db_session.refresh(job)
-            
-            return job
+        """Start a job atomically (PENDING -> PROCESSING)."""
+        now = datetime.utcnow().isoformat()
+        return self.atomic_transition(
+            job_id,
+            from_status=JobStatus.PENDING.value,
+            to_status=JobStatus.PROCESSING.value,
+            started_at=now,
+            instance_id=instance_id,
+        )
 
     def complete_job(
         self,
         job_id: str,
         result_summary: Optional[str] = None,
     ) -> Optional[JobItem]:
-        """Mark a job as completed.
-        
-        Can only be called on PROCESSING jobs.
-        
-        Args:
-            job_id: Job identifier.
-            result_summary: Optional summary of the job result.
-            
-        Returns:
-            Updated JobItem if found, None otherwise.
-            
-        Raises:
-            ValueError: If job is not in PROCESSING state.
-        """
-        job = self.get(job_id)
-        if job is None:
-            return None
-        if job.status != JobStatus.PROCESSING.value:
-            raise ValueError(
-                f"Cannot complete job in '{job.status}' state, must be PROCESSING"
-            )
-        return self.update(
+        """Complete a job (PROCESSING -> COMPLETED)."""
+        now = datetime.utcnow().isoformat()
+        return self.atomic_transition(
             job_id,
-            status=JobStatus.COMPLETED.value,
-            completed_at=datetime.utcnow().isoformat(),
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.COMPLETED.value,
+            completed_at=now,
             result_summary=result_summary,
         )
 
@@ -396,60 +416,42 @@ class JobRepository:
         job_id: str,
         error_message: str,
     ) -> Optional[JobItem]:
-        """Mark a job as failed.
-        
-        Can only be called on PROCESSING jobs.
-        
-        Args:
-            job_id: Job identifier.
-            error_message: Error message describing the failure.
-            
-        Returns:
-            Updated JobItem if found, None otherwise.
-            
-        Raises:
-            ValueError: If job is not in PROCESSING state.
-        """
-        job = self.get(job_id)
-        if job is None:
-            return None
-        if job.status != JobStatus.PROCESSING.value:
-            raise ValueError(
-                f"Cannot fail job in '{job.status}' state, must be PROCESSING"
-            )
-        return self.update(
+        """Fail a job (PROCESSING -> FAILED)."""
+        now = datetime.utcnow().isoformat()
+        return self.atomic_transition(
             job_id,
-            status=JobStatus.FAILED.value,
-            completed_at=datetime.utcnow().isoformat(),
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.FAILED.value,
+            completed_at=now,
             error_message=error_message,
         )
 
     def cancel_job(self, job_id: str) -> Optional[JobItem]:
-        """Mark a job as cancelled.
-        
-        Can only be called on PENDING jobs.
-        
-        Args:
-            job_id: Job identifier.
-            
-        Returns:
-            Updated JobItem if found, None otherwise.
-            
-        Raises:
-            ValueError: If job is not in PENDING state.
-        """
+        """Cancel a job. Works for both PENDING and PROCESSING states."""
         job = self.get(job_id)
         if job is None:
             return None
-        if job.status != JobStatus.PENDING.value:
-            raise ValueError(
-                f"Cannot cancel job in '{job.status}' state, must be PENDING"
+
+        now = datetime.utcnow().isoformat()
+
+        if job.status == JobStatus.PENDING.value:
+            return self.atomic_transition(
+                job_id,
+                from_status=JobStatus.PENDING.value,
+                to_status=JobStatus.CANCELLED.value,
+                cancelled_at=now,
             )
-        return self.update(
-            job_id,
-            status=JobStatus.CANCELLED.value,
-            cancelled_at=datetime.utcnow().isoformat(),
-        )
+        elif job.status == JobStatus.PROCESSING.value:
+            return self.atomic_transition(
+                job_id,
+                from_status=JobStatus.PROCESSING.value,
+                to_status=JobStatus.CANCELLED.value,
+                cancelled_at=now,
+            )
+        else:
+            raise ValueError(
+                f"Cannot cancel job in '{job.status}' state, must be PENDING or PROCESSING"
+            )
 
     # --------------------------------------------------------
     # DELETE

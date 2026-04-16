@@ -84,6 +84,7 @@ from .services.job_lock_manager import JobLockManager
 from .services.job_processor import JobProcessor
 from .services.job_queue_mgmt_service import JobQueueMgmtService
 from .repositories.job_queue.queue_repository import JobQueueRepository
+from .repositories.job_queue.lock_repository import LockRepository
 from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
 from .registry import get_registry
 from .cancellation import CancellationReason
@@ -175,7 +176,13 @@ async def lifespan(app: FastAPI):
     # The JobItem model is registered with SQLModel.metadata when
     # create_job_repository is imported (via its import chain)
     job_repository = create_job_repository(engine=manager._engine, create_tables=True)
-    job_lock_manager = JobLockManager()
+    
+    # Create LockRepository for job lock persistence
+    lock_repo = LockRepository(engine=manager._engine)
+    job_lock_manager = JobLockManager(lock_repo=lock_repo)
+    
+    # Reconcile locks from DB on startup to rebuild in-memory state
+    await job_lock_manager.reconcile_locks()
     
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager._engine)

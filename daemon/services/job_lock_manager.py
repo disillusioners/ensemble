@@ -1,16 +1,21 @@
-"""Job Lock Manager - Per-queue job serialization using in-memory locks.
+"""Job Lock Manager - Per-queue job serialization using in-memory + database locks.
 
 This module provides the lock management layer that controls per-queue job
-serialization with concurrency support using in-memory locks.
+serialization with concurrency support using in-memory locks with optional
+database persistence for crash recovery.
 """
 
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from daemon.repositories.job_queue.models import JobLockInfo
+
+if TYPE_CHECKING:
+    from daemon.repositories.job_queue.lock_repository import LockRepository
+    from daemon.repositories.job_queue.models import JobLock
 
 
 class LockInfo:
@@ -61,10 +66,15 @@ class JobLockManager:
         _lock: asyncio.Lock for thread-safe operations on internal state
     """
     
-    def __init__(self) -> None:
-        """Initialize the JobLockManager."""
+    def __init__(self, lock_repo: Optional["LockRepository"] = None) -> None:
+        """Initialize the JobLockManager.
+        
+        Args:
+            lock_repo: Optional LockRepository for database persistence.
+        """
         self._queue_locks: dict[tuple[str, str], list[LockInfo]] = {}
         self._lock = asyncio.Lock()
+        self._lock_repo = lock_repo
     
     async def acquire_queue_lock(
         self,
@@ -108,6 +118,17 @@ class JobLockManager:
                 self._queue_locks[key] = []
             
             self._queue_locks[key].append(lock_info)
+            
+            # Persist to database if repository is available
+            if self._lock_repo:
+                db_lock = JobLock(
+                    project_id=project_id,
+                    queue_id=queue_id,
+                    job_id=job_id,
+                    instance_id=instance_id,
+                )
+                await asyncio.to_thread(self._lock_repo.acquire, db_lock)
+            
             return True
     
     async def release_queue_lock(
@@ -142,6 +163,12 @@ class JobLockManager:
                     if not current_locks:
                         del self._queue_locks[key]
                     
+                    # Release from database if repository is available
+                    if self._lock_repo:
+                        await asyncio.to_thread(
+                            self._lock_repo.release_by_job, project_id, queue_id, job_id
+                        )
+                    
                     return True
             
             return False
@@ -173,6 +200,13 @@ class JobLockManager:
         """
         key = (project_id, queue_id)
         
+        # Prefer database count for accuracy if available
+        if self._lock_repo:
+            return await asyncio.to_thread(
+                self._lock_repo.get_lock_count, project_id, queue_id
+            )
+        
+        # Fallback to in-memory count
         async with self._lock:
             if key not in self._queue_locks:
                 return 0
@@ -209,6 +243,10 @@ class JobLockManager:
                         del self._queue_locks[key]
                     released.append(key)
         
+        # Release all locks from database if repository is available
+        if self._lock_repo and released:
+            await asyncio.to_thread(self._lock_repo.release_by_instance, instance_id)
+        
         return released
     
     async def get_all_locks(self) -> dict[str, list[JobLockInfo]]:
@@ -234,6 +272,63 @@ class JobLockManager:
         Warning: This should only be used for testing or cleanup.
         """
         self._queue_locks.clear()
+    
+    async def reconcile_locks(
+        self,
+        get_instance_status: Optional[callable] = None
+    ) -> int:
+        """Reconcile in-memory locks with database state.
+        
+        Called on startup to clean up orphaned locks and rebuild
+        in-memory state from persistent storage.
+        
+        Args:
+            get_instance_status: Optional callable(instance_id) -> Optional[str]
+                Returns instance status or None if instance doesn't exist.
+                If not provided, all DB locks are loaded to memory only.
+        
+        Returns:
+            Number of orphaned locks cleaned up.
+        """
+        if not self._lock_repo:
+            return 0
+        
+        # Load all DB locks
+        db_locks = await asyncio.to_thread(self._lock_repo.get_all_locks)
+        
+        reconciled = 0
+        for db_lock in db_locks:
+            # If we have a status checker, verify the instance is still active
+            if get_instance_status:
+                status = await get_instance_status(db_lock.instance_id)
+                if status is None or status in ("completed", "terminated", "error", "cancelled"):
+                    # Instance is gone or completed — release orphaned lock
+                    await asyncio.to_thread(self._lock_repo.release, db_lock.lock_id)
+                    reconciled += 1
+                    continue
+            
+            # Rebuild in-memory state from DB locks
+            key = (db_lock.project_id, db_lock.queue_id)
+            if key not in self._queue_locks:
+                self._queue_locks[key] = []
+            
+            # Check if already in memory
+            existing_job_ids = {l.job_id for l in self._queue_locks[key]}
+            if db_lock.job_id not in existing_job_ids:
+                # Parse acquired_at - may be string or datetime
+                acquired_at = db_lock.acquired_at
+                if isinstance(acquired_at, str):
+                    acquired_at = datetime.fromisoformat(acquired_at)
+                
+                self._queue_locks[key].append(LockInfo(
+                    job_id=db_lock.job_id,
+                    project_id=db_lock.project_id,
+                    queue_id=db_lock.queue_id,
+                    instance_id=db_lock.instance_id or "",
+                    locked_at=acquired_at,
+                ))
+        
+        return reconciled
     
     # ========== Backward Compatibility Methods ==========
     # These methods provide backward compatibility with project-based locking

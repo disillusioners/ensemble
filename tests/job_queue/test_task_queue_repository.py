@@ -8,6 +8,7 @@ import time
 
 from daemon.repositories.job_queue import JobRepository
 from daemon.repositories.job_queue.models import JobStatus, JobItem
+from daemon.services.job_state_machine import InvalidTransitionError
 
 
 class TestRepositoryCreate:
@@ -332,14 +333,14 @@ class TestRepositoryJobLifecycle:
         assert completed.result_summary == "Job completed successfully"
 
     def test_complete_pending_job_raises(self, repository, sample_job_data):
-        """Test completing a pending job raises ValueError."""
+        """Test completing a pending job raises InvalidTransitionError."""
         job = repository.create(**sample_job_data)
         
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(InvalidTransitionError) as exc_info:
             repository.complete_job(job.job_id)
         
-        assert "Cannot complete job" in str(exc_info.value)
-        assert "pending" in str(exc_info.value)
+        assert exc_info.value.from_status == "pending"
+        assert exc_info.value.to_status == "completed"
 
     def test_fail_processing_job(self, repository, sample_job_data):
         """Test failing a processing job."""
@@ -357,14 +358,14 @@ class TestRepositoryJobLifecycle:
         assert failed.error_message == "Something went wrong"
 
     def test_fail_pending_job_raises(self, repository, sample_job_data):
-        """Test failing a pending job raises ValueError."""
+        """Test failing a pending job raises InvalidTransitionError."""
         job = repository.create(**sample_job_data)
         
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(InvalidTransitionError) as exc_info:
             repository.fail_job(job.job_id, "Error")
         
-        assert "Cannot fail job" in str(exc_info.value)
-        assert "pending" in str(exc_info.value)
+        assert exc_info.value.from_status == "pending"
+        assert exc_info.value.to_status == "failed"
 
     def test_cancel_pending_job(self, repository, sample_job_data):
         """Test cancelling a pending job."""
@@ -376,16 +377,16 @@ class TestRepositoryJobLifecycle:
         assert cancelled.status == JobStatus.CANCELLED.value
         assert cancelled.cancelled_at is not None
 
-    def test_cancel_processing_job_raises(self, repository, sample_job_data):
-        """Test cancelling a processing job raises ValueError."""
+    def test_cancel_processing_job(self, repository, sample_job_data):
+        """Test cancelling a processing job succeeds (PROCESSING -> CANCELLED)."""
         job = repository.create(**sample_job_data)
         repository.start_job(job.job_id, "instance-1")
         
-        with pytest.raises(ValueError) as exc_info:
-            repository.cancel_job(job.job_id)
+        cancelled = repository.cancel_job(job.job_id)
         
-        assert "Cannot cancel job" in str(exc_info.value)
-        assert "processing" in str(exc_info.value)
+        assert cancelled is not None
+        assert cancelled.status == JobStatus.CANCELLED.value
+        assert cancelled.cancelled_at is not None
 
 
 class TestRepositoryDelete:
@@ -802,17 +803,17 @@ class TestRepositoryStartJobAtomic:
         assert started.started_at is not None
 
     def test_start_job_atomic_wrong_status(self, repository, sample_job_data):
-        """Test start_job_atomic raises ValueError for non-PENDING job."""
+        """Test start_job_atomic raises InvalidTransitionError for non-PENDING job."""
         job = repository.create(**sample_job_data)
         # Start the job first
         repository.start_job(job.job_id, "instance-1")
         
-        # Try to start again - should fail
-        with pytest.raises(ValueError) as exc_info:
+        # Try to start again - should fail with InvalidTransitionError
+        with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
         
-        assert "Cannot start job" in str(exc_info.value)
-        assert "processing" in str(exc_info.value)
+        assert exc_info.value.from_status == "processing"
+        assert exc_info.value.to_status == "processing"
 
     def test_start_job_atomic_concurrent_safety(self, repository, sample_job_data):
         """Test start_job_atomic ensures only one concurrent start succeeds."""
@@ -826,12 +827,12 @@ class TestRepositoryStartJobAtomic:
         assert first_started.status == JobStatus.PROCESSING.value
         assert first_started.instance_id == "instance-1"
         
-        # Second call should raise ValueError (job no longer pending)
-        with pytest.raises(ValueError) as exc_info:
+        # Second call should raise InvalidTransitionError (job no longer pending)
+        with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
         
-        assert "Cannot start job" in str(exc_info.value)
-        assert "processing" in str(exc_info.value)
+        assert exc_info.value.from_status == "processing"
+        assert exc_info.value.to_status == "processing"
         
         # Verify only one job was started
         retrieved = repository.get(job.job_id)

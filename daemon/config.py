@@ -167,6 +167,19 @@ class ServicesConfig(BaseSettings):
     )
 
 
+class JobSystemConfig(BaseSettings):
+    """Configuration for the job system improvements."""
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_JOB_SYSTEM_")
+    
+    default_max_retries: int = Field(default=3, description="Default max retry attempts for failed jobs")
+    retry_backoff_base_seconds: int = Field(default=60, description="Base delay in seconds for exponential backoff")
+    retry_backoff_max_seconds: int = Field(default=3600, description="Maximum delay in seconds for retry backoff")
+    dlq_enabled: bool = Field(default=True, description="Enable dead letter queue functionality")
+    event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
+    observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -180,6 +193,7 @@ class Config(BaseSettings):
     queue: QueueConfig = Field(default_factory=QueueConfig)
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
+    job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
 
 
 def load_config(config_path: Optional[str] = None) -> Config:
@@ -252,6 +266,8 @@ def load_config(config_path: Optional[str] = None) -> Config:
         config_dict["compaction"] = processed_config["compaction"]
     if "services" in processed_config:
         config_dict["services"] = processed_config["services"]
+    if "job_system" in processed_config:
+        config_dict["job_system"] = processed_config["job_system"]
 
     # Create and validate config
     return Config(**config_dict)

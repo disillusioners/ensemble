@@ -24,6 +24,7 @@ class JobStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    DEAD_LETTER = "dead_letter"
 
     @classmethod
     def is_valid(cls, status: str) -> bool:
@@ -63,6 +64,7 @@ class JobQueue(SQLModel, table=True):
     is_system: bool = Field(default=False)
     is_paused: bool = Field(default=False)
     description: Optional[str] = None
+    default_max_retries: Optional[int] = Field(default=None)
     
     # Timestamps
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -138,6 +140,13 @@ class JobItem(SQLModel, table=True):
     # Cancellation
     cancelled_at: Optional[str] = None
 
+    # Retry handling
+    retry_count: int = Field(default=0, ge=0)
+    max_retries: Optional[int] = Field(default=None)
+    idempotency_key: Optional[str] = Field(default=None, max_length=255)
+    failed_at: Optional[str] = None
+    next_retry_at: Optional[str] = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -158,6 +167,11 @@ class JobItem(SQLModel, table=True):
             "result_summary": self.result_summary,
             "metadata": dict(self.job_metadata) if self.job_metadata else {},
             "cancelled_at": self.cancelled_at,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "idempotency_key": self.idempotency_key,
+            "failed_at": self.failed_at,
+            "next_retry_at": self.next_retry_at,
         }
 
 
@@ -172,3 +186,15 @@ class JobLockInfo(BaseModel):
     queue_id: str
     instance_id: str
     locked_at: datetime
+
+
+class JobLock(SQLModel, table=True):
+    """Persistent lock tracking for active jobs."""
+    __tablename__ = "job_locks"
+
+    lock_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(index=True)
+    queue_id: str = Field(index=True)
+    job_id: str = Field(index=True)
+    instance_id: Optional[str] = Field(default=None, index=True)
+    acquired_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())

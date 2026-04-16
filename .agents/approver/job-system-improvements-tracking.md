@@ -88,3 +88,28 @@ Three independent council sessions verified:
 - Heartbeat asyncio.Task exception handling not explicitly specified — should follow existing background loop pattern (try/except + logger.exception, continue loop).
 - RetryScheduler error handling not explicitly specified — should follow job_processor.py pattern.
 - `is_instance_alive()` implementation is straightforward for single-process architecture (instances dict is empty on restart → all PROCESSING jobs are orphaned).
+
+## Iteration 003 — APPROVED
+
+**Date:** 2026-04-19
+**Verdict:** APPROVED
+**Reviewer:** approver (independent evaluation with council)
+
+### Evaluation Summary
+
+Independent evaluation from scratch with one council session. Council raised 5 concerns; all independently assessed as non-blocking:
+
+1. **Observer blind spot for pre-instance failures** — NOT a blocker. JobProcessor calls complete_job() directly for pre-instance failures. Observer only handles post-instance completions. Two-path architecture is correct.
+2. **FAILED→CANCELLED race with retry engine** — NOT a blocker. StaleTaskRecovery operates on tasks, not jobs. No existing job-level retry engine. Plan's double transition is safe.
+3. **Async observer not atomic** — NOT a blocker. terminate_instance() calls complete_job_sync() synchronously before yielding. Plan's race analysis correct.
+4. **Instance never starts** — NOT a blocker. Task-level StaleTaskRecovery + TimeoutMonitor handle this. Startup recovery catches remaining orphans. ADR-009 correct.
+5. **Lock release ordering** — Known existing issue, addressed by Phase 1's atomic_transition() integration.
+
+### Previous Issues (Iteration 001) — Still Resolved
+
+All 4 blocking issues remain adequately addressed in the current plan text.
+
+### Notes (Non-blocking)
+
+- Phase 3 retry integration with cancellation: cancel_job() should skip maybe_retry() and go straight CANCELLED. Plan implies this but doesn't explicitly state it.
+- DLQ replay code sketch uses read-then-write illustration (noted in iteration 002) — task description itself correctly requires atomic behavior.

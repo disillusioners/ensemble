@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
 from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -193,7 +194,7 @@ class JobQueueService:
         return await asyncio.to_thread(self._repository.update, job_id, **updates)
     
     async def cancel_job(self, job_id: str) -> bool:
-        """Cancel a pending job or abort a running job.
+        """Cancel a job. Works for both PENDING and PROCESSING states.
         
         Args:
             job_id: Job identifier.
@@ -206,30 +207,25 @@ class JobQueueService:
         if job is None:
             return False
         
-        # Can only cancel PENDING jobs
-        if job.status == JobStatus.PENDING.value:
+        # Pre-validate with state machine (for better error messages)
+        if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
+            return False
+        
+        # For PROCESSING jobs, release the lock first
+        if job.status == JobStatus.PROCESSING.value:
+            if job.queue_id and job.project_id:
+                await self._lock_manager.release_queue_lock(
+                    job.project_id, job.queue_id, job_id
+                )
+            elif job.project_id:
+                await self._lock_manager.release(job.project_id, job_id)
+        
+        # Now cancel via repository (handles both PENDING and PROCESSING)
+        try:
             await asyncio.to_thread(self._repository.cancel_job, job_id)
             return True
-        
-        # Can abort PROCESSING jobs (release lock)
-        if job.status == JobStatus.PROCESSING.value:
-            # Release the per-queue lock held by this job's instance
-            # W8: release_by_instance() handles all lock cleanup for the instance,
-            # no need for separate release_queue_lock() call
-            if job.instance_id:
-                await self._lock_manager.release_by_instance(job.instance_id)
-            
-            # Use update() instead of cancel_job() since PROCESSING jobs
-            # can't be cancelled via cancel_job() (raises ValueError)
-            await asyncio.to_thread(
-                self._repository.update,
-                job_id,
-                status=JobStatus.CANCELLED.value,
-                cancelled_at=datetime.utcnow().isoformat(),
-            )
-            return True
-        
-        return False
+        except (ValueError, InvalidTransitionError):
+            return False
     
     async def retry_job(self, job_id: str) -> Optional[JobItem]:
         """Retry a failed job by creating a new job with the same parameters.
@@ -644,7 +640,7 @@ class JobQueueService:
                 return await asyncio.to_thread(
                     self._repository.fail_job, job_id, error_message=error or "Unknown error"
                 )
-        except ValueError:
+        except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
     
@@ -703,7 +699,7 @@ class JobQueueService:
                 return self._repository.complete_job(job_id, result_summary=result_summary)
             else:
                 return self._repository.fail_job(job_id, error_message=error or "Unknown error")
-        except ValueError:
+        except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
     
