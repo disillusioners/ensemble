@@ -55,7 +55,7 @@ def _extract_timestamp(msg) -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
+def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | None = None) -> dict:
     """Serialize a LangChain message to dict matching REST API format.
     
     Must handle all 5 thinking extraction paths:
@@ -68,6 +68,8 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
     Args:
         msg: LangChain BaseMessage (HumanMessage, AIMessage, ToolMessage, etc.)
         tool_outputs: Optional map of tool_call_id -> output content.
+        message_id: Optional explicit message ID to use. If not provided,
+            falls back to msg.id or generates a new UUID.
     
     Returns:
         Dict with message_id, role, content, thinking, tool_calls, created_at.
@@ -120,7 +122,7 @@ def serialize_message(msg, tool_outputs: dict | None = None) -> dict:
                 })
     
     return {
-        "message_id": getattr(msg, 'id', None) or str(uuid.uuid4()),
+        "message_id": str(message_id) if message_id else getattr(msg, 'id', None) or str(uuid.uuid4()),
         "role": role,
         "content": content_str,
         "thinking": thinking,

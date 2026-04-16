@@ -1126,20 +1126,22 @@ class InstanceManager:
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
         
+        # Import here to avoid circular imports with langchain_core
+        from langchain_core.messages import HumanMessage
+        
         if is_retry:
             if await self._has_checkpoint(instance_id):
                 logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{retry_count})")
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
-                graph_input = {"messages": [message]}
+                graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
         else:
             # First attempt - add message to conversation
-            graph_input = {"messages": [message]}
+            graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
         
         # Pre-emit user message before graph starts so frontend shows it immediately
-        from langchain_core.messages import HumanMessage
-        user_msg = HumanMessage(content=message)
+        user_msg = HumanMessage(content=message, id=message_id)
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
         await self._event_bus.broadcast_message_event(
