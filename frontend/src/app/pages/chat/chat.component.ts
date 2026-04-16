@@ -350,30 +350,16 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     // Clear any previous error
     this.sendError.set(null);
-
-    // Add user message to UI immediately
-    const userMessage: Message = {
-      message_id: `temp-${Date.now()}`,
-      role: 'user',
-      content,
-      created_at: new Date().toISOString(),
-    };
-    this.messages.update(prev => [...prev, userMessage]);
-
     this.isSending.set(true);
     
     this.api.sendMessage(instance.instance_id, content).subscribe({
       next: (_response) => {
-        // The assistant response will come via SSE checkpoint events
+        // Wait for the message to arrive via SSE - server assigns message_id
+        // The SSE service will upsert it when received
       },
       error: (err) => {
         console.error('Failed to send message:', err);
         this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
-        this.messages.update(prev => prev.map(m => 
-          m.message_id === userMessage.message_id 
-            ? { ...m, content: m.content + ' [Failed to send]' }
-            : m
-        ));
         this.isSending.set(false);
       }
     });
