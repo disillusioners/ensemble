@@ -681,12 +681,11 @@ class SourceRegistry:
             source = f"{source_id}:{msg.external_user_id}"
             
             # Queue the message for processing with correct parameters
-            self._manager.queue.enqueue(
+            await self._manager.enqueue_message(
                 instance_id=instance_id,
-                content=msg.content,
+                message=msg.content,
                 source=source,
                 priority=1,
-                metadata=msg.metadata
             )
             logger.info(
                 f"✅ Queued message: source_id={source_id}, "
