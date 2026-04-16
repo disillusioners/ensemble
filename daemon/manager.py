@@ -46,7 +46,7 @@ from sqlmodel import Session
 from sqlalchemy import text
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
-from .services.event_bus import EventBus
+from .services.live_event_hub import LiveEventHub
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
@@ -394,13 +394,10 @@ class InstanceManager:
             instance_repo=self._instance_repository,
         )
         
-        # Create EventBus for ResponseDispatcher (will be updated with real event_repo in prepare)
-        from .repositories.event.repository import EventRepository
-        _event_repo_for_bus = EventRepository(engine=self._engine)
-        self._event_bus = EventBus(event_repo=_event_repo_for_bus)
+        # Create LiveEventHub for live-only SSE streaming
+        self._live_hub = LiveEventHub()
         
         self.source_dispatcher = ResponseDispatcher(
-            event_bus=self._event_bus,
             registry=self.source_registry,
             subscriber_id="response_dispatcher"
         )
@@ -532,6 +529,7 @@ class InstanceManager:
             instance_manager=self,
             event_repo=event_repo,
             graph_timeout_minutes=svc.graph_timeout_minutes,
+            source_dispatcher=self.source_dispatcher,
         )
         
         # Create and start worker pool with timeout/retry config
@@ -1159,7 +1157,7 @@ class InstanceManager:
         user_msg = HumanMessage(content=message, id=message_id)
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
-        await self._event_bus.broadcast_message_event(
+        await self._live_hub.stream_message(
             instance_id=instance_id,
             message=user_serialized,
             event_type="user_message",
@@ -1243,7 +1241,7 @@ class InstanceManager:
                             
                             # Emit individually
                             event_type = _get_message_event_type(msg_serialized)
-                            await self._event_bus.broadcast_message_event(
+                            await self._live_hub.stream_message(
                                 instance_id=instance_id,
                                 message=msg_serialized,
                                 event_type=event_type,
@@ -1259,10 +1257,9 @@ class InstanceManager:
                                 break
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
-            await self._event_bus.create_event(
+            await self._live_hub.stream_error(
                 instance_id=instance_id,
-                kind=EventKind.PROCESSING_FAILED,
-                data={"error": str(e), "stage": "streaming", "message_id": message_id},
+                error={"error": str(e), "stage": "streaming", "message_id": message_id},
             )
             raise
 
@@ -1751,9 +1748,9 @@ Provide a concise summary:"""
         
         # Broadcast child completion event asynchronously (using captured parent_id)
         try:
-            await self._event_bus.create_event(
+            await self._live_hub.stream_lifecycle(
                 instance_id=parent_id,
-                kind=EventKind.CHILD_COMPLETED,
+                event_type="child_completed",
                 data={
                     "child_instance_id": instance_id,
                     "report_message_id": report_message_id,
@@ -1844,9 +1841,9 @@ Provide a concise summary:"""
             report_message_id = msg.message_id
             
             # Broadcast error report event
-            await self._event_bus.create_event(
+            await self._live_hub.stream_lifecycle(
                 instance_id=parent_id,
-                kind=EventKind.CHILD_FAILED,
+                event_type="child_failed",
                 data={
                     "type": "error_report",
                     "child_instance_id": instance_id,
@@ -2196,8 +2193,8 @@ Title:"""
         # 1. Cancel active requests for this instance
         self._request_registry.cancel_by_instance(instance_id)
         
-        # 2. Clean up event bus for this instance
-        self._event_bus.cleanup_instance(instance_id)
+        # 2. Clean up live hub connections for this instance
+        await self._live_hub.cleanup_instance(instance_id)
 
         # 3. Remove from instances dict
         if instance_id in self.instances:

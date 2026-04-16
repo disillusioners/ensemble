@@ -1,4 +1,9 @@
-"""Response dispatcher for routing agent responses back to external sources."""
+"""Response dispatcher for routing agent responses back to external sources.
+
+The dispatcher receives completed message events directly from the manager
+and routes responses to external sources (Telegram, Discord, etc.) using
+per-user ordering locks for guaranteed delivery ordering.
+"""
 
 import asyncio
 import logging
@@ -6,7 +11,6 @@ import re
 from collections import OrderedDict
 from typing import Optional, TYPE_CHECKING
 
-from ..services.event_bus import EventBus
 from .base import OutgoingMessage
 
 if TYPE_CHECKING:
@@ -18,32 +22,28 @@ logger = logging.getLogger(__name__)
 class ResponseDispatcher:
     """Dispatches completed agent responses to appropriate message sources.
     
-    Listens for "completed" events from the EventBus and routes
-    responses to external sources using per-user ordering locks.
+    Receives completed message events directly from the manager via
+    `dispatch_completed()` and routes responses to external sources.
+    Uses per-user ordering locks to guarantee delivery ordering.
     """
     
     MAX_SEND_LOCKS = 10000  # Class constant for LRU eviction
     
     def __init__(
         self,
-        event_bus: EventBus,
-        registry: "SourceRegistry",
+        registry: Optional["SourceRegistry"] = None,
         subscriber_id: str = "response_dispatcher"
     ) -> None:
         """Initialize the response dispatcher.
         
         Args:
-            event_bus: EventBus to subscribe to.
             registry: SourceRegistry to get adapters from.
-            subscriber_id: Unique identifier for this subscriber.
+            subscriber_id: Unique identifier for this dispatcher instance.
         """
-        self._event_bus = event_bus
-        self._registry: "SourceRegistry" = registry
+        self._registry: Optional["SourceRegistry"] = registry
         self._subscriber_id = subscriber_id
         
         self._running: bool = False
-        self._task: Optional[asyncio.Task] = None
-        self._event_queue: Optional[asyncio.Queue] = None
         
         self._send_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_guard = asyncio.Lock()
@@ -57,13 +57,7 @@ class ResponseDispatcher:
             return
         
         logger.info("Starting ResponseDispatcher")
-        
-        # Subscribe to all events from EventBus
-        self._event_queue = self._event_bus.subscribe_all(self._subscriber_id)
-        
         self._running = True
-        self._task = asyncio.create_task(self._event_loop())
-        logger.info("ResponseDispatcher event loop started")
     
     async def stop(self, timeout: float = 30.0) -> None:
         """Stop the dispatcher gracefully.
@@ -72,40 +66,92 @@ class ResponseDispatcher:
             timeout: Maximum seconds to wait for graceful shutdown.
         """
         if not self._running:
-            logger.warning("ResponseDispatcher not running")
             return
         
-        logger.info(f"Stopping ResponseDispatcher (timeout={timeout}s)")
+        logger.info("Stopping ResponseDispatcher")
         self._running = False
-        
-        # Unsubscribe from EventBus
-        self._event_bus.unsubscribe_all(self._subscriber_id)
-        
-        # Wait for task to complete with timeout
-        if self._task is not None:
-            try:
-                await asyncio.wait_for(self._task, timeout=timeout)
-                logger.info("ResponseDispatcher stopped gracefully")
-            except asyncio.CancelledError:
-                logger.warning("ResponseDispatcher stop cancelled")
-            except asyncio.TimeoutError:
-                logger.warning(f"ResponseDispatcher stop timed out after {timeout}s")
-                if self._task is not None and not self._task.done():
-                    self._task.cancel()
-                    try:
-                        await self._task
-                    except asyncio.CancelledError:
-                        pass
-        else:
-            logger.warning("ResponseDispatcher had no task to stop")
-        
-        # Cleanup
-        self._event_queue = None
-        self._task = None
         
         # Clear send locks
         async with self._locks_guard:
             self._send_locks.clear()
+    
+    async def dispatch_completed(
+        self,
+        instance_id: str,
+        message_id: str,
+        source: str,
+        content: str,
+        message_type: str = "text",
+        metadata: Optional[dict] = None,
+        reply_to_id: Optional[str] = None,
+    ) -> None:
+        """Dispatch a completed message to the appropriate external source.
+        
+        This is the main entry point called by the manager when a message
+        completes processing. It routes the response to the correct adapter.
+        
+        Args:
+            instance_id: The instance that processed the message.
+            message_id: The message ID that completed.
+            source: The source identifier (format: "source_id:external_user_id").
+            content: The response content to send.
+            message_type: Type of message (text, image, etc.).
+            metadata: Optional metadata to include.
+            reply_to_id: Optional message ID to reply to.
+        """
+        if not self._running:
+            logger.debug("ResponseDispatcher not running, skipping dispatch")
+            return
+        
+        if self._registry is None:
+            logger.debug("No source registry configured, skipping dispatch")
+            return
+        
+        # Parse source as "source_id:external_user_id"
+        # Sources without ":" are internal (e.g., "api") and don't need routing
+        if ":" not in source:
+            logger.debug(f"Skipping internal source (no routing needed): {source}")
+            return
+        
+        source_id, external_user_id = source.split(":", 1)
+        
+        # Validate source_id format
+        if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', source_id):
+            logger.warning(f"Invalid source_id format: {source_id}")
+            return
+        
+        # Validate external_user_id length
+        if len(external_user_id) > 256:
+            logger.warning(f"external_user_id too long: {len(external_user_id)}")
+            return
+        
+        logger.debug(f"Dispatching completed message for source={source_id}, user={external_user_id}")
+        
+        # Get adapter from registry
+        adapter = self._registry.get(source_id)
+        if adapter is None:
+            logger.error(f"No adapter found for source_id={source_id}")
+            return
+        
+        # Create OutgoingMessage
+        outgoing = OutgoingMessage(
+            external_user_id=external_user_id,
+            content=content,
+            source_id=source_id,
+            metadata=metadata or {},
+            message_type=message_type,
+            reply_to_id=reply_to_id
+        )
+        
+        # Send with per-user lock for ordering
+        send_lock = await self._get_send_lock(external_user_id)
+        
+        async with send_lock:
+            success = await adapter.send(outgoing)
+            if success:
+                logger.debug(f"Sent response to user {external_user_id} via {source_id}")
+            else:
+                logger.warning(f"Failed to send response to user {external_user_id} via {source_id}")
     
     async def _get_send_lock(self, external_user_id: str) -> asyncio.Lock:
         """Get or create a send lock for a specific user.
@@ -134,102 +180,14 @@ class ResponseDispatcher:
             self._send_locks[external_user_id] = lock
             return lock
     
-    async def _event_loop(self) -> None:
-        """Main event loop: process events from the queue."""
-        logger.info("ResponseDispatcher event loop started")
-        
-        # Queue should be initialized by start() before this runs
-        assert self._event_queue is not None, "Event queue not initialized - call start() first"
-        
-        while self._running:
-            try:
-                # Use wait_for to check _running flag periodically
-                event = await asyncio.wait_for(
-                    self._event_queue.get(),
-                    timeout=1.0
-                )
-                
-                await self._handle_event(event)
-                
-            except asyncio.TimeoutError:
-                # No event available within timeout, continue loop
-                continue
-            except asyncio.CancelledError:
-                logger.info("ResponseDispatcher event loop cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in ResponseDispatcher event loop: {e}", exc_info=True)
-                # Continue processing despite errors
-        
-        logger.info("ResponseDispatcher event loop exited")
-    
     async def _handle_event(self, event: dict) -> None:
         """Process a completed event by sending response to source.
         
+        NOTE: Disabled pending redesign. This was previously called by the event
+        loop but is now a no-op.
+        
         Args:
-            event: The event dict from EventBus (with event_type and data keys).
+            event: The event dict (not used)
         """
-        try:
-            # EventBus sends dicts with "event_type" and "data" keys
-            event_type = event.get("event_type")
-            data = event.get("data", {})
-            
-            # Step 1: Check event type is "completed"
-            if event_type != "completed":
-                logger.debug(f"Ignoring non-completed event: {event_type}")
-                return
-            
-            # Step 2: Get source from event data
-            source = data.get("source")
-            if not source:
-                logger.warning(f"Completed event missing source: {event}")
-                return
-            
-            # Step 3: Parse source as "source_id:external_user_id"
-            # Sources without ":" are internal (e.g., "api") and don't need routing
-            if ":" not in source:
-                logger.debug(f"Skipping internal source (no routing needed): {source}")
-                return
-            
-            source_id, external_user_id = source.split(":", 1)
-            
-            # Validate source_id format
-            if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', source_id):
-                logger.warning(f"Invalid source_id format: {source_id}")
-                return
-            
-            # Validate external_user_id length
-            if len(external_user_id) > 256:
-                logger.warning(f"external_user_id too long: {len(external_user_id)}")
-                return
-            
-            logger.debug(f"Processing completed event for source={source_id}, user={external_user_id}")
-            
-            # Step 4: Get adapter from registry
-            adapter = self._registry.get(source_id)
-            if adapter is None:
-                logger.error(f"No adapter found for source_id={source_id}")
-                return
-            
-            # Step 5: Create OutgoingMessage
-            outgoing = OutgoingMessage(
-                external_user_id=external_user_id,
-                content=data.get("content", ""),
-                source_id=source_id,
-                metadata=data.get("metadata", {}),
-                message_type=data.get("message_type", "text"),
-                reply_to_id=data.get("reply_to_id")
-            )
-            
-            # Step 6: Send with per-user lock for ordering
-            send_lock = await self._get_send_lock(external_user_id)
-            
-            async with send_lock:
-                success = await adapter.send(outgoing)
-                if success:
-                    logger.debug(f"Sent response to user {external_user_id} via {source_id}")
-                else:
-                    logger.warning(f"Failed to send response to user {external_user_id} via {source_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling completed event: {e}", exc_info=True)
+        # No-op - dispatcher is disabled pending redesign
+        pass

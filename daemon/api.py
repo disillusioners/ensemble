@@ -77,7 +77,7 @@ from .models import (
 from .manager import InstanceManager
 from .config import Config, load_config
 from .persistence import get_checkpointer
-from .services.event_bus import EventBus
+from .services.live_event_hub import LiveEventHub
 from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
 from .services.job_lock_manager import JobLockManager
@@ -165,8 +165,6 @@ async def lifespan(app: FastAPI):
     config = load_config()
     manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
-    # Set the main event loop for thread-safe EventBus operations
-    manager._event_bus._loop = asyncio.get_running_loop()
     
     # Set up worker pool for message processing
     manager.setup_worker_pool(num_workers=4)
@@ -225,12 +223,9 @@ async def lifespan(app: FastAPI):
     await job_processor.start()
     logger.info("JobProcessor started")
     
-    # Initialize EventBus with EventRepository for hybrid DB + streaming delivery
-    # IMPORTANT: Use manager's existing EventBus so SSE endpoint receives the same events
-    from .repositories.event.repository import EventRepository
-    event_repo = EventRepository(engine=manager._engine)
-    app.state.event_bus = manager._event_bus  # Use manager's EventBus, not a new one
-    app.state.event_repository = event_repo
+    # Initialize LiveEventHub for live-only SSE streaming
+    # Store in app.state for SSE endpoint to use
+    app.state.live_hub = manager._live_hub
     
     # Auto-provision system queues for existing projects
     # This ensures all projects have their system queues (system_fifo_queue, system_parallel_queue)
@@ -250,9 +245,9 @@ async def lifespan(app: FastAPI):
     # Stop JobProcessor on shutdown
     await job_processor.stop()
     
-    # Shutdown EventBus
-    if hasattr(app.state, 'event_bus'):
-        await app.state.event_bus.shutdown()
+    # Shutdown LiveEventHub
+    if hasattr(app.state, 'live_hub'):
+        await app.state.live_hub.shutdown()
     
     # Call manager shutdown for graceful shutdown sequence
     # This handles cancellation of active requests, consumers, SSE, stop_sources(), etc.
@@ -827,7 +822,7 @@ async def stream_events(instance_id: str, request: Request):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
     
-    event_bus: EventBus = request.app.state.event_bus
+    live_hub: LiveEventHub = request.app.state.live_hub
     
     async def event_generator() -> AsyncGenerator[dict, None]:
         # 1. Connected event
@@ -836,36 +831,32 @@ async def stream_events(instance_id: str, request: Request):
             "data": json.dumps({"instance_id": instance_id}),
         }
         
-        # 2. Listen for new checkpoints
-        notification = event_bus.get_notification(instance_id)
+        # 2. Create a queue for this connection
+        queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        await live_hub.add_connection(instance_id, queue)
         
-        while True:
-            if await request.is_disconnected():
-                break
-            
-            if manager.is_shutting_down:
-                yield {"event": "error", "data": json.dumps({"error": "server_shutdown"})}
-                break
-            
-            try:
-                await asyncio.wait_for(notification.wait(), timeout=30)
-                notification.clear()
-            except asyncio.TimeoutError:
-                yield {"event": "keepalive", "data": "{}"}
-                continue
-            
-            # Drain individual message events from queue
-            events = await event_bus.get_streaming_events(instance_id)
-            for event in events:
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                
+                if manager.is_shutting_down:
+                    yield {"event": "error", "data": json.dumps({"error": "server_shutdown"})}
+                    break
+                
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30)
+                except asyncio.TimeoutError:
+                    yield {"event": "keepalive", "data": "{}"}
+                    continue
+                
                 yield {
                     "event": event["event_type"],
                     "id": event.get("event_id", ""),
-                    "data": json.dumps({
-                        "instance_id": event["instance_id"],
-                        "message": event["message"],
-                        "checkpoint_id": event.get("checkpoint_id", ""),
-                    }),
+                    "data": json.dumps(event),
                 }
+        finally:
+            await live_hub.remove_connection(instance_id, queue)
     
     return EventSourceResponse(event_generator(), ping=30)
 

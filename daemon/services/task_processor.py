@@ -8,7 +8,6 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from .event_bus import EventBus
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
 
@@ -67,7 +66,7 @@ class ProcessMessageProcessor(BaseProcessor):
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
         message_repository=None,
-        event_bus: "EventBus | None" = None,
+        source_dispatcher=None,  # ResponseDispatcher for external routing
     ):
         """Initialize the message processor.
 
@@ -76,13 +75,13 @@ class ProcessMessageProcessor(BaseProcessor):
             task_repo: TaskRepository for task operations.
             event_repo: Optional EventRepository for event creation.
             message_repository: Optional MessageQueueRepository for message updates.
-            event_bus: Optional EventBus for event creation.
+            source_dispatcher: Optional ResponseDispatcher for external routing.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
         self._message_repo = message_repository
-        self._event_bus = event_bus
+        self._source_dispatcher = source_dispatcher
 
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
@@ -141,20 +140,6 @@ class ProcessMessageProcessor(BaseProcessor):
                 message_source=message_source,
             )
             
-            # Broadcast completed event via EventBus for SSE delivery
-            # Checkpoint events are already emitted by manager, this is for final completion signal
-            if self._event_bus and result:
-                await self._event_bus._broadcast_to_global(
-                    instance_id=task.instance_id,
-                    event_type="completed",
-                    data={
-                        "source": message_source,
-                        "content": result.content or "",
-                        "message_type": "final",
-                        "instance_id": task.instance_id,
-                    }
-                )
-            
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
             if self._message_repo:
                 await asyncio.to_thread(self._message_repo.complete, task.message_id)
@@ -166,6 +151,20 @@ class ProcessMessageProcessor(BaseProcessor):
                 task.id,
                 {"success": True, "message_id": task.message_id}
             )
+            
+            # Dispatch completed message to external sources (Telegram, Discord, etc.)
+            if self._source_dispatcher and message_source and result:
+                try:
+                    await self._source_dispatcher.dispatch_completed(
+                        instance_id=task.instance_id,
+                        message_id=task.message_id,
+                        source=message_source,
+                        content=result.content or "",
+                        message_type="final",
+                    )
+                except Exception as e:
+                    logger.error(f"Error dispatching to external source: {e}", exc_info=True)
+                    # Don't fail the task - dispatch is best-effort
             
             # Check if this instance is a child that has completed all work
             # This may create a completion report task for the parent
@@ -229,12 +228,10 @@ class SendReportProcessor(BaseProcessor):
         instance_manager,
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
-        event_bus: "EventBus | None" = None,
     ):
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
-        self._event_bus = event_bus
 
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Send a completion report to the parent instance.
@@ -262,12 +259,10 @@ class CleanupProcessor(BaseProcessor):
         instance_manager,
         task_repo: "TaskRepository",
         event_repo: "EventRepository | None",
-        event_bus: "EventBus | None" = None,
     ):
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo
-        self._event_bus = event_bus
 
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Perform cleanup for an instance.
@@ -299,8 +294,8 @@ class TaskProcessor:
         task_repo: "TaskRepository",
         instance_manager,
         event_repo: "EventRepository | None" = None,
-        event_bus: "EventBus | None" = None,
         graph_timeout_minutes: float = 40.0,
+        source_dispatcher=None,  # ResponseDispatcher for external routing
     ):
         """Initialize the task processor.
 
@@ -308,29 +303,27 @@ class TaskProcessor:
             task_repo: TaskRepository for task operations.
             instance_manager: InstanceManager for message processing.
             event_repo: Optional EventRepository for event creation.
-            event_bus: Optional EventBus for event creation.
             graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
+            source_dispatcher: Optional ResponseDispatcher for external routing.
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
-        self._event_bus = event_bus
         self._graph_timeout_minutes = graph_timeout_minutes
+        self._source_dispatcher = source_dispatcher
 
         # Create type-specific processors
         self._processors: dict[str, BaseProcessor] = {
             "process_message": ProcessMessageProcessor(
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
-                event_bus=event_bus,
+                source_dispatcher=source_dispatcher,
             ),
             "send_report": SendReportProcessor(
                 instance_manager, task_repo, event_repo,
-                event_bus=event_bus,
             ),
             "cleanup": CleanupProcessor(
                 instance_manager, task_repo, event_repo,
-                event_bus=event_bus,
             ),
         }
 
