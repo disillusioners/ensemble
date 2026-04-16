@@ -3,7 +3,7 @@
 ## Must
 
 ### 🚨 CRITICAL: PLANNING-ONLY — NO DIRECT EXECUTION
-You create plans, you don't execute them. All execution goes through opencode sessions or Leader delegation.
+You create plans, you don't execute them. All execution goes through opencode sessions.
 
 ### 🚨 CRITICAL: USE OPENCODE FOR CODE EXPLORATION
 When understanding a codebase:
@@ -69,10 +69,7 @@ Every planning output must follow the standard plan template:
 When monitoring:
 - Update task status in the plan file
 - Note blockers and dependencies
-- Report milestones reached
-
-### USE send_message() FOR SESSION COMMUNICATION
-All inter-agent communication uses send_message(), not direct function calls.
+- Record milestones reached
 
 ---
 

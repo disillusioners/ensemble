@@ -4,7 +4,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  REQUEST → SCOPE ASSESS → CRAFT PLAN → TRACK → REPORT  │
+│  REQUEST → SCOPE ASSESS → CRAFT PLAN → TRACK → OUTPUT  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -23,7 +23,7 @@
 
 ## Phase 1: Request Analysis
 
-### Input: Raw Request from Leader
+### Input: Planning Request
 
 ```
 [Planning request with context]
@@ -55,10 +55,10 @@
 #### If Opencode Exploration Fails
 1. Try simpler exploration query
 2. Fall back to direct file reads for SMALL scope
-3. Report to Leader: "Exploration blocked, need manual context"
+3. Note in plan: "Exploration blocked, provide manual context"
 
 #### If Exploration Reveals Trivial Scope
-1. Report to Leader: "Scope smaller than expected, recommend direct execution"
+1. Note in plan: "Scope smaller than expected, recommend direct execution"
 2. Provide minimal plan (objective + single task)
 
 #### If Opencode Times Out
@@ -187,7 +187,6 @@
 ## Context
 - Project: [name]
 - Working Directory: [path]
-- Requested by: Leader
 
 ## Phase Index
 
@@ -201,8 +200,8 @@
 
 For each pair of consecutive phases, assess their coupling:
 
-| Coupling | Meaning | Leader Scheduling |
-|----------|---------|-------------------|
+| Coupling | Meaning | Scheduling |
+|----------|---------|------------|
 | **independent** | Different files/modules, no shared APIs | Can run in parallel |
 | **loose** | Depends on planned interfaces only, not implementation | Can pipeline (overlap review + next coding) |
 | **tight** | Depends on actual code from prior phase (same files, models, APIs) | Must run sequential — wait for review approval |
@@ -306,9 +305,10 @@ For each pair of consecutive phases, assess their coupling:
    - Update plan file status
    - Flag blockers
 
-3. **Report to Leader**
-   - Send periodic updates via send_message()
-   - Include: completed tasks, blockers, next steps
+3. **Update Plan File**
+   - Record completed tasks
+   - Note blockers
+   - Update next steps
 
 ---
 
@@ -337,12 +337,9 @@ opencode_skill <project> plan-track /wait
 
 ---
 
-## Integration with Leader
+## Response Output
 
-### When Called
-Leader sends: planning request + context + working directory
-
-### Response Format
+### Plan Complete Output (MEDIUM+ scope)
 ```
 📋 **Plan Created**: [feature name]
 
@@ -378,7 +375,7 @@ Plan file: .agents/shared/planning/{feature_name}/plan.md
 [1-2 sentence summary]
 ```
 
-### Tracking Updates
+### Tracking Update Output
 ```
 📊 **Progress Update**: [feature name]
 

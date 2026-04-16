@@ -25,9 +25,6 @@ opencode_skill <project> <session_name> /wait
 - `plan-draft`: Draft and refine plan content
 - `plan-track`: Monitor execution progress
 
-### send_message()
-Inter-agent communication. Use to report to Leader.
-
 ### write_file()
 Write plan documents to disk.
 
@@ -38,15 +35,12 @@ write_file(".agents/shared/planning/<feature>/plan-overview.md", plan_content)
 
 ---
 
-## Session Communication Pattern
+## Session Workflow
 
 ```
-Leader ──(request)──→ Planner
-                        │
-                        ├──→ opencode (explore)
-                        ├──→ opencode (draft)
-                        │
-                        └──→ (response) ──→ Leader
+                    ├──→ opencode (explore)
+                    ├──→ opencode (draft)
+                    └──→ Complete plan output
 ```
 
 ---
@@ -58,6 +52,5 @@ Planner ──(spawn)──→ Tracker Session (opencode)
                            │
                            ├── monitors tasks
                            ├── updates plan.md
-                           │
-                           └── periodic updates ──→ Planner ──→ Leader
+                           └── periodic updates ──→ Plan file
 ```

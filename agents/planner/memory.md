@@ -29,7 +29,7 @@ Use simple session names (consistent with workflow.md):
 1. **Over-planning**: Don't create 50-line plans for 5-minute tasks
 2. **Under-planning**: Don't skip scope assessment
 3. **Execution creep**: Don't start coding when you should be planning
-4. **Silent tracking**: Always report progress, even if no changes
+4. **Skip tracking**: Always update the plan file with progress
 
 ---
 
