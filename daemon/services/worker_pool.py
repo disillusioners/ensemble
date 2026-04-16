@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -17,6 +18,21 @@ logger = logging.getLogger(__name__)
 
 # Default task timeout: 5 minutes (300 seconds)
 DEFAULT_TASK_TIMEOUT = 300.0
+
+# Max length for error messages in logs/database (prevents HTML flooding)
+MAX_ERROR_LEN = 500
+
+
+def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
+    """Truncate error message, stripping HTML if present."""
+    # Strip HTML tags and reduce whitespace
+    if "<" in error and ">" in error:
+        error = error.replace("<", " <").replace(">", "> ")
+        error = re.sub(r"<[^>]+>", "", error)
+        error = " ".join(error.split())
+    if len(error) > max_len:
+        return error[:max_len] + "..."
+    return error
 
 
 class Worker(threading.Thread):
@@ -170,11 +186,12 @@ class Worker(threading.Thread):
             
         except Exception as e:
             # Other error — decide retry vs permanent fail
+            error_msg = _truncate_error(str(e))
             logger.error(
-                f"Worker {self.worker_id} failed task {task.id}: {e}",
+                f"Worker {self.worker_id} failed task {task.id}: {error_msg}",
                 exc_info=True
             )
-            self._handle_task_failure(task, str(e))
+            self._handle_task_failure(task, error_msg)
             
         finally:
             monitor.stop()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
     from daemon.repositories.event.repository import EventRepository
 
 logger = logging.getLogger(__name__)
+
+# Max length for error messages in logs/database (prevents HTML flooding)
+MAX_ERROR_LEN = 500
+
+
+def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
+    """Truncate error message, stripping HTML if present."""
+    if "<" in error and ">" in error:
+        error = error.replace("<", " <").replace(">", "> ")
+        error = re.sub(r"<[^>]+>", "", error)
+        error = " ".join(error.split())
+    if len(error) > max_len:
+        return error[:max_len] + "..."
+    return error
 
 
 class BaseProcessor(ABC):
@@ -175,8 +190,9 @@ class ProcessMessageProcessor(BaseProcessor):
         except OperationCancelledError:
             raise
         except Exception as e:
-            logger.error(f"Failed to process message task {task.id}: {e}", exc_info=True)
-            
+            error_msg = _truncate_error(str(e))
+            logger.error(f"Failed to process message task {task.id}: {error_msg}", exc_info=True)
+
             # Create error event
             if self._event_bus:
                 await self._event_bus.create_error_event(
@@ -184,7 +200,7 @@ class ProcessMessageProcessor(BaseProcessor):
                     error={
                         "task_id": task.id,
                         "message_id": task.message_id,
-                        "error": str(e),
+                        "error": error_msg,
                     },
                 )
             elif self._event_repo:
