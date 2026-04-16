@@ -1,149 +1,208 @@
-# Phase 2: Reliability — Job Timeout & Crash Recovery
+# Phase 2: Integration — Task↔Job Feedback Loop
 
 ## Objective
 
-Add configurable job timeouts with heartbeat monitoring and implement automatic recovery for PROCESSING jobs orphaned by worker crashes. Together these ensure no job can run forever and no job stays stuck in PROCESSING after a daemon restart.
+**Implement the primary job completion mechanism.** Currently, there is NO path for successful job completion — `_complete_job_for_instance()` is dead code (never called), and `terminate_instance()` always marks jobs as FAILED. This phase:
+
+1. **Adds instance lifecycle event publishing** for top-level instances (C1, C2-NEW)
+2. **Implements `JobFeedbackObserver`** that receives these events and completes jobs (C3, C3-NEW)
+3. **Adds simplified startup recovery** for orphaned PROCESSING jobs
+4. **Implements cancellation cascade** using existing `terminate_instance()` (C2)
+
+**Key insight:** The tasks system (`TimeoutMonitor`, `StaleTaskRecovery`) already handles execution-level timeout, crash recovery, and retry. The job system observes these results rather than duplicating them.
 
 ## Coupling
 
-- **Depends on**: Phase 1 (State Machine, Persistent Locks, new model fields)
+- **Depends on**: Phase 1 (State Machine, Persistent Locks, `atomic_transition()`)
 - **Coupling type**: tight
-- **Shared files with other phases**: `models.py` (uses `started_at` [existing], `max_duration_seconds`, `last_heartbeat_at` from Phase 1), `job_state_machine.py` (adds TIMED_OUT transition), `job_queue_service.py` (adds timeout/recovery methods)
-- **Why this coupling**: Timeout adds a new state (`TIMED_OUT`) to the state machine and uses fields from Phase 1. Recovery depends on persistent locks to identify orphaned lock holders.
-- **Note on Phase 3 dependency**: TIMED_OUT is a **terminal state** without Phase 3. Phase 3 adds the exit paths (TIMED_OUT→PENDING, TIMED_OUT→DEAD_LETTER). Phase 3 should follow Phase 2 so timed-out jobs aren't stuck forever.
+- **Shared files with other phases**: `job_state_machine.py`, `job_queue_service.py`, `manager.py`
+- **Why this coupling**: The observer calls `complete_job()` / `fail_job()` which use `atomic_transition()` from Phase 1. Startup recovery uses persistent locks from Phase 1. New event publishing code in `manager.py` works with Phase 1's state machine.
 
-## Context
+## Context: Verified Codebase Gaps
 
-Phase 1 delivered the formal state machine, persistent locks, `max_duration_seconds`, `last_heartbeat_at` fields on JobItem, `default_timeout_minutes` on JobQueue, and `JobSystemConfig`. The `started_at` field already existed on JobItem and is set by `start_job_atomic()`.
+### Gap 1: No Event for Top-Level Instances (C1)
 
-This phase activates those fields and adds two new background services: a `JobTimeoutMonitor` that periodically checks for expired jobs, and a `JobRecoveryService` that runs at startup to clean up orphaned PROCESSING jobs.
+At `daemon/manager.py:1730`, `_process_child_completion_and_notify_parent()` returns early for instances without `parent_id`:
+
+```python
+if instance.parent_id is None:
+    logger.debug(f"Instance {instance_id[:8]}... has no parent, skipping completion check")
+    return  # ← Job instances hit this and NO event is published
+```
+
+`INSTANCE_COMPLETED` is only published for **child instances** (those spawned by other agents). Job instances are top-level — they have `parent_id=None`.
+
+### Gap 2: No Error/Termination Events (C2-NEW)
+
+`terminate_instance()` at `daemon/manager.py:2210-2250` does NOT publish any EventBus event. The observer would miss:
+- Instance termination (user cancel, error, forced shutdown)
+- Instance errors during processing
+
+**Missing EventKind value:** `INSTANCE_LIFECYCLE` (single event kind with `status` field for `completed`, `terminated`, `error`) does not exist. See ADR-010 for design rationale.
+
+### Gap 3: Dead Completion Code (C3)
+
+`_complete_job_for_instance()` at `daemon/manager.py:575-610` is **never called** from anywhere. The only job completion in production is `terminate_instance()` at `daemon/manager.py:2240` which always calls `complete_job_sync(success=False)`. **There is no successful completion path.**
+
+### Gap 4: No `cancel_instance()` Method (C2)
+
+Phase 2's cancellation cascade needs `cancel_instance()`, but only `cancel_instance_requests()` exists (cancels active LLM requests, doesn't stop tasks). The proper approach is to use existing `terminate_instance()`.
+
+### Gap 5: Wrong EventBus Event Field (C3-NEW)
+
+EventBus events use `event_type` field (not `kind`):
+
+```python
+event = {"instance_id": str, "event_type": str, "event_id": str|None, "data": dict|None}
+```
 
 ## Tasks
 
-### Task 1: Job Timeout Monitor
+### Task 1: Add Instance Lifecycle Events for Top-Level Instances
+
+**This is NEW functionality, not observation of existing behavior.** Currently, top-level instances complete silently with no event.
 
 | # | Sub-task | Details | Key Files |
 |---|----------|---------|-----------|
-| 1.1 | Create `JobTimeoutMonitor` service | Background async loop that periodically queries PROCESSING jobs where `started_at + max_duration_seconds < now()`. | `daemon/services/job_timeout_monitor.py` (NEW) |
-| 1.2 | Implement timeout check | Query: `SELECT * FROM job_queue_items WHERE status = 'PROCESSING' AND max_duration_seconds IS NOT NULL AND datetime(started_at, '+' \|\| max_duration_seconds \|\| ' seconds') < datetime('now')`. Use configurable check interval (default: 30s). | `daemon/services/job_timeout_monitor.py` (NEW) |
-| 1.3 | Handle timed-out jobs — **cancel instance FIRST** | For each timed-out job: (1) **cancel associated instance via InstanceManager FIRST**, (2) wait for instance completion callback (which calls `complete_job()`), (3) if callback doesn't fire within grace period, use `atomic_transition(PROCESSING → TIMED_OUT)` with lock release, (4) log event. | `daemon/services/job_timeout_monitor.py` (NEW) |
-| 1.4 | Add `find_timed_out_jobs()` to repository | New repository method for the timeout query. | `daemon/repositories/job_queue/repository.py` |
-| 1.5 | Register TIMED_OUT in state machine | Add `(PROCESSING, TIMED_OUT): "timeout"` transition. | `daemon/services/job_state_machine.py` |
-| 1.6 | Wire into daemon lifecycle | Start `JobTimeoutMonitor` in `api.py` lifespan, stop on shutdown. | `daemon/api.py` |
+| 1.1 | Add `INSTANCE_LIFECYCLE` EventKind | New event kind for top-level instance status changes: `instance_lifecycle`. Single event kind with a `status` field (`completed`, `terminated`, `error`) rather than separate kinds per status. See ADR-010 for rationale. | `daemon/repositories/event/models.py` |
+| 1.2 | Add `_publish_instance_lifecycle_event()` to InstanceManager | New method that publishes instance lifecycle events for top-level instances (parent_id=None). Called after instance status transitions. | `daemon/manager.py` |
+| 1.3 | Hook into instance completion paths | Call `_publish_instance_lifecycle_event()` in: (a) `_process_child_completion_and_notify_parent()` for instances with `parent_id=None`, (b) `terminate_instance()` after marking instance terminated, (c) error handlers in task processing. | `daemon/manager.py` |
+| 1.4 | Fix the parent_id early return | In `_process_child_completion_and_notify_parent()`, instead of early return when `parent_id is None`, still publish lifecycle event for the instance itself. | `daemon/manager.py` |
+| 1.5 | Event data schema | Event payload: `{"instance_id": str, "status": str, "error": str|None, "parent_id": str|None}`. Status values: `completed`, `terminated`, `error`. | `daemon/manager.py` |
 
-> **C2 fix:** The original plan had the order wrong — transitioning state FIRST then cancelling instance. This causes a race: `terminate_instance()` internally checks `job.status == "PROCESSING"` and calls `complete_job_sync()` → `fail_job()`, which would raise because the job is already TIMED_OUT.
->
-> **Corrected order:** Cancel the instance FIRST. Instance termination triggers the normal completion callback (`_complete_job_for_instance()`), which calls `complete_job()`. If the instance terminates normally (returns error), `fail_job()` transitions PROCESSING→FAILED (valid). If the instance doesn't terminate within the grace period, the monitor falls through to a direct TIMED_OUT transition.
->
-> The completion callback and `fail_job()` must be updated to handle the case where the job has already been transitioned (idempotent — if already TIMED_OUT, skip). This is a minor change to `complete_job()`.
-
-**Timeout sequence diagram (corrected):**
+**Event publishing flow for top-level instances:**
 
 ```mermaid
 sequenceDiagram
-    participant Monitor as JobTimeoutMonitor
-    participant Repo as JobRepository
+    participant WP as WorkerPool
+    participant TP as TaskProcessor
     participant IM as InstanceManager
-    participant SM as StateMachine
-    participant Lock as LockManager
+    participant EB as EventBus
+
+    Note over IM: Instance has parent_id=None (top-level)
+
+    WP->>TP: task completes
+    TP->>IM: _process_child_completion_and_notify_parent()
     
-    loop Every check_interval (default: 30s)
-        Monitor->>Repo: find_timed_out_jobs()
-        Repo-->>Monitor: [job1, ...]
+    alt parent_id is None (top-level instance)
+        Note over IM: OLD: early return, no event
+        Note over IM: NEW: publish lifecycle event
+        IM->>IM: instance.status = COMPLETED
+        IM->>EB: _broadcast_to_global(event_type="instance_lifecycle", data={status: "completed"})
+    else parent_id exists (child instance)
+        Note over IM: EXISTING: normal child completion flow
+        IM->>EB: _create_completion_events(INSTANCE_COMPLETED + CHILD_COMPLETED)
+    end
+```
+
+**Event publishing for termination:**
+
+```mermaid
+sequenceDiagram
+    participant API as User/CancelAPI
+    participant IM as InstanceManager
+    participant EB as EventBus
+    
+    API->>IM: terminate_instance(instance_id)
+    IM->>IM: Cancel requests, cleanup, update status
+    IM->>IM: Mark job FAILED (existing code at line 2231)
+    IM->>EB: _broadcast_to_global(event_type="instance_lifecycle", data={status: "terminated"})
+```
+
+### Task 2: JobFeedbackObserver Service
+
+**This IS the primary job completion mechanism.** The observer receives instance lifecycle events and calls `complete_job()`.
+
+| # | Sub-task | Details | Key Files |
+|---|----------|---------|-----------|
+| 2.1 | Create `JobFeedbackObserver` | Service that subscribes to EventBus via `subscribe_all()` and processes instance lifecycle events. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.2 | Subscribe to EventBus | Call `event_bus.subscribe_all("job_feedback_observer")` to receive all events. Returns `asyncio.Queue`. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.3 | Filter for lifecycle events | **Filter on `event["event_type"]`** (not `kind`). Match `"instance_lifecycle"` events. Also handle `"instance_completed"` (child instances with jobs). | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.4 | Map instance status → job action | `status=completed` → `complete_job(success=True)`, `status=terminated` → skip (already handled by `terminate_instance`), `status=error` → `complete_job(success=False)`. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.5 | Instance → Job lookup | Use `job_queue_service.get_job_by_instance(instance_id)` to find the job. Skip if no job or job not in PROCESSING state. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.6 | Call `complete_job()` via `atomic_transition()` | Use the Phase 1 state machine's `atomic_transition()` for PROCESSING→COMPLETED or PROCESSING→FAILED. `rowcount=0` means job already transitioned — skip silently. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.7 | Health monitoring | Periodic log: count events processed, last event timestamp. If no events in `observer_health_check_interval_seconds` (default 300s), log warning. Not a crash detector — just observability. | `daemon/services/job_feedback_observer.py` (NEW) |
+| 2.8 | Wire into daemon lifecycle | Start observer in `api.py` lifespan, stop on shutdown (unsubscribe). | `daemon/api.py` |
+
+**Observer event processing flow:**
+
+```mermaid
+sequenceDiagram
+    participant EB as EventBus
+    participant Q as asyncio.Queue
+    participant JFO as JobFeedbackObserver
+    participant JQS as JobQueueService
+    participant Repo as JobRepository
+    
+    EB->>Q: put_nowait(event)
+    
+    loop Observer event loop
+        JFO->>Q: get() — await next event
+        JFO->>JFO: Filter: event["event_type"] == "instance_lifecycle"?
         
-        for each timed-out job:
-            Monitor->>IM: cancel_instance(instance_id, graceful=True)
+        alt Not a lifecycle event
+            JFO->>JFO: Skip
+        else Is lifecycle event
+            JFO->>JFO: Extract instance_id, status
+            JFO->>JQS: get_job_by_instance(instance_id)
             
-            alt Instance terminates within grace period
-                IM->>IM: _complete_job_for_instance(success=False)
-                Note over IM: Calls fail_job() → PROCESSING→FAILED
-                Note over Monitor: Job is now FAILED (not TIMED_OUT)
-                Note over Monitor: Phase 3's retry engine handles it
-            else Instance doesn't terminate
-                Monitor->>Monitor: Grace period expired
-                Monitor->>Repo: atomic_transition(PROCESSING → TIMED_OUT)
-                Note over Repo: UPDATE WHERE status='PROCESSING', rowcount check
-                Monitor->>Lock: release_by_instance(instance_id)
-                Monitor->>IM: force_terminate(instance_id)
-                Monitor->>Monitor: log timeout event
+            alt No job or job not PROCESSING
+                JFO->>JFO: Skip
+            else Job is PROCESSING
+                alt status == "completed"
+                    JFO->>Repo: atomic_transition(PROCESSING → COMPLETED)
+                else status == "error"
+                    JFO->>Repo: atomic_transition(PROCESSING → FAILED, error=...)
+                else status == "terminated"
+                    JFO->>JFO: Skip — terminate_instance already handled
+                end
+                
+                alt rowcount == 0
+                    Note over JFO: Job already transitioned by another actor — skip
+                else rowcount > 0
+                    JFO->>JFO: Release lock, trigger next job
+                end
             end
         end
     end
 ```
 
-**Idempotent `complete_job()` / `fail_job()` requirement:**
-
-```python
-# In JobRepository — uses atomic_transition from Phase 1:
-def complete_job_atomic(self, job_id: str, success: bool, error: str = None):
-    """Atomic job completion — handles concurrent transitions gracefully."""
-    new_status = JobStatus.COMPLETED.value if success else JobStatus.FAILED.value
-    updates = {}
-    if not success:
-        updates['error_message'] = error
-        updates['failed_at'] = datetime.now(UTC).isoformat()
-    
-    # atomic_transition handles the WHERE status='PROCESSING' check
-    # If rowcount=0, the job was already transitioned by another actor (timeout, cancel)
-    try:
-        self.atomic_transition(job_id, JobStatus.PROCESSING.value, new_status, **updates)
-    except InvalidTransitionError:
-        # Job already moved to TIMED_OUT/CANCELLED/DEAD_LETTER — that's fine
-        logger.warning(f"Job {job_id} no longer PROCESSING, skipping completion")
-        return None
-    return self.get(job_id)
-```
-
-### Task 2: Heartbeat Mechanism
-
-| # | Sub-task | Details | Key Files |
-|---|----------|---------|-----------|
-| 2.1 | **Heartbeat timer ownership in InstanceManager** | When JobProcessor spawns an instance for a job, InstanceManager creates an `asyncio.Task` that updates `last_heartbeat_at` every `heartbeat_interval_seconds` (from `JobSystemConfig`). The task is stored on the instance context and cancelled when the instance completes or is terminated. | `daemon/manager.py` |
-| 2.2 | Add `_start_heartbeat()` method to InstanceManager | `async def _start_heartbeat(self, instance_id: str, job_id: str)` — creates periodic `asyncio.create_task()` that calls `job_repo.update_heartbeat(job_id)` every N seconds. | `daemon/manager.py` |
-| 2.3 | Add `_stop_heartbeat()` method to InstanceManager | `def _stop_heartbeat(self, instance_id: str)` — cancels the heartbeat task. Called in `_complete_job_for_instance()` and `terminate_instance()`. | `daemon/manager.py` |
-| 2.4 | Add `update_heartbeat()` to JobRepository | Simple `UPDATE job_queue_items SET last_heartbeat_at = ? WHERE job_id = ?`. | `daemon/repositories/job_queue/repository.py` |
-| 2.5 | Detect stale heartbeats | In timeout monitor, also check: `status = 'PROCESSING' AND last_heartbeat_at IS NOT NULL AND datetime(last_heartbeat_at, '+' \|\| (2 * heartbeat_interval) \|\| ' seconds') < datetime('now')`. This catches hung jobs even if `max_duration_seconds` is not set. | `daemon/services/job_timeout_monitor.py` (NEW) |
-
-> **W2 fix:** Heartbeat ownership is now explicitly specified. InstanceManager owns the heartbeat timer lifecycle. It spawns a background `asyncio.Task` on job start and cancels it on completion/termination. Changes are scoped to `daemon/manager.py`.
-
-**Heartbeat flow (corrected):**
+**Race condition handling:**
 
 ```mermaid
 sequenceDiagram
-    participant JP as JobProcessor
-    participant IM as InstanceManager
-    participant Repo as JobRepository
-    participant Task as TaskProcessor
+    participant TI as terminate_instance()
+    participant JFO as JobFeedbackObserver
+    participant DB as SQLite
     
-    JP->>IM: spawn_instance(job)
-    IM->>IM: _start_heartbeat(instance_id, job_id)
-    Note over IM: asyncio.Task created, updates last_heartbeat_at every 30s
+    Note over TI,JFO: Both try to complete the same job
     
-    loop Every heartbeat_interval (default: 30s)
-        IM->>Repo: update_heartbeat(job_id)
+    par Concurrent actors
+        TI->>DB: UPDATE ... SET status='FAILED' WHERE status='PROCESSING'
+        Note over DB: rowcount=1 ✅ TI wins
+    and
+        JFO->>DB: UPDATE ... SET status='COMPLETED' WHERE status='PROCESSING'
+        Note over DB: rowcount=0 ❌ JFO loses
     end
     
-    Task->>IM: task completed (or instance terminates)
-    IM->>IM: _stop_heartbeat(instance_id)
-    Note over IM: asyncio.Task cancelled
-    
-    IM->>IM: _complete_job_for_instance()
+    Note over JFO: rowcount=0 → skip silently
+    Note over TI: TI always wins (synchronous, runs first)
 ```
 
-### Task 3: PROCESSING Job Crash Recovery
+> **Why `terminate_instance()` always wins:** Although `terminate_instance()` is `async def`, it calls `complete_job_sync()` (a synchronous method) which runs the `UPDATE` immediately within the same coroutine step — before the coroutine yields control. The observer processes events asynchronously from an `asyncio.Queue`, so it cannot observe or act on the event until the current coroutine step completes. The observer's `atomic_transition()` gets `rowcount=0` and skips.
+
+### Task 3: Simplified Startup Recovery
 
 | # | Sub-task | Details | Key Files |
 |---|----------|---------|-----------|
-| 3.1 | Create `JobRecoveryService` | Service with `recover_on_startup()` method that finds orphaned PROCESSING jobs. | `daemon/services/job_recovery_service.py` (NEW) |
-| 3.2 | Implement startup recovery | Query all PROCESSING jobs. For each: check if instance still exists and is active. If not, transition to FAILED with error "Recovered: orphaned PROCESSING job". Release lock. | `daemon/services/job_recovery_service.py` (NEW) |
-| 3.3 | Add `find_processing_jobs()` to repository | New method to list all jobs with status=PROCESSING. | `daemon/repositories/job_queue/repository.py` |
-| 3.4 | Instance status check | Use InstanceManager to verify if instance is still alive. If instance not found or terminated, job is orphaned. | `daemon/services/job_recovery_service.py` (NEW) |
-| 3.5 | Wire into startup sequence | Call `recover_on_startup()` in `api.py` lifespan, AFTER database initialization but BEFORE starting JobProcessor. | `daemon/api.py` |
-| 3.6 | Log recovery events | Audit log each recovered job with original status, recovery action, timestamp. | `daemon/services/job_recovery_service.py` (NEW) |
+| 3.1 | Create `JobRecoveryService` | Service with `recover_on_startup()` method. Checks if PROCESSING jobs' instances are still alive. | `daemon/services/job_recovery_service.py` (NEW) |
+| 3.2 | Query all PROCESSING jobs | `find_processing_jobs()` returns all jobs with `status = 'PROCESSING'`. | `daemon/repositories/job_queue/repository.py` |
+| 3.3 | Check instance liveness | For each PROCESSING job, check if `instance_id` exists via `instance_repo.get(instance_id)`. If not found or terminal status (`completed`, `terminated`, `error`), job is orphaned. | `daemon/services/job_recovery_service.py` (NEW) |
+| 3.4 | Mark orphaned jobs as FAILED | `atomic_transition(PROCESSING → FAILED, error="Recovered: instance no longer active")`. Release lock. | `daemon/services/job_recovery_service.py` (NEW) |
+| 3.5 | Leave alive jobs as PROCESSING | If instance is alive (`running`, `idle`, `waiting_children`), the observer will handle completion naturally. | `daemon/services/job_recovery_service.py` (NEW) |
+| 3.6 | Wire into startup sequence | Call `recover_on_startup()` in `api.py` AFTER database initialization, BEFORE starting observer and processor. | `daemon/api.py` |
 
-> **Note:** Recovered jobs transition to FAILED (not TIMED_OUT). Once Phase 3 is implemented, these will be eligible for auto-retry. Without Phase 3, they stay at FAILED (same as current behavior for manually-failed jobs).
-
-**Startup recovery sequence:**
+**Startup recovery flow:**
 
 ```mermaid
 sequenceDiagram
@@ -151,7 +210,8 @@ sequenceDiagram
     participant Recovery as JobRecoveryService
     participant Repo as JobRepository
     participant Lock as LockManager
-    participant IM as InstanceManager
+    participant IR as InstanceRepository
+    participant JFO as JobFeedbackObserver
     participant JP as JobProcessor
     
     API->>Recovery: recover_on_startup()
@@ -159,63 +219,117 @@ sequenceDiagram
     Repo-->>Recovery: [job1, job2, job3]
     
     for each job:
-        Recovery->>IM: is_instance_alive(instance_id)?
+        Recovery->>IR: get(instance_id)
         
-        alt Instance alive
-            IM-->>Recovery: true
-            Note over Recovery: Leave job as PROCESSING
-            Recovery->>Recovery: Start heartbeat for job
-        else Instance dead or missing
-            IM-->>Recovery: false
-            Recovery->>Repo: atomic_transition(job_id, PROCESSING → FAILED, error="Recovered: orphaned")
+        alt Instance not found or terminal
+            IR-->>Recovery: None or terminal status
+            Recovery->>Repo: atomic_transition(PROCESSING → FAILED)
             Recovery->>Lock: release_by_instance(instance_id)
-            Recovery->>Recovery: log recovery event
+        else Instance alive
+            IR-->>Recovery: Instance (running/idle/waiting)
+            Note over Recovery: Leave as PROCESSING
         end
     end
     
-    API->>JP: start() (only after recovery completes)
+    API->>JFO: start() (observer begins)
+    API->>JP: start() (processor begins)
 ```
 
-### Task 4: Integration & Configuration
+### Task 4: Cancellation Cascade
+
+**Uses existing `terminate_instance()`, not a new `cancel_instance()` method.**
 
 | # | Sub-task | Details | Key Files |
 |---|----------|---------|-----------|
-| 4.1 | Set timeout on enqueue — **mandatory default** | When creating a job, resolve `max_duration_seconds` from: (1) explicit parameter in `JobCreateRequest`, (2) `queue.default_timeout_minutes * 60`, (3) **`JobSystemConfig.default_job_timeout_minutes * 60` (mandatory default: 60 min)**. The fallback chain ALWAYS produces a concrete value — no job is created without a timeout. To disable timeout for a specific job, the caller must explicitly set `max_duration_seconds = -1` (documented escape hatch). | `daemon/services/job_queue_service.py` |
-| 4.2 | Update API schemas | Add optional `max_duration_seconds` to `JobCreateRequest`. Document that omitting it uses the default (60 min). | `daemon/routers/jobs.py` |
-| 4.3 | Startup ordering | Ensure correct startup sequence: DB init → migration → lock reconciliation → job recovery → timeout monitor → retry scheduler (Phase 3) → job processor. | `daemon/api.py` |
+| 4.1 | Update `cancel_job()` to call `terminate_instance()` | When cancelling a PROCESSING job: call `instance_manager.terminate_instance(job.instance_id)`. `terminate_instance()` already handles: cascading to children, cancelling active requests, releasing locks, marking job FAILED. | `daemon/services/job_queue_service.py` |
+| 4.2 | Handle the terminate→FAILED path | `terminate_instance()` always marks jobs as FAILED. For cancellation, the caller may want CANCELLED status. Solution: after `terminate_instance()`, `atomic_transition(FAILED → CANCELLED)` if the user requested cancel. This is a second transition — safe because `atomic_transition()` checks status. | `daemon/services/job_queue_service.py` |
+| 4.3 | **Brief FAILED→CANCELLED window** | Between `terminate_instance()` marking FAILED and the subsequent `atomic_transition(FAILED→CANCELLED)`, the observer may see the job as FAILED. This is safe: the observer skips `terminated` status events (they're already handled), and the `FAILED→CANCELLED` transition will succeed because the observer never acts on terminated instances. The observer only acts on `completed` and `error` lifecycle events. | — |
+| 4.4 | Skip if instance already terminated | Before calling `terminate_instance()`, check if instance is still alive. If already terminated, just mark job CANCELLED directly. | `daemon/services/job_queue_service.py` |
 
-> **Issue 2 fix:** The original plan allowed `max_duration_seconds = None` which meant no timeout — the exact problem the plan claims to solve. The resolution chain now **always** produces a concrete timeout value. The config default (`default_job_timeout_minutes: 60`) is mandatory, not optional. An explicit `-1` escape hatch exists for operators who truly want no timeout, but it requires deliberate action.
+**Cancellation cascade flow:**
+
+```mermaid
+sequenceDiagram
+    participant API as User
+    participant JQS as JobQueueService
+    participant IM as InstanceManager
+    participant Repo as JobRepository
+    
+    API->>JQS: cancel_job(job_id)
+    JQS->>Repo: get(job_id)
+    
+    alt Job is PENDING
+        JQS->>Repo: atomic_transition(PENDING → CANCELLED)
+    else Job is PROCESSING
+        JQS->>IM: terminate_instance(instance_id)
+        Note over IM: Cancels requests, cascades to children,<br/>marks job FAILED (existing code)
+        JQS->>Repo: atomic_transition(FAILED → CANCELLED)
+        Note over Repo: Second transition — only if caller wants CANCELLED status
+    else Job is terminal
+        JQS->>JQS: Return False (already done)
+    end
+```
+
+> **Design choice (C2):** Using `terminate_instance()` instead of creating a new `cancel_instance()` method because:
+> - `terminate_instance()` already handles cascading to children, cancelling requests, releasing locks, and marking jobs
+> - A new `cancel_instance()` would duplicate most of `terminate_instance()` logic
+> - The FAILED→CANCELLED second transition is cheap and safe via `atomic_transition()`
+
+### Task 5: Cleanup Dead Code
+
+| # | Sub-task | Details | Key Files |
+|---|----------|---------|-----------|
+| 5.1 | Remove `_complete_job_for_instance()` | This method at `daemon/manager.py:575-610` is dead code (never called). Remove it to avoid confusion — the observer replaces its intended functionality. | `daemon/manager.py` |
+| 5.2 | Verify no other dead code references | Search for any references to `_complete_job_for_instance` in tests or other files. Update or remove. | Tests, other files |
 
 ## Key Files
 
 | File | Role |
 |------|------|
-| `daemon/services/job_timeout_monitor.py` (NEW) | Periodic timeout check |
-| `daemon/services/job_recovery_service.py` (NEW) | Startup crash recovery for PROCESSING jobs |
-| `daemon/services/job_state_machine.py` | Add TIMED_OUT state |
-| `daemon/repositories/job_queue/repository.py` | `find_timed_out_jobs()`, `find_processing_jobs()`, `update_heartbeat()` |
-| `daemon/services/job_queue_service.py` | Set timeout on enqueue; idempotent `complete_job()` |
-| `daemon/manager.py` | Heartbeat timer lifecycle (`_start_heartbeat`, `_stop_heartbeat`) |
-| `daemon/routers/jobs.py` | API schema update |
-| `daemon/api.py` | Wire recovery + timeout monitor into lifecycle |
+| `daemon/services/job_feedback_observer.py` (NEW) | Subscribes to EventBus, propagates instance completion to job |
+| `daemon/services/job_recovery_service.py` (NEW) | Startup recovery for orphaned PROCESSING jobs |
+| `daemon/manager.py` | **Modified**: adds `_publish_instance_lifecycle_event()`, fixes parent_id early return |
+| `daemon/repositories/event/models.py` | **Modified**: adds `INSTANCE_LIFECYCLE` EventKind |
+| `daemon/services/job_state_machine.py` | Used by `complete_job()` / `fail_job()` |
+| `daemon/repositories/job_queue/repository.py` | `find_processing_jobs()`, `atomic_transition()` |
+| `daemon/services/job_queue_service.py` | `cancel_job()` updated with cascade |
+| `daemon/api.py` | Wire observer + recovery into lifecycle |
 
 ## Constraints
 
-- **Timeout monitor must be lightweight.** Don't scan all jobs every interval — use indexed queries on `status + started_at`.
-- **Recovery runs once at startup.** Not a continuous process — it's a one-shot cleanup before the processor starts.
-- **Heartbeat interval must be tunable.** High-frequency heartbeats can cause SQLite contention. Default 30s is conservative.
-- **Canceling instances on timeout must be graceful.** Cancel instance FIRST (per C2 fix). Try graceful cancel, force-kill after grace period (default: 30s).
-- **`complete_job()` must be idempotent.** Uses `atomic_transition()` — if the job was already transitioned by another actor (timeout, cancel), the WHERE clause matches 0 rows and the transition is silently skipped.
-- **All state transitions use `atomic_transition()`.** Timeout transitions, recovery transitions, and completion callbacks all go through the same atomic SQL pattern. No read-then-write.
+- **Observer must be idempotent.** `atomic_transition()` with `rowcount` check. Skip if job already transitioned.
+- **Observer filter uses `event_type` field.** NOT `kind`. EventBus events have `{"event_type": str, ...}`.
+- **`terminate_instance()` always wins races.** Although `async def`, it calls `complete_job_sync()` synchronously within the coroutine step — before the async observer can process the queued event.
+- **No job-level timeout.** Tasks handle timeout via `TimeoutMonitor`.
+- **No job-level heartbeat.** Tasks track activity via `started_at`.
+- **All state transitions use `atomic_transition()`.**
+- **Recovery runs once at startup.** Not a continuous process.
+- **Observer health is logging-only.** No auto-restart — if observer dies, startup recovery catches orphaned jobs on next restart.
+
+## What Was Removed from Original Phase 2
+
+| Removed Component | Reason |
+|-------------------|--------|
+| `JobTimeoutMonitor` | Tasks have `TimeoutMonitor` (ADR-009) |
+| Job-level heartbeat | Tasks track activity via `started_at` |
+| `max_duration_seconds` field | No job-level timeout needed |
+| Mandatory default timeout | Tasks enforce wall-clock limits |
+| `cancel_instance()` (new method) | Use existing `terminate_instance()` instead |
 
 ## Deliverables
 
-- [ ] `JobTimeoutMonitor` running as background task
-- [ ] Heartbeat timer owned by InstanceManager (spawned on job start, cancelled on completion)
-- [ ] TIMED_OUT state in state machine
-- [ ] `JobRecoveryService` with startup recovery
-- [ ] Queue-level default timeout configuration (field added in Phase 1, activated here)
-- [ ] Mandatory default timeout — no job created without a concrete `max_duration_seconds` value
-- [ ] Correct startup ordering in `api.py`
-- [ ] Idempotent `complete_job()` / `fail_job()` methods
-- [ ] Tests for timeout, heartbeat, and recovery scenarios
+- [ ] `INSTANCE_LIFECYCLE` EventKind added to enum
+- [ ] `_publish_instance_lifecycle_event()` method in InstanceManager
+- [ ] Top-level instances publish lifecycle events on completion/termination/error
+- [ ] `JobFeedbackObserver` subscribing to EventBus via `subscribe_all()`
+- [ ] Observer filters on `event_type == "instance_lifecycle"` (not `kind`)
+- [ ] Observer calls `complete_job()` for completed instances
+- [ ] Observer skips terminated instances (handled by `terminate_instance`)
+- [ ] Observer handles errors (calls `fail_job()`)
+- [ ] Observer health monitoring (periodic logging)
+- [ ] Simplified `JobRecoveryService` for startup orphan recovery
+- [ ] Cancellation cascade via existing `terminate_instance()`
+- [ ] Correct startup ordering: recovery → observer → processor
+- [ ] Dead `_complete_job_for_instance()` code removed from manager.py
+- [ ] All existing tests pass
+- [ ] Tests for feedback observer, event publishing, and recovery scenarios
