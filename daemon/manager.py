@@ -1151,6 +1151,7 @@ class InstanceManager:
 
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
+        tool_outputs: dict = {}
         event_index = 0  # Sequence counter for checkpoint_id
 
         # Stream through graph execution
@@ -1232,11 +1233,12 @@ class InstanceManager:
                                 checkpoint_id=sequence_id,
                             )
                         
-                        # Track final content from last AI message
+                        # Track final content and last AI message from streaming
                         for msg in reversed(all_state_messages):
                             if hasattr(msg, 'type') and msg.type == 'ai':
                                 if hasattr(msg, 'content'):
                                     final_content = msg.content or ""
+                                last_ai_message = msg
                                 break
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
@@ -1248,6 +1250,7 @@ class InstanceManager:
             raise
 
         # Final-state safety net after streaming loop
+        final_tool_outputs: dict = {}
         try:
             final_state = await graph.aget_state(config)
             if final_state and final_state.values:
@@ -1307,10 +1310,11 @@ class InstanceManager:
                         checkpoint_id=final_sequence_id,
                     )
                 
-                # Extract final content and thinking from last AI message
+                # Extract final content and thinking from last AI message (fallback)
                 for msg in reversed(final_messages):
                     if hasattr(msg, 'type') and msg.type == 'ai':
-                        last_ai_message = msg
+                        if last_ai_message is None:
+                            last_ai_message = msg
                         if not final_content:
                             final_content = getattr(msg, 'content', '') or ""
                         break
@@ -1333,8 +1337,8 @@ class InstanceManager:
         tool_calls = None
         if last_ai_message and hasattr(last_ai_message, 'tool_calls') and last_ai_message.tool_calls:
             tool_calls = []
-            # Use final_tool_outputs if available, otherwise empty dict
-            outputs_map = final_tool_outputs if 'final_tool_outputs' in dir() else {}
+            # Prefer final_tool_outputs (safety net), fall back to streaming tool_outputs
+            outputs_map = final_tool_outputs or tool_outputs
             for tc in last_ai_message.tool_calls:
                 tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
