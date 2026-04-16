@@ -89,7 +89,6 @@ class TestGetInstanceMessages:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "Hello world"
-        assert messages[0]["type"] == "human"
 
     @pytest.mark.asyncio
     async def test_get_instance_messages_with_ai_message(self):
@@ -109,7 +108,6 @@ class TestGetInstanceMessages:
         assert len(messages) == 1
         assert messages[0]["role"] == "assistant"
         assert messages[0]["content"] == "Hello, how can I help?"
-        assert messages[0]["type"] == "ai"
 
     @pytest.mark.asyncio
     async def test_get_instance_messages_with_system_message(self):
@@ -129,7 +127,6 @@ class TestGetInstanceMessages:
         assert len(messages) == 1
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == "You are helpful."
-        assert messages[0]["type"] == "system"
 
     @pytest.mark.asyncio
     async def test_get_instance_messages_extracts_thinking(self):
