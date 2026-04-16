@@ -557,44 +557,6 @@ class InstanceManager:
             self._stale_recovery = None
             logger.info("Stale task recovery stopped")
 
-    async def _complete_job_for_instance(
-        self,
-        instance_id: str,
-        success: bool,
-        error: str | None = None,
-        result_summary: str | None = None,
-    ) -> None:
-        """Update job status when instance completes.
-        
-        Looks up the job associated with this instance and marks it
-        as completed or failed based on success parameter.
-        Also triggers the next pending job for the same project.
-        """
-        if self._job_queue_service is None:
-            return
-        
-        try:
-            job = await self._job_queue_service.get_job_by_instance(instance_id)
-            if job is None:
-                return  # No job associated with this instance
-            
-            if success:
-                await self._job_queue_service.complete_job(
-                    job.job_id, success=True, error=None,
-                    result_summary=result_summary,
-                )
-            else:
-                await self._job_queue_service.complete_job(
-                    job.job_id, success=False, error=error or "Instance failed"
-                )
-            
-            # Trigger next pending job for this project
-            if job.project_id:
-                await self._job_queue_service.trigger_next_job(job.project_id)
-                
-        except Exception as e:
-            logger.warning(f"Failed to update job status for instance {instance_id}: {e}")
-
     def spawn_instance(
         self, 
         agent_id: str,
@@ -1709,9 +1671,16 @@ Provide a concise summary:"""
             if instance is None:
                 return
             
-            # Not a child? Nothing to do
+            # Not a child? Instance completed (no parent to send report to)
+            # Publish lifecycle event for the completed instance
             if instance.parent_id is None:
-                logger.debug(f"Instance {instance_id[:8]}... has no parent, skipping completion check")
+                logger.debug(f"Instance {instance_id[:8]}... completed (no parent), publishing lifecycle event")
+                await self._publish_instance_lifecycle_event(
+                    instance_id=instance_id,
+                    status="completed",
+                    error=None,
+                    parent_id=None,
+                )
                 return
             
             # Idempotency checks
@@ -2235,7 +2204,50 @@ Title:"""
             except Exception as e:
                 logger.warning(f"Failed to mark job as failed on terminate: {e}")
 
+        # 8. Publish lifecycle event for terminated instance
+        parent_id = meta.parent_id if meta else None
+        await self._publish_instance_lifecycle_event(
+            instance_id=instance_id,
+            status="terminated",
+            error=None,
+            parent_id=parent_id,
+        )
+
         return True
+
+    async def _publish_instance_lifecycle_event(
+        self,
+        instance_id: str,
+        status: str,
+        error: str | None = None,
+        parent_id: str | None = None,
+    ) -> None:
+        """Publish an instance lifecycle event via the LiveEventHub.
+        
+        Lifecycle events signal important state transitions: completed, terminated, error.
+        
+        Args:
+            instance_id: The instance ID.
+            status: Lifecycle status ("completed", "terminated", "error").
+            error: Optional error message for error status.
+            parent_id: Optional parent instance ID.
+        """
+        event_data = {
+            "instance_id": instance_id,
+            "status": status,
+            "error": error,
+            "parent_id": parent_id,
+        }
+        
+        try:
+            await self._live_hub.stream_lifecycle(
+                instance_id=instance_id,
+                event_type=EventKind.INSTANCE_LIFECYCLE.value,
+                data=event_data,
+            )
+            logger.debug(f"Published INSTANCE_LIFECYCLE event for {instance_id[:8]}...: status={status}")
+        except Exception as e:
+            logger.warning(f"Failed to publish INSTANCE_LIFECYCLE event for {instance_id[:8]}...: {e}")
 
     def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.

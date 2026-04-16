@@ -19,6 +19,7 @@ class EventKind(str, enum.Enum):
     CHILD_COMPLETED = "child_completed"
     CHILD_FAILED = "child_failed"
     INSTANCE_COMPLETED = "instance_completed"
+    INSTANCE_LIFECYCLE = "instance_lifecycle"
     ERROR = "error"
     MESSAGE_COMPLETED = "message_completed"
 

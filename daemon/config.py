@@ -175,6 +175,7 @@ class JobSystemConfig(BaseSettings):
     default_max_retries: int = Field(default=3, description="Default max retry attempts for failed jobs")
     retry_backoff_base_seconds: int = Field(default=60, description="Base delay in seconds for exponential backoff")
     retry_backoff_max_seconds: int = Field(default=3600, description="Maximum delay in seconds for retry backoff")
+    retry_backoff_multiplier: float = Field(default=2.0, description="Exponential multiplier for backoff (2^retry_count * multiplier)")
     dlq_enabled: bool = Field(default=True, description="Enable dead letter queue functionality")
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
     observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")

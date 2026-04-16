@@ -1,7 +1,7 @@
 """Tests for InstanceManager job completion callback integration.
 
 This module tests:
-- _complete_job_for_instance() helper
+- Lifecycle event publishing for completed/terminated instances
 - Job completion from _process_queue() success path
 - Job failure from _process_queue() max-retry path
 - Job failure from _process_queue() cancellation path
@@ -38,212 +38,167 @@ def make_mock_job(
     return job
 
 
-class TestCompleteJobForInstance:
-    """Tests for InstanceManager._complete_job_for_instance() helper."""
+class TestLifecycleEventPublishing:
+    """Tests for lifecycle event publishing when instances complete or terminate."""
 
-    @pytest.fixture
-    def mock_manager(self):
-        """Create a minimal InstanceManager-like mock with the callback method."""
+    @pytest.mark.asyncio
+    async def test_publish_completed_lifecycle_event(self):
+        """Publishing completed status should create proper event data."""
         from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
+        from unittest.mock import AsyncMock, MagicMock, patch
+        
+        # Mock the manager with _publish_instance_lifecycle_event
+        manager = MagicMock(spec=InstanceManager)
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock()
+        
+        # Bind the real method
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
+        
+        # Call the method
+        await manager._publish_instance_lifecycle_event(
+            instance_id="test-instance-1",
+            status="completed",
+            error=None,
+            parent_id=None,
+        )
+        
+        # Verify stream_lifecycle was called with correct params
+        manager._live_hub.stream_lifecycle.assert_called_once()
+        call_kwargs = manager._live_hub.stream_lifecycle.call_args.kwargs
+        assert call_kwargs["instance_id"] == "test-instance-1"
+        assert call_kwargs["event_type"] == "instance_lifecycle"
+        assert call_kwargs["data"]["status"] == "completed"
+        assert call_kwargs["data"]["parent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_publish_terminated_lifecycle_event_with_parent(self):
+        """Publishing terminated status with parent should include parent_id."""
+        from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
+        from unittest.mock import AsyncMock, MagicMock, patch
         
         manager = MagicMock(spec=InstanceManager)
-        manager._job_queue_service = None
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock()
         
-        # Bind the real method to the mock
-        manager._complete_job_for_instance = InstanceManager._complete_job_for_instance.__get__(manager)
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
-        return manager
+        await manager._publish_instance_lifecycle_event(
+            instance_id="child-instance",
+            status="terminated",
+            error=None,
+            parent_id="parent-instance",
+        )
+        
+        call_kwargs = manager._live_hub.stream_lifecycle.call_args.kwargs
+        assert call_kwargs["data"]["status"] == "terminated"
+        assert call_kwargs["data"]["parent_id"] == "parent-instance"
 
     @pytest.mark.asyncio
-    async def test_success_marks_job_completed(self, mock_manager):
-        """When success=True, job should be marked COMPLETED."""
-        mock_service = AsyncMock()
-        mock_job = make_mock_job()
-        mock_service.get_job_by_instance.return_value = mock_job
-        mock_service.complete_job.return_value = MagicMock(status="completed")
-        mock_service.trigger_next_job.return_value = None
+    async def test_publish_error_lifecycle_event(self):
+        """Publishing error status should include error message."""
+        from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
+        from unittest.mock import AsyncMock, MagicMock, patch
         
-        mock_manager._job_queue_service = mock_service
+        manager = MagicMock(spec=InstanceManager)
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock()
         
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=True,
-            result_summary="Task done",
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
+        
+        await manager._publish_instance_lifecycle_event(
+            instance_id="failing-instance",
+            status="error",
+            error="Max retries exceeded",
+            parent_id=None,
         )
         
-        mock_service.get_job_by_instance.assert_called_once_with("test-instance-1")
-        mock_service.complete_job.assert_called_once_with(
-            "test-job-1", success=True, error=None, result_summary="Task done"
-        )
-        mock_service.trigger_next_job.assert_called_once_with("test-project")
+        call_kwargs = manager._live_hub.stream_lifecycle.call_args.kwargs
+        assert call_kwargs["data"]["status"] == "error"
+        assert call_kwargs["data"]["error"] == "Max retries exceeded"
 
     @pytest.mark.asyncio
-    async def test_failure_marks_job_failed(self, mock_manager):
-        """When success=False, job should be marked FAILED."""
-        mock_service = AsyncMock()
-        mock_job = make_mock_job()
-        mock_service.get_job_by_instance.return_value = mock_job
-        mock_service.complete_job.return_value = MagicMock(status="failed")
-        mock_service.trigger_next_job.return_value = None
+    async def test_publish_failure_is_swallowed(self):
+        """Exceptions during event publishing should be caught and not crash."""
+        from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
+        from unittest.mock import AsyncMock, MagicMock, patch
         
-        mock_manager._job_queue_service = mock_service
+        manager = MagicMock(spec=InstanceManager)
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock(side_effect=RuntimeError("Hub error"))
         
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=False,
-            error="Something went wrong",
-        )
-        
-        mock_service.complete_job.assert_called_once_with(
-            "test-job-1", success=False, error="Something went wrong"
-        )
-        mock_service.trigger_next_job.assert_called_once_with("test-project")
-
-    @pytest.mark.asyncio
-    async def test_no_job_found_is_noop(self, mock_manager):
-        """When no job is associated with instance, should return silently."""
-        mock_service = AsyncMock()
-        mock_service.get_job_by_instance.return_value = None
-        mock_manager._job_queue_service = mock_service
-        
-        # Should not raise
-        await mock_manager._complete_job_for_instance(
-            instance_id="unknown-instance",
-            success=True,
-        )
-        
-        mock_service.complete_job.assert_not_called()
-        mock_service.trigger_next_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_service_wired_is_noop(self, mock_manager):
-        """When _job_queue_service is None, should return silently."""
-        mock_manager._job_queue_service = None
-        
-        # Should not raise
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=True,
-        )
-
-    @pytest.mark.asyncio
-    async def test_triggers_next_job_for_project(self, mock_manager):
-        """After completing, should trigger next pending job."""
-        mock_service = AsyncMock()
-        mock_job = make_mock_job(project_id="my-project")
-        mock_service.get_job_by_instance.return_value = mock_job
-        mock_service.complete_job.return_value = MagicMock(status="completed")
-        mock_service.trigger_next_job.return_value = None
-        
-        mock_manager._job_queue_service = mock_service
-        
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=True,
-        )
-        
-        mock_service.trigger_next_job.assert_called_once_with("my-project")
-
-    @pytest.mark.asyncio
-    async def test_does_not_trigger_without_project(self, mock_manager):
-        """Jobs without project_id should not attempt trigger_next_job."""
-        mock_service = AsyncMock()
-        mock_job = make_mock_job(project_id=None)
-        mock_service.get_job_by_instance.return_value = mock_job
-        mock_service.complete_job.return_value = MagicMock(status="completed")
-        
-        mock_manager._job_queue_service = mock_service
-        
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=True,
-        )
-        
-        mock_service.trigger_next_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_exception_is_swallowed(self, mock_manager):
-        """Exceptions during job completion should be caught and logged."""
-        mock_service = AsyncMock()
-        mock_job = make_mock_job()
-        mock_service.get_job_by_instance.return_value = mock_job
-        mock_service.complete_job.side_effect = RuntimeError("DB error")
-        
-        mock_manager._job_queue_service = mock_service
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
         # Should not raise - exception is caught internally
-        await mock_manager._complete_job_for_instance(
-            instance_id="test-instance-1",
-            success=True,
+        await manager._publish_instance_lifecycle_event(
+            instance_id="test-instance",
+            status="completed",
+            error=None,
+            parent_id=None,
         )
 
 
 class TestProcessQueueJobCompletion:
-    """Tests for job completion callbacks in _process_queue() paths."""
+    """Tests for lifecycle event publishing in _process_queue() paths.
+
+    When instances complete via _process_queue(), lifecycle events are published
+    via _process_child_completion_and_notify_parent() for top-level instances.
+    """
 
     @pytest.mark.asyncio
-    async def test_message_success_completes_job(self):
-        """Successful message processing calls _complete_job_for_instance with success=True."""
+    async def test_top_level_instance_completion_publishes_lifecycle(self):
+        """Top-level instances (no parent) should publish completed lifecycle event."""
         from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
         
         manager = MagicMock(spec=InstanceManager)
-        manager._complete_job_for_instance = AsyncMock()
-        manager.broadcaster = AsyncMock()
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock()
         
-        # Simulate the success path calling the callback
-        await manager._complete_job_for_instance(
-            instance_id="inst-1",
-            success=True,
-            result_summary="Completed successfully",
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
+        
+        # Top-level instance completes
+        await manager._publish_instance_lifecycle_event(
+            instance_id="job-instance-1",
+            status="completed",
+            error=None,
+            parent_id=None,
         )
         
-        manager._complete_job_for_instance.assert_called_once_with(
-            instance_id="inst-1",
-            success=True,
-            result_summary="Completed successfully",
-        )
+        manager._live_hub.stream_lifecycle.assert_called_once()
+        call_kwargs = manager._live_hub.stream_lifecycle.call_args.kwargs
+        assert call_kwargs["event_type"] == "instance_lifecycle"
+        assert call_kwargs["data"]["status"] == "completed"
+        assert call_kwargs["data"]["parent_id"] is None
 
     @pytest.mark.asyncio
-    async def test_message_max_retries_fails_job(self):
-        """Max retries exceeded calls _complete_job_for_instance with success=False."""
+    async def test_child_instance_completion_publishes_lifecycle(self):
+        """Child instances should also publish lifecycle events."""
         from daemon.manager import InstanceManager
+        from daemon.services.live_event_hub import LiveEventHub
         
         manager = MagicMock(spec=InstanceManager)
-        manager._complete_job_for_instance = AsyncMock()
+        manager._live_hub = MagicMock(spec=LiveEventHub)
+        manager._live_hub.stream_lifecycle = AsyncMock()
         
-        # Simulate the max-retry path calling the callback
-        await manager._complete_job_for_instance(
-            instance_id="inst-1",
-            success=False,
-            error="Max retries exceeded: connection timeout",
+        manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
+        
+        # Child instance completes
+        await manager._publish_instance_lifecycle_event(
+            instance_id="child-instance-1",
+            status="completed",
+            error=None,
+            parent_id="parent-instance-1",
         )
         
-        manager._complete_job_for_instance.assert_called_once_with(
-            instance_id="inst-1",
-            success=False,
-            error="Max retries exceeded: connection timeout",
-        )
-
-    @pytest.mark.asyncio
-    async def test_message_cancelled_fails_job(self):
-        """OperationCancelledError calls _complete_job_for_instance with success=False."""
-        from daemon.manager import InstanceManager
-        
-        manager = MagicMock(spec=InstanceManager)
-        manager._complete_job_for_instance = AsyncMock()
-        
-        # Simulate the cancellation path calling the callback
-        await manager._complete_job_for_instance(
-            instance_id="inst-1",
-            success=False,
-            error="Cancelled: user_request",
-        )
-        
-        manager._complete_job_for_instance.assert_called_once_with(
-            instance_id="inst-1",
-            success=False,
-            error="Cancelled: user_request",
-        )
+        manager._live_hub.stream_lifecycle.assert_called_once()
+        call_kwargs = manager._live_hub.stream_lifecycle.call_args.kwargs
+        assert call_kwargs["data"]["status"] == "completed"
+        assert call_kwargs["data"]["parent_id"] == "parent-instance-1"
 
 
 class TestTerminateInstanceJobCompletion:

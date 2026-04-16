@@ -484,7 +484,7 @@ async def cleanup_dlq(
         )
     
     # The service.cleanup_dlq() correctly converts days to hours internally
-    deleted_count = service.cleanup_dlq(max_age_days=max_age_days)
+    deleted_count = service.cleanup_dlq(max_age_days=max_age_days, reason=reason)
     
     return DLQCleanupResponse(
         deleted_count=deleted_count,

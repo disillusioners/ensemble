@@ -260,6 +260,9 @@ async def lifespan(app: FastAPI):
     # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
+    # Wire InstanceManager into JobQueueService for cancellation cascade
+    job_queue_service.set_instance_manager(manager)
+    
     # Run startup recovery for orphaned PROCESSING jobs
     # This must run FIRST — clean up orphans before observer/processor start
     instance_repo = SQLModelInstanceRepository(engine=manager._engine)

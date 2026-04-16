@@ -201,7 +201,8 @@ class TestStateMachineGetValidTransitions:
         targets = {target for target, name in result}
         assert "pending" in targets       # retry
         assert "dead_letter" in targets   # dead_letter
-        assert len(result) == 2
+        assert "cancelled" in targets    # cancel_after_fail
+        assert len(result) == 3
 
     def test_get_valid_transitions_from_dead_letter(self):
         """Test valid transitions from DEAD_LETTER state."""
@@ -290,9 +291,9 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_nine_entries(self):
-        """Test TRANSITIONS dict has 9 entries."""
-        assert len(TRANSITIONS) == 9
+    def test_transitions_has_ten_entries(self):
+        """Test TRANSITIONS dict has 10 entries."""
+        assert len(TRANSITIONS) == 10
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""
