@@ -193,6 +193,19 @@ class JobRepository:
             jobs = list(db_session.exec(stmt))
             return jobs
 
+    def find_processing_jobs(self) -> list[JobItem]:
+        """Find all jobs currently in PROCESSING status.
+        
+        Used for startup recovery to identify orphaned jobs.
+        
+        Returns:
+            List of all processing JobItem objects.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(JobItem).where(JobItem.status == JobStatus.PROCESSING.value)
+            jobs = list(db_session.exec(stmt))
+            return jobs
+
     def list_pending_by_queue(self, queue_id: str) -> list[JobItem]:
         """List pending jobs for a specific queue, ordered by priority.
         
@@ -510,3 +523,34 @@ class JobRepository:
             result = db_session.exec(stmt)
             db_session.commit()
             return result.rowcount
+
+    def find_retryable_jobs(self, project_id: str = None) -> list[JobItem]:
+        """Find jobs eligible for retry (FAILED with next_retry_at <= now).
+        
+        IMPORTANT: This method only finds jobs that are FAILED with next_retry_at
+        set and passed. Jobs that are being cancelled (transitioning to CANCELLED)
+        are naturally excluded because their status will not be FAILED.
+        
+        Args:
+            project_id: Optional project ID to filter by.
+            
+        Returns:
+            List of JobItem objects that are FAILED and their next_retry_at
+            has passed.
+        """
+        with SQLModelSession(self.engine) as session:
+            now = datetime.utcnow().isoformat()
+            stmt = (
+                select(JobItem)
+                .where(JobItem.status == JobStatus.FAILED.value)
+                .where(JobItem.next_retry_at.is_not(None))
+                .where(col(JobItem.next_retry_at) <= now)
+            )
+            
+            if project_id is not None:
+                stmt = stmt.where(JobItem.project_id == project_id)
+            
+            stmt = stmt.order_by(
+                col(JobItem.priority).desc(), JobItem.created_at.asc()
+            )
+            return list(session.exec(stmt))

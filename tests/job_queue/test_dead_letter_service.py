@@ -1,0 +1,778 @@
+"""Comprehensive tests for DeadLetterService.
+
+This module tests the DeadLetterService with in-memory SQLite database,
+focusing on atomic operations for moving jobs to DLQ and replaying them.
+"""
+
+import pytest
+from datetime import datetime, timedelta
+
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session as SQLModelSession
+
+from daemon.repositories.job_queue import JobRepository, DeadLetterRepository
+from daemon.repositories.job_queue.models import JobItem, JobStatus, DeadLetterItem
+from daemon.services.dead_letter_service import (
+    DeadLetterService,
+    DLQItemNotFoundError,
+    JobNotInFailedStateError,
+)
+from daemon.services.job_state_machine import InvalidTransitionError
+
+
+@pytest.fixture
+def engine():
+    """Create in-memory SQLite engine for testing.
+    
+    Uses StaticPool to reuse the same connection across threads.
+    """
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def job_repository(engine):
+    """Create JobRepository with test engine."""
+    return JobRepository(engine)
+
+
+@pytest.fixture
+def dlq_repository(engine):
+    """Create DeadLetterRepository with test engine."""
+    return DeadLetterRepository(engine)
+
+
+@pytest.fixture
+def dead_letter_service(job_repository, dlq_repository):
+    """Create DeadLetterService with test repositories."""
+    return DeadLetterService(job_repository, dlq_repository)
+
+
+@pytest.fixture
+def failed_job(engine, job_repository):
+    """Create a job in FAILED state for testing."""
+    job = job_repository.create(
+        agent_id="test-agent",
+        agent_dir="/agents/test-agent",
+        message="Test job message",
+        source="api",
+        project_id="test-project",
+        priority=5,
+        job_metadata={"test": True},
+    )
+    # Transition to PROCESSING then FAILED
+    job_repository.atomic_transition(
+        job.job_id,
+        from_status=JobStatus.PENDING.value,
+        to_status=JobStatus.PROCESSING.value,
+        started_at=datetime.utcnow().isoformat(),
+        instance_id="test-instance",
+    )
+    job_repository.atomic_transition(
+        job.job_id,
+        from_status=JobStatus.PROCESSING.value,
+        to_status=JobStatus.FAILED.value,
+        completed_at=datetime.utcnow().isoformat(),
+        error_message="Connection timeout",
+    )
+    return job
+
+
+def create_failed_job(engine, job_repository, message="Test job", retry_count=0):
+    """Helper to create a FAILED job."""
+    job = job_repository.create(
+        agent_id="test-agent",
+        agent_dir="/agents/test-agent",
+        message=message,
+        source="api",
+        project_id="test-project",
+        priority=5,
+        job_metadata={"test": True},
+    )
+    job_repository.atomic_transition(
+        job.job_id,
+        from_status=JobStatus.PENDING.value,
+        to_status=JobStatus.PROCESSING.value,
+        started_at=datetime.utcnow().isoformat(),
+        instance_id=f"instance-{job.job_id[:8]}",
+    )
+    job_repository.atomic_transition(
+        job.job_id,
+        from_status=JobStatus.PROCESSING.value,
+        to_status=JobStatus.FAILED.value,
+        completed_at=datetime.utcnow().isoformat(),
+        error_message=f"Error for {message}",
+    )
+    return job
+
+
+class TestMoveToDLQ:
+    """Tests for move_to_dlq() method which takes a session parameter."""
+
+    def test_move_to_dlq_success(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
+        """Test successful move to DLQ with session parameter."""
+        with SQLModelSession(engine) as session:
+            dlq_item = dead_letter_service.move_to_dlq(
+                session=session,
+                job_id=failed_job.job_id,
+                reason="MAX_RETRIES",
+            )
+            session.commit()
+            
+            # Verify DLQ item was created
+            assert dlq_item is not None
+            assert dlq_item.job_id == failed_job.job_id
+            assert dlq_item.reason == "MAX_RETRIES"
+        
+        # Verify job is in dead_letter state (after commit)
+        updated_job = job_repository.get(failed_job.job_id)
+        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        
+        # Verify DLQ item exists in database
+        dlq_item_db = dlq_repository.get(dlq_item.dlq_id)
+        assert dlq_item_db is not None
+        assert dlq_item_db.job_id == failed_job.job_id
+
+    def test_move_to_dlq_job_not_found(self, engine, dead_letter_service):
+        """Test move_to_dlq raises DLQItemNotFoundError when job not found."""
+        with SQLModelSession(engine) as session:
+            with pytest.raises(DLQItemNotFoundError) as exc_info:
+                dead_letter_service.move_to_dlq(
+                    session=session,
+                    job_id="nonexistent-job-id",
+                    reason="MAX_RETRIES",
+                )
+            assert exc_info.value.dlq_id == "nonexistent-job-id"
+
+    def test_move_to_dlq_job_not_in_failed_state(self, engine, job_repository, dead_letter_service):
+        """Test move_to_dlq raises JobNotInFailedStateError when job not in FAILED state."""
+        # Create a job in PENDING state
+        job = job_repository.create(
+            agent_id="test-agent",
+            agent_dir="/agents/test-agent",
+            message="Test job",
+            source="api",
+            project_id="test-project",
+            priority=5,
+            job_metadata=None,
+        )
+        
+        with SQLModelSession(engine) as session:
+            with pytest.raises(JobNotInFailedStateError) as exc_info:
+                dead_letter_service.move_to_dlq(
+                    session=session,
+                    job_id=job.job_id,
+                    reason="MAX_RETRIES",
+                )
+            assert exc_info.value.job_id == job.job_id
+            assert exc_info.value.current_status == JobStatus.PENDING.value
+
+    def test_move_to_dlq_atomicity_both_succeed(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
+        """Test atomicity: both job transition and DLQ item creation succeed."""
+        with SQLModelSession(engine) as session:
+            dlq_item = dead_letter_service.move_to_dlq(
+                session=session,
+                job_id=failed_job.job_id,
+                reason="MANUAL",
+            )
+            # Commit the transaction
+            session.commit()
+        
+        # Verify job is in dead_letter state
+        updated_job = job_repository.get(failed_job.job_id)
+        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        
+        # Verify DLQ item exists with correct data
+        dlq_item_db = dlq_repository.get_by_job_id(failed_job.job_id)
+        assert dlq_item_db is not None
+        assert dlq_item_db.reason == "MANUAL"
+        assert dlq_item_db.error_message == "Connection timeout"
+
+    def test_move_to_dlq_preserves_job_data(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
+        """Test that move_to_dlq preserves all job data in DLQ item."""
+        with SQLModelSession(engine) as session:
+            dlq_item = dead_letter_service.move_to_dlq(
+                session=session,
+                job_id=failed_job.job_id,
+                reason="MAX_RETRIES",
+            )
+            session.commit()
+        
+        # Verify DLQ item contains all job data
+        dlq_item_db = dlq_repository.get_by_job_id(failed_job.job_id)
+        assert dlq_item_db.agent_id == failed_job.agent_id
+        assert dlq_item_db.agent_dir == failed_job.agent_dir
+        assert dlq_item_db.message == failed_job.message
+        assert dlq_item_db.source == failed_job.source
+        assert dlq_item_db.project_id == failed_job.project_id
+        assert dlq_item_db.priority == failed_job.priority
+        assert dlq_item_db.retry_count == failed_job.retry_count
+        assert dlq_item_db.metadata_json == failed_job.job_metadata
+
+
+class TestMoveToDLQStandalone:
+    """Tests for move_to_dlq_standalone() method which creates its own session."""
+
+    def test_move_to_dlq_standalone_success(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
+        """Test successful standalone move to DLQ."""
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Verify DLQ item was created
+        assert dlq_item is not None
+        assert dlq_item.job_id == failed_job.job_id
+        assert dlq_item.reason == "MAX_RETRIES"
+        
+        # Verify job is in dead_letter state
+        updated_job = job_repository.get(failed_job.job_id)
+        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        
+        # Verify DLQ item exists in database
+        dlq_item_db = dlq_repository.get(dlq_item.dlq_id)
+        assert dlq_item_db is not None
+
+    def test_move_to_dlq_standalone_job_not_found(self, dead_letter_service):
+        """Test standalone move raises DLQItemNotFoundError when job not found."""
+        with pytest.raises(DLQItemNotFoundError) as exc_info:
+            dead_letter_service.move_to_dlq_standalone(
+                job_id="nonexistent-job-id",
+                reason="MAX_RETRIES",
+            )
+        assert exc_info.value.dlq_id == "nonexistent-job-id"
+
+    def test_move_to_dlq_standalone_wrong_status(self, engine, job_repository, dead_letter_service):
+        """Test standalone move raises JobNotInFailedStateError when job not in FAILED state."""
+        # Create a job in PROCESSING state
+        job = job_repository.create(
+            agent_id="test-agent",
+            agent_dir="/agents/test-agent",
+            message="Test job",
+            source="api",
+            project_id="test-project",
+            priority=5,
+            job_metadata=None,
+        )
+        job_repository.atomic_transition(
+            job.job_id,
+            from_status=JobStatus.PENDING.value,
+            to_status=JobStatus.PROCESSING.value,
+            started_at=datetime.utcnow().isoformat(),
+            instance_id="test-instance",
+        )
+        
+        with pytest.raises(JobNotInFailedStateError) as exc_info:
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=job.job_id,
+                reason="MAX_RETRIES",
+            )
+        assert exc_info.value.job_id == job.job_id
+        assert exc_info.value.current_status == JobStatus.PROCESSING.value
+        
+        # Verify job is still in PROCESSING state (not modified)
+        updated_job = job_repository.get(job.job_id)
+        assert updated_job.status == JobStatus.PROCESSING.value
+
+    def test_move_to_dlq_standalone_atomicity(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test atomicity: either both job transition AND DLQ creation happen, or neither."""
+        # Create a new failed job for this test
+        job = create_failed_job(engine, job_repository, "Atomicity test job")
+        
+        # Count before
+        initial_dlq_count = dlq_repository.count()
+        
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Verify both operations happened
+        final_dlq_count = dlq_repository.count()
+        assert final_dlq_count == initial_dlq_count + 1
+        
+        # Verify job is in correct state
+        updated_job = job_repository.get(job.job_id)
+        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        
+        # Verify DLQ item exists
+        dlq_item_db = dlq_repository.get_by_job_id(job.job_id)
+        assert dlq_item_db is not None
+
+    def test_move_to_dlq_standalone_failure_leaves_nothing(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test that failure (job not found) leaves no partial state."""
+        # Count before
+        initial_dlq_count = dlq_repository.count()
+        
+        with pytest.raises(DLQItemNotFoundError):
+            dead_letter_service.move_to_dlq_standalone(
+                job_id="nonexistent-job-id",
+                reason="MAX_RETRIES",
+            )
+        
+        # Verify nothing was added
+        final_dlq_count = dlq_repository.count()
+        assert final_dlq_count == initial_dlq_count
+
+
+class TestReplayFromDLQ:
+    """Tests for replay_from_dlq() method."""
+
+    def test_replay_from_dlq_success(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
+        """Test successful replay from DLQ."""
+        # First move job to DLQ
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        dlq_id = dlq_item.dlq_id
+        
+        # Verify job is in dead_letter state
+        job_before = job_repository.get(failed_job.job_id)
+        assert job_before.status == JobStatus.DEAD_LETTER.value
+        
+        # Replay the job
+        replayed_job = dead_letter_service.replay_from_dlq(dlq_id)
+        
+        # Verify job is now in PENDING state
+        assert replayed_job is not None
+        assert replayed_job.status == JobStatus.PENDING.value
+        assert replayed_job.job_id == failed_job.job_id
+        assert replayed_job.retry_count == 0  # Reset
+        assert replayed_job.failed_at is None  # Reset
+        
+        # Verify DLQ item is deleted
+        dlq_item_db = dlq_repository.get(dlq_id)
+        assert dlq_item_db is None
+        
+        # Verify job in repository
+        job_after = job_repository.get(failed_job.job_id)
+        assert job_after.status == JobStatus.PENDING.value
+        assert job_after.retry_count == 0
+
+    def test_replay_from_dlq_dlq_not_found(self, dead_letter_service):
+        """Test replay raises DLQItemNotFoundError when DLQ item not found."""
+        with pytest.raises(DLQItemNotFoundError) as exc_info:
+            dead_letter_service.replay_from_dlq(dlq_id="nonexistent-dlq-id")
+        assert exc_info.value.dlq_id == "nonexistent-dlq-id"
+
+    def test_replay_from_dlq_atomicity_success(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test atomicity on success: job transitions to PENDING AND DLQ item is deleted."""
+        # Setup: create and move job to DLQ
+        job = create_failed_job(engine, job_repository, "Atomicity replay test")
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=job.job_id,
+            reason="MAX_RETRIES",
+        )
+        dlq_id = dlq_item.dlq_id
+        
+        # Count before replay
+        initial_dlq_count = dlq_repository.count()
+        
+        # Replay
+        replayed_job = dead_letter_service.replay_from_dlq(dlq_id)
+        
+        # Verify both operations happened
+        final_dlq_count = dlq_repository.count()
+        assert final_dlq_count == initial_dlq_count - 1
+        
+        # Verify job state
+        job_after = job_repository.get(job.job_id)
+        assert job_after.status == JobStatus.PENDING.value
+        
+        # Verify DLQ item deleted
+        dlq_item_db = dlq_repository.get(dlq_id)
+        assert dlq_item_db is None
+
+    def test_replay_from_dlq_resets_retry_fields(self, engine, job_repository, dead_letter_service):
+        """Test that replay_from_dlq resets retry-related fields."""
+        # Create job and move to DLQ
+        job = create_failed_job(engine, job_repository, "Retry reset test", retry_count=3)
+        
+        # Manually set retry count on job (simulating a job that had retries)
+        with SQLModelSession(engine) as session:
+            job_item = session.get(JobItem, job.job_id)
+            job_item.retry_count = 3
+            job_item.failed_at = datetime.utcnow().isoformat()
+            job_item.error_message = "Previous error"
+            session.commit()
+        
+        # Move to DLQ
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Replay
+        replayed_job = dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
+        
+        # Verify fields are reset
+        assert replayed_job.retry_count == 0
+        assert replayed_job.failed_at is None
+        assert replayed_job.error_message is None
+
+    def test_replay_from_dlq_job_not_in_dead_letter_state(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test replay raises error if job is not in dead_letter state."""
+        # Create job and move to DLQ
+        job = create_failed_job(engine, job_repository, "Wrong state test")
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Manually change job status back to FAILED (bypassing validation)
+        with SQLModelSession(engine) as session:
+            job_item = session.get(JobItem, job.job_id)
+            job_item.status = JobStatus.FAILED.value
+            session.commit()
+        
+        # Replay should fail because job is not in dead_letter state
+        with pytest.raises(InvalidTransitionError) as exc_info:
+            dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
+        
+        assert exc_info.value.from_status == JobStatus.FAILED.value
+        assert exc_info.value.to_status == JobStatus.PENDING.value
+
+
+class TestListDLQ:
+    """Tests for list_dlq() method."""
+
+    def test_list_dlq_empty(self, dead_letter_service):
+        """Test listing DLQ when empty returns empty list."""
+        items, total = dead_letter_service.list_dlq()
+        assert items == []
+        assert total == 0
+
+    def test_list_dlq_all_items(self, engine, job_repository, dead_letter_service):
+        """Test listing all DLQ items."""
+        # Move multiple jobs to DLQ
+        for i in range(3):
+            job = create_failed_job(engine, job_repository, f"List test job {i}")
+            dead_letter_service.move_to_dlq_standalone(job_id=job.job_id, reason="MAX_RETRIES")
+        
+        items, total = dead_letter_service.list_dlq()
+        
+        assert total >= 3
+        assert len(items) >= 3
+
+    def test_list_dlq_with_project_filter(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test listing DLQ items filtered by project_id."""
+        # Move the failed job to DLQ
+        dead_letter_service.move_to_dlq_standalone(job_id=failed_job.job_id, reason="MAX_RETRIES")
+        
+        items, total = dead_letter_service.list_dlq(project_id="test-project")
+        
+        assert total >= 1
+        for item in items:
+            assert item.project_id == "test-project"
+
+    def test_list_dlq_with_queue_filter(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test listing DLQ items filtered by queue_id."""
+        # Move the failed job to DLQ
+        dead_letter_service.move_to_dlq_standalone(job_id=failed_job.job_id, reason="MAX_RETRIES")
+        
+        items, total = dead_letter_service.list_dlq(queue_id="")
+        
+        # Should return items with matching queue_id
+        for item in items:
+            assert item.queue_id == ""
+
+    def test_list_dlq_with_reason_filter(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test listing DLQ items filtered by reason."""
+        # Move to DLQ with MAX_RETRIES reason
+        dead_letter_service.move_to_dlq_standalone(job_id=failed_job.job_id, reason="MAX_RETRIES")
+        
+        items, total = dead_letter_service.list_dlq(reason="MAX_RETRIES")
+        
+        for item in items:
+            assert item.reason == "MAX_RETRIES"
+
+    def test_list_dlq_with_limit(self, dead_letter_service):
+        """Test listing DLQ items with limit."""
+        items, total = dead_letter_service.list_dlq(limit=5)
+        
+        assert len(items) <= 5
+
+
+class TestGetDLQ:
+    """Tests for get_dlq() method."""
+
+    def test_get_dlq_existing(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test getting an existing DLQ item."""
+        # Move job to DLQ
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Get by DLQ ID
+        result = dead_letter_service.get_dlq(dlq_item.dlq_id)
+        
+        assert result is not None
+        assert result.dlq_id == dlq_item.dlq_id
+        assert result.job_id == failed_job.job_id
+
+    def test_get_dlq_not_found(self, dead_letter_service):
+        """Test getting a non-existent DLQ item returns None."""
+        result = dead_letter_service.get_dlq("nonexistent-dlq-id")
+        
+        assert result is None
+
+    def test_get_dlq_by_job_id(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test getting DLQ item by job ID."""
+        # Move job to DLQ
+        dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Get by job ID
+        result = dead_letter_service.get_dlq_by_job_id(failed_job.job_id)
+        
+        assert result is not None
+        assert result.job_id == failed_job.job_id
+
+
+class TestDeleteDLQ:
+    """Tests for delete_dlq() method."""
+
+    def test_delete_dlq_existing(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test deleting an existing DLQ item."""
+        # Move job to DLQ
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        dlq_id = dlq_item.dlq_id
+        
+        # Delete
+        result = dead_letter_service.delete_dlq(dlq_id)
+        
+        assert result is True
+        
+        # Verify DLQ item is gone
+        assert dead_letter_service.get_dlq(dlq_id) is None
+        
+        # Verify job is still in dead_letter state (delete doesn't affect job)
+        job = job_repository.get(failed_job.job_id)
+        assert job.status == JobStatus.DEAD_LETTER.value
+
+    def test_delete_dlq_not_found(self, dead_letter_service):
+        """Test deleting a non-existent DLQ item returns False."""
+        result = dead_letter_service.delete_dlq("nonexistent-dlq-id")
+        
+        assert result is False
+
+
+class TestCountDLQ:
+    """Tests for count_dlq() method."""
+
+    def test_count_dlq_empty(self, dead_letter_service):
+        """Test counting DLQ when empty returns 0."""
+        count = dead_letter_service.count_dlq()
+        assert count == 0
+
+    def test_count_dlq_with_items(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test counting DLQ items."""
+        # Move job to DLQ
+        dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        count = dead_letter_service.count_dlq()
+        assert count >= 1
+
+    def test_count_dlq_with_project_filter(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test counting DLQ items filtered by project_id."""
+        # Move job to DLQ
+        dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        count = dead_letter_service.count_dlq(project_id="test-project")
+        assert count >= 1
+        
+        count_other = dead_letter_service.count_dlq(project_id="nonexistent-project")
+        assert count_other == 0
+
+
+class TestDLQAtomicityEdgeCases:
+    """Tests for edge cases and atomicity guarantees."""
+
+    def test_concurrent_move_to_dlq_not_possible(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test that after move_to_dlq, the job is no longer in FAILED state."""
+        # Move to DLQ
+        dead_letter_service.move_to_dlq_standalone(
+            job_id=failed_job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Try to move again - should fail because job is no longer FAILED
+        with pytest.raises(JobNotInFailedStateError):
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=failed_job.job_id,
+                reason="MANUAL",
+            )
+
+    def test_cleanup_dlq_removes_old_items(self, engine, dlq_repository, dead_letter_service):
+        """Test cleanup_dlq method removes old items."""
+        # Create an old DLQ item
+        with SQLModelSession(engine) as session:
+            old_time = datetime.utcnow() - timedelta(hours=25)
+            item = DeadLetterItem(
+                job_id="old-job-1",
+                agent_id="test-agent",
+                agent_dir="/agents/test-agent",
+                message="Old message",
+                source="api",
+                project_id="test-project",
+                queue_id="test-queue",
+                priority=5,
+                error_message="Old error",
+                retry_count=0,
+                failed_at=old_time.isoformat(),
+                moved_to_dlq_at=old_time.isoformat(),
+                reason="MAX_RETRIES",
+            )
+            session.add(item)
+            session.commit()
+        
+        # Create a recent DLQ item
+        with SQLModelSession(engine) as session:
+            recent_time = datetime.utcnow() - timedelta(hours=1)
+            item = DeadLetterItem(
+                job_id="recent-job-1",
+                agent_id="test-agent",
+                agent_dir="/agents/test-agent",
+                message="Recent message",
+                source="api",
+                project_id="test-project",
+                queue_id="test-queue",
+                priority=5,
+                error_message="Recent error",
+                retry_count=0,
+                failed_at=recent_time.isoformat(),
+                moved_to_dlq_at=recent_time.isoformat(),
+                reason="MAX_RETRIES",
+            )
+            session.add(item)
+            session.commit()
+        
+        # Verify recent item exists before cleanup
+        recent_before = dead_letter_service.get_dlq_by_job_id("recent-job-1")
+        assert recent_before is not None
+        
+        # Cleanup items older than 24 hours (cleanup_dlq uses max_age_days internally converted to hours)
+        # Note: cleanup_dlq takes max_age_days, internally converts to hours
+        deleted_count = dead_letter_service.cleanup_dlq(max_age_days=1)
+        
+        assert deleted_count >= 1
+        
+        # Recent item should still exist
+        assert dead_letter_service.get_dlq_by_job_id("recent-job-1") is not None
+        # Old item should be gone
+        assert dead_letter_service.get_dlq_by_job_id("old-job-1") is None
+
+
+class TestDeadLetterServiceIntegration:
+    """Integration tests for DeadLetterService workflow."""
+
+    def test_full_dlq_lifecycle(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test complete lifecycle: create job -> fail -> move to DLQ -> replay."""
+        # Create and fail a job
+        job = create_failed_job(engine, job_repository, "Lifecycle test job")
+        
+        # Verify job is FAILED
+        assert job_repository.get(job.job_id).status == JobStatus.FAILED.value
+        
+        # Move to DLQ
+        dlq_item = dead_letter_service.move_to_dlq_standalone(
+            job_id=job.job_id,
+            reason="MAX_RETRIES",
+        )
+        
+        # Verify job is in DLQ
+        assert job_repository.get(job.job_id).status == JobStatus.DEAD_LETTER.value
+        assert dlq_repository.get_by_job_id(job.job_id) is not None
+        
+        # Replay from DLQ
+        replayed_job = dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
+        
+        # Verify job is back to PENDING
+        assert replayed_job.status == JobStatus.PENDING.value
+        assert replayed_job.retry_count == 0
+        assert dlq_repository.get_by_job_id(job.job_id) is None
+        
+        # Verify DLQ count is back to 0
+        assert dlq_repository.count() == 0
+
+    def test_multiple_jobs_dlq_management(self, engine, job_repository, dlq_repository, dead_letter_service):
+        """Test managing multiple jobs in DLQ."""
+        # Create and fail multiple jobs
+        job_ids = []
+        for i in range(3):
+            job = create_failed_job(engine, job_repository, f"Multi job {i}")
+            job_ids.append(job.job_id)
+        
+        # Move all to DLQ
+        dlq_ids = []
+        for job_id in job_ids:
+            dlq_item = dead_letter_service.move_to_dlq_standalone(job_id=job_id, reason="MAX_RETRIES")
+            dlq_ids.append(dlq_item.dlq_id)
+        
+        # Verify all in DLQ
+        assert dlq_repository.count() == 3
+        
+        # Replay first job
+        dead_letter_service.replay_from_dlq(dlq_ids[0])
+        
+        # Verify one is back to PENDING, two remain in DLQ
+        assert job_repository.get(job_ids[0]).status == JobStatus.PENDING.value
+        assert dlq_repository.count() == 2
+        
+        # Delete remaining DLQ items
+        for dlq_id in dlq_ids[1:]:
+            dead_letter_service.delete_dlq(dlq_id)
+        
+        # Verify all cleaned up
+        assert dlq_repository.count() == 0
+
+    def test_dlq_error_handling_workflow(self, engine, job_repository, dead_letter_service):
+        """Test error handling: try to move non-failed job to DLQ."""
+        # Create a PENDING job
+        job = job_repository.create(
+            agent_id="test-agent",
+            agent_dir="/agents/test-agent",
+            message="Pending job",
+            source="api",
+            project_id="test-project",
+            priority=5,
+            job_metadata=None,
+        )
+        
+        # Try to move to DLQ - should raise error
+        with pytest.raises(JobNotInFailedStateError):
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=job.job_id,
+                reason="MANUAL",
+            )
+        
+        # Verify job is still PENDING
+        assert job_repository.get(job.job_id).status == JobStatus.PENDING.value
+        
+        # Verify no DLQ items exist
+        assert dead_letter_service.count_dlq() == 0
+
+    def test_replay_nonexistent_dlq(self, dead_letter_service):
+        """Test replaying non-existent DLQ item raises error."""
+        with pytest.raises(DLQItemNotFoundError):
+            dead_letter_service.replay_from_dlq("nonexistent-dlq-id")

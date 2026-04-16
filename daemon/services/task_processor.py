@@ -214,6 +214,21 @@ class ProcessMessageProcessor(BaseProcessor):
                     },
                 )
             
+            # Publish instance lifecycle event for the failed instance
+            # (for child instances, _send_error_report handles lifecycle events)
+            if hasattr(self._manager, '_publish_instance_lifecycle_event'):
+                try:
+                    meta = self._manager._instance_repository.get(task.instance_id)
+                    parent_id = meta.parent_id if meta else None
+                    await self._manager._publish_instance_lifecycle_event(
+                        instance_id=task.instance_id,
+                        status="error",
+                        error=error_msg,
+                        parent_id=parent_id,
+                    )
+                except Exception as lifecycle_err:
+                    logger.warning(f"Failed to publish lifecycle event for error: {lifecycle_err}")
+            
             raise
 
 

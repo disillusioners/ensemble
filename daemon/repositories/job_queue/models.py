@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 from sqlalchemy import CheckConstraint, Column, Index, UniqueConstraint
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, Text
 from sqlmodel import SQLModel, Field
 
 
@@ -198,3 +198,69 @@ class JobLock(SQLModel, table=True):
     job_id: str = Field(index=True)
     instance_id: Optional[str] = Field(default=None, index=True)
     acquired_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class DeadLetterItem(SQLModel, table=True):
+    """Dead letter queue item for failed jobs that exceeded retry limits.
+    
+    Jobs that fail after exhausting their retry attempts are moved here for
+    later inspection, manual replay, or cleanup.
+    """
+    __tablename__ = "dead_letter_items"
+    __table_args__ = (
+        Index("idx_dead_letter_job_id", "job_id", unique=True),
+        Index("idx_dead_letter_project", "project_id"),
+        Index("idx_dead_letter_queue", "queue_id"),
+    )
+
+    # Primary identification
+    dlq_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    
+    # Original job reference
+    job_id: str
+    
+    # Job content (duplicated for quick access without joining)
+    agent_id: str
+    agent_dir: str
+    message: str
+    source: str
+    
+    # Queue routing
+    project_id: str
+    queue_id: str
+    priority: int = Field(default=5)
+    
+    # Error details
+    error_message: str
+    retry_count: int = Field(default=0)
+    failed_at: str
+    
+    # DLQ metadata
+    moved_to_dlq_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    reason: str  # "MAX_RETRIES", "MANUAL", "CIRCUIT_BREAKER", etc.
+    
+    # Optional metadata storage
+    metadata_json: Optional[dict[str, Any]] = Field(
+        default=None,
+        sa_column=Column("metadata", JSON, nullable=True)
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "dlq_id": self.dlq_id,
+            "job_id": self.job_id,
+            "agent_id": self.agent_id,
+            "agent_dir": self.agent_dir,
+            "message": self.message,
+            "source": self.source,
+            "project_id": self.project_id,
+            "queue_id": self.queue_id,
+            "priority": self.priority,
+            "error_message": self.error_message,
+            "retry_count": self.retry_count,
+            "failed_at": self.failed_at,
+            "moved_to_dlq_at": self.moved_to_dlq_at,
+            "reason": self.reason,
+            "metadata": dict(self.metadata_json) if self.metadata_json else {},
+        }

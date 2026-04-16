@@ -6,6 +6,7 @@ from daemon.services.main_loop_bridge import MainLoopBridge
 from daemon.services.worker_pool import Worker, WorkerPool
 from daemon.services.task_processor import TaskProcessor, BaseProcessor
 from daemon.services.stale_task_recovery import StaleTaskRecovery
+from daemon.services.job_retry_engine import JobRetryEngine
 
 __all__ = [
     "JobLockManager",
@@ -17,4 +18,5 @@ __all__ = [
     "TaskProcessor",
     "BaseProcessor",
     "StaleTaskRecovery",
+    "JobRetryEngine",
 ]

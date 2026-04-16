@@ -82,9 +82,14 @@ from .sources.credentials import CredentialManager
 from .services.job_queue_service import JobQueueService
 from .services.job_lock_manager import JobLockManager
 from .services.job_processor import JobProcessor
+from .services.job_feedback_observer import JobFeedbackObserver
 from .services.job_queue_mgmt_service import JobQueueMgmtService
+from .services.dead_letter_service import DeadLetterService
+from .services.job_recovery_service import JobRecoveryService
 from .repositories.job_queue.queue_repository import JobQueueRepository
 from .repositories.job_queue.lock_repository import LockRepository
+from .repositories.job_queue.dead_letter_repository import DeadLetterRepository
+from .repositories.instance.repository import SQLModelInstanceRepository
 from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
 from .registry import get_registry
 from .cancellation import CancellationReason
@@ -158,11 +163,12 @@ credential_manager = CredentialManager()
 job_queue_service: JobQueueService = None
 job_processor: JobProcessor = None
 job_queue_mgmt_service: JobQueueMgmtService = None
+retry_scheduler = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time, job_queue_service, job_processor, job_queue_mgmt_service
+    global manager, start_time, job_queue_service, job_processor, job_queue_mgmt_service, retry_scheduler
     config = load_config()
     manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
@@ -198,6 +204,7 @@ async def lifespan(app: FastAPI):
         repository=job_repository,
         lock_manager=job_lock_manager,
         queue_repo=queue_repo,
+        instance_manager=manager,
     )
     
     # W6: Store the event loop for sync→async operations in complete_job_sync()
@@ -216,10 +223,65 @@ async def lifespan(app: FastAPI):
     from daemon.routers.queues import set_job_queue_mgmt_service
     set_job_queue_mgmt_service(job_queue_mgmt_service)
     
+    # Set up dependency injection for DLQ router
+    from daemon.repositories.job_queue.dead_letter_repository import set_dead_letter_repository
+    dlq_repository = DeadLetterRepository(engine=manager._engine)
+    set_dead_letter_repository(dlq_repository)
+    
+    dead_letter_service = DeadLetterService(
+        job_repository=job_repository,
+        dlq_repository=dlq_repository,
+    )
+    from daemon.routers.dlq import set_dead_letter_service
+    set_dead_letter_service(dead_letter_service)
+    
+    # Initialize JobRetryEngine for automatic retry with backoff
+    from daemon.services.job_retry_engine import JobRetryEngine
+    retry_engine = JobRetryEngine(
+        job_repo=job_repository,
+        queue_repo=queue_repo,
+        dlq_service=dead_letter_service,
+        config=config.job_system,
+    )
+    
+    # Wire retry engine into JobQueueService so it can use maybe_retry on job failure
+    job_queue_service.set_retry_engine(retry_engine)
+    
+    # Initialize and start RetryScheduler for background retry polling
+    from daemon.services.retry_scheduler import RetryScheduler
+    retry_scheduler = RetryScheduler(
+        retry_engine=retry_engine,
+        queue_service=job_queue_service,
+        poll_interval=60.0,
+    )
+    await retry_scheduler.start()
+    logger.info("RetryScheduler started")
+    
     # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
-    # Initialize and start JobProcessor with queue repository for per-queue polling
+    # Run startup recovery for orphaned PROCESSING jobs
+    # This must run FIRST — clean up orphans before observer/processor start
+    instance_repo = SQLModelInstanceRepository(engine=manager._engine)
+    job_recovery = JobRecoveryService(
+        job_repository=job_repository,
+        lock_repository=lock_repo,
+        instance_repository=instance_repo,
+    )
+    recovery_stats = await job_recovery.recover_on_startup()
+    logger.info(f"Job recovery: {recovery_stats}")
+    
+    # Initialize and start JobFeedbackObserver (SECOND — observe lifecycle events)
+    job_feedback_observer = JobFeedbackObserver(
+        job_queue_service=job_queue_service,
+        event_bus=manager._live_hub._event_bus,
+        job_repo=job_repository,
+        lock_repo=lock_repo,
+    )
+    await job_feedback_observer.start()
+    logger.info("JobFeedbackObserver started")
+    
+    # Initialize and start JobProcessor (THIRD — start processing new jobs)
     job_processor = JobProcessor(
         queue_service=job_queue_service,
         instance_manager=manager,
@@ -248,6 +310,14 @@ async def lifespan(app: FastAPI):
     await manager.start_sources()
     
     yield
+    
+    # Stop RetryScheduler first (so it stops triggering new jobs)
+    if retry_scheduler is not None:
+        await retry_scheduler.stop()
+    
+    # Stop JobFeedbackObserver before processor (so observer handles completions while processor stops)
+    if 'job_feedback_observer' in locals():
+        await job_feedback_observer.stop()
     
     # Stop JobProcessor on shutdown
     await job_processor.stop()
@@ -1930,9 +2000,11 @@ async def receive_webhook(source_id: str, request: Request):
 from daemon.routers.jobs import router as jobs_router
 from daemon.routers.projects import router as projects_router
 from daemon.routers.queues import router as queues_router
+from daemon.routers.dlq import router as dlq_router
 api_router.include_router(jobs_router)
 api_router.include_router(projects_router)
 api_router.include_router(queues_router)
+api_router.include_router(dlq_router)
 app.include_router(api_router)
 
 

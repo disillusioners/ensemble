@@ -10,7 +10,10 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from daemon.manager import InstanceManager
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
 from daemon.services.job_lock_manager import JobLockManager
@@ -37,6 +40,7 @@ class JobQueueService:
         repository: JobRepository,
         lock_manager: JobLockManager,
         queue_repo: JobQueueRepository,
+        instance_manager: Optional["InstanceManager"] = None,
     ):
         """Initialize the JobQueueService.
         
@@ -44,11 +48,22 @@ class JobQueueService:
             repository: Job repository for database operations.
             lock_manager: Lock manager for per-queue job serialization.
             queue_repo: Queue repository for queue metadata and concurrency limits.
+            instance_manager: Optional instance manager for terminating PROCESSING jobs.
         """
         self._repository = repository
         self._lock_manager = lock_manager
         self._queue_repo = queue_repo
+        self._instance_manager = instance_manager
+        self._retry_engine = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+    
+    def set_retry_engine(self, retry_engine) -> None:
+        """Set the retry engine for auto-retry functionality.
+        
+        Args:
+            retry_engine: The JobRetryEngine instance to use for auto-retries.
+        """
+        self._retry_engine = retry_engine
     
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Store the event loop for sync→async operations.
@@ -57,6 +72,14 @@ class JobQueueService:
             loop: The running event loop to use for async operations.
         """
         self._loop = loop
+    
+    def set_instance_manager(self, instance_manager) -> None:
+        """Set the InstanceManager reference for cancellation cascade.
+        
+        Args:
+            instance_manager: InstanceManager instance.
+        """
+        self._instance_manager = instance_manager
     
     # ========== Public API ==========
     
@@ -196,6 +219,10 @@ class JobQueueService:
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel a job. Works for both PENDING and PROCESSING states.
         
+        For PROCESSING jobs with an alive instance, this cascades termination
+        to the instance (cancelling active requests, terminating children,
+        releasing locks) before marking the job as CANCELLED.
+        
         Args:
             job_id: Job identifier.
             
@@ -211,21 +238,95 @@ class JobQueueService:
         if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
             return False
         
-        # For PROCESSING jobs, release the lock first
-        if job.status == JobStatus.PROCESSING.value:
+        # Handle based on current status
+        if job.status == JobStatus.PENDING.value:
+            # PENDING: simple transition
+            try:
+                await asyncio.to_thread(
+                    self._repository.atomic_transition,
+                    job_id=job.job_id,
+                    from_status=JobStatus.PENDING.value,
+                    to_status=JobStatus.CANCELLED.value,
+                )
+                return True
+            except InvalidTransitionError:
+                return False
+        
+        elif job.status == JobStatus.PROCESSING.value:
+            instance_id = job.instance_id
+            
+            # Release any locks held by this job first
             if job.queue_id and job.project_id:
                 await self._lock_manager.release_queue_lock(
                     job.project_id, job.queue_id, job_id
                 )
             elif job.project_id:
                 await self._lock_manager.release(job.project_id, job_id)
-        
-        # Now cancel via repository (handles both PENDING and PROCESSING)
-        try:
-            await asyncio.to_thread(self._repository.cancel_job, job_id)
+            
+            # Check if instance is still alive
+            instance_alive = (
+                instance_id is not None
+                and self._instance_manager is not None
+                and self._is_instance_alive(instance_id)
+            )
+            
+            if instance_alive:
+                # Terminate the instance (cascades to children, cancels requests,
+                # releases locks, marks job FAILED)
+                await self._instance_manager.terminate_instance(instance_id)
+                
+                # terminate_instance() marks job as FAILED.
+                # For cancellation, we want CANCELLED status.
+                # Attempt FAILED → CANCELLED transition.
+                try:
+                    await asyncio.to_thread(
+                        self._repository.atomic_transition,
+                        job_id=job.job_id,
+                        from_status=JobStatus.FAILED.value,
+                        to_status=JobStatus.CANCELLED.value,
+                    )
+                except InvalidTransitionError:
+                    # Job may have already transitioned (e.g., was already FAILED
+                    # and then completed the transition) — that's fine
+                    logger.warning(
+                        f"Could not transition job {job.job_id} from FAILED to CANCELLED; "
+                        "may already be terminal"
+                    )
+            else:
+                # Instance already dead or never created — transition directly
+                try:
+                    await asyncio.to_thread(
+                        self._repository.atomic_transition,
+                        job_id=job.job_id,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.CANCELLED.value,
+                    )
+                except InvalidTransitionError:
+                    return False
+            
             return True
-        except (ValueError, InvalidTransitionError):
+        
+        # Terminal or non-cancellable states
+        return False
+    
+    def _is_instance_alive(self, instance_id: str) -> bool:
+        """Check if an instance exists and is not in a terminal state.
+        
+        Args:
+            instance_id: The instance ID to check.
+            
+        Returns:
+            True if instance is alive (exists with non-terminal status).
+        """
+        if not self._instance_manager or not hasattr(self._instance_manager, '_instance_repository'):
             return False
+        
+        meta = self._instance_manager._instance_repository.get(instance_id)
+        if meta is None:
+            return False
+        
+        terminal_statuses = {"completed", "error", "terminated", "failed"}
+        return meta.status not in terminal_statuses
     
     async def retry_job(self, job_id: str) -> Optional[JobItem]:
         """Retry a failed job by creating a new job with the same parameters.
@@ -637,9 +738,20 @@ class JobQueueService:
                     self._repository.complete_job, job_id, result_summary=summary
                 )
             else:
-                return await asyncio.to_thread(
+                failed_job = await asyncio.to_thread(
                     self._repository.fail_job, job_id, error_message=error or "Unknown error"
                 )
+                
+                # Try auto-retry if retry engine is configured
+                if failed_job is not None and self._retry_engine is not None:
+                    try:
+                        retried = await asyncio.to_thread(self._retry_engine.maybe_retry, job_id)
+                        if retried is not None:
+                            return retried
+                    except Exception as e:
+                        logger.error(f"Auto-retry failed for job {job_id}: {e}")
+                
+                return failed_job
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
@@ -698,7 +810,18 @@ class JobQueueService:
             if success:
                 return self._repository.complete_job(job_id, result_summary=result_summary)
             else:
-                return self._repository.fail_job(job_id, error_message=error or "Unknown error")
+                failed_job = self._repository.fail_job(job_id, error_message=error or "Unknown error")
+                
+                # Try auto-retry if retry engine is configured
+                if failed_job is not None and self._retry_engine is not None:
+                    try:
+                        retried = self._retry_engine.maybe_retry(job_id)
+                        if retried is not None:
+                            return retried
+                    except Exception as e:
+                        logger.error(f"Auto-retry failed for job {job_id}: {e}")
+                
+                return failed_job
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
