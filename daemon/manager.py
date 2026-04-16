@@ -301,6 +301,11 @@ class InstanceManager:
         # Maps instance_id to tuple of (graph, agent_dir)
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
 
+        # Maps (instance_id, msg_id) to the created_at timestamp from first emission.
+        # Persists across _process_message_internal calls so re-emitted messages
+        # keep their original timestamp instead of getting a fresh one.
+        self._original_timestamps: dict[str, str] = {}
+
         # LLM concurrency setting
         self._llm_semaphore = asyncio.Semaphore(config.limits.llm_concurrency)
 
@@ -1166,7 +1171,7 @@ class InstanceManager:
                         # Import ToolMessage here to avoid circular imports
                         from langchain_core.messages import ToolMessage
                         
-                        # Emit individual messages
+                        # Emit individual messages, preserving original created_at
                         for m in all_state_messages:
                             # Skip ToolMessages — they get baked into tool_calls
                             if isinstance(m, ToolMessage):
@@ -1175,9 +1180,16 @@ class InstanceManager:
                             if hasattr(m, 'type') and m.type == 'human':
                                 continue
                             
-                            # Serialize the NEW message only
+                            msg_id = getattr(m, 'id', None)
                             msg_serialized = serialize_message(m, tool_outputs)
                             msg_serialized["instance_id"] = instance_id
+                            
+                            # Preserve original created_at from first emission
+                            ts_key = f"{instance_id}:{msg_id}" if msg_id else None
+                            if ts_key and ts_key in self._original_timestamps:
+                                msg_serialized["created_at"] = self._original_timestamps[ts_key]
+                            elif ts_key:
+                                self._original_timestamps[ts_key] = msg_serialized["created_at"]
                             
                             # Emit individually
                             event_type = _get_message_event_type(msg_serialized)
@@ -1220,7 +1232,7 @@ class InstanceManager:
                 
                 final_sequence_id = f"seq_{event_index}_final"
                 
-                # Emit any remaining messages individually
+                # Emit any remaining messages individually, preserving original timestamps
                 from langchain_core.messages import ToolMessage
                 for msg in final_messages:
                     if isinstance(msg, ToolMessage):
@@ -1229,8 +1241,16 @@ class InstanceManager:
                     if hasattr(msg, 'type') and msg.type == 'human':
                         continue
                     
+                    msg_id = getattr(msg, 'id', None)
                     msg_serialized = serialize_message(msg, final_tool_outputs)
                     msg_serialized["instance_id"] = instance_id
+                    
+                    # Preserve original created_at from first emission
+                    ts_key = f"{instance_id}:{msg_id}" if msg_id else None
+                    if ts_key and ts_key in self._original_timestamps:
+                        msg_serialized["created_at"] = self._original_timestamps[ts_key]
+                    elif ts_key:
+                        self._original_timestamps[ts_key] = msg_serialized["created_at"]
                     
                     event_type = _get_message_event_type(msg_serialized)
                     await self._event_bus.broadcast_message_event(
