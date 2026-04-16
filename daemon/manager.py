@@ -1220,7 +1220,7 @@ class InstanceManager:
                             
                             # Store content hash for deduplication (skip if content unchanged)
                             if ts_key:
-                                content_hash = self._compute_message_content_hash(msg_serialized)
+                                content_hash = _compute_message_content_hash(msg_serialized)
                                 self._emitted_message_content[ts_key] = content_hash
                             
                             # Emit individually
