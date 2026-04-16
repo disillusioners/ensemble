@@ -1067,7 +1067,7 @@ class InstanceManager:
         # Skip injection if:
         # 1. This is a retry (already processed)
         # 2. This is a completion/error report (parent already has context)
-        # 3. This is NOT the first message (already injected)
+        # 3. Project already injected (checked via metadata flag)
         if not is_retry:
             # Determine if this is a completion report or error report
             # These should skip injection because parent already has project context
@@ -1082,15 +1082,24 @@ class InstanceManager:
                 # Skip project injection for completion/error reports
                 pass
             else:
-                # Check if this is the first message (no existing messages in state)
-                message_count = await self._get_message_count(instance_id)
+                # Check if project was already injected (using metadata flag)
+                instance_meta = self._instance_repository.get(instance_id)
+                project_already_injected = (
+                    instance_meta and 
+                    instance_meta.instance_metadata and 
+                    instance_meta.instance_metadata.get("project_injected")
+                )
                 
-                if message_count == 0:
-                    # First message → attempt project injection
-                    instance_meta = self._instance_repository.get(instance_id)
+                if project_already_injected:
+                    # Already injected, skip
+                    pass
+                else:
+                    # First injection → attempt project injection
                     existing_project_id = None
                     if instance_meta and instance_meta.instance_metadata:
                         existing_project_id = instance_meta.instance_metadata.get("project_id")
+                    
+                    injection_succeeded = False
                     
                     if existing_project_id:
                         # project_id exists (inherited from parent) → inject context using stored project_id
@@ -1098,6 +1107,7 @@ class InstanceManager:
                         if matched_project:
                             project_context = format_project_context(matched_project)
                             message = project_context + message
+                            injection_succeeded = True
                             logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
                     else:
                         # No project_id yet → extract keywords and try to match
@@ -1116,11 +1126,16 @@ class InstanceManager:
                                 # Prepend project context to message
                                 project_context = format_project_context(matched_project)
                                 message = project_context + message
+                                injection_succeeded = True
                                 
                                 # Update instance metadata with project_id
                                 self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
                                 
                                 logger.debug(f"Injected project context for instance {instance_id[:8]}...")
+                    
+                    # Mark as injected to prevent re-injection on subsequent messages
+                    if injection_succeeded:
+                        self._instance_repository.set_metadata(instance_id, "project_injected", True)
         
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
