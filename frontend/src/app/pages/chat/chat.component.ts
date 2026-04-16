@@ -37,6 +37,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly sseService = inject(SseService);
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private routeSubscription: Subscription | null = null;
+  private processedSseMessageIds = new Set<string>();
 
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
@@ -74,15 +75,34 @@ export class ChatComponent implements OnInit, OnDestroy {
       localStorage.setItem('ensemble-show-toolcalls', String(this.showToolCalls()));
     });
 
-    // Simple effect - SSE messages are the source of truth
+    // SSE messages update the existing message list - only process genuinely new messages
     effect(() => {
       const sseMessages = this.sseService.messages();
-      if (sseMessages.length === 0) return;
       
-      console.log('[Chat] Updating messages from SSE, count:', sseMessages.length);
+      // Filter to only truly new messages
+      const newMessages = sseMessages.filter(m => !this.processedSseMessageIds.has(m.message_id));
+      if (newMessages.length === 0) return;
       
-      // Messages already deduplicated and typed from SSE service
-      this.messages.set(sseMessages);
+      console.log('[Chat] New SSE messages:', newMessages.length);
+      
+      // Mark as processed
+      newMessages.forEach(m => this.processedSseMessageIds.add(m.message_id));
+      
+      // Merge: upsert new messages into existing list
+      this.messages.update(existing => {
+        const result = [...existing];
+        for (const msg of newMessages) {
+          const idx = result.findIndex(m => m.message_id === msg.message_id);
+          if (idx >= 0) {
+            result[idx] = msg;
+          } else {
+            result.push(msg);
+          }
+        }
+        // Sort by created_at
+        result.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+        return result;
+      });
       this.isSending.set(false);
     }, { allowSignalWrites: true });
 
@@ -281,10 +301,16 @@ export class ChatComponent implements OnInit, OnDestroy {
    * Load initial messages via REST API, then connect SSE for real-time updates.
    */
   private loadInstanceMessages(instanceId: string): void {
+    // Clear processed IDs when loading new instance
+    this.processedSseMessageIds.clear();
+    
     this.api.getMessages(instanceId).subscribe({
       next: (messages) => {
         console.log('[Chat] Loaded', messages.length, 'messages from API');
-        this.messages.set(messages.map(m => this.toViewModel(m)));
+        const viewModels = messages.map(m => this.toViewModel(m));
+        this.messages.set(viewModels);
+        // Track these so SSE doesn't duplicate them
+        messages.forEach(m => this.processedSseMessageIds.add(m.message_id));
       },
       error: (err) => {
         console.warn('[Chat] Failed to load messages:', err);
@@ -323,6 +349,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sendError.set(null);
     this.currentInstance.set(null);
     this.messages.set([]);
+    this.processedSseMessageIds.clear();
     this.sseService.disconnect();
     this.sseService.clearEvents();
 
