@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -11,6 +14,56 @@ if TYPE_CHECKING:
     from daemon.services.job_retry_engine import JobRetryEngine
 
 logger = logging.getLogger(__name__)
+
+# Module-level lock state
+_scheduler_lock_file: Optional[int] = None
+_scheduler_lock_path: Optional[Path] = None
+
+
+def _acquire_scheduler_lock(lock_dir: Path) -> bool:
+    """Acquire an exclusive lock to prevent duplicate scheduler instances.
+    
+    Args:
+        lock_dir: Directory to store the lock file.
+        
+    Returns:
+        True if lock acquired, False if another scheduler is already running.
+    """
+    global _scheduler_lock_file, _scheduler_lock_path
+    
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "retry_scheduler.lock"
+    _scheduler_lock_path = lock_path
+    
+    # Open lock file (create if doesn't exist)
+    lock_file = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    _scheduler_lock_file = lock_file
+    
+    try:
+        # Try non-blocking exclusive lock
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except (IOError, OSError):
+        # Lock is held by another process
+        os.close(lock_file)
+        _scheduler_lock_file = None
+        _scheduler_lock_path = None
+        return False
+
+
+def _release_scheduler_lock() -> None:
+    """Release the scheduler lock if held."""
+    global _scheduler_lock_file, _scheduler_lock_path
+    
+    if _scheduler_lock_file is not None:
+        try:
+            fcntl.flock(_scheduler_lock_file, fcntl.LOCK_UN)
+            os.close(_scheduler_lock_file)
+        except (IOError, OSError):
+            pass
+        finally:
+            _scheduler_lock_file = None
+            _scheduler_lock_path = None
 
 
 class RetryScheduler:
@@ -37,6 +90,7 @@ class RetryScheduler:
         retry_engine: "JobRetryEngine",
         queue_service: "JobQueueService",
         poll_interval: float = 60.0,
+        lock_dir: Optional[Path] = None,
     ):
         """Initialize RetryScheduler.
         
@@ -44,17 +98,28 @@ class RetryScheduler:
             retry_engine: The retry engine for finding retryable jobs.
             queue_service: Queue service for triggering job processing.
             poll_interval: Seconds between retry checks (default: 60).
+            lock_dir: Directory for lock file storage (default: ./data).
         """
         self._retry_engine = retry_engine
         self._queue_service = queue_service
         self._poll_interval = poll_interval
+        self._lock_dir = lock_dir or Path("./data")
         self._running = False
         self._task: Optional[asyncio.Task] = None
     
     async def start(self) -> None:
-        """Start the background scheduler loop."""
+        """Start the background scheduler loop.
+        
+        Raises:
+            RuntimeError: If another scheduler instance is already running.
+        """
         if self._running:
             return
+        
+        # Acquire exclusive lock to prevent duplicate instances
+        if not _acquire_scheduler_lock(self._lock_dir):
+            logger.warning("Another RetryScheduler instance is already running. Exiting.")
+            raise RuntimeError("Another RetryScheduler instance is already running")
         
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
@@ -63,6 +128,7 @@ class RetryScheduler:
     async def stop(self) -> None:
         """Stop the background scheduler loop gracefully."""
         if not self._running:
+            _release_scheduler_lock()
             return
         
         self._running = False
@@ -75,6 +141,7 @@ class RetryScheduler:
                 pass
             self._task = None
         
+        _release_scheduler_lock()
         logger.info("RetryScheduler stopped")
     
     async def _run_loop(self) -> None:

@@ -611,6 +611,65 @@ class TestObserverStartStop:
         
         assert observer._running is False
 
+    @pytest.mark.asyncio
+    async def test_observer_stop_drains_pending_events(self):
+        """Stop drains pending events from queue before cancelling task."""
+        import asyncio
+        
+        mock_event_bus = MagicMock()
+        mock_queue = asyncio.Queue()
+        mock_event_bus.subscribe_all.return_value = mock_queue
+        mock_job_repo = MagicMock(spec=JobRepository)
+        mock_lock_repo = MagicMock(spec=LockRepository)
+        
+        # Create jobs for the events we'll queue
+        mock_job_1 = create_mock_job(job_id="job-1", status="processing", instance_id="instance-1")
+        mock_job_2 = create_mock_job(job_id="job-2", status="processing", instance_id="instance-2")
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(
+            side_effect=[mock_job_1, mock_job_2]
+        )
+        
+        observer = JobFeedbackObserver(
+            event_bus=mock_event_bus,
+            job_queue_service=mock_job_queue_service,
+            job_repo=mock_job_repo,
+            lock_repo=mock_lock_repo,
+        )
+        
+        await observer.start()
+        
+        # Put events in the queue
+        event1 = {
+            "event_type": "instance_lifecycle",
+            "data": {"instance_id": "instance-1", "status": "completed"},
+        }
+        event2 = {
+            "event_type": "instance_lifecycle",
+            "data": {"instance_id": "instance-2", "status": "completed"},
+        }
+        await mock_queue.put(event1)
+        await mock_queue.put(event2)
+        
+        # Stop should drain events before cancelling
+        await observer.stop()
+        
+        # Both events should have been processed
+        assert mock_job_queue_service.get_job_by_instance.call_count == 2
+        assert mock_job_repo.atomic_transition.call_count == 2
+        
+        # Verify job completions
+        mock_job_repo.atomic_transition.assert_any_call(
+            job_id="job-1",
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.COMPLETED.value,
+        )
+        mock_job_repo.atomic_transition.assert_any_call(
+            job_id="job-2",
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.COMPLETED.value,
+        )
+
 
 class TestObserverConfig:
     """Tests for observer configuration."""

@@ -153,12 +153,14 @@ class DeadLetterRepository:
         self,
         max_age_hours: int,
         reason: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> int:
         """Delete dead letter items older than max_age_hours.
         
         Args:
             max_age_hours: Maximum age in hours for items to keep.
             reason: Optional reason filter to only delete items with specific reason.
+            project_id: Optional project ID filter to only delete items for a specific project.
             
         Returns:
             Number of items deleted.
@@ -172,6 +174,8 @@ class DeadLetterRepository:
             )
             if reason:
                 stmt = stmt.where(DeadLetterItem.reason == reason)
+            if project_id:
+                stmt = stmt.where(DeadLetterItem.project_id == project_id)
             result = session.exec(stmt)
             session.commit()
             return result.rowcount

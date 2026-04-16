@@ -289,6 +289,92 @@ class TestDLQEndpoints:
         assert response.status_code == 400
         assert "non-negative" in response.json()["detail"]["message"].lower()
 
+    def test_cleanup_dlq_calls_service_with_project_id(self, client, dlq_service):
+        """Test cleanup passes project_id to service (C2 fix)."""
+        dlq_service.cleanup_dlq = MagicMock(return_value=0)
+        
+        response = client.delete(
+            "/projects/project-abc/dlq",
+            params={"max_age_days": 7}
+        )
+        
+        assert response.status_code == 200
+        dlq_service.cleanup_dlq.assert_called_once()
+        call_kwargs = dlq_service.cleanup_dlq.call_args[1]
+        assert call_kwargs["project_id"] == "project-abc"
+        assert call_kwargs["max_age_days"] == 7
+
+
+class TestListDLPagination:
+    """Tests for C4: list_dlq returns correct total count before pagination."""
+
+    def test_list_dlq_total_is_total_before_pagination(self, client, dlq_service):
+        """Test that list_dlq returns total BEFORE pagination, not after.
+        
+        This tests the fix for C4 where the router was using len(items)
+        which gave the count AFTER pagination slicing.
+        """
+        # Create sample items (simulating paginated response)
+        sample_items = []
+        for i in range(5):
+            item = DeadLetterItem(
+                dlq_id=f"dlq-{i}",
+                job_id=f"job-{i}",
+                agent_id="coder",
+                agent_dir="/agents/coder",
+                message=f"Message {i}",
+                source="api",
+                project_id="project-abc",
+                queue_id="queue-xyz",
+                priority=5,
+                error_message="Error",
+                retry_count=0,
+                failed_at="2025-03-15T10:00:00",
+                moved_to_dlq_at="2025-03-15T10:05:00",
+                reason="MAX_RETRIES",
+                metadata_json={},
+            )
+            sample_items.append(item)
+        
+        # Simulate: 10 total items, but only 5 returned (paginated)
+        # The service should return total=10 (before pagination)
+        dlq_service.list_dlq = MagicMock(return_value=(sample_items, 10))
+        
+        response = client.get(
+            "/projects/project-abc/dlq",
+            params={"limit": 5, "offset": 0}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        # Total should be 10 (before pagination), NOT 5 (items returned)
+        assert data["total"] == 10, f"Expected total=10 (before pagination), got {data['total']}"
+        assert len(data["items"]) == 5
+
+    def test_list_dlq_pagination_consistent_total(self, client, dlq_service):
+        """Test that total count stays consistent across pagination pages."""
+        # Page 1: 3 items returned, but 10 total
+        dlq_service.list_dlq = MagicMock(return_value=([], 10))
+        
+        response = client.get(
+            "/projects/project-abc/dlq",
+            params={"limit": 3, "offset": 0}
+        )
+        
+        assert response.status_code == 200
+        assert response.json()["total"] == 10
+        
+        # Page 2: Should still report 10 total
+        dlq_service.list_dlq = MagicMock(return_value=([], 10))
+        
+        response = client.get(
+            "/projects/project-abc/dlq",
+            params={"limit": 3, "offset": 3}
+        )
+        
+        assert response.status_code == 200
+        assert response.json()["total"] == 10
+
 
 # =============================================================================
 # Test DLQ Schemas

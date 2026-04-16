@@ -211,6 +211,7 @@ class DeadLetterItem(SQLModel, table=True):
         Index("idx_dead_letter_job_id", "job_id", unique=True),
         Index("idx_dead_letter_project", "project_id"),
         Index("idx_dead_letter_queue", "queue_id"),
+        Index("idx_dead_letter_moved_at", "moved_to_dlq_at"),
     )
 
     # Primary identification

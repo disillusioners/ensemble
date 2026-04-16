@@ -100,9 +100,23 @@ class JobFeedbackObserver:
     async def stop(self) -> None:
         """Stop the observer.
 
-        Cancels the background task and unsubscribes from the EventBus.
+        Drains any pending events from the queue before cancelling the background
+        task and unsubscribing from the EventBus.
         """
         self._running = False
+
+        # Drain remaining events from the queue before cancelling
+        if self._queue is not None:
+            while True:
+                try:
+                    event = self._queue.get_nowait()
+                    try:
+                        await self._process_event(event)
+                    except Exception:
+                        # Don't crash during drain - log if needed
+                        pass
+                except asyncio.QueueEmpty:
+                    break
 
         # Cancel the background task if running
         if self._task is not None and not self._task.done():

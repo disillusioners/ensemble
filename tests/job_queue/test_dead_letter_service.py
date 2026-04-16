@@ -683,6 +683,242 @@ class TestDLQAtomicityEdgeCases:
         assert dead_letter_service.get_dlq_by_job_id("old-job-1") is None
 
 
+class TestCleanupDLQ:
+    """Tests for cleanup_dlq() method - C2: project_id filtering."""
+
+    def test_cleanup_dlq_respects_project_id(self, engine, dlq_repository, dead_letter_service):
+        """Test that cleanup_dlq only deletes items for the specified project."""
+        from datetime import datetime, timedelta
+        from daemon.repositories.job_queue.models import DeadLetterItem
+        
+        # Create old DLQ items for project-a
+        with SQLModelSession(engine) as session:
+            old_time = datetime.utcnow() - timedelta(hours=25)
+            item_a1 = DeadLetterItem(
+                job_id="job-a1",
+                agent_id="test-agent",
+                agent_dir="/agents/test-agent",
+                message="Message A1",
+                source="api",
+                project_id="project-a",
+                queue_id="queue-1",
+                priority=5,
+                error_message="Error",
+                retry_count=0,
+                failed_at=old_time.isoformat(),
+                moved_to_dlq_at=old_time.isoformat(),
+                reason="MAX_RETRIES",
+            )
+            session.add(item_a1)
+            session.commit()
+        
+        # Create old DLQ items for project-b
+        with SQLModelSession(engine) as session:
+            old_time = datetime.utcnow() - timedelta(hours=25)
+            item_b1 = DeadLetterItem(
+                job_id="job-b1",
+                agent_id="test-agent",
+                agent_dir="/agents/test-agent",
+                message="Message B1",
+                source="api",
+                project_id="project-b",
+                queue_id="queue-1",
+                priority=5,
+                error_message="Error",
+                retry_count=0,
+                failed_at=old_time.isoformat(),
+                moved_to_dlq_at=old_time.isoformat(),
+                reason="MAX_RETRIES",
+            )
+            session.add(item_b1)
+            session.commit()
+        
+        # Create recent DLQ item for project-a (should NOT be deleted)
+        with SQLModelSession(engine) as session:
+            recent_time = datetime.utcnow() - timedelta(hours=1)
+            item_a2 = DeadLetterItem(
+                job_id="job-a2",
+                agent_id="test-agent",
+                agent_dir="/agents/test-agent",
+                message="Message A2",
+                source="api",
+                project_id="project-a",
+                queue_id="queue-1",
+                priority=5,
+                error_message="Error",
+                retry_count=0,
+                failed_at=recent_time.isoformat(),
+                moved_to_dlq_at=recent_time.isoformat(),
+                reason="MAX_RETRIES",
+            )
+            session.add(item_a2)
+            session.commit()
+        
+        # Cleanup ONLY project-a items older than 24 hours
+        deleted_count = dead_letter_service.cleanup_dlq(
+            max_age_days=1,
+            project_id="project-a",
+        )
+        
+        # Should only delete 1 item (job-a1), NOT job-b1
+        assert deleted_count == 1
+        
+        # project-a old item should be gone
+        assert dead_letter_service.get_dlq_by_job_id("job-a1") is None
+        # project-a recent item should still exist
+        assert dead_letter_service.get_dlq_by_job_id("job-a2") is not None
+        # project-b item should still exist (not affected by project-a cleanup)
+        assert dead_letter_service.get_dlq_by_job_id("job-b1") is not None
+
+    def test_cleanup_dlq_without_project_id_deletes_all(self, engine, dlq_repository, dead_letter_service):
+        """Test that cleanup_dlq without project_id deletes across all projects."""
+        from datetime import datetime, timedelta
+        from daemon.repositories.job_queue.models import DeadLetterItem
+        
+        # Create old DLQ items for different projects
+        for project in ["project-a", "project-b", "project-c"]:
+            with SQLModelSession(engine) as session:
+                old_time = datetime.utcnow() - timedelta(hours=25)
+                item = DeadLetterItem(
+                    job_id=f"job-{project}",
+                    agent_id="test-agent",
+                    agent_dir="/agents/test-agent",
+                    message=f"Message {project}",
+                    source="api",
+                    project_id=project,
+                    queue_id="queue-1",
+                    priority=5,
+                    error_message="Error",
+                    retry_count=0,
+                    failed_at=old_time.isoformat(),
+                    moved_to_dlq_at=old_time.isoformat(),
+                    reason="MAX_RETRIES",
+                )
+                session.add(item)
+                session.commit()
+        
+        # Cleanup without project_id should delete all old items
+        deleted_count = dead_letter_service.cleanup_dlq(max_age_days=1)
+        
+        assert deleted_count == 3
+        # All should be gone
+        assert dead_letter_service.count_dlq() == 0
+
+
+class TestMoveToDLQConcurrency:
+    """Tests for C3: TOCTOU race condition handling in move_to_dlq()."""
+
+    def test_move_to_dlq_with_lock_prevents_double_move(self, engine, job_repository, dead_letter_service, failed_job):
+        """Test that pessimistic locking prevents double move to DLQ.
+        
+        This tests that when using move_to_dlq() with a shared session,
+        the FOR UPDATE lock ensures only one process can move the job.
+        """
+        from sqlalchemy.exc import IntegrityError
+        
+        with SQLModelSession(engine) as session:
+            # First move should succeed
+            dlq_item = dead_letter_service.move_to_dlq(
+                session=session,
+                job_id=failed_job.job_id,
+                reason="MAX_RETRIES",
+            )
+            session.commit()
+            
+            # Verify job is now in dead_letter state
+            session.refresh(dlq_item)
+        
+        # Verify job is in dead_letter state
+        updated_job = job_repository.get(failed_job.job_id)
+        assert updated_job.status == "dead_letter"
+        
+        # Create a new failed job and verify the lock pattern works
+        job2 = create_failed_job(engine, job_repository, "Second job")
+        with SQLModelSession(engine) as session:
+            dlq_item2 = dead_letter_service.move_to_dlq(
+                session=session,
+                job_id=job2.job_id,
+                reason="MAX_RETRIES",
+            )
+            session.commit()
+        
+        updated_job2 = job_repository.get(job2.job_id)
+        assert updated_job2.status == "dead_letter"
+
+
+class TestListDLQPagination:
+    """Tests for C4: Total count in paginated results is correct."""
+
+    def test_list_dlq_returns_total_before_pagination(self, engine, job_repository, dead_letter_service):
+        """Test that list_dlq returns total count BEFORE pagination, not after.
+        
+        This tests the fix for C4 where the router was returning len(items)
+        which gave the count AFTER pagination slicing, not the total.
+        """
+        # Create 10 DLQ items
+        for i in range(10):
+            job = create_failed_job(engine, job_repository, f"Pagination test job {i}")
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=job.job_id,
+                reason="MAX_RETRIES",
+            )
+        
+        # Request first page (limit=3, offset=0)
+        items_page1, total = dead_letter_service.list_dlq(limit=3, offset=0)
+        
+        # Total should be 10 (all items), NOT 3 (only items on this page)
+        assert total == 10, f"Expected total=10 (before pagination), got {total}"
+        assert len(items_page1) == 3, f"Expected 3 items on page, got {len(items_page1)}"
+        
+        # Request second page
+        items_page2, total2 = dead_letter_service.list_dlq(limit=3, offset=3)
+        
+        # Total should still be 10
+        assert total2 == 10, f"Expected total=10 on page 2, got {total2}"
+        assert len(items_page2) == 3, f"Expected 3 items on page 2, got {len(items_page2)}"
+        
+        # Third page (partial)
+        items_page3, total3 = dead_letter_service.list_dlq(limit=3, offset=6)
+        
+        # Total should still be 10
+        assert total3 == 10, f"Expected total=10 on page 3, got {total3}"
+        assert len(items_page3) == 3, f"Expected 3 items on page 3, got {len(items_page3)}"
+        
+        # Fourth page (should be empty)
+        items_page4, total4 = dead_letter_service.list_dlq(limit=3, offset=9)
+        
+        # Total should still be 10, but no items returned
+        assert total4 == 10, f"Expected total=10 on page 4, got {total4}"
+        assert len(items_page4) == 1, f"Expected 1 item on page 4, got {len(items_page4)}"
+
+    def test_list_dlq_total_respects_filters(self, engine, job_repository, dead_letter_service):
+        """Test that total count respects filters, not just pagination."""
+        # Create DLQ items with different reasons
+        for i in range(5):
+            job = create_failed_job(engine, job_repository, f"MAX_RETRIES job {i}")
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=job.job_id,
+                reason="MAX_RETRIES",
+            )
+        
+        for i in range(3):
+            job = create_failed_job(engine, job_repository, f"MANUAL job {i}")
+            dead_letter_service.move_to_dlq_standalone(
+                job_id=job.job_id,
+                reason="MANUAL",
+            )
+        
+        # List with MAX_RETRIES filter - should only count MAX_RETRIES items
+        items, total = dead_letter_service.list_dlq(reason="MAX_RETRIES", limit=10)
+        assert total == 5, f"Expected 5 MAX_RETRIES items, got {total}"
+        assert len(items) == 5
+        
+        # List with MANUAL filter
+        items, total = dead_letter_service.list_dlq(reason="MANUAL", limit=10)
+        assert total == 3, f"Expected 3 MANUAL items, got {total}"
+        assert len(items) == 3
+
+
 class TestDeadLetterServiceIntegration:
     """Integration tests for DeadLetterService workflow."""
 

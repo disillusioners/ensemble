@@ -9,6 +9,7 @@ import pytest
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.services.job_recovery_service import JobRecoveryService
+from daemon.services.job_state_machine import InvalidTransitionError
 
 
 def create_mock_job(
@@ -306,7 +307,7 @@ class TestJobRecoveryStartup:
 
     @pytest.mark.asyncio
     async def test_atomic_transition_error_handled(self, mock_repositories, service):
-        """If atomic_transition fails, error should be logged but not crash."""
+        """If atomic_transition fails with unexpected error, error should be logged but not crash."""
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
 
         mock_job = create_mock_job()
@@ -316,7 +317,27 @@ class TestJobRecoveryStartup:
 
         stats = await service.recover_on_startup()
 
-        assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Stats should still be updated"
+        assert stats == {"recovered": 0, "alive": 0, "total": 1}, "Stats should not be incremented on error"
+
+    @pytest.mark.asyncio
+    async def test_invalid_transition_error_skips_stats(self, mock_repositories, service):
+        """If atomic_transition raises InvalidTransitionError, it's expected and stats are NOT incremented."""
+        mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
+
+        mock_job = create_mock_job()
+        mock_job_repo.find_processing_jobs.return_value = [mock_job]
+        mock_instance_repo.get.return_value = None
+        mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
+            job_id=mock_job.job_id,
+            from_status="processing",
+            to_status="failed",
+        )
+
+        stats = await service.recover_on_startup()
+
+        assert stats == {"recovered": 0, "alive": 0, "total": 1}, "Stats should not be incremented for InvalidTransitionError"
+        # Lock should still be released even if transition is skipped
+        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1")
 
 
 class TestJobRecoveryServiceHelpers:

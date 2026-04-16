@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -112,8 +113,7 @@ class JobRecoveryService:
             if not job.instance_id:
                 # Job has no instance — orphaned, mark as failed
                 logger.warning(f"Job {job.job_id[:8]}... has no instance_id, marking FAILED")
-                await self._fail_orphaned_job(job, "Recovered: no instance assigned")
-                stats["recovered"] += 1
+                await self._fail_orphaned_job(job, "Recovered: no instance assigned", stats)
                 continue
             
             # Check instance liveness
@@ -124,16 +124,14 @@ class JobRecoveryService:
                 logger.warning(
                     f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... not found, marking FAILED"
                 )
-                await self._fail_orphaned_job(job, "Recovered: instance no longer exists")
-                stats["recovered"] += 1
+                await self._fail_orphaned_job(job, "Recovered: instance no longer exists", stats)
             elif instance.status in ("completed", "terminated", "error", "failed"):
                 # Instance is terminal — job is orphaned
                 logger.warning(
                     f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... "
                     f"is terminal ({instance.status}), marking FAILED"
                 )
-                await self._fail_orphaned_job(job, f"Recovered: instance is {instance.status}")
-                stats["recovered"] += 1
+                await self._fail_orphaned_job(job, f"Recovered: instance is {instance.status}", stats)
             else:
                 # Instance is alive — observer will handle
                 logger.info(
@@ -148,17 +146,29 @@ class JobRecoveryService:
         )
         return stats
 
-    async def _fail_orphaned_job(self, job: "JobItem", error_message: str) -> None:
-        """Mark an orphaned job as FAILED and release its lock."""
+    async def _fail_orphaned_job(
+        self, job: "JobItem", error_message: str, stats: dict[str, int]
+    ) -> bool:
+        """Mark an orphaned job as FAILED and release its lock.
+
+        Args:
+            job: The job to fail.
+            error_message: Reason for failure.
+            stats: Stats dict to increment on success.
+
+        Returns:
+            True if job was successfully transitioned, False if transition was
+            skipped (e.g., already transitioned by another actor).
+        """
         try:
             # Release lock first
             if job.instance_id:
                 await asyncio.to_thread(
                     self._lock_repository.release_by_instance, job.instance_id
                 )
-            
+
             # Transition to FAILED using atomic_transition
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             await asyncio.to_thread(
                 self._job_repository.atomic_transition,
                 job.job_id,
@@ -167,5 +177,14 @@ class JobRecoveryService:
                 completed_at=now,
                 error_message=error_message,
             )
+            stats["recovered"] += 1
+            return True
+        except InvalidTransitionError:
+            # Job was already transitioned by another actor — this is expected
+            logger.info(
+                f"Job {job.job_id[:8]}... already transitioned during recovery, skipping"
+            )
+            return False
         except Exception as e:
             logger.error(f"Failed to recover job {job.job_id[:8]}...: {e}")
+            return False

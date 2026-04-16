@@ -446,6 +446,41 @@ class TestMaybeRetry:
         assert dlq_item is not None
         assert dlq_item.reason == "MAX_RETRIES"
 
+    def test_maybe_retry_exhausted_dlq_failure_rolls_back(self, retry_engine, job_repo, dlq_repo, engine):
+        """Test DLQ move failure triggers rollback, job stays FAILED."""
+        create_job(
+            engine,
+            job_id="job-123",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test message",
+            source="api",
+            project_id="project-abc",
+            queue_id="queue-123",
+            status="failed",
+            retry_count=3,  # Exhausted
+            max_retries=3,
+            error_message="Connection timeout",
+            failed_at=datetime.utcnow().isoformat(),
+        )
+
+        with patch.object(
+            retry_engine._dlq_service, "move_to_dlq", side_effect=RuntimeError("DB write failed")
+        ):
+            with pytest.raises(RuntimeError, match="DB write failed"):
+                retry_engine.maybe_retry("job-123")
+
+        # Job should remain in FAILED state after rollback
+        job = job_repo.get("job-123")
+        assert job is not None
+        assert job.status == "failed"
+        assert job.retry_count == 3
+        assert job.error_message == "Connection timeout"
+
+        # Nothing should be in DLQ
+        dlq_item = dlq_repo.get_by_job_id("job-123")
+        assert dlq_item is None
+
     def test_maybe_retry_job_not_failed(self, retry_engine, job_repo, engine):
         """Test maybe_retry returns None for non-FAILED jobs."""
         create_job(

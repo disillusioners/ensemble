@@ -236,7 +236,11 @@ class JobRetryEngine:
                     session.commit()
                     logger.info(f"Job {job_id} moved to DLQ after {job.retry_count} retries")
                 except Exception as e:
-                    logger.error(f"Failed to move job {job_id} to DLQ: {e}")
+                    session.rollback()
+                    logger.error(
+                        f"Failed to move job {job_id} to DLQ, rolled back: {e}"
+                    )
+                    raise
                 
                 return None
     

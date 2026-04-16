@@ -4,13 +4,34 @@ This module tests the RetryScheduler background service that:
 - Periodically checks for retryable jobs
 - Triggers job processing for projects with retryable jobs
 - Handles start/stop lifecycle with graceful shutdown
+- Prevents duplicate scheduler instances via file-based locking
 """
 
 import pytest
 import asyncio
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from daemon.services.retry_scheduler import RetryScheduler
+from daemon.services.retry_scheduler import (
+    RetryScheduler,
+    _acquire_scheduler_lock,
+    _release_scheduler_lock,
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_scheduler_lock():
+    """Ensure scheduler lock is released before each test."""
+    _release_scheduler_lock()
+    yield
+    _release_scheduler_lock()
+
+
+@pytest.fixture
+def scheduler_lock_dir(tmp_path):
+    """Provide a temporary directory for scheduler lock files."""
+    return tmp_path / "scheduler_locks"
 
 
 class MockJob:
@@ -21,18 +42,28 @@ class MockJob:
         self.project_id = project_id
 
 
-def create_mock_scheduler(poll_interval: float = 60.0):
-    """Factory to create a fully mocked RetryScheduler."""
+def create_mock_scheduler(poll_interval: float = 60.0, lock_dir: Optional[Path] = None):
+    """Factory to create a fully mocked RetryScheduler.
+    
+    Args:
+        poll_interval: Seconds between retry checks.
+        lock_dir: Directory for lock files. If None, uses a unique temp directory.
+    """
     mock_engine = MagicMock()
     mock_engine.find_retryable_jobs = MagicMock(return_value=[])
     
     mock_queue_service = MagicMock()
     mock_queue_service.trigger_next_job = AsyncMock()
     
+    # Use unique temp dir if no lock_dir provided
+    if lock_dir is None:
+        lock_dir = Path(tempfile.mkdtemp(prefix="scheduler_test_"))
+    
     scheduler = RetryScheduler(
         retry_engine=mock_engine,
         queue_service=mock_queue_service,
         poll_interval=poll_interval,
+        lock_dir=lock_dir,
     )
     return scheduler, mock_engine, mock_queue_service
 
@@ -501,3 +532,141 @@ class TestRetrySchedulerIntegration:
         
         # State should be preserved
         assert scheduler._poll_interval == 5.0
+
+
+class TestRetrySchedulerDuplicatePrevention:
+    """Tests for duplicate scheduler instance prevention."""
+
+    def test_acquire_lock_succeeds_when_no_lock(self, tmp_path):
+        """Test that lock can be acquired when no other scheduler is running."""
+        result = _acquire_scheduler_lock(tmp_path)
+        assert result is True
+        _release_scheduler_lock()
+
+    def test_acquire_lock_fails_when_lock_held(self, tmp_path):
+        """Test that lock acquisition fails when another scheduler holds the lock."""
+        # First scheduler acquires lock
+        result1 = _acquire_scheduler_lock(tmp_path)
+        assert result1 is True
+
+        # Second scheduler fails to acquire
+        result2 = _acquire_scheduler_lock(tmp_path)
+        assert result2 is False
+
+        _release_scheduler_lock()
+
+    def test_release_lock_allows_new_acquisition(self, tmp_path):
+        """Test that releasing lock allows another scheduler to acquire it."""
+        # First scheduler
+        result1 = _acquire_scheduler_lock(tmp_path)
+        assert result1 is True
+        _release_scheduler_lock()
+
+        # Second scheduler can now acquire
+        result2 = _acquire_scheduler_lock(tmp_path)
+        assert result2 is True
+        _release_scheduler_lock()
+
+    def test_lock_creates_lock_file(self, tmp_path):
+        """Test that lock acquisition creates the lock file."""
+        lock_path = tmp_path / "retry_scheduler.lock"
+        assert not lock_path.exists()
+
+        _acquire_scheduler_lock(tmp_path)
+        assert lock_path.exists()
+        _release_scheduler_lock()
+
+    @pytest.mark.asyncio
+    async def test_start_raises_when_duplicate(self, tmp_path):
+        """Test that start() raises RuntimeError when another instance is running."""
+        mock_engine = MagicMock()
+        mock_engine.find_retryable_jobs = MagicMock(return_value=[])
+        mock_queue_service = MagicMock()
+        mock_queue_service.trigger_next_job = AsyncMock()
+
+        # First scheduler
+        scheduler1 = RetryScheduler(
+            retry_engine=mock_engine,
+            queue_service=mock_queue_service,
+            lock_dir=tmp_path,
+            poll_interval=3600.0,
+        )
+
+        # Second scheduler with same lock dir
+        scheduler2 = RetryScheduler(
+            retry_engine=mock_engine,
+            queue_service=mock_queue_service,
+            lock_dir=tmp_path,
+            poll_interval=3600.0,
+        )
+
+        # First starts successfully
+        await scheduler1.start()
+        assert scheduler1._running is True
+
+        # Second fails to start
+        with pytest.raises(RuntimeError, match="already running"):
+            await scheduler2.start()
+
+        await scheduler1.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_lock(self, tmp_path):
+        """Test that stop() releases the lock, allowing new instance."""
+        mock_engine = MagicMock()
+        mock_engine.find_retryable_jobs = MagicMock(return_value=[])
+        mock_queue_service = MagicMock()
+        mock_queue_service.trigger_next_job = AsyncMock()
+
+        scheduler = RetryScheduler(
+            retry_engine=mock_engine,
+            queue_service=mock_queue_service,
+            lock_dir=tmp_path,
+            poll_interval=3600.0,
+        )
+
+        await scheduler.start()
+        assert scheduler._running is True
+        await scheduler.stop()
+
+        # After stop, a new scheduler can start
+        result = _acquire_scheduler_lock(tmp_path)
+        assert result is True
+        _release_scheduler_lock()
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_releases_any_lock(self, tmp_path):
+        """Test that stop() without prior start() handles lock state correctly."""
+        scheduler = RetryScheduler(
+            retry_engine=MagicMock(),
+            queue_service=MagicMock(),
+            lock_dir=tmp_path,
+        )
+
+        # Stop without start should not crash
+        await scheduler.stop()
+
+    def test_scheduler_uses_default_lock_dir(self):
+        """Test that scheduler uses ./data as default lock directory."""
+        mock_engine = MagicMock()
+        mock_queue_service = MagicMock()
+
+        scheduler = RetryScheduler(
+            retry_engine=mock_engine,
+            queue_service=mock_queue_service,
+        )
+
+        assert scheduler._lock_dir == Path("./data")
+
+    def test_scheduler_accepts_custom_lock_dir(self, tmp_path):
+        """Test that scheduler accepts custom lock directory."""
+        mock_engine = MagicMock()
+        mock_queue_service = MagicMock()
+
+        scheduler = RetryScheduler(
+            retry_engine=mock_engine,
+            queue_service=mock_queue_service,
+            lock_dir=tmp_path,
+        )
+
+        assert scheduler._lock_dir == tmp_path

@@ -469,6 +469,21 @@ class TestCancelProcessingWithAliveInstanceCascade:
             "instance-alive": mock_instance_meta
         })
 
+        # Mock terminate_instance to simulate the cascade:
+        # terminate_instance() internally calls complete_job_sync which
+        # transitions PROCESSING -> FAILED before returning
+        async def mock_terminate(instance_id: str) -> bool:
+            # Simulate what real terminate_instance does:
+            # it marks the job as FAILED via complete_job_sync
+            mock_repository.atomic_transition(
+                job_id="job-cascade",
+                from_status="processing",
+                to_status="failed",
+            )
+            return True
+
+        mock_instance_manager.terminate_instance = AsyncMock(side_effect=mock_terminate)
+
         # Cancel
         result = await service.cancel_job("job-cascade")
 
@@ -480,8 +495,16 @@ class TestCancelProcessingWithAliveInstanceCascade:
 
         # Verify: terminate_instance marks job as FAILED
         # (the service then tries FAILED -> CANCELLED)
-        # At minimum, we should see atomic_transition calls
-        assert mock_repository.atomic_transition.call_count >= 1
+        # Verify specific transitions in the cascade
+        calls = mock_repository.atomic_transition.call_args_list
+        assert any(
+            c.kwargs.get("to_status") == "failed" or (len(c.args) > 2 and c.args[2] == "failed")
+            for c in calls
+        ), "Expected transition to 'failed' status"
+        assert any(
+            c.kwargs.get("to_status") == "cancelled" or (len(c.args) > 2 and c.args[2] == "cancelled")
+            for c in calls
+        ), "Expected transition to 'cancelled' status"
 
 
 class TestCancelNoInstanceManager:

@@ -75,6 +75,9 @@ class DeadLetterService:
         MUST be called within an existing session/transaction.
         This method does NOT create its own session.
         
+        Uses pessimistic locking (FOR UPDATE) to prevent TOCTOU race conditions
+        when multiple processes try to move the same job to DLQ.
+        
         Args:
             session: An existing SQLModel Session (shared transaction).
             job_id: The job to move.
@@ -86,14 +89,16 @@ class DeadLetterService:
         Raises:
             ValueError: If job not found or not in FAILED state.
         """
-        # Read the job from the session
+        from sqlalchemy.exc import IntegrityError
         from daemon.repositories.job_queue.models import JobItem
-        job = session.get(JobItem, job_id)
+        
+        # Use FOR UPDATE to acquire pessimistic row lock, preventing TOCTOU race
+        job = session.get(JobItem, job_id, with_for_update=True)
         
         if job is None:
             raise DLQItemNotFoundError(job_id)
         
-        # Verify job is in FAILED state
+        # Verify job is in FAILED state (now safe under lock)
         if job.status != "failed":
             raise JobNotInFailedStateError(job_id, job.status)
         
@@ -114,14 +119,19 @@ class DeadLetterService:
             metadata_json=job.job_metadata,
         )
         
-        # Add DLQ item to session
-        session.add(dlq_item)
-        
-        # Update job status to dead_letter
-        job.status = "dead_letter"
-        
-        # Let the caller commit the session
-        return dlq_item
+        try:
+            # Add DLQ item to session
+            session.add(dlq_item)
+            
+            # Update job status to dead_letter
+            job.status = "dead_letter"
+            
+            # Let the caller commit the session
+            return dlq_item
+        except IntegrityError:
+            # Concurrent process already moved this job to DLQ
+            session.rollback()
+            raise JobNotInFailedStateError(job_id, job.status)
     
     def move_to_dlq_standalone(
         self,
@@ -136,6 +146,9 @@ class DeadLetterService:
         Both the job status transition AND DLQ item creation happen in a
         single transaction - either both succeed or both fail.
         
+        Uses pessimistic locking (FOR UPDATE) to prevent TOCTOU race conditions
+        when multiple processes try to move the same job to DLQ.
+        
         Args:
             job_id: The job to move to DLQ.
             reason: Reason for moving to DLQ (e.g., "MAX_RETRIES", "MANUAL").
@@ -144,18 +157,19 @@ class DeadLetterService:
             The created DeadLetterItem.
             
         Raises:
-            JobNotInFailedStateError: If job is not in FAILED state.
+            JobNotInFailedStateError: If job is not in FAILED state (including concurrent modification).
         """
+        from sqlalchemy.exc import IntegrityError
         from sqlmodel import Session as SQLModelSession
         from daemon.repositories.job_queue.models import JobItem
         
         with SQLModelSession(self._job_repo.engine) as session:
-            # Fetch the job from this session
-            job = session.get(JobItem, job_id)
+            # Use FOR UPDATE to acquire pessimistic row lock, preventing TOCTOU race
+            job = session.get(JobItem, job_id, with_for_update=True)
             if job is None:
                 raise DLQItemNotFoundError(job_id)
             
-            # Validate job is in FAILED state
+            # Validate job is in FAILED state (now safe under lock)
             if job.status != "failed":
                 raise JobNotInFailedStateError(job_id, job.status)
             
@@ -176,27 +190,35 @@ class DeadLetterService:
                 metadata_json=job.job_metadata,
             )
             
-            # Add DLQ item to session
-            session.add(dlq_item)
-            
-            # Update job status to dead_letter
-            job.status = "dead_letter"
-            
-            # Commit both operations atomically
-            session.commit()
-            session.refresh(dlq_item)
-            
-            return dlq_item
+            try:
+                # Add DLQ item to session
+                session.add(dlq_item)
+                
+                # Update job status to dead_letter
+                job.status = "dead_letter"
+                
+                # Commit both operations atomically
+                session.commit()
+                session.refresh(dlq_item)
+                
+                return dlq_item
+            except IntegrityError:
+                # Concurrent process already moved this job to DLQ
+                session.rollback()
+                raise JobNotInFailedStateError(job_id, job.status)
     
     def replay_from_dlq(self, dlq_id: str) -> Any:
         """Atomically replay a job from the dead letter queue.
         
         This operation in a SINGLE transaction:
-        1. Fetches the DLQ item
+        1. Fetches the DLQ item (with FOR UPDATE lock)
         2. Updates the job to PENDING status (resetting retry_count)
         3. Deletes the DLQ item
         
         Either all operations succeed or none do.
+        
+        Uses pessimistic locking (FOR UPDATE) on the DLQ item to prevent
+        concurrent replays of the same DLQ item.
         
         Args:
             dlq_id: The DLQ item to replay.
@@ -211,15 +233,15 @@ class DeadLetterService:
         from daemon.repositories.job_queue.models import JobItem, DeadLetterItem
         
         with SQLModelSession(self._job_repo.engine) as session:
-            # Fetch DLQ item from this session
-            dlq_item = session.get(DeadLetterItem, dlq_id)
+            # Fetch DLQ item with FOR UPDATE lock to prevent concurrent replay
+            dlq_item = session.get(DeadLetterItem, dlq_id, with_for_update=True)
             if dlq_item is None:
                 raise DLQItemNotFoundError(dlq_id)
             
             job_id = dlq_item.job_id
             
-            # Fetch the job from the same session
-            job = session.get(JobItem, job_id)
+            # Fetch the job from the same session (also lock to prevent concurrent modifications)
+            job = session.get(JobItem, job_id, with_for_update=True)
             if job is None:
                 raise DLQItemNotFoundError(dlq_id)
             
@@ -256,23 +278,26 @@ class DeadLetterService:
         queue_id: Optional[str] = None,
         reason: Optional[str] = None,
         limit: int = 50,
-    ) -> List[DeadLetterItem]:
-        """List dead letter queue items with optional filters.
+        offset: int = 0,
+    ) -> tuple[List[DeadLetterItem], int]:
+        """List dead letter queue items with optional filters and pagination.
         
         Args:
             project_id: Optional project ID filter.
             queue_id: Optional queue ID filter.
             reason: Optional reason filter.
             limit: Maximum number of items to return.
+            offset: Number of items to skip for pagination.
             
         Returns:
-            List of matching DeadLetterItem objects.
+            Tuple of (list of matching items, total count BEFORE pagination).
         """
         return self._dlq_repo.list(
             project_id=project_id,
             queue_id=queue_id,
             reason=reason,
             limit=limit,
+            offset=offset,
         )
     
     def get_dlq(self, dlq_id: str) -> Optional[DeadLetterItem]:
@@ -308,17 +333,27 @@ class DeadLetterService:
         """
         return self._dlq_repo.delete(dlq_id)
     
-    def cleanup_dlq(self, max_age_days: int, reason: Optional[str] = None) -> int:
+    def cleanup_dlq(
+        self,
+        max_age_days: int,
+        reason: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> int:
         """Delete dead letter items older than max_age_days.
         
         Args:
             max_age_days: Maximum age in days for items to keep.
             reason: Optional reason filter to only delete items with specific reason.
+            project_id: Optional project ID filter to only delete items for a specific project.
             
         Returns:
             Number of items deleted.
         """
-        return self._dlq_repo.cleanup_by_age(max_age_days * 24, reason=reason)
+        return self._dlq_repo.cleanup_by_age(
+            max_age_days * 24,
+            reason=reason,
+            project_id=project_id,
+        )
     
     def count_dlq(
         self,

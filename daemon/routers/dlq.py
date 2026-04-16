@@ -237,20 +237,18 @@ async def list_dlq(
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
     
-    # List DLQ items
+    # List DLQ items - service returns (items, total) where total is count BEFORE pagination
     items, total = service.list_dlq(
         project_id=project_id,
         queue_id=queue_id,
         reason=reason,
-        limit=limit + offset,  # Fetch extra for pagination
+        limit=limit,
+        offset=offset,
     )
     
-    # Apply pagination
-    paginated_items = items[offset:offset + limit]
-    
     return DLQListResponse(
-        items=[_dlq_to_response(item) for item in paginated_items],
-        total=len(items),
+        items=[_dlq_to_response(item) for item in items],
+        total=total,  # Total count BEFORE pagination (correct)
     )
 
 
@@ -484,7 +482,12 @@ async def cleanup_dlq(
         )
     
     # The service.cleanup_dlq() correctly converts days to hours internally
-    deleted_count = service.cleanup_dlq(max_age_days=max_age_days, reason=reason)
+    # project_id is required to ensure cleanup only affects the specified project
+    deleted_count = service.cleanup_dlq(
+        max_age_days=max_age_days,
+        reason=reason,
+        project_id=project_id,
+    )
     
     return DLQCleanupResponse(
         deleted_count=deleted_count,

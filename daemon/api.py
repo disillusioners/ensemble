@@ -277,7 +277,7 @@ async def lifespan(app: FastAPI):
     # Initialize and start JobFeedbackObserver (SECOND — observe lifecycle events)
     job_feedback_observer = JobFeedbackObserver(
         job_queue_service=job_queue_service,
-        event_bus=manager._live_hub._event_bus,
+        event_bus=manager._event_bus,
         job_repo=job_repository,
         lock_repo=lock_repo,
     )

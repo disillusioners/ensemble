@@ -47,6 +47,7 @@ from sqlalchemy import text
 from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
+from .services.event_bus import EventBus
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
@@ -396,6 +397,12 @@ class InstanceManager:
         
         # Create LiveEventHub for live-only SSE streaming
         self._live_hub = LiveEventHub()
+        
+        # Create EventBus for lifecycle event broadcasting to global subscribers
+        # JobFeedbackObserver subscribes to this for job completion feedback
+        from .repositories.event.repository import EventRepository
+        event_repo = EventRepository(engine=self._engine)
+        self._event_bus = EventBus(event_repo=event_repo)
         
         self.source_dispatcher = ResponseDispatcher(
             registry=self.source_registry,
@@ -2222,9 +2229,11 @@ Title:"""
         error: str | None = None,
         parent_id: str | None = None,
     ) -> None:
-        """Publish an instance lifecycle event via the LiveEventHub.
+        """Publish an instance lifecycle event via the EventBus.
         
         Lifecycle events signal important state transitions: completed, terminated, error.
+        This method publishes to EventBus so JobFeedbackObserver (which subscribes via
+        subscribe_all) receives the events for job completion feedback.
         
         Args:
             instance_id: The instance ID.
@@ -2240,9 +2249,11 @@ Title:"""
         }
         
         try:
-            await self._live_hub.stream_lifecycle(
+            # Publish via EventBus - this broadcasts to global subscribers including
+            # JobFeedbackObserver which listens for job completion feedback
+            await self._event_bus.create_event(
                 instance_id=instance_id,
-                event_type=EventKind.INSTANCE_LIFECYCLE.value,
+                kind=EventKind.INSTANCE_LIFECYCLE,
                 data=event_data,
             )
             logger.debug(f"Published INSTANCE_LIFECYCLE event for {instance_id[:8]}...: status={status}")

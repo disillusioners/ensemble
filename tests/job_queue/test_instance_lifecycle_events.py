@@ -38,8 +38,8 @@ class TestPublishInstanceLifecycleEvent:
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
             manager.config = mock_config
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             # Publish lifecycle event for top-level instance completion
             await manager._publish_instance_lifecycle_event(
@@ -49,13 +49,13 @@ class TestPublishInstanceLifecycleEvent:
                 parent_id=None,  # Top-level instance
             )
 
-            # Verify: stream_lifecycle was called
-            manager._live_hub.stream_lifecycle.assert_called_once()
+            # Verify: create_event was called
+            manager._event_bus.create_event.assert_called_once()
 
             # Verify: event data
-            call_args = manager._live_hub.stream_lifecycle.call_args
+            call_args = manager._event_bus.create_event.call_args
             assert call_args.kwargs.get("instance_id") == "test-instance-123"
-            assert call_args.kwargs.get("event_type") == EventKind.INSTANCE_LIFECYCLE.value
+            assert call_args.kwargs.get("kind") == EventKind.INSTANCE_LIFECYCLE
 
             # Verify: data payload
             data = call_args.kwargs.get("data")
@@ -71,8 +71,8 @@ class TestPublishInstanceLifecycleEvent:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             # Publish lifecycle event for termination
             await manager._publish_instance_lifecycle_event(
@@ -83,9 +83,9 @@ class TestPublishInstanceLifecycleEvent:
             )
 
             # Verify
-            manager._live_hub.stream_lifecycle.assert_called_once()
-            call_args = manager._live_hub.stream_lifecycle.call_args
-            assert call_args.kwargs.get("event_type") == EventKind.INSTANCE_LIFECYCLE.value
+            manager._event_bus.create_event.assert_called_once()
+            call_args = manager._event_bus.create_event.call_args
+            assert call_args.kwargs.get("kind") == EventKind.INSTANCE_LIFECYCLE
 
             data = call_args.kwargs.get("data")
             assert data["status"] == "terminated"
@@ -97,8 +97,8 @@ class TestPublishInstanceLifecycleEvent:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             # Publish lifecycle event for error
             await manager._publish_instance_lifecycle_event(
@@ -109,9 +109,9 @@ class TestPublishInstanceLifecycleEvent:
             )
 
             # Verify
-            manager._live_hub.stream_lifecycle.assert_called_once()
+            manager._event_bus.create_event.assert_called_once()
 
-            data = manager._live_hub.stream_lifecycle.call_args.kwargs.get("data")
+            data = manager._event_bus.create_event.call_args.kwargs.get("data")
             assert data["status"] == "error"
             assert data["error"] == "Something went wrong"
 
@@ -122,8 +122,8 @@ class TestPublishInstanceLifecycleEvent:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             # Publish lifecycle event for child instance with parent
             await manager._publish_instance_lifecycle_event(
@@ -134,7 +134,7 @@ class TestPublishInstanceLifecycleEvent:
             )
 
             # Verify: parent_id is included in data
-            data = manager._live_hub.stream_lifecycle.call_args.kwargs.get("data")
+            data = manager._event_bus.create_event.call_args.kwargs.get("data")
             assert data["parent_id"] == "parent-instance"
 
 
@@ -148,8 +148,8 @@ class TestEventDataSchema:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             await manager._publish_instance_lifecycle_event(
                 instance_id="test-instance",
@@ -158,7 +158,7 @@ class TestEventDataSchema:
                 parent_id=None,
             )
 
-            data = manager._live_hub.stream_lifecycle.call_args.kwargs.get("data")
+            data = manager._event_bus.create_event.call_args.kwargs.get("data")
 
             # Verify all required fields
             assert "instance_id" in data
@@ -173,8 +173,8 @@ class TestEventDataSchema:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             await manager._publish_instance_lifecycle_event(
                 instance_id="test-instance",
@@ -183,8 +183,8 @@ class TestEventDataSchema:
                 parent_id=None,
             )
 
-            event_type = manager._live_hub.stream_lifecycle.call_args.kwargs.get("event_type")
-            assert event_type == EventKind.INSTANCE_LIFECYCLE.value
+            kind = manager._event_bus.create_event.call_args.kwargs.get("kind")
+            assert kind == EventKind.INSTANCE_LIFECYCLE
 
 
 class TestPublishFailureHandling:
@@ -198,8 +198,8 @@ class TestPublishFailureHandling:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock(side_effect=Exception("Network error"))
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock(side_effect=Exception("Network error"))
 
             # Should not raise
             await manager._publish_instance_lifecycle_event(
@@ -227,8 +227,8 @@ class TestChildInstanceVsTopLevel:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             # Even child instances should publish lifecycle events if the method is called
             # The difference is in WHEN/WHERE the method is called
@@ -240,7 +240,7 @@ class TestChildInstanceVsTopLevel:
             )
 
             # Verify: event is still published (method doesn't distinguish)
-            manager._live_hub.stream_lifecycle.assert_called_once()
+            manager._event_bus.create_event.assert_called_once()
 
 
 class TestLifecycleEventCallSites:
@@ -272,8 +272,9 @@ class TestLifecycleEventCallSites:
             manager.config = mock_config
 
             # Setup mocks
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
             manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
             manager._live_hub.cleanup_instance = AsyncMock()
 
             manager._request_registry = MagicMock()
@@ -302,7 +303,7 @@ class TestLifecycleEventCallSites:
             assert result is True
 
             # Verify: lifecycle event was published
-            manager._live_hub.stream_lifecycle.assert_called()
+            manager._event_bus.create_event.assert_called()
 
 
 class TestEventKindEnum:
@@ -333,8 +334,8 @@ class TestIntegrationPublishFlow:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             await manager._publish_instance_lifecycle_event(
                 instance_id="full-instance",
@@ -343,9 +344,8 @@ class TestIntegrationPublishFlow:
                 parent_id="parent-123",
             )
 
-            call_args = manager._live_hub.stream_lifecycle.call_args
+            call_args = manager._event_bus.create_event.call_args
             assert call_args.kwargs["instance_id"] == "full-instance"
-            assert call_args.kwargs["event_type"] == "instance_lifecycle"
             data = call_args.kwargs["data"]
             assert data["instance_id"] == "full-instance"
             assert data["status"] == "error"
@@ -359,15 +359,15 @@ class TestIntegrationPublishFlow:
 
         with patch.object(InstanceManager, '__init__', lambda self, config: None):
             manager = InstanceManager.__new__(InstanceManager)
-            manager._live_hub = MagicMock()
-            manager._live_hub.stream_lifecycle = AsyncMock()
+            manager._event_bus = MagicMock()
+            manager._event_bus.create_event = AsyncMock()
 
             await manager._publish_instance_lifecycle_event(
                 instance_id="minimal-instance",
                 status="completed",
             )
 
-            call_args = manager._live_hub.stream_lifecycle.call_args
+            call_args = manager._event_bus.create_event.call_args
             data = call_args.kwargs["data"]
             assert data["error"] is None
             assert data["parent_id"] is None
