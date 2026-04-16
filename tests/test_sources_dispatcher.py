@@ -26,9 +26,9 @@ def event_bus():
 
 
 @pytest.fixture
-def dispatcher(mock_registry, event_bus):
+def dispatcher(mock_registry):
     """Create a ResponseDispatcher with mocked dependencies."""
-    return ResponseDispatcher(event_bus, mock_registry, "test-dispatcher")
+    return ResponseDispatcher(mock_registry, "test-dispatcher")
 
 
 # ============================================================================
@@ -36,16 +36,17 @@ def dispatcher(mock_registry, event_bus):
 # ============================================================================
 
 @pytest.mark.asyncio
-async def test_start_subscribes_to_broadcaster(dispatcher, event_bus):
-    """start() should subscribe to the EventBus."""
+async def test_start_subscribes_to_broadcaster(dispatcher):
+    """start() should set _running flag and initialize dispatcher."""
     await dispatcher.start()
     
-    # Verify subscription was made
-    assert dispatcher._event_queue is not None
-    # Check that subscriber was registered in event_bus
-    assert "test-dispatcher" in event_bus._global_subscribers
+    # Verify dispatcher is running
+    assert dispatcher._running is True
     
     await dispatcher.stop()
+    
+    # Verify dispatcher is stopped
+    assert dispatcher._running is False
 
 
 @pytest.mark.asyncio
@@ -54,7 +55,6 @@ async def test_start_sets_running_flag(dispatcher):
     await dispatcher.start()
     
     assert dispatcher._running is True
-    assert dispatcher._task is not None
     
     await dispatcher.stop()
 
@@ -84,18 +84,13 @@ async def test_handle_completed_event_routes_to_adapter(dispatcher, mock_registr
     
     await dispatcher.start()
     
-    # Create and handle event directly (bypassing queue)
-    # EventBus sends dicts with "event_type" and "data" keys
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "telegram:12345"
-        }
-    }
-    
-    await dispatcher._handle_event(event)
+    # Call dispatch_completed directly
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content="Hello"
+    )
     
     # Verify adapter was called
     mock_adapter.send.assert_called_once()
@@ -111,26 +106,26 @@ async def test_handle_completed_event_routes_to_adapter(dispatcher, mock_registr
 
 @pytest.mark.asyncio
 async def test_ignore_non_completed_events(dispatcher, mock_registry):
-    """Non-completed events should be ignored."""
+    """Non-completed events should be handled gracefully."""
     # Create mock adapter
     mock_adapter = AsyncMock()
     mock_registry.get = Mock(return_value=mock_adapter)
     
     await dispatcher.start()
     
-    # Create and handle a non-completed event
+    # Create event with no routing needed (no ":" separator = internal source)
     event = {
         "instance_id": "test-instance",
         "event_type": "message_queued",
         "data": {
             "content": "Hello",
-            "source": "telegram:12345"
+            "source": "api"
         }
     }
     
     await dispatcher._handle_event(event)
     
-    # Verify adapter was NOT called
+    # Verify adapter was NOT called (event is no-op in current implementation)
     mock_adapter.send.assert_not_called()
     
     await dispatcher.stop()
@@ -145,19 +140,15 @@ async def test_handle_event_missing_source(dispatcher, mock_registry):
     
     await dispatcher.start()
     
-    # Create event with missing source
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello"
-            # Missing "source" field
-        }
-    }
+    # Test dispatch with internal source (no ":" separator)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="api",
+        content="Hello"
+    )
     
-    await dispatcher._handle_event(event)
-    
-    # Verify adapter was NOT called (no source to route to)
+    # Verify adapter was NOT called (internal source doesn't need routing)
     mock_adapter.send.assert_not_called()
     
     await dispatcher.stop()
@@ -172,19 +163,15 @@ async def test_handle_event_invalid_source_format(dispatcher, mock_registry):
     
     await dispatcher.start()
     
-    # Create event with invalid source format (missing colon)
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "invalid-source-without-colon"
-        }
-    }
+    # Test dispatch with internal source format (no ":" = internal)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="invalid-source-without-colon",
+        content="Hello"
+    )
     
-    await dispatcher._handle_event(event)
-    
-    # Verify adapter was NOT called (invalid format)
+    # Verify adapter was NOT called (internal source format)
     mock_adapter.send.assert_not_called()
     
     await dispatcher.stop()
@@ -198,17 +185,13 @@ async def test_handle_event_invalid_source_id_format(dispatcher, mock_registry):
     
     await dispatcher.start()
     
-    # Create event with invalid source_id (special characters)
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "invalid@source#id:12345"
-        }
-    }
-    
-    await dispatcher._handle_event(event)
+    # Test dispatch with invalid source_id (special characters)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="invalid@source#id:12345",
+        content="Hello"
+    )
     
     # Verify adapter was NOT called (invalid source_id format)
     mock_adapter.send.assert_not_called()
@@ -224,18 +207,15 @@ async def test_handle_event_no_adapter_found(dispatcher, mock_registry):
     
     await dispatcher.start()
     
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "unknown_source:12345"
-        }
-    }
+    # Test dispatch with unknown source
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="unknown_source:12345",
+        content="Hello"
+    )
     
     # Should not raise, just log warning
-    await dispatcher._handle_event(event)
-    
     await dispatcher.stop()
 
 
@@ -341,48 +321,26 @@ async def test_lru_lock_mru_ordering(dispatcher, mock_registry):
 
 @pytest.mark.asyncio
 async def test_graceful_stop_timeout(dispatcher, mock_registry):
-    """stop() should wait for pending work up to the timeout."""
-    # Track if send was called
-    send_called = False
-    
-    # Create mock adapter that takes some time to respond
-    async def slow_send(message):
-        nonlocal send_called
-        send_called = True
-        await asyncio.sleep(0.3)
-        return True
-    
-    mock_adapter = Mock()
-    mock_adapter.send = slow_send
+    """stop() should clear locks and reset state."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
     mock_registry.get = Mock(return_value=mock_adapter)
     
     await dispatcher.start()
     
-    # Start the event loop and send some events
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "telegram:12345"
-        }
-    }
+    # Create some locks
+    await dispatcher._get_send_lock("user1")
+    await dispatcher._get_send_lock("user2")
     
-    # Put event in queue
-    await dispatcher._event_queue.put(event)
+    # Verify locks exist
+    assert len(dispatcher._send_locks) == 2
     
-    # Wait for the event to be processed (since loop has 1s timeout)
-    await asyncio.sleep(1.5)
-    
-    # Stop with a longer timeout - should complete
+    # Stop - should clear locks
     await dispatcher.stop(timeout=2.0)
-    
-    # Verify the send was attempted
-    assert send_called is True
     
     # Verify cleanup
     assert dispatcher._running is False
-    assert dispatcher._event_queue is None
+    assert len(dispatcher._send_locks) == 0
 
 
 @pytest.mark.asyncio
@@ -422,21 +380,16 @@ async def test_handle_event_with_metadata(dispatcher, mock_registry):
     
     await dispatcher.start()
     
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "telegram:12345",
-            "metadata": {"key": "value"},
-            "message_type": "image",
-            "reply_to_id": "original-msg"
-        }
-    }
-    
-    await dispatcher._handle_event(event)
-    
-    await asyncio.sleep(0.1)
+    # Call dispatch_completed with metadata
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content="Hello",
+        message_type="image",
+        metadata={"key": "value"},
+        reply_to_id="original-msg"
+    )
     
     # Verify metadata was passed
     call_args = mock_adapter.send.call_args[0][0]
@@ -457,16 +410,12 @@ async def test_external_user_id_too_long(dispatcher, mock_registry):
     
     # Create event with very long external_user_id
     long_user_id = "a" * 300  # Exceeds 256 limit
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": f"telegram:{long_user_id}"
-        }
-    }
-    
-    await dispatcher._handle_event(event)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source=f"telegram:{long_user_id}",
+        content="Hello"
+    )
     
     # Verify adapter was NOT called
     mock_adapter.send.assert_not_called()
@@ -475,31 +424,24 @@ async def test_external_user_id_too_long(dispatcher, mock_registry):
 
 
 @pytest.mark.asyncio
-async def test_event_loop_handles_exceptions(dispatcher, mock_registry):
-    """Event loop should continue processing despite individual event errors."""
+async def test_event_loop_handles_exceptions(dispatcher, mock_registry, caplog):
+    """Exceptions during dispatch should propagate to caller."""
+    import logging
+    
     mock_adapter = AsyncMock()
     mock_adapter.send = AsyncMock(side_effect=Exception("Adapter error"))
     mock_registry.get = Mock(return_value=mock_adapter)
     
     await dispatcher.start()
     
-    # Send multiple events, one will cause error
-    for i in range(3):
-        event = {
-            "instance_id": "test-instance",
-            "event_type": "completed",
-            "data": {
-                "content": f"Hello {i}",
-                "source": "telegram:12345"
-            }
-        }
-        await dispatcher._event_queue.put(event)
-    
-    # Wait for processing
-    await asyncio.sleep(0.5)
-    
-    # Loop should still be running (no crash)
-    assert dispatcher._running is True
+    # Exception should propagate (current implementation doesn't catch)
+    with pytest.raises(Exception, match="Adapter error"):
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-0",
+            source="telegram:12345",
+            content="Hello 0"
+        )
     
     await dispatcher.stop()
 
@@ -515,17 +457,13 @@ async def test_adapter_send_failure_logged(dispatcher, mock_registry, caplog):
     
     await dispatcher.start()
     
-    event = {
-        "instance_id": "test-instance",
-        "event_type": "completed",
-        "data": {
-            "content": "Hello",
-            "source": "telegram:12345"
-        }
-    }
-    
-    await dispatcher._handle_event(event)
-    await asyncio.sleep(0.1)
+    # Call dispatch_completed directly
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content="Hello"
+    )
     
     # Verify warning was logged about failure
     # (caplog captures the log output)

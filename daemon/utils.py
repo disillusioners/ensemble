@@ -123,6 +123,7 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
     
     return {
         "message_id": str(message_id) if message_id else getattr(msg, 'id', None) or str(uuid.uuid4()),
+        "type": msg.type,
         "role": role,
         "content": content_str,
         "thinking": thinking,
