@@ -1,6 +1,7 @@
 """LLM error classification utilities for retry handling and context overflow detection."""
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -13,6 +14,22 @@ logger = logging.getLogger(__name__)
 
 # Status codes that indicate transient/retryable errors
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+# Max length for error messages in logs (prevents HTML flooding)
+MAX_ERROR_LEN = 300
+
+
+def _truncate_error(error: Exception | str, max_len: int = MAX_ERROR_LEN) -> str:
+    """Truncate error message, stripping HTML if present."""
+    error_str = str(error)
+    # Strip HTML tags and reduce whitespace
+    if "<" in error_str and ">" in error_str:
+        error_str = error_str.replace("<", " <").replace(">", "> ")
+        error_str = re.sub(r"<[^>]+>", "", error_str)
+        error_str = " ".join(error_str.split())
+    if len(error_str) > max_len:
+        return error_str[:max_len] + "..."
+    return error_str
 
 
 class TransientAPIError(Exception):
@@ -148,34 +165,34 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             # MUST come FIRST — BadRequestError is a subclass of APIStatusError
             error_str = str(e).lower()
             if 'context_length_exceeded' in error_str or 'maximum context length' in error_str:
-                logger.warning(f"[LLM] Context length exceeded (non-retryable), triggering compaction: {e}")
+                logger.warning(f"[LLM] Context length exceeded (non-retryable), triggering compaction: {_truncate_error(e)}")
                 raise ContextLengthExceededError(e) from e
-            logger.error(f"[LLM] BadRequestError (non-retryable): {e}")
+            logger.error(f"[LLM] BadRequestError (non-retryable): {_truncate_error(e)}")
             raise  # Other BadRequestErrors (genuine bugs) — pass through
         except openai.APIStatusError as e:
             if e.status_code in RETRYABLE_STATUS_CODES:
-                logger.warning(f"[LLM] Transient API error (status={e.status_code}), will retry: {e}")
+                logger.warning(f"[LLM] Transient API error (status={e.status_code}), will retry: {_truncate_error(e)}")
                 raise TransientAPIError(e) from e
-            logger.error(f"[LLM] Non-retryable API error (status={e.status_code}): {e}")
+            logger.error(f"[LLM] Non-retryable API error (status={e.status_code}): {_truncate_error(e)}")
             raise  # Non-retryable status error — pass through
         except openai.APITimeoutError as e:
-            logger.warning(f"[LLM] API timeout, will retry: {e}")
+            logger.warning(f"[LLM] API timeout, will retry: {_truncate_error(e)}")
             raise
         except openai.APIConnectionError as e:
-            logger.warning(f"[LLM] Connection error, will retry: {e}")
+            logger.warning(f"[LLM] Connection error, will retry: {_truncate_error(e)}")
             raise
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError) as e:
-            logger.warning(f"[LLM] Connection error ({type(e).__name__}), will retry: {e}")
+            logger.warning(f"[LLM] Connection error ({type(e).__name__}), will retry: {_truncate_error(e)}")
             raise
         except LLMResponseValidationError as e:
-            logger.warning(f"[LLM] Response validation failed, will retry: {e}")
+            logger.warning(f"[LLM] Response validation failed, will retry: {_truncate_error(e)}")
             raise
         except openai.APIResponseValidationError as e:
             # Proxy returned non-JSON (HTML error page) — transient
-            logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {e}")
+            logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {_truncate_error(e)}")
             raise
         except Exception as e:
-            logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {e}")
+            logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {_truncate_error(e)}")
             raise  # Everything else passes through (including socket errors)
     
     return RunnableLambda(func=_run_with_classification)

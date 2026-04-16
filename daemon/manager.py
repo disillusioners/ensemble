@@ -1030,9 +1030,12 @@ class InstanceManager:
         last_ai_message = None
         
         
-        # Project context injection for first message
+        # Project context injection for first message only
         # Must happen BEFORE building graph_input
-        # Skip injection ONLY for completion/error reports (parent already has context)
+        # Skip injection if:
+        # 1. This is a retry (already processed)
+        # 2. This is a completion/error report (parent already has context)
+        # 3. This is NOT the first message (already injected)
         if not is_retry:
             # Determine if this is a completion report or error report
             # These should skip injection because parent already has project context
@@ -1047,41 +1050,45 @@ class InstanceManager:
                 # Skip project injection for completion/error reports
                 pass
             else:
-                # Check if instance already has project context
-                instance_meta = self._instance_repository.get(instance_id)
-                existing_project_id = None
-                if instance_meta and instance_meta.instance_metadata:
-                    existing_project_id = instance_meta.instance_metadata.get("project_id")
+                # Check if this is the first message (no existing messages in state)
+                message_count = await self._get_message_count(instance_id)
                 
-                if existing_project_id:
-                    # project_id exists (inherited from parent) → inject context using stored project_id
-                    matched_project = self._project_repository.get(existing_project_id)
-                    if matched_project:
-                        project_context = format_project_context(matched_project)
-                        message = project_context + message
-                        logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
-                else:
-                    # No project_id → extract keywords and try to match
-                    keywords = extract_project_keywords(message)
+                if message_count == 0:
+                    # First message → attempt project injection
+                    instance_meta = self._instance_repository.get(instance_id)
+                    existing_project_id = None
+                    if instance_meta and instance_meta.instance_metadata:
+                        existing_project_id = instance_meta.instance_metadata.get("project_id")
                     
-                    if keywords:
-                        matched_project = self._project_repository.match_by_keywords(keywords)
-                        
+                    if existing_project_id:
+                        # project_id exists (inherited from parent) → inject context using stored project_id
+                        matched_project = self._project_repository.get(existing_project_id)
                         if matched_project:
-                            # Log the match
-                            logger.info(
-                                f"Project context injection: matched '{matched_project.name}' "
-                                f"from keywords: {keywords[:5]}..."
-                            )
-                            
-                            # Prepend project context to message
                             project_context = format_project_context(matched_project)
                             message = project_context + message
+                            logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
+                    else:
+                        # No project_id yet → extract keywords and try to match
+                        keywords = extract_project_keywords(message)
+                        
+                        if keywords:
+                            matched_project = self._project_repository.match_by_keywords(keywords)
                             
-                            # Update instance metadata with project_id
-                            self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
-                            
-                            logger.debug(f"Injected project context for instance {instance_id[:8]}...")
+                            if matched_project:
+                                # Log the match
+                                logger.info(
+                                    f"Project context injection: matched '{matched_project.name}' "
+                                    f"from keywords: {keywords[:5]}..."
+                                )
+                                
+                                # Prepend project context to message
+                                project_context = format_project_context(matched_project)
+                                message = project_context + message
+                                
+                                # Update instance metadata with project_id
+                                self._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
+                                
+                                logger.debug(f"Injected project context for instance {instance_id[:8]}...")
         
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
@@ -2103,6 +2110,25 @@ Title:"""
             return state is not None
         except Exception:
             return False
+
+    async def _get_message_count(self, instance_id: str) -> int:
+        """Get the number of messages in the instance's checkpoint/state.
+        
+        Args:
+            instance_id: The instance ID to check.
+            
+        Returns:
+            Number of messages in the current state.
+        """
+        try:
+            config = {"configurable": {"thread_id": instance_id}}
+            state = await self.checkpointer.aget(config)
+            if state and state.values:
+                messages = state.values.get("messages", [])
+                return len(messages) if messages else 0
+            return 0
+        except Exception:
+            return 0
 
     def cancel(self, message_id: str, reason: CancellationReason) -> bool:
         """Request cancellation of a specific message.
