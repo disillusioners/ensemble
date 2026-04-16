@@ -15,7 +15,7 @@
 4. Generate evaluation plan — identify areas to verify
 5. Execute evaluation (all sessions use `--agent council`):
    - SMALL scope: 1 opencode session
-   - MEDIUM+ scope: 2-3 parallel opencode sessions (partition by concern)
+   - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md)
    ⚠️ opencode prompts must contain ZERO tracking/rejection info — evaluate fresh
 6. Collect results → reach verdict
 7. AFTER verdict: read tracking file to compare findings with previous rejections
@@ -89,8 +89,10 @@ SESSIONS:
 | Plan Size | Sessions | Approach |
 |-----------|----------|----------|
 | <50 lines, single component | 1 | Direct evaluation |
-| Module/feature plan | 2-3 | Parallel by concern |
-| Multi-phase strategic plan | 2-3 | Parallel by phase group |
+| Module/feature plan | 2-3 | Sequential by concern |
+| Multi-phase strategic plan | 2-3 | Sequential by phase group |
+
+> **Note:** All council sessions run sequentially (one at a time) due to resource constraints.
 
 ---
 

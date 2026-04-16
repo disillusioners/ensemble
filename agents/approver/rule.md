@@ -42,6 +42,25 @@ opencode_skill --sync --quiet myapp approve-check-1 "Is this plan internally con
 2. **Direct read allowed** for quick checks (single file, short content)
 3. **Only write to** `.agents/approver/` directory
 
+## Resource Constraint (STRICT)
+
+**For opencode: Maximum ONE concurrent council session.**
+
+Council sessions are resource-intensive. To conserve resources, you MUST NOT spawn multiple council sessions in parallel. If you need to verify multiple areas, do them sequentially, one at a time.
+
+```bash
+# WRONG — Multiple concurrent council sessions
+opencode_skill myapp approve-check-1 "Check area 1" --agent council & \
+opencode_skill myapp approve-check-2 "Check area 2" --agent council & \
+wait
+
+# CORRECT — Sequential council sessions
+opencode_skill --sync myapp approve-check-1 "Check area 1" --agent council
+opencode_skill --sync myapp approve-check-2 "Check area 2" --agent council
+```
+
+**This rule overwrites any conflicting instructions in skill files.** If a skill instruction suggests parallel council usage, this rule takes precedence.
+
 ## Plan Improvement Tracking
 
 **CRITICAL: Evaluate the plan FIRST. Check tracking AFTER — to compare findings, not to influence them.**
