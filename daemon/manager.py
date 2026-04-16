@@ -1242,14 +1242,17 @@ class InstanceManager:
                         continue
                     
                     msg_id = getattr(msg, 'id', None)
+                    
+                    # Skip messages already emitted during streaming
+                    ts_key = f"{instance_id}:{msg_id}" if msg_id else None
+                    if ts_key and ts_key in self._original_timestamps:
+                        continue
+                    
                     msg_serialized = serialize_message(msg, final_tool_outputs)
                     msg_serialized["instance_id"] = instance_id
                     
                     # Preserve original created_at from first emission
-                    ts_key = f"{instance_id}:{msg_id}" if msg_id else None
-                    if ts_key and ts_key in self._original_timestamps:
-                        msg_serialized["created_at"] = self._original_timestamps[ts_key]
-                    elif ts_key:
+                    if ts_key:
                         self._original_timestamps[ts_key] = msg_serialized["created_at"]
                     
                     event_type = _get_message_event_type(msg_serialized)
