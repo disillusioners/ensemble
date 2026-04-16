@@ -1249,78 +1249,6 @@ class InstanceManager:
             )
             raise
 
-        # Final-state safety net after streaming loop
-        final_tool_outputs: dict = {}
-        try:
-            final_state = await graph.aget_state(config)
-            if final_state and final_state.values:
-                final_messages = final_state.values.get("messages", [])
-                
-                # Build tool_outputs from final state
-                final_tool_outputs = {}
-                for m in final_messages:
-                    if hasattr(m, 'tool_call_id'):
-                        tc_id = getattr(m, 'tool_call_id', '')
-                        if tc_id:
-                            content = getattr(m, 'content', '') or ''
-                            final_tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
-                
-                final_sequence_id = f"seq_{event_index}_final"
-                
-                # Emit any remaining messages individually, preserving original timestamps
-                from langchain_core.messages import ToolMessage
-                for msg in final_messages:
-                    if isinstance(msg, ToolMessage):
-                        continue  # Skip ToolMessages
-                    # Skip HumanMessages — already emitted before graph started
-                    if hasattr(msg, 'type') and msg.type == 'human':
-                        continue
-                    
-                    msg_id = getattr(msg, 'id', None)
-                    ts_key = f"{instance_id}:{msg_id}" if msg_id else None
-                    
-                    msg_serialized = serialize_message(msg, final_tool_outputs)
-                    msg_serialized["instance_id"] = instance_id
-                    
-                    # Check if this message was already emitted during streaming
-                    if ts_key and ts_key in self._original_timestamps:
-                        # Compare content hash to detect updates
-                        current_hash = _compute_message_content_hash(msg_serialized)
-                        if ts_key in self._emitted_message_content:
-                            if current_hash == self._emitted_message_content[ts_key]:
-                                continue  # Skip - same content already emitted
-                            # Content changed - emit the updated version
-                            logger.debug(f"Message {msg_id[:8]}... content updated, re-emitting")
-                    
-                    # Preserve original created_at from first emission (if known)
-                    if ts_key and ts_key in self._original_timestamps:
-                        msg_serialized["created_at"] = self._original_timestamps[ts_key]
-                    elif ts_key:
-                        self._original_timestamps[ts_key] = msg_serialized["created_at"]
-                    
-                    # Store content hash for future comparisons
-                    if ts_key:
-                        self._emitted_message_content[ts_key] = _compute_message_content_hash(msg_serialized)
-                    
-                    event_type = _get_message_event_type(msg_serialized)
-                    await self._event_bus.broadcast_message_event(
-                        instance_id=instance_id,
-                        message=msg_serialized,
-                        event_type=event_type,
-                        checkpoint_id=final_sequence_id,
-                    )
-                
-                # Extract final content and thinking from last AI message (fallback)
-                for msg in reversed(final_messages):
-                    if hasattr(msg, 'type') and msg.type == 'ai':
-                        if last_ai_message is None:
-                            last_ai_message = msg
-                        if not final_content:
-                            final_content = getattr(msg, 'content', '') or ""
-                        break
-        except Exception as e:
-            logger.warning(f"Final state fetch failed for {instance_id}: {e}")
-        
         # Parse <think/> tags from final content
         content, thinking_extracted = parse_think_tags(final_content)
         
@@ -1337,8 +1265,7 @@ class InstanceManager:
         tool_calls = None
         if last_ai_message and hasattr(last_ai_message, 'tool_calls') and last_ai_message.tool_calls:
             tool_calls = []
-            # Prefer final_tool_outputs (safety net), fall back to streaming tool_outputs
-            outputs_map = final_tool_outputs or tool_outputs
+            outputs_map = tool_outputs
             for tc in last_ai_message.tool_calls:
                 tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
