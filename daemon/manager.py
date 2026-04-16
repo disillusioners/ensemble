@@ -245,6 +245,29 @@ def _get_message_event_type(msg: dict) -> str:
     return "assistant_message"
 
 
+def _compute_message_content_hash(msg: dict) -> str:
+    """Compute a hash of the key content fields for deduplication.
+
+    Args:
+        msg: Serialized message dict
+
+    Returns:
+        A string hash representing the message content
+    """
+    import hashlib
+    import json
+
+    # Key fields that matter for content comparison
+    content_parts = {
+        "content": msg.get("content"),
+        "tool_calls": msg.get("tool_calls"),
+        "role": msg.get("role"),
+    }
+    # Normalize: sort keys and remove None values for consistent hashing
+    content_str = json.dumps(content_parts, sort_keys=True, default=str)
+    return hashlib.md5(content_str.encode()).hexdigest()[:16]
+
+
 @dataclass
 class MessageResult:
     """Result of sending a message to an instance."""
@@ -305,6 +328,10 @@ class InstanceManager:
         # Persists across _process_message_internal calls so re-emitted messages
         # keep their original timestamp instead of getting a fresh one.
         self._original_timestamps: dict[str, str] = {}
+
+        # Maps (instance_id, msg_id) to a content hash for deduplication.
+        # Used to detect if a message was updated between streaming and final state.
+        self._emitted_message_content: dict[str, str] = {}
 
         # LLM concurrency setting
         self._llm_semaphore = asyncio.Semaphore(config.limits.llm_concurrency)
@@ -1191,6 +1218,11 @@ class InstanceManager:
                             elif ts_key:
                                 self._original_timestamps[ts_key] = msg_serialized["created_at"]
                             
+                            # Store content hash for deduplication (skip if content unchanged)
+                            if ts_key:
+                                content_hash = self._compute_message_content_hash(msg_serialized)
+                                self._emitted_message_content[ts_key] = content_hash
+                            
                             # Emit individually
                             event_type = _get_message_event_type(msg_serialized)
                             await self._event_bus.broadcast_message_event(
@@ -1242,18 +1274,30 @@ class InstanceManager:
                         continue
                     
                     msg_id = getattr(msg, 'id', None)
-                    
-                    # Skip messages already emitted during streaming
                     ts_key = f"{instance_id}:{msg_id}" if msg_id else None
-                    if ts_key and ts_key in self._original_timestamps:
-                        continue
                     
                     msg_serialized = serialize_message(msg, final_tool_outputs)
                     msg_serialized["instance_id"] = instance_id
                     
-                    # Preserve original created_at from first emission
-                    if ts_key:
+                    # Check if this message was already emitted during streaming
+                    if ts_key and ts_key in self._original_timestamps:
+                        # Compare content hash to detect updates
+                        current_hash = _compute_message_content_hash(msg_serialized)
+                        if ts_key in self._emitted_message_content:
+                            if current_hash == self._emitted_message_content[ts_key]:
+                                continue  # Skip - same content already emitted
+                            # Content changed - emit the updated version
+                            logger.debug(f"Message {msg_id[:8]}... content updated, re-emitting")
+                    
+                    # Preserve original created_at from first emission (if known)
+                    if ts_key and ts_key in self._original_timestamps:
+                        msg_serialized["created_at"] = self._original_timestamps[ts_key]
+                    elif ts_key:
                         self._original_timestamps[ts_key] = msg_serialized["created_at"]
+                    
+                    # Store content hash for future comparisons
+                    if ts_key:
+                        self._emitted_message_content[ts_key] = _compute_message_content_hash(msg_serialized)
                     
                     event_type = _get_message_event_type(msg_serialized)
                     await self._event_bus.broadcast_message_event(
