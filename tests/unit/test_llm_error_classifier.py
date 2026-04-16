@@ -1,5 +1,6 @@
 """Tests for LLM error classifier module."""
 
+import httpx
 import pytest
 from unittest.mock import MagicMock, Mock, patch
 import openai
@@ -194,6 +195,13 @@ class TestTransientExceptions:
     def test_contains_llm_response_validation_error(self):
         """TRANSIENT_EXCEPTIONS should contain LLMResponseValidationError."""
         assert LLMResponseValidationError in TRANSIENT_EXCEPTIONS
+
+    def test_contains_api_response_validation_error(self):
+        """TRANSIENT_EXCEPTIONS should contain openai.APIResponseValidationError.
+
+        When proxy returns HTML instead of JSON, SDK raises this error.
+        """
+        assert openai.APIResponseValidationError in TRANSIENT_EXCEPTIONS
 
     def test_contains_connection_reset_error(self):
         """TRANSIENT_EXCEPTIONS should contain ConnectionResetError."""
@@ -529,6 +537,28 @@ class TestClassifyLLErrors:
         classified = classify_llm_errors(mock_llm)
 
         with pytest.raises(LLMResponseValidationError):
+            classified.invoke([])
+
+    def test_api_response_validation_error_retried(self):
+        """APIResponseValidationError (proxy returning HTML) should be retried.
+
+        When a proxy returns HTML instead of JSON (e.g., 502/503 error page),
+        the OpenAI SDK raises APIResponseValidationError. This should be
+        caught and retried like other transient errors.
+        """
+        request = httpx.Request("POST", "http://llm-proxy.example.com/v1/chat")
+        mock_response = httpx.Response(502, text="<html>Bad Gateway</html>", request=request)
+        original = openai.APIResponseValidationError(
+            response=mock_response,
+            body=None,
+            message="Failed to parse response"
+        )
+
+        mock_llm = self._create_mock_llm(original)
+        classified = classify_llm_errors(mock_llm)
+
+        # Should raise APIResponseValidationError for with_retry to catch
+        with pytest.raises(openai.APIResponseValidationError):
             classified.invoke([])
 
     def test_bad_request_error_context_overflow_caught_as_context_exceeded(

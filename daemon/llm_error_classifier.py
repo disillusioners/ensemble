@@ -59,6 +59,8 @@ TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
     openai.APIConnectionError,
     # Response validation failure from Phase 1
     LLMResponseValidationError,
+    # Proxy returning non-JSON response (e.g., HTML error page)
+    openai.APIResponseValidationError,
 )
 
 
@@ -167,6 +169,10 @@ def classify_llm_errors(llm_with_tools: Any) -> RunnableLambda:
             raise
         except LLMResponseValidationError as e:
             logger.warning(f"[LLM] Response validation failed, will retry: {e}")
+            raise
+        except openai.APIResponseValidationError as e:
+            # Proxy returned non-JSON (HTML error page) — transient
+            logger.warning(f"[LLM] Response validation error (proxy issue), will retry: {e}")
             raise
         except Exception as e:
             logger.error(f"[LLM] Unexpected error (will not retry): {type(e).__name__}: {e}")
