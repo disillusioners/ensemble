@@ -881,15 +881,15 @@ class InstanceManager:
         from .repositories.event.models import Event, EventKind
         
         # Determine message type based on source
-        if source.startswith("report:"):
+        if source.startswith("internal_report:"):
             msg_type = MessageType.COMPLETION_REPORT.value
             # System-generated reports use random IDs (not user messages)
             message_id = str(uuid.uuid4())
-        elif source.startswith("error_report:"):
+        elif source.startswith("internal_error_report:"):
             msg_type = MessageType.ERROR_REPORT.value
             # System-generated errors use random IDs (not user messages)
             message_id = str(uuid.uuid4())
-        elif source.startswith("agent:"):
+        elif source.startswith("internal_agent:"):
             msg_type = MessageType.AGENT.value
             # Agent-to-agent messages use random IDs
             message_id = str(uuid.uuid4())
@@ -1040,8 +1040,8 @@ class InstanceManager:
             # These should skip injection because parent already has project context
             is_completion_report = (
                 message_source is not None and (
-                    message_source.startswith("report:") or
-                    message_source.startswith("error_report:")
+                    message_source.startswith("internal_report:") or
+                    message_source.startswith("internal_error_report:")
                 )
             )
             
