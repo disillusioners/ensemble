@@ -236,7 +236,11 @@ class ResponseDispatcher:
         send_lock = await self._get_send_lock(external_user_id)
         
         async with send_lock:
-            success = await adapter.send(outgoing)
+            try:
+                success = await adapter.send(outgoing)
+            except Exception as e:
+                logger.warning(f"Progressive dispatch failed for source {source}: {e}")
+                return
             if success:
                 logger.debug(f"Sent progressive message to user {external_user_id} via {source_id}")
                 # Track this source so dispatch_completed won't send again

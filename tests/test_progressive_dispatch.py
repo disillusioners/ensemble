@@ -1,0 +1,718 @@
+"""Tests for the progressive message delivery feature.
+
+This module tests the end-to-end progressive delivery behavior across
+daemon/sources/dispatcher.py and daemon/manager.py, focusing on:
+- dispatcher.dispatch_message() routing, skipping, and tracking
+- dispatcher.dispatch_completed() dedup via _progressive_sent_sources
+- manager._process_message_with_tracking() streaming loop content extraction
+- Error handling and empty content guards
+"""
+
+import pytest
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
+
+from daemon.config import Config, LLMConfig, LimitsConfig, PersistenceConfig, DaemonConfig, AgentsConfig
+
+
+# ==============================================================================
+# Fixtures
+# ==============================================================================
+
+@pytest.fixture
+def mock_config():
+    """Create a mock config for manager tests."""
+    return Config(
+        llm=LLMConfig(
+            base_url="https://api.openai.com/v1",
+            api_key="test-key",
+            model="gpt-4",
+            temperature=0.7
+        ),
+        limits=LimitsConfig(
+            max_instances=5,
+            max_children_per_instance=3,
+            instance_timeout_minutes=60,
+            message_rate_limit=60
+        ),
+        persistence=PersistenceConfig(
+            db_path=":memory:",
+            checkpoint_interval=1,
+            checkpoint_ttl_hours=168,
+            checkpoint_cleanup_interval=24,
+            checkpoint_max_count=1000
+        ),
+        daemon=DaemonConfig(host="0.0.0.0", port=8079),
+        agents=AgentsConfig(directory="./agents")
+    )
+
+
+@pytest.fixture
+def mock_checkpointer():
+    """Create a mock checkpointer."""
+    return Mock()
+
+
+@pytest.fixture
+def mock_prompt_cache():
+    """Create a mock prompt cache."""
+    return Mock()
+
+
+@pytest.fixture
+def mock_instance_repository():
+    """Create a mock instance repository."""
+    mock_repo = MagicMock()
+    mock_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_repo.get.return_value = None
+    mock_repo.list.return_value = ([], 0)
+    return mock_repo
+
+
+@pytest.fixture
+def mock_adapter():
+    """Mock adapter that always succeeds."""
+    adapter = AsyncMock()
+    adapter.send = AsyncMock(return_value=True)
+    return adapter
+
+
+@pytest.fixture
+def failing_adapter():
+    """Mock adapter that always fails."""
+    adapter = AsyncMock()
+    adapter.send = AsyncMock(return_value=False)
+    return adapter
+
+
+@pytest.fixture
+def error_adapter():
+    """Mock adapter that raises an exception."""
+    adapter = AsyncMock()
+    adapter.send = AsyncMock(side_effect=Exception("Adapter error"))
+    return adapter
+
+
+@pytest.fixture
+def mock_registry(mock_adapter):
+    """Mock registry with a telegram adapter."""
+    registry = Mock()
+    registry.get.return_value = mock_adapter
+    return registry
+
+
+@pytest.fixture
+def dispatcher(mock_registry):
+    """Create a ResponseDispatcher with mocked dependencies."""
+    from daemon.sources.dispatcher import ResponseDispatcher
+    disp = ResponseDispatcher(mock_registry, "test-dispatcher")
+    return disp
+
+
+# ==============================================================================
+# Dispatcher: dispatch_message() routing and skipping
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_dispatch_message_routes_correctly(dispatcher, mock_adapter, mock_registry):
+    """Test #1: dispatch_message() calls the right adapter's send_message() method."""
+    await dispatcher.start()
+
+    await dispatcher.dispatch_message("telegram:123456789", "Hello World")
+
+    mock_adapter.send.assert_called_once()
+    call_args = mock_adapter.send.call_args[0][0]
+    assert call_args.external_user_id == "123456789"
+    assert call_args.content == "Hello World"
+    assert call_args.source_id == "telegram"
+    assert call_args.message_type == "text"
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_api_source(dispatcher, mock_adapter, mock_registry):
+    """Test #2: dispatch_message() skips "api" source (no colon = internal)."""
+    await dispatcher.start()
+
+    # "api" has no colon, so treated as internal source
+    await dispatcher.dispatch_message("api", "Hello World")
+
+    # Adapter should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_internal_report_source(dispatcher, mock_adapter, mock_registry):
+    """Test #3: dispatch_message() skips "internal_report:id" source (internal_ prefix)."""
+    await dispatcher.start()
+
+    await dispatcher.dispatch_message("internal_report:child123", "Hello World")
+
+    # Adapter should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_internal_error_report_source(dispatcher, mock_adapter, mock_registry):
+    """Test #4: dispatch_message() skips "internal_error_report:id" source (internal_ prefix)."""
+    await dispatcher.start()
+
+    await dispatcher.dispatch_message("internal_error_report:child123", "Hello World")
+
+    # Adapter should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_tracks_source_in_progressive_sent_sources(dispatcher, mock_adapter, mock_registry):
+    """Test #5: After successful dispatch, source is in _progressive_sent_sources."""
+    await dispatcher.start()
+
+    source = "telegram:12345"
+    assert source not in dispatcher._progressive_sent_sources
+
+    await dispatcher.dispatch_message(source, "Progressive text")
+
+    # Source should be tracked after successful send
+    assert source in dispatcher._progressive_sent_sources
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_does_not_track_on_failure(dispatcher, mock_adapter, mock_registry):
+    """Test #5b (extended): Source is NOT tracked when adapter returns False."""
+    await dispatcher.start()
+
+    # Make the adapter fail
+    mock_adapter.send = AsyncMock(return_value=False)
+
+    source = "telegram:12345"
+    await dispatcher.dispatch_message(source, "Failed text")
+
+    # Source should NOT be tracked on failure
+    assert source not in dispatcher._progressive_sent_sources
+
+    await dispatcher.stop()
+
+
+# ==============================================================================
+# Dispatcher: dispatch_completed() dedup via _progressive_sent_sources
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_skips_when_progressive_already_sent(dispatcher, mock_adapter, mock_registry):
+    """Test #6: dispatch_completed() skips when source was sent progressively (dedup)."""
+    await dispatcher.start()
+
+    source = "telegram:12345"
+
+    # Simulate progressive send
+    await dispatcher.dispatch_message(source, "Progressive text")
+
+    # Verify progressive was tracked
+    assert source in dispatcher._progressive_sent_sources
+
+    # Count adapter calls before dispatch_completed
+    calls_before = mock_adapter.send.call_count
+
+    # dispatch_completed should skip (source already tracked)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-1",
+        source=source,
+        content="Final response"
+    )
+
+    # No new calls should have been made (skipped)
+    assert mock_adapter.send.call_count == calls_before
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_still_sends_when_not_progressive(dispatcher, mock_adapter, mock_registry):
+    """Test #7: dispatch_completed() sends normally when source was NOT sent progressively."""
+    await dispatcher.start()
+
+    source = "telegram:67890"
+
+    # dispatch_completed for this source should send normally (not in progressive set)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-1",
+        source=source,
+        content="Final response for source"
+    )
+
+    mock_adapter.send.assert_called_once()
+    call_args = mock_adapter.send.call_args[0][0]
+    assert call_args.external_user_id == "67890"
+    assert call_args.content == "Final response for source"
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_empty_content_guard(dispatcher, mock_adapter, mock_registry):
+    """Test #8: dispatch_completed() skips when content is empty/whitespace."""
+    await dispatcher.start()
+
+    source = "telegram:12345"
+
+    # Empty string should be skipped
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-1",
+        source=source,
+        content=""
+    )
+    mock_adapter.send.assert_not_called()
+
+    # Whitespace only should be skipped
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-2",
+        source=source,
+        content="   \t\n  "
+    )
+    mock_adapter.send.assert_not_called()
+
+    # Non-empty content should still send
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-3",
+        source=source,
+        content="Actual content"
+    )
+    assert mock_adapter.send.call_count == 1
+
+    await dispatcher.stop()
+
+
+# ==============================================================================
+# Dispatcher: _progressive_sent_sources cleanup
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_progressive_sent_sources_cleanup_after_dispatch_completed(dispatcher, mock_adapter, mock_registry):
+    """Test #9: Source is removed from _progressive_sent_sources after dispatch_completed skips it.
+
+    When dispatch_completed() skips a source (because progressive was already sent),
+    it discards the source from the tracking set. This means the NEXT dispatch_completed
+    call for the same source will send normally (since the source is no longer tracked).
+    """
+    await dispatcher.start()
+
+    source = "telegram:12345"
+
+    # Simulate progressive send (tracks the source)
+    await dispatcher.dispatch_message(source, "Progressive text")
+    assert source in dispatcher._progressive_sent_sources
+
+    # First dispatch_completed skips (tracked) and discards source
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-1",
+        source=source,
+        content="Final content"
+    )
+
+    # Source should be removed from tracking set (discarded on skip)
+    assert source not in dispatcher._progressive_sent_sources
+
+    # Now dispatch_completed should send normally (source not in set anymore)
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-2",
+        source=source,
+        content="Another final content"
+    )
+
+    # Two total sends: progressive message + second dispatch_completed
+    # First dispatch_completed was skipped (discarded and skipped)
+    assert mock_adapter.send.call_count == 2
+
+    await dispatcher.stop()
+
+
+# ==============================================================================
+# Dispatcher: Error handling in progressive dispatch
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_dispatch_message_handles_adapter_exception(dispatcher, mock_registry):
+    """Test #10: Error in progressive dispatch is caught and logged, doesn't break execution."""
+    error_adapter = AsyncMock()
+    error_adapter.send = AsyncMock(side_effect=Exception("Adapter error"))
+    mock_registry.get.return_value = error_adapter
+
+    await dispatcher.start()
+
+    # Should not raise - error is caught and logged internally
+    await dispatcher.dispatch_message("telegram:12345", "Hello")
+
+    # Source should NOT be tracked (since send failed with exception)
+    assert "telegram:12345" not in dispatcher._progressive_sent_sources
+
+    await dispatcher.stop()
+
+
+# ==============================================================================
+# Manager: Streaming loop content extraction - string content
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_streaming_extracts_string_content(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #11: Streaming loop extracts text from string content."""
+    from daemon.manager import InstanceManager
+
+    # Create a mock graph that yields an agent node message with string content
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Streaming response text"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-stream-1"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repository
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Hello",
+            message_id="test-msg-001",
+            message_source="telegram:12345"
+        )
+
+        # dispatch_message should have been called with the string content
+        mock_dispatcher.dispatch_message.assert_called()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['content'] == "Streaming response text"
+
+
+# ==============================================================================
+# Manager: Streaming loop content extraction - list content
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_streaming_extracts_list_content(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #12: Streaming loop extracts text from list content (multi-modal)."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = [{"type": "text", "text": "List content response"}]
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-list-1"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]), \
+         patch('daemon.manager.parse_think_tags', return_value=("List content response", None)):
+
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_dispatcher
+
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+            result = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+
+            mock_dispatcher.dispatch_message.assert_called()
+            call_args = mock_dispatcher.dispatch_message.call_args
+            assert call_args.kwargs['content'] == "List content response"
+
+
+@pytest.mark.asyncio
+async def test_manager_streaming_mixed_list_content_only_text_dispatched(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #13: Streaming loop handles list with mixed text and non-text blocks."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = [
+        {"type": "text", "text": "Part one "},
+        {"type": "image", "url": "http://example.com/image.png"},
+        {"type": "text", "text": "Part two"}
+    ]
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-mixed-1"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]), \
+         patch('daemon.manager.parse_think_tags', return_value=("Part one  Part two", None)):
+
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_dispatcher
+
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+            result = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+
+            # Should have been called with joined text (non-text blocks filtered)
+            mock_dispatcher.dispatch_message.assert_called()
+            call_args = mock_dispatcher.dispatch_message.call_args
+            content = call_args.kwargs['content']
+            assert "Part one" in content
+            assert "Part two" in content
+            # Image URL should not appear
+            assert "http://example.com" not in content
+
+
+# ==============================================================================
+# Manager: Streaming deduplication by message ID
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_streaming_deduplication_by_message_id(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #14: Same message ID is not dispatched twice."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    # Two messages with the SAME ID
+    msg1 = Mock()
+    msg1.content = "First update"
+    msg1.type = 'ai'
+    msg1.tool_calls = []
+    msg1.id = "msg-same-id"
+
+    msg2 = Mock()
+    msg2.content = "Second update"
+    msg2.type = 'ai'
+    msg2.tool_calls = []
+    msg2.id = "msg-same-id"  # Same ID
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [msg1]}})
+        yield ("updates", {"agent": {"messages": [msg2]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repository
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Hello",
+            message_id="test-msg-001",
+            message_source="telegram:12345"
+        )
+
+        # Should only dispatch ONCE (first message, second is deduped)
+        mock_dispatcher.dispatch_message.assert_called_once()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['content'] == "First update"
+
+
+@pytest.mark.asyncio
+async def test_manager_streaming_multiple_messages_same_execution(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #15: Multiple messages with different IDs are each dispatched separately."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    msg1 = Mock()
+    msg1.content = "First message"
+    msg1.type = 'ai'
+    msg1.tool_calls = []
+    msg1.id = "msg-unique-1"
+
+    msg2 = Mock()
+    msg2.content = "Second message"
+    msg2.type = 'ai'
+    msg2.tool_calls = []
+    msg2.id = "msg-unique-2"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [msg1]}})
+        yield ("updates", {"agent": {"messages": [msg2]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repository
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Hello",
+            message_id="test-msg-001",
+            message_source="telegram:12345"
+        )
+
+        # Should dispatch TWICE (once for each unique message)
+        assert mock_dispatcher.dispatch_message.call_count == 2
+        contents = [call.kwargs['content'] for call in mock_dispatcher.dispatch_message.call_args_list]
+        assert "First message" in contents
+        assert "Second message" in contents
+
+
+# ==============================================================================
+# Manager: Empty content from streaming
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_streaming_empty_content_not_dispatched(
+    mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository
+):
+    """Test #16: Empty content from streaming should not be dispatched."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    # Message with empty content
+    empty_msg = Mock()
+    empty_msg.content = ""
+    empty_msg.type = 'ai'
+    empty_msg.tool_calls = []
+    empty_msg.id = "msg-empty"
+
+    # Message with whitespace-only content
+    whitespace_msg = Mock()
+    whitespace_msg.content = "   \t\n  "
+    whitespace_msg.type = 'ai'
+    whitespace_msg.tool_calls = []
+    whitespace_msg.id = "msg-whitespace"
+
+    # Valid message
+    valid_msg = Mock()
+    valid_msg.content = "Valid content"
+    valid_msg.type = 'ai'
+    valid_msg.tool_calls = []
+    valid_msg.id = "msg-valid"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [empty_msg]}})
+        yield ("updates", {"agent": {"messages": [whitespace_msg]}})
+        yield ("updates", {"agent": {"messages": [valid_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [valid_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repository
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Hello",
+            message_id="test-msg-001",
+            message_source="telegram:12345"
+        )
+
+        # Only the valid message should have been dispatched
+        mock_dispatcher.dispatch_message.assert_called_once()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['content'] == "Valid content"
