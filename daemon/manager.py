@@ -1028,6 +1028,29 @@ class InstanceManager:
         final_content = ""
         last_ai_message = None
         
+        # Determine the effective source for progressive dispatch
+        # When processing an internal_report:* message, we need to use the original
+        # external source (e.g., telegram:123) instead of the internal report source
+        dispatch_source: str | None = None
+        if message_source:
+            if message_source.startswith("internal_"):
+                # This is an internal message (completion report, error report, etc.)
+                # Retrieve the original external source from instance metadata
+                instance_meta = self._instance_repository.get(instance_id)
+                # Use is not None check because empty dict {} is falsy
+                if instance_meta is not None and instance_meta.instance_metadata is not None:
+                    dispatch_source = instance_meta.instance_metadata.get("original_source")
+                if not dispatch_source:
+                    logger.debug(
+                        f"No original_source found for instance {instance_id[:8]}... "
+                        f"(message_source={message_source})"
+                    )
+            else:
+                # This is an external message - store as original source for future internal reports
+                dispatch_source = message_source
+                # Store in instance metadata for later retrieval when child completes
+                self._instance_repository.set_metadata(instance_id, "original_source", message_source)
+        
         
         # Project context injection for first message only
         # Must happen BEFORE building graph_input
@@ -1152,7 +1175,7 @@ class InstanceManager:
                     
                     if mode == "updates":
                         # Progressive delivery: dispatch AI messages from "agent" node immediately
-                        if message_source and self.source_dispatcher:
+                        if dispatch_source and self.source_dispatcher:
                             for node_name, node_data in data.items():
                                 if node_name == "agent":
                                     node_messages = node_data.get("messages", [])
@@ -1181,7 +1204,7 @@ class InstanceManager:
                                         if content and content.strip():
                                             try:
                                                 await self.source_dispatcher.dispatch_message(
-                                                    source=message_source,
+                                                    source=dispatch_source,
                                                     content=content
                                                 )
                                             except Exception as e:

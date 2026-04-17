@@ -716,3 +716,242 @@ async def test_manager_streaming_empty_content_not_dispatched(
         mock_dispatcher.dispatch_message.assert_called_once()
         call_args = mock_dispatcher.dispatch_message.call_args
         assert call_args.kwargs['content'] == "Valid content"
+
+
+# ==============================================================================
+# Manager: Original source preservation for child completion reports
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_stores_original_source_in_metadata(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #17: External source is stored in instance metadata as original_source."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-1"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Create mock instance repository that tracks set_metadata calls
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.return_value = None  # Initial get returns None
+    mock_instance_repo.set_metadata = MagicMock()
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Hello",
+            message_id="test-msg-001",
+            message_source="telegram:123456789"
+        )
+
+        # Verify set_metadata was called with original_source
+        mock_instance_repo.set_metadata.assert_called_with(
+            instance_id, "original_source", "telegram:123456789"
+        )
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_original_source_for_internal_report(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #18: Internal report source uses original external source for dispatch."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response after child completion"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-2"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Create mock instance repository that returns original_source in metadata
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {
+        "original_source": "telegram:123456789"
+    }
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.return_value = mock_instance_meta
+    mock_instance_repo.set_metadata = MagicMock()
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        # Process with internal_report source
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Child completed",
+            message_id="test-msg-002",
+            message_source="internal_report:child123:msg456"
+        )
+
+        # Verify dispatch was called with ORIGINAL source, not internal_report source
+        mock_dispatcher.dispatch_message.assert_called()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['source'] == "telegram:123456789"
+        assert call_args.kwargs['content'] == "Response after child completion"
+
+
+@pytest.mark.asyncio
+async def test_manager_skips_dispatch_when_no_original_source(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #19: Dispatch is skipped when internal report has no original_source."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response that should not be dispatched"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-3"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Create mock instance repository with NO original_source
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {}  # Empty metadata
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.return_value = mock_instance_meta
+    mock_instance_repo.set_metadata = MagicMock()
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        # Process with internal_report source but no original_source stored
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Child completed",
+            message_id="test-msg-003",
+            message_source="internal_report:child123:msg456"
+        )
+
+        # Verify dispatch was NOT called (no original source to use)
+        mock_dispatcher.dispatch_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_original_source_for_internal_error_report(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #20: Internal error report also uses original external source for dispatch."""
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response after error"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-4"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Create mock instance repository that returns original_source in metadata
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {
+        "original_source": "discord:user_abc"
+    }
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.return_value = mock_instance_meta
+    mock_instance_repo.set_metadata = MagicMock()
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        # Process with internal_error_report source
+        result = await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Child error",
+            message_id="test-msg-004",
+            message_source="internal_error_report:child123"
+        )
+
+        # Verify dispatch was called with ORIGINAL source
+        mock_dispatcher.dispatch_message.assert_called()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['source'] == "discord:user_abc"

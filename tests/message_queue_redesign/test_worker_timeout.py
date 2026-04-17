@@ -842,3 +842,152 @@ class TestWorkerRetryWorkflow:
         mock_task_processor._task_repo.cancel_task.assert_called_once()
         mock_task_processor._task_repo.schedule_retry.assert_not_called()
         assert worker._tasks_failed == 1
+
+
+# ============================================================================
+# Original Source Preservation Tests (dispatch_completed fix)
+# ============================================================================
+
+class TestOriginalSourcePreservation:
+    """Tests for preserving original external source for internal messages."""
+
+    def test_process_message_processor_dispatches_with_original_source(self):
+        """ProcessMessageProcessor uses original_source for internal messages."""
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock, patch, MagicMock
+        import asyncio
+        
+        # Create mock dependencies
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        mock_manager._instance_repository = Mock()
+        
+        # Mock instance metadata with original_source
+        mock_instance_meta = Mock()
+        mock_instance_meta.instance_metadata = {"original_source": "telegram:12345"}
+        mock_manager._instance_repository.get.return_value = mock_instance_meta
+        
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test"
+        mock_message.source = "internal_report:child123:msg456"
+        mock_message_repo.get = Mock(return_value=mock_message)
+        
+        mock_dispatcher = AsyncMock()
+        
+        # Create processor
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            source_dispatcher=mock_dispatcher,
+        )
+        
+        # Create task
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 0
+        
+        # Run processing
+        asyncio.run(processor.process(task))
+        
+        # Verify dispatch_completed was called with ORIGINAL source
+        mock_dispatcher.dispatch_completed.assert_called_once()
+        call_kwargs = mock_dispatcher.dispatch_completed.call_args.kwargs
+        assert call_kwargs["source"] == "telegram:12345"
+
+    def test_process_message_processor_skips_dispatch_when_no_original_source(self):
+        """ProcessMessageProcessor skips dispatch when internal report has no original_source."""
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock, patch, MagicMock
+        import asyncio
+        
+        # Create mock dependencies
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        mock_manager._instance_repository = Mock()
+        
+        # Mock instance metadata WITHOUT original_source
+        mock_instance_meta = Mock()
+        mock_instance_meta.instance_metadata = {}
+        mock_manager._instance_repository.get.return_value = mock_instance_meta
+        
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test"
+        mock_message.source = "internal_report:child123"
+        mock_message_repo.get = Mock(return_value=mock_message)
+        
+        mock_dispatcher = AsyncMock()
+        
+        # Create processor
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            source_dispatcher=mock_dispatcher,
+        )
+        
+        # Create task
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 0
+        
+        # Run processing
+        asyncio.run(processor.process(task))
+        
+        # Verify dispatch_completed was NOT called (no original source)
+        mock_dispatcher.dispatch_completed.assert_not_called()
+
+    def test_process_message_processor_uses_direct_source_for_external_messages(self):
+        """ProcessMessageProcessor uses message.source directly for external messages."""
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock, patch, MagicMock
+        import asyncio
+        
+        # Create mock dependencies
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        mock_manager._instance_repository = Mock()
+        
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test"
+        mock_message.source = "telegram:67890"  # External source
+        mock_message_repo.get = Mock(return_value=mock_message)
+        
+        mock_dispatcher = AsyncMock()
+        
+        # Create processor
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            source_dispatcher=mock_dispatcher,
+        )
+        
+        # Create task
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 0
+        
+        # Run processing
+        asyncio.run(processor.process(task))
+        
+        # Verify dispatch_completed was called with the DIRECT source
+        mock_dispatcher.dispatch_completed.assert_called_once()
+        call_kwargs = mock_dispatcher.dispatch_completed.call_args.kwargs
+        assert call_kwargs["source"] == "telegram:67890"
+
