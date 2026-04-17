@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-12 SSE Message Unification)
+## Test Results (Latest: 2026-04-17 Progressive Message Delivery)
+
+### Progressive Message Delivery (commit 388d64c)
+- **17 new progressive dispatch tests** — ALL PASS (dispatcher routing, skip rules, dedup, cleanup, error handling, manager streaming)
+- **704 existing tests pass** (125 sources + 579 core) — no regressions
+- **1 quick fix applied**: Added try/except around adapter.send() in dispatch_message() for error resilience
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-17-progressive-message-delivery.md` for full report
+
+### Progressive Message Delivery Status: ✅ READY FOR MERGE
 
 ### feature/sse-message-unification branch (commit 7f39b28)
 - **1787 tests pass** (22 skipped, 0 failed) excluding integration
@@ -151,9 +160,9 @@ tests/
 
 ### Status: ✅ READY FOR MERGE
 
-**Latest:** 838 job_queue tests pass (14 skipped, 0 failed), 2024 core tests pass (13 pre-existing failures), dev.sh validated
+**Latest:** 838 job_queue tests pass (14 skipped, 0 failed), 2024 core tests pass (13 pre-existing failures), dev.sh validated, **17 progressive dispatch tests pass**
 **Branch:** feature/job-system-improvements
-**Commits:** `14d204c` (pre-existing test fixes)
+**Commits:** `388d64c` (progressive dispatch tests + error handling fix)
 **Key verified:** Event-driven wake ≤100ms, polling fallback, idempotent enqueue (new/existing/terminal/TTL), RetryScheduler dispatch, queue resume dispatch, concurrent enqueue, metrics counters
 **All 12 functional/race/edge scenarios covered** — see RESULTS/2026-04-17-phase4-event-dispatch-idempotent-enqueue.md
 
