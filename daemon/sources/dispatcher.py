@@ -48,6 +48,9 @@ class ResponseDispatcher:
         self._send_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_guard = asyncio.Lock()
         
+        # Track sources that received progressive messages to avoid duplicate delivery
+        self._progressive_sent_sources: set[str] = set()
+        
         logger.info(f"ResponseDispatcher initialized with subscriber_id={subscriber_id}")
     
     async def start(self) -> None:
@@ -74,6 +77,7 @@ class ResponseDispatcher:
         # Clear send locks
         async with self._locks_guard:
             self._send_locks.clear()
+            self._progressive_sent_sources.clear()
     
     async def dispatch_completed(
         self,
@@ -110,6 +114,12 @@ class ResponseDispatcher:
         # Skip empty content to avoid duplicate/empty sends (progressive may have sent)
         if not content or not content.strip():
             logger.debug(f"Skipping empty content for source={source}")
+            return
+        
+        # Skip if source already received progressive messages (last message was already sent)
+        if source in self._progressive_sent_sources:
+            logger.debug(f"Skipping dispatch_completed for source={source} (progressive delivery already sent)")
+            self._progressive_sent_sources.discard(source)
             return
         
         # Parse source as "source_id:external_user_id"
@@ -229,6 +239,8 @@ class ResponseDispatcher:
             success = await adapter.send(outgoing)
             if success:
                 logger.debug(f"Sent progressive message to user {external_user_id} via {source_id}")
+                # Track this source so dispatch_completed won't send again
+                self._progressive_sent_sources.add(source)
             else:
                 logger.warning(f"Failed to send progressive message to user {external_user_id} via {source_id}")
     

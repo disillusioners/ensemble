@@ -1137,6 +1137,7 @@ class InstanceManager:
         all_state_messages: list = []
         tool_outputs: dict = {}
         event_index = 0  # Sequence counter for checkpoint_id
+        _dispatched_msg_ids: set[str] = set()  # Track dispatched message IDs for dedup
 
         # Stream through graph execution
         try:
@@ -1156,16 +1157,32 @@ class InstanceManager:
                                 if node_name == "agent":
                                     node_messages = node_data.get("messages", [])
                                     for msg in node_messages:
-                                        # Check if it's an AI message with text content
-                                        if (
-                                            hasattr(msg, 'type') and msg.type == 'ai' and
-                                            hasattr(msg, 'content') and msg.content and
-                                            msg.content.strip()
-                                        ):
+                                        # Check if it's an AI message
+                                        if not (hasattr(msg, 'type') and msg.type == 'ai'):
+                                            continue
+
+                                        # W3: Deduplicate by message ID
+                                        msg_id = getattr(msg, 'id', None)
+                                        if msg_id and msg_id in _dispatched_msg_ids:
+                                            continue
+                                        if msg_id:
+                                            _dispatched_msg_ids.add(msg_id)
+
+                                        # W2: Handle list content (e.g., [{"type": "text", "text": "..."}])
+                                        content = getattr(msg, 'content', None)
+                                        if isinstance(content, list):
+                                            text_parts = [
+                                                b.get("text", "")
+                                                for b in content
+                                                if isinstance(b, dict) and b.get("text")
+                                            ]
+                                            content = " ".join(text_parts)
+
+                                        if content and content.strip():
                                             try:
                                                 await self.source_dispatcher.dispatch_message(
                                                     source=message_source,
-                                                    content=msg.content
+                                                    content=content
                                                 )
                                             except Exception as e:
                                                 logger.warning(

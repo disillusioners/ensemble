@@ -943,3 +943,323 @@ class TestProgressiveMessageDelivery:
             
             # Verify dispatch_message was NOT called (no source specified)
             mock_source_dispatcher.dispatch_message.assert_not_called()
+
+
+class TestListContentHandling:
+    """Tests for Fix W2: List content handling (content as list of blocks)."""
+
+    @pytest.fixture
+    def mock_source_dispatcher(self):
+        """Create a mock source dispatcher."""
+        dispatcher = AsyncMock()
+        dispatcher.dispatch_message = AsyncMock(return_value=None)
+        return dispatcher
+
+    @pytest.fixture
+    def streaming_graph_with_list_content(self):
+        """Create a mock graph that yields events with list content blocks."""
+        graph = Mock()
+        
+        # Create an AI message with list content (like [{"type": "text", "text": "..."}])
+        ai_message = Mock()
+        ai_message.content = [{"type": "text", "text": "List content response"}]
+        ai_message.type = 'ai'
+        ai_message.tool_calls = []
+        ai_message.id = "msg-list-1"
+        
+        stream_event = ("updates", {"agent": {"messages": [ai_message]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [ai_message]})
+        
+        return graph
+
+    @pytest.fixture
+    def streaming_graph_with_list_content_no_text(self):
+        """Create a mock graph that yields events with list content but no text blocks."""
+        graph = Mock()
+        
+        # Create an AI message with list content but no text blocks
+        ai_message = Mock()
+        ai_message.content = [{"type": "image", "url": "http://example.com/image.png"}]
+        ai_message.type = 'ai'
+        ai_message.tool_calls = []
+        ai_message.id = "msg-list-no-text-1"
+        
+        stream_event = ("updates", {"agent": {"messages": [ai_message]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [ai_message]})
+        
+        return graph
+
+    @pytest.fixture
+    def streaming_graph_with_mixed_list_content(self):
+        """Create a mock graph with list content containing multiple text blocks."""
+        graph = Mock()
+        
+        # Create an AI message with multiple text blocks in list
+        ai_message = Mock()
+        ai_message.content = [
+            {"type": "text", "text": "Part one "},
+            {"type": "text", "text": "Part two "},
+            {"type": "text", "text": "Part three"}
+        ]
+        ai_message.type = 'ai'
+        ai_message.tool_calls = []
+        ai_message.id = "msg-mixed-1"
+        
+        stream_event = ("updates", {"agent": {"messages": [ai_message]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [ai_message]})
+        
+        return graph
+
+    @pytest.mark.asyncio
+    async def test_manager_extracts_text_from_list_content(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_list_content, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Test that manager correctly extracts text from list content and dispatches it.
+        
+        When message.content is a list like [{"type": "text", "text": "hello"}],
+        the manager should extract the text and dispatch it.
+        """
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_list_content), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]), \
+             patch('daemon.manager.parse_think_tags', return_value=("test content", None)):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was called with extracted text
+            mock_source_dispatcher.dispatch_message.assert_called()
+            call_args = mock_source_dispatcher.dispatch_message.call_args
+            assert call_args.kwargs['content'] == "List content response"
+
+    @pytest.mark.asyncio
+    async def test_manager_skips_dispatch_when_list_has_no_text(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_list_content_no_text, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Test that manager does NOT dispatch when list content has no text blocks.
+        
+        When message.content is a list with no text blocks (e.g., only images),
+        the manager should skip dispatching since there's no text to send.
+        """
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_list_content_no_text), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]), \
+             patch('daemon.manager.parse_think_tags', return_value=("test content", None)):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was NOT called (no text content)
+            mock_source_dispatcher.dispatch_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manager_joins_multiple_text_blocks(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_mixed_list_content, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Test that manager joins multiple text blocks with spaces."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_mixed_list_content), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]), \
+             patch('daemon.manager.parse_think_tags', return_value=("test content", None)):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was called with joined text
+            mock_source_dispatcher.dispatch_message.assert_called()
+            call_args = mock_source_dispatcher.dispatch_message.call_args
+            # Content ends with spaces so join produces double spaces
+            assert call_args.kwargs['content'] == "Part one  Part two  Part three"
+
+
+class TestStreamingDeduplicationByMessageId:
+    """Tests for Fix W3: Streaming deduplication by message ID."""
+
+    @pytest.fixture
+    def mock_source_dispatcher(self):
+        """Create a mock source dispatcher."""
+        dispatcher = AsyncMock()
+        dispatcher.dispatch_message = AsyncMock(return_value=None)
+        return dispatcher
+
+    @pytest.fixture
+    def streaming_graph_with_duplicate_ids(self):
+        """Create a mock graph that yields events with duplicate message IDs."""
+        graph = Mock()
+        
+        # First message with ID
+        msg1 = Mock()
+        msg1.content = "First message"
+        msg1.type = 'ai'
+        msg1.tool_calls = []
+        msg1.id = "msg-duplicate"
+        
+        # Second message with SAME ID (duplicate)
+        msg2 = Mock()
+        msg2.content = "Duplicate message"
+        msg2.type = 'ai'
+        msg2.tool_calls = []
+        msg2.id = "msg-duplicate"  # Same ID!
+        
+        stream_event1 = ("updates", {"agent": {"messages": [msg1]}})
+        stream_event2 = ("updates", {"agent": {"messages": [msg2]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event1
+            yield stream_event2
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
+        
+        return graph
+
+    @pytest.fixture
+    def streaming_graph_with_unique_ids(self):
+        """Create a mock graph that yields events with unique message IDs."""
+        graph = Mock()
+        
+        msg1 = Mock()
+        msg1.content = "First unique message"
+        msg1.type = 'ai'
+        msg1.tool_calls = []
+        msg1.id = "msg-unique-1"
+        
+        msg2 = Mock()
+        msg2.content = "Second unique message"
+        msg2.type = 'ai'
+        msg2.tool_calls = []
+        msg2.id = "msg-unique-2"
+        
+        stream_event1 = ("updates", {"agent": {"messages": [msg1]}})
+        stream_event2 = ("updates", {"agent": {"messages": [msg2]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event1
+            yield stream_event2
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [msg1, msg2]})
+        
+        return graph
+
+    @pytest.mark.asyncio
+    async def test_manager_skips_duplicate_message_ids(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_duplicate_ids, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Test that manager skips dispatching messages with duplicate IDs.
+        
+        When the same message ID appears multiple times in the streaming session,
+        the manager should only dispatch the first one and skip subsequent duplicates.
+        """
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_duplicate_ids), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was called exactly ONCE for the duplicate ID
+            mock_source_dispatcher.dispatch_message.assert_called_once()
+            
+            # The content should be from the FIRST message only
+            call_args = mock_source_dispatcher.dispatch_message.call_args
+            assert call_args.kwargs['content'] == "First message"
+
+    @pytest.mark.asyncio
+    async def test_manager_dispatches_unique_message_ids(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_unique_ids, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Test that manager dispatches messages with different IDs normally.
+        
+        When messages have unique IDs, the manager should dispatch each one.
+        """
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_unique_ids), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was called TWICE (once for each unique ID)
+            assert mock_source_dispatcher.dispatch_message.call_count == 2
+            
+            # Check both messages were dispatched
+            call_args_list = mock_source_dispatcher.dispatch_message.call_args_list
+            contents = [call.kwargs['content'] for call in call_args_list]
+            assert "First unique message" in contents
+            assert "Second unique message" in contents

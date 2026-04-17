@@ -685,3 +685,185 @@ async def test_dispatch_message_per_user_locking(dispatcher, mock_registry):
     assert mock_adapter.send.call_count == 2
     
     await dispatcher.stop()
+
+
+class TestProgressiveDuplicateDelivery:
+    """Tests for Fix W1: Duplicate message delivery prevention via _progressive_sent_sources."""
+
+    @pytest.fixture
+    def mock_adapter(self):
+        """Create a mock adapter that always succeeds."""
+        adapter = AsyncMock()
+        adapter.send = AsyncMock(return_value=True)
+        return adapter
+
+    @pytest.fixture
+    def mock_registry(self, mock_adapter):
+        """Create a mock registry with a telegram adapter."""
+        registry = Mock()
+        registry.get.return_value = mock_adapter
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_dispatch_completed_skips_after_progressive_send(self, mock_registry):
+        """Test that dispatch_completed skips sending if source already received progressive message.
+        
+        When dispatch_message() sends successfully, then dispatch_completed() for same source
+        should skip sending to avoid duplicate delivery.
+        """
+        dispatcher = ResponseDispatcher(registry=mock_registry)
+        await dispatcher.start()
+        
+        source = "telegram:12345"
+        
+        # Simulate successful progressive message dispatch
+        await dispatcher.dispatch_message(source=source, content="Progressive text")
+        
+        # Verify the source was tracked
+        assert source in dispatcher._progressive_sent_sources
+        
+        # Count calls before dispatch_completed
+        adapter = mock_registry.get.return_value
+        calls_before = adapter.send.call_count
+        
+        # Now dispatch_completed should skip (source is in set)
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-1",
+            source=source,
+            content="Hello world"
+        )
+        
+        # Verify send was NOT called for dispatch_completed (no new calls added)
+        assert adapter.send.call_count == calls_before
+        
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_completed_different_source_still_sends(self, mock_registry, mock_adapter):
+        """Test that dispatch_completed for a DIFFERENT source still sends normally.
+        
+        When dispatch_message() sends to one source, dispatch_completed() for a 
+        different source should still send normally (no cross-source interference).
+        """
+        dispatcher = ResponseDispatcher(registry=mock_registry)
+        await dispatcher.start()
+        
+        source1 = "telegram:12345"
+        source2 = "telegram:67890"
+        
+        # Simulate successful progressive message dispatch to source1 only
+        await dispatcher.dispatch_message(source=source1, content="Progressive for source1")
+        
+        # Verify only source1 was tracked
+        assert source1 in dispatcher._progressive_sent_sources
+        assert source2 not in dispatcher._progressive_sent_sources
+        
+        # Count calls after progressive dispatch
+        calls_after_progressive = mock_adapter.send.call_count
+        
+        # dispatch_completed for source2 should send normally
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-1",
+            source=source2,
+            content="Final response for source2"
+        )
+        
+        # Verify one new call was made for source2
+        assert mock_adapter.send.call_count == calls_after_progressive + 1
+        
+        # Check the last call was for source2
+        last_call = mock_adapter.send.call_args_list[-1]
+        assert "67890" in str(last_call)
+        
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_source_cleaned_after_progressive_skip(self, mock_registry, mock_adapter):
+        """Test that source is cleaned from tracking set after dispatch_completed skips.
+        
+        After dispatch_completed() skips a source (because progressive was sent),
+        the source should be removed from the tracking set. This means the next
+        dispatch_completed for the same source would send again.
+        """
+        dispatcher = ResponseDispatcher(registry=mock_registry)
+        await dispatcher.start()
+        
+        source = "telegram:12345"
+        
+        # Simulate successful progressive message dispatch
+        await dispatcher.dispatch_message(source=source, content="Progressive text")
+        
+        # Verify source is tracked
+        assert source in dispatcher._progressive_sent_sources
+        
+        # Count calls after progressive
+        calls_after_progressive = mock_adapter.send.call_count
+        
+        # First dispatch_completed skips (removes from set)
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-1",
+            source=source,
+            content="Final content"
+        )
+        
+        # Verify no new call was made (skipped)
+        assert mock_adapter.send.call_count == calls_after_progressive
+        
+        # Verify source was removed from tracking set
+        assert source not in dispatcher._progressive_sent_sources
+        
+        # Now dispatch_completed should send normally (source not in set anymore)
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-2",
+            source=source,
+            content="Another final content"
+        )
+        
+        # Verify one new call was made
+        assert mock_adapter.send.call_count == calls_after_progressive + 1
+        
+        await dispatcher.stop()
+
+    @pytest.mark.asyncio
+    async def test_progressive_only_tracks_on_success(self):
+        """Test that source is only tracked when progressive send succeeds."""
+        # Create registry with failing adapter
+        failing_adapter = AsyncMock()
+        failing_adapter.send = AsyncMock(return_value=False)
+        mock_registry = Mock()
+        mock_registry.get.return_value = failing_adapter
+        
+        # Create registry with success adapter for second call
+        success_adapter = AsyncMock()
+        success_adapter.send = AsyncMock(return_value=True)
+        
+        dispatcher = ResponseDispatcher(registry=mock_registry)
+        await dispatcher.start()
+        
+        source = "telegram:12345"
+        
+        # dispatch_message fails
+        await dispatcher.dispatch_message(source=source, content="Failed progressive")
+        
+        # Source should NOT be tracked since send failed
+        assert source not in dispatcher._progressive_sent_sources
+        
+        # Now update registry to return success adapter
+        mock_registry.get.return_value = success_adapter
+        
+        # dispatch_completed should send normally
+        await dispatcher.dispatch_completed(
+            instance_id="test-instance",
+            message_id="msg-1",
+            source=source,
+            content="Final content"
+        )
+        
+        # Adapter.send SHOULD have been called since progressive wasn't tracked
+        success_adapter.send.assert_called_once()
+        
+        await dispatcher.stop()
