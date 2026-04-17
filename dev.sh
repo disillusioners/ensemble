@@ -45,10 +45,16 @@ fi
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
 
-# Create data directory if it doesn't exist
-mkdir -p data
+# Create dev data directory if it doesn't exist (separate from production ./data)
+export DATA_DIR="${DATA_DIR:-./data_dev}"
+mkdir -p "$DATA_DIR"
 
-export PORT="${PORT:-8079}"
+# Override persistence paths for dev mode
+export PERSISTENCE_DB_PATH="$DATA_DIR/instances.db"
+export PERSISTENCE_CHECKPOINTER_DB_PATH="$DATA_DIR/checkpoints.db"
+
+# Dev mode always uses port 8079 to avoid conflicting with production on 8088
+export PORT=8079
 export HOST="${HOST:-0.0.0.0}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"
 

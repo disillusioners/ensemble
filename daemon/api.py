@@ -86,6 +86,7 @@ from .services.job_feedback_observer import JobFeedbackObserver
 from .services.job_queue_mgmt_service import JobQueueMgmtService
 from .services.dead_letter_service import DeadLetterService
 from .services.job_recovery_service import JobRecoveryService
+from .services.dispatch_event_bus import DispatchEventBus
 from .repositories.job_queue.queue_repository import JobQueueRepository
 from .repositories.job_queue.lock_repository import LockRepository
 from .repositories.job_queue.dead_letter_repository import DeadLetterRepository
@@ -164,11 +165,12 @@ job_queue_service: JobQueueService = None
 job_processor: JobProcessor = None
 job_queue_mgmt_service: JobQueueMgmtService = None
 retry_scheduler = None
+dispatch_event_bus: DispatchEventBus = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global manager, start_time, job_queue_service, job_processor, job_queue_mgmt_service, retry_scheduler
+    global manager, start_time, job_queue_service, job_processor, job_queue_mgmt_service, retry_scheduler, dispatch_event_bus
     config = load_config()
     manager = InstanceManager(config)
     await manager.initialize()  # Initialize async checkpointer within async context
@@ -194,10 +196,13 @@ async def lifespan(app: FastAPI):
     queue_repo = JobQueueRepository(engine=manager._engine)
     
     # Create job queue management service for auto-provisioning
+    # Note: dispatch_bus will be set after DispatchEventBus is created
     job_queue_mgmt_service = JobQueueMgmtService(
         queue_repo=queue_repo,
         job_repo=job_repository,
     )
+    # Set DispatchEventBus on JobQueueMgmtService for resume notifications
+    job_queue_mgmt_service._dispatch_bus = dispatch_event_bus
     
     # Initialize JobQueueService with queue repository for per-queue locking
     job_queue_service = JobQueueService(
@@ -209,6 +214,13 @@ async def lifespan(app: FastAPI):
     
     # W6: Store the event loop for sync→async operations in complete_job_sync()
     job_queue_service.set_event_loop(asyncio.get_running_loop())
+    
+    # Create DispatchEventBus for event-driven job dispatch
+    dispatch_event_bus = DispatchEventBus()
+    dispatch_event_bus.set_event_loop(asyncio.get_running_loop())
+    
+    # Set DispatchEventBus on JobQueueService for enqueue notifications
+    job_queue_service.set_dispatch_bus(dispatch_event_bus)
     
     # Set up dependency injection for jobs router
     from daemon.routers.jobs import set_job_queue_service
@@ -248,11 +260,16 @@ async def lifespan(app: FastAPI):
     job_queue_service.set_retry_engine(retry_engine)
     
     # Initialize and start RetryScheduler for background retry polling
+    # Use the same data directory as persistence for the lock file
+    from pathlib import Path
+    lock_dir = Path(config.persistence.db_path).parent
     from daemon.services.retry_scheduler import RetryScheduler
     retry_scheduler = RetryScheduler(
         retry_engine=retry_engine,
         queue_service=job_queue_service,
         poll_interval=60.0,
+        lock_dir=lock_dir,
+        dispatch_bus=dispatch_event_bus,
     )
     await retry_scheduler.start()
     logger.info("RetryScheduler started")
@@ -291,6 +308,8 @@ async def lifespan(app: FastAPI):
         project_repo=manager._project_repository,
         queue_repo=queue_repo,
         poll_interval=2.0,
+        dispatch_bus=dispatch_event_bus,
+        event_dispatch_enabled=config.job_system.event_dispatch_enabled,
     )
     await job_processor.start()
     logger.info("JobProcessor started")

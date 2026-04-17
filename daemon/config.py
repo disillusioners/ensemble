@@ -179,6 +179,7 @@ class JobSystemConfig(BaseSettings):
     dlq_enabled: bool = Field(default=True, description="Enable dead letter queue functionality")
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
     observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
+    idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
 
 
 class Config(BaseSettings):
@@ -262,6 +263,23 @@ def load_config(config_path: Optional[str] = None) -> Config:
         queue_config["discard_on_startup"] = env_val in ("true", "1", "yes")
 
     config_dict["queue"] = queue_config
+
+    # Handle persistence config - env vars take priority over YAML
+    # This allows dev.sh to override paths via PERSISTENCE_DB_PATH, etc.
+    persistence_config: Dict[str, Any] = {}
+    if "persistence" in processed_config:
+        persistence_config = processed_config["persistence"].copy()
+    # Don't override db_path if PERSISTENCE_DB_PATH env var is set
+    if "PERSISTENCE_DB_PATH" not in os.environ:
+        persistence_config.setdefault("db_path", "./data/instances.db")
+    else:
+        persistence_config["db_path"] = os.environ["PERSISTENCE_DB_PATH"]
+    # Don't override checkpointer_db_path if PERSISTENCE_CHECKPOINTER_DB_PATH env var is set
+    if "PERSISTENCE_CHECKPOINTER_DB_PATH" not in os.environ:
+        persistence_config.setdefault("checkpointer_db_path", "./data/checkpoints.db")
+    else:
+        persistence_config["checkpointer_db_path"] = os.environ["PERSISTENCE_CHECKPOINTER_DB_PATH"]
+    config_dict["persistence"] = persistence_config
 
     if "compaction" in processed_config:
         config_dict["compaction"] = processed_config["compaction"]
