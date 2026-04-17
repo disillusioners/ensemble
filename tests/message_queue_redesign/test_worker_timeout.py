@@ -224,7 +224,6 @@ class TestRetryCountPassthrough:
             task_repo=mock_task_repo,
             event_repo=None,
             message_repository=mock_message_repo,
-            event_bus=None,
         )
         
         # Create task with retry_count > 0
@@ -265,7 +264,6 @@ class TestRetryCountPassthrough:
             task_repo=mock_task_repo,
             event_repo=None,
             message_repository=mock_message_repo,
-            event_bus=None,
         )
         
         # Create task with retry_count == 0 (first attempt)
