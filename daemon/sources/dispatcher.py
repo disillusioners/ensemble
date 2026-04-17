@@ -107,6 +107,11 @@ class ResponseDispatcher:
             logger.debug("No source registry configured, skipping dispatch")
             return
         
+        # Skip empty content to avoid duplicate/empty sends (progressive may have sent)
+        if not content or not content.strip():
+            logger.debug(f"Skipping empty content for source={source}")
+            return
+        
         # Parse source as "source_id:external_user_id"
         # Sources without ":" are internal (e.g., "api") and don't need routing
         if ":" not in source:
@@ -157,6 +162,75 @@ class ResponseDispatcher:
                 logger.debug(f"Sent response to user {external_user_id} via {source_id}")
             else:
                 logger.warning(f"Failed to send response to user {external_user_id} via {source_id}")
+    
+    async def dispatch_message(self, source: str, content: str) -> None:
+        """Send an intermediate message during execution (progressive delivery).
+        
+        Routes messages to external sources during agent execution, as opposed
+        to dispatch_completed which sends the final response.
+        
+        Args:
+            source: The source identifier (format: "source_id:external_user_id").
+            content: The message content to send.
+        """
+        if not self._running:
+            logger.debug("ResponseDispatcher not running, skipping dispatch")
+            return
+        
+        if self._registry is None:
+            logger.debug("No source registry configured, skipping dispatch")
+            return
+        
+        # Parse source as "source_id:external_user_id"
+        # Sources without ":" are internal (e.g., "api") and don't need routing
+        if ":" not in source:
+            logger.debug(f"Skipping internal source (no routing needed): {source}")
+            return
+        
+        source_id, external_user_id = source.split(":", 1)
+        
+        # Validate source_id format
+        if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', source_id):
+            logger.warning(f"Invalid source_id format: {source_id}")
+            return
+        
+        # Validate external_user_id length
+        if len(external_user_id) > 256:
+            logger.warning(f"external_user_id too long: {len(external_user_id)}")
+            return
+        
+        logger.debug(f"Dispatching progressive message for source={source_id}, user={external_user_id}")
+        
+        # Skip adapter lookup for internal sources (not external adapters)
+        if source_id.startswith("internal_"):
+            logger.debug(f"Skipping internal source (no adapter needed): {source_id}")
+            return
+        
+        # Get adapter from registry
+        adapter = self._registry.get(source_id)
+        if adapter is None:
+            logger.error(f"No adapter found for source_id={source_id}")
+            return
+        
+        # Create OutgoingMessage
+        outgoing = OutgoingMessage(
+            external_user_id=external_user_id,
+            content=content,
+            source_id=source_id,
+            metadata={},
+            message_type="text",
+            reply_to_id=None
+        )
+        
+        # Send with per-user lock for ordering
+        send_lock = await self._get_send_lock(external_user_id)
+        
+        async with send_lock:
+            success = await adapter.send(outgoing)
+            if success:
+                logger.debug(f"Sent progressive message to user {external_user_id} via {source_id}")
+            else:
+                logger.warning(f"Failed to send progressive message to user {external_user_id} via {source_id}")
     
     async def _get_send_lock(self, external_user_id: str) -> asyncio.Lock:
         """Get or create a send lock for a specific user.

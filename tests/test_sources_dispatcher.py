@@ -469,3 +469,219 @@ async def test_adapter_send_failure_logged(dispatcher, mock_registry, caplog):
     # (caplog captures the log output)
     
     await dispatcher.stop()
+
+
+# ============================================================================
+# Progressive Delivery (dispatch_message) Tests
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_dispatch_message_routes_to_correct_adapter(dispatcher, mock_registry):
+    """dispatch_message should route correctly to the right adapter for external sources."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    await dispatcher.dispatch_message("telegram:123456789", "Hello World")
+    
+    mock_adapter.send.assert_called_once()
+    call_args = mock_adapter.send.call_args[0][0]
+    assert call_args.external_user_id == "123456789"
+    assert call_args.content == "Hello World"
+    assert call_args.source_id == "telegram"
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_api_source(dispatcher, mock_registry):
+    """dispatch_message should skip 'api' source (no colon) - internal source."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # "api" has no colon, so it's treated as an internal source
+    await dispatcher.dispatch_message("api", "Hello World")
+    
+    # Adapter's send should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_internal_report_source(dispatcher, mock_registry):
+    """dispatch_message should skip 'internal_report:*' sources - internal sources."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # "internal_report:some_id" starts with "internal_" prefix
+    await dispatcher.dispatch_message("internal_report:some_id", "Hello World")
+    
+    # Adapter's send should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_internal_error_report_source(dispatcher, mock_registry):
+    """dispatch_message should skip 'internal_error_report:*' sources - internal sources."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # "internal_error_report:some_id" starts with "internal_" prefix
+    await dispatcher.dispatch_message("internal_error_report:some_id", "Hello World")
+    
+    # Adapter's send should NOT be called for internal sources
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_skips_empty_string(dispatcher, mock_registry):
+    """dispatch_completed should not send when content is empty string."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content=""  # Empty string
+    )
+    
+    # Adapter's send should NOT be called for empty content
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_skips_whitespace_content(dispatcher, mock_registry):
+    """dispatch_completed should not send when content is only whitespace."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content="   \t\n  "  # Whitespace only
+    )
+    
+    # Adapter's send should NOT be called for whitespace-only content
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completed_sends_non_empty_content(dispatcher, mock_registry):
+    """dispatch_completed should still send normally when content is non-empty."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    await dispatcher.dispatch_completed(
+        instance_id="test-instance",
+        message_id="msg-001",
+        source="telegram:12345",
+        content="Hello World"
+    )
+    
+    # Adapter's send SHOULD be called for non-empty content
+    mock_adapter.send.assert_called_once()
+    call_args = mock_adapter.send.call_args[0][0]
+    assert call_args.content == "Hello World"
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_handles_adapter_not_found(dispatcher, mock_registry):
+    """dispatch_message should handle missing adapter gracefully."""
+    mock_registry.get = Mock(return_value=None)  # No adapter found
+    
+    await dispatcher.start()
+    
+    # Should not raise, just log warning
+    await dispatcher.dispatch_message("telegram:12345", "Hello")
+    
+    # No exception should be raised
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_invalid_source_id_format(dispatcher, mock_registry):
+    """dispatch_message should skip sources with invalid source_id format."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # Invalid source_id (special characters)
+    await dispatcher.dispatch_message("invalid@source#id:12345", "Hello")
+    
+    # Adapter's send should NOT be called for invalid source_id
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_skips_long_external_user_id(dispatcher, mock_registry):
+    """dispatch_message should skip sources with too long external_user_id."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # external_user_id exceeds 256 char limit
+    long_user_id = "a" * 300
+    await dispatcher.dispatch_message(f"telegram:{long_user_id}", "Hello")
+    
+    # Adapter's send should NOT be called
+    mock_adapter.send.assert_not_called()
+    
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_message_per_user_locking(dispatcher, mock_registry):
+    """dispatch_message should use per-user locks for ordering."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock(return_value=True)
+    mock_registry.get = Mock(return_value=mock_adapter)
+    
+    await dispatcher.start()
+    
+    # Send multiple messages to same user
+    await dispatcher.dispatch_message("telegram:user1", "Message 1")
+    await dispatcher.dispatch_message("telegram:user1", "Message 2")
+    
+    # Both should be sent to same adapter
+    assert mock_adapter.send.call_count == 2
+    
+    await dispatcher.stop()

@@ -730,3 +730,216 @@ class TestGenerateAndBroadcastTitle:
             # Should log warning
             mock_logger.warning.assert_called()
             assert "Failed to generate title" in str(mock_logger.warning.call_args)
+
+
+class TestProgressiveMessageDelivery:
+    """Tests for progressive message delivery via source_dispatcher."""
+
+    @pytest.fixture
+    def mock_source_dispatcher(self):
+        """Create a mock source dispatcher."""
+        dispatcher = AsyncMock()
+        dispatcher.dispatch_message = AsyncMock(return_value=None)
+        return dispatcher
+
+    @pytest.fixture
+    def streaming_graph_with_agent_message(self):
+        """Create a mock graph that yields streaming events with agent messages."""
+        graph = Mock()
+        
+        # Create an AI message with text content
+        ai_message = Mock()
+        ai_message.content = "Streaming response"
+        ai_message.type = 'ai'
+        ai_message.tool_calls = []
+        ai_message.id = "msg-1"
+        
+        # Create a streaming event with agent node data
+        stream_event = ("updates", {"agent": {"messages": [ai_message]}})
+        
+        # Generator that yields the stream event
+        async def mock_astream(*args, **kwargs):
+            yield stream_event
+            yield ("updates", {"agent": {"messages": []}})  # Empty update to end
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [ai_message]})
+        
+        return graph
+
+    @pytest.fixture
+    def streaming_graph_with_tool_calls_only(self):
+        """Create a mock graph that yields events with tool_calls but empty content."""
+        graph = Mock()
+        
+        # Create a tool message with empty content (no text to send)
+        tool_message = Mock()
+        tool_message.content = ""  # Empty content - should be skipped
+        tool_message.type = 'ai'  # But it's type 'ai' (from tool call)
+        tool_message.tool_calls = [{"name": "some_tool", "id": "call_123"}]
+        tool_message.id = "msg-1"
+        
+        stream_event = ("updates", {"agent": {"messages": [tool_message]}})
+        
+        async def mock_astream(*args, **kwargs):
+            yield stream_event
+            yield ("updates", {"agent": {"messages": []}})
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [tool_message]})
+        
+        return graph
+
+    @pytest.mark.asyncio
+    async def test_manager_calls_dispatch_message_for_agent_text_messages(
+        self, mock_config, mock_checkpointer, mock_prompt_cache, 
+        streaming_graph_with_agent_message, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Manager should call dispatch_message for each agent text message during streaming."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_agent_message), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            # Call _process_message_with_tracking directly with message_source
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was called for the agent text message
+            mock_source_dispatcher.dispatch_message.assert_called()
+            
+            # Check the call arguments
+            calls = mock_source_dispatcher.dispatch_message.call_args_list
+            # Should have called at least once with the message content
+            assert len(calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_manager_skips_dispatch_for_tool_calls_only_messages(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_tool_calls_only, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Manager should NOT call dispatch_message for tool_calls-only messages with empty content."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_tool_calls_only), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            # Call _process_message_with_tracking directly with message_source
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify dispatch_message was NOT called for empty content
+            # The message has type='ai' but content is empty/whitespace
+            mock_source_dispatcher.dispatch_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_manager_handles_dispatch_errors_gracefully(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_agent_message, mock_instance_repository
+    ):
+        """Manager should handle dispatch errors gracefully without breaking execution."""
+        # Create a mock dispatcher that raises an exception
+        mock_dispatcher = AsyncMock()
+        mock_dispatcher.dispatch_message = AsyncMock(side_effect=Exception("Dispatch failed"))
+        
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_agent_message), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]), \
+             patch('daemon.manager.logger') as mock_logger:
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            # This should NOT raise - errors should be caught and logged
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Verify the error was logged
+            mock_logger.warning.assert_called()
+            warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+            assert any("Progressive dispatch failed" in c for c in warning_calls)
+            
+            # Response should still be returned (execution continued)
+            assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_manager_does_not_dispatch_without_source_dispatcher(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_agent_message, mock_instance_repository
+    ):
+        """Manager should not try to dispatch when source_dispatcher is None."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_agent_message), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            # source_dispatcher defaults to None in this test
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            # Should not raise even without dispatcher
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source="telegram:12345"
+            )
+            
+            # Response should still be returned
+            assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_manager_does_not_dispatch_without_message_source(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_agent_message, mock_instance_repository, mock_source_dispatcher
+    ):
+        """Manager should not dispatch when message_source is None/empty."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_agent_message), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+            
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager.source_dispatcher = mock_source_dispatcher
+            
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            
+            # Call _process_message_with_tracking WITHOUT a message_source
+            response = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source=None  # No source specified
+            )
+            
+            # Verify dispatch_message was NOT called (no source specified)
+            mock_source_dispatcher.dispatch_message.assert_not_called()

@@ -1150,6 +1150,28 @@ class InstanceManager:
                         data = event
                     
                     if mode == "updates":
+                        # Progressive delivery: dispatch AI messages from "agent" node immediately
+                        if message_source and self.source_dispatcher:
+                            for node_name, node_data in data.items():
+                                if node_name == "agent":
+                                    node_messages = node_data.get("messages", [])
+                                    for msg in node_messages:
+                                        # Check if it's an AI message with text content
+                                        if (
+                                            hasattr(msg, 'type') and msg.type == 'ai' and
+                                            hasattr(msg, 'content') and msg.content and
+                                            msg.content.strip()
+                                        ):
+                                            try:
+                                                await self.source_dispatcher.dispatch_message(
+                                                    source=message_source,
+                                                    content=msg.content
+                                                )
+                                            except Exception as e:
+                                                logger.warning(
+                                                    f"Progressive dispatch failed for message {message_id[:8]}...: {e}"
+                                                )
+                        
                         # Accumulate messages from ALL nodes
                         any_new = False
                         for node_name, node_data in data.items():
