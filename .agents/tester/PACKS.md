@@ -8,7 +8,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) | 2 min | 2026-04-17 | ✅ PASS (1138 passed, 8 skipped, 3 pre-existing fixes) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) | 2 min | 2026-04-17 | ✅ PASS (569 passed) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-07 | ✅ PASS (111 passed) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-07 | ✅ PASS (177 passed) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-3 + Phase 2 observer/recovery/cancellation/atomic/state-machine + Phase 2 feedback + Phase 4 event dispatch/idempotent enqueue verify tests | 2 min | 2026-04-17 | ✅ PASS (838 passed, 14 skipped) |
@@ -38,3 +38,4 @@ Update after each test run:
 - **Status**: PASS/FAIL/TIMEOUT
 - Add new entry for new packs
 - Mark deprecated packs as DEPRECATED
+rk deprecated packs as DEPRECATED
