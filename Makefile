@@ -9,8 +9,13 @@ PROD_PORT ?= 8088
 BACKEND_DIRS = daemon agents data
 CONFIG_FILE = config.yaml
 ENV_FILE = .env
+ENV_PROD_FILE = .env.prod
 FRONTEND_DIR = frontend
 FRONTEND_DIST = frontend/dist/frontend/browser
+
+# PyInstaller settings
+PYINSTALLER_SPEC = ensemble.spec
+PYINSTALLER_OUT = dist/ensemble-prod
 
 # Colors for output
 GREEN := \033[0;32m
@@ -18,19 +23,21 @@ YELLOW := \033[1;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: build install install-deps clean uninstall help sync stop start dev
+.PHONY: build install install-deps clean uninstall help sync stop start dev pyinstaller pyinstaller-clean
 
 help:
 	@echo "Available targets:"
-	@echo "  make build         - Build the frontend"
-	@echo "  make install       - Install production version to $(INSTALL_DIR)"
-	@echo "  make install-deps  - Install Python dependencies in $(INSTALL_DIR)"
-	@echo "  make sync          - Install dependencies with uv sync"
-	@echo "  make start         - Start the daemon (kills existing process first)"
-	@echo "  make stop          - Stop the daemon"
-	@echo "  make dev           - stop + sync + start"
-	@echo "  make clean         - Remove build artifacts"
-	@echo "  make uninstall     - Remove installed production version"
+	@echo "  make build           - Build the frontend"
+	@echo "  make pyinstaller     - Build production binary (dist/ensemble-prod)"
+	@echo "  make install         - Build binary and install to $(INSTALL_DIR)"
+	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
+	@echo "  make sync            - Install dependencies with uv sync"
+	@echo "  make start           - Start the daemon (kills existing process first)"
+	@echo "  make stop            - Stop the daemon"
+	@echo "  make dev             - stop + sync + start"
+	@echo "  make clean           - Remove build artifacts"
+	@echo "  make pyinstaller-clean - Remove PyInstaller build files"
+	@echo "  make uninstall       - Remove installed production version"
 	@echo ""
 	@echo "Variables:"
 	@echo "  INSTALL_DIR=$(INSTALL_DIR)"
@@ -80,7 +87,7 @@ install-deps:
 	@echo "$(GREEN)Dependencies installed!$(NC)"
 
 # Install production version
-install: build
+install: pyinstaller
 	@echo "$(GREEN)Installing to $(INSTALL_DIR)...$(NC)"
 	
 	# Stop any process using the production port
@@ -95,19 +102,13 @@ install: build
 	mkdir -p $(INSTALL_DIR)
 	mkdir -p $(INSTALL_DIR)/data
 	
-	# Copy backend code
-	@echo "$(YELLOW)Copying backend...$(NC)"
-	cp -r daemon $(INSTALL_DIR)/
+	# Copy binary
+	@echo "$(YELLOW)Copying binary...$(NC)"
+	cp $(PYINSTALLER_OUT) $(INSTALL_DIR)/
 	
 	# Create symlink to agents directory (points to source)
 	@echo "$(YELLOW)Linking agents...$(NC)"
 	ln -sfn $(CURDIR)/agents $(INSTALL_DIR)/agents
-	
-	# Copy pyproject.toml and uv.lock for dependency installation
-	@echo "$(YELLOW)Copying project files...$(NC)"
-	cp pyproject.toml $(INSTALL_DIR)/
-	cp README.md $(INSTALL_DIR)/ 2>/dev/null || echo "# Ensemble" > $(INSTALL_DIR)/README.md
-	cp uv.lock $(INSTALL_DIR)/ 2>/dev/null || true
 	
 	# Copy and modify config.yaml with production port
 	@echo "$(YELLOW)Configuring port $(PROD_PORT)...$(NC)"
@@ -115,69 +116,31 @@ install: build
 	
 	# Copy .env.prod file (or .env as fallback)
 	@echo "$(YELLOW)Copying environment...$(NC)"
-	cp .env.prod $(INSTALL_DIR)/.env 2>/dev/null || cp $(ENV_FILE) $(INSTALL_DIR)/.env 2>/dev/null || cp .env.example $(INSTALL_DIR)/.env 2>/dev/null || true
+	cp $(ENV_PROD_FILE) $(INSTALL_DIR)/.env 2>/dev/null || \
+		cp $(ENV_FILE) $(INSTALL_DIR)/.env 2>/dev/null || \
+		cp .env.example $(INSTALL_DIR)/.env 2>/dev/null || true
 	
 	# Copy frontend build (copy browser contents directly to dist)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
 	mkdir -p $(INSTALL_DIR)/frontend/dist
 	cp -r $(FRONTEND_DIST)/* $(INSTALL_DIR)/frontend/dist/ || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
 	
-	# Create venv and install dependencies
-	@echo "$(YELLOW)Creating virtual environment and installing dependencies...$(NC)"
-	cd $(INSTALL_DIR) && \
-	if command -v uv >/dev/null 2>&1; then \
-		echo "$(GREEN)Using uv sync...$(NC)"; \
-		uv sync; \
-	else \
-		echo "$(GREEN)Using pip...$(NC)"; \
-		python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -e .; \
-	fi
-	
-	# Create start script for production
-	@echo "$(YELLOW)Creating production start script...$(NC)"
-	@echo '#!/bin/bash' > $(INSTALL_DIR)/start.sh
-	@echo '# Start Ensemble Daemon (Production)' >> $(INSTALL_DIR)/start.sh
-	@echo 'set -e' >> $(INSTALL_DIR)/start.sh
-	@echo 'cd "$$(dirname "$$0")"' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '# Colors' >> $(INSTALL_DIR)/start.sh
-	@echo 'GREEN="\033[0;32m"' >> $(INSTALL_DIR)/start.sh
-	@echo 'NC="\033[0m"' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '# Use venv python if available' >> $(INSTALL_DIR)/start.sh
-	@echo 'if [ -f ".venv/bin/python" ]; then PYTHON=".venv/bin/python"; else PYTHON="python3"; fi' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '# Load environment from .env' >> $(INSTALL_DIR)/start.sh
-	@echo 'if [ -f ".env" ]; then export $$(cat .env | grep -v "^#" | xargs); fi' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '# Set defaults' >> $(INSTALL_DIR)/start.sh
-	@echo 'export PORT="$${PORT:-$(PROD_PORT)}"' >> $(INSTALL_DIR)/start.sh
-	@echo 'export HOST="$${HOST:-0.0.0.0}"' >> $(INSTALL_DIR)/start.sh
-	@echo 'mkdir -p data' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '# Kill existing process on port' >> $(INSTALL_DIR)/start.sh
-	@echo 'if pid=$$(lsof -ti :$$PORT 2>/dev/null); then' >> $(INSTALL_DIR)/start.sh
-	@echo '  echo "Killing existing process on port $$PORT (PID: $$pid)"' >> $(INSTALL_DIR)/start.sh
-	@echo '  kill $$pid 2>/dev/null || true' >> $(INSTALL_DIR)/start.sh
-	@echo '  sleep 1' >> $(INSTALL_DIR)/start.sh
-	@echo 'fi' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo 'echo -e "$${GREEN}Starting Ensemble Daemon...$${NC}"' >> $(INSTALL_DIR)/start.sh
-	@echo 'echo "Port: $$PORT"' >> $(INSTALL_DIR)/start.sh
-	@echo 'echo "API:  http://localhost:$$PORT/docs"' >> $(INSTALL_DIR)/start.sh
-	@echo 'echo "UI:   http://localhost:$$PORT"' >> $(INSTALL_DIR)/start.sh
-	@echo '' >> $(INSTALL_DIR)/start.sh
-	@echo '$$PYTHON -m uvicorn daemon.api:app --host $$HOST --port $$PORT' >> $(INSTALL_DIR)/start.sh
-	@chmod +x $(INSTALL_DIR)/start.sh
-	
 	@echo "$(GREEN)Installation complete!$(NC)"
 	@echo ""
 	@echo "Production version installed to: $(INSTALL_DIR)"
+	@echo "Binary: ensemble-prod"
 	@echo "Port: $(PROD_PORT)"
 	@echo ""
-	@echo "To start: cd $(INSTALL_DIR) && ./start.sh"
+	@echo "To start: cd $(INSTALL_DIR) && ./ensemble-prod"
 	@echo "API Docs: http://localhost:$(PROD_PORT)/docs"
 	@echo "UI:       http://localhost:$(PROD_PORT)"
+	@echo ""
+	@echo "Required files in working directory:"
+	@echo "  - config.yaml"
+	@echo "  - .env"
+	@echo "  - agents/ (symlink)"
+	@echo "  - frontend/dist/"
+	@echo "  - data/"
 
 # Clean build artifacts
 clean:
@@ -187,6 +150,17 @@ clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 	@echo "$(GREEN)Clean complete!$(NC)"
+
+# PyInstaller build targets
+pyinstaller-clean:
+	@echo "$(GREEN)Cleaning PyInstaller artifacts...$(NC)"
+	rm -rf build/ dist/
+	@echo "$(GREEN)PyInstaller clean complete!$(NC)"
+
+pyinstaller: pyinstaller-clean build
+	@echo "$(GREEN)Building production binary with PyInstaller...$(NC)"
+	uv run python -m PyInstaller $(PYINSTALLER_SPEC)
+	@echo "$(GREEN)Binary built: $(PYINSTALLER_OUT)$(NC)"
 
 # Uninstall production version
 uninstall:
