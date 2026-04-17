@@ -60,9 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-17 Progressive Message Delivery)
+## Test Results (Latest: 2026-04-17 Child-Parent Source Propagation Fix)
 
-### Progressive Message Delivery (commit 388d64c)
+### Child-Parent Source Propagation Fix (commit 21ad4e1)
+- **7 new tests added** to `tests/test_progressive_dispatch.py` — all PASS
+- **32 total progressive dispatch tests** — ALL PASS
+- **704 existing tests pass** (125 sources + 579 core) — no regressions
+- **1 quick fix applied**: Narrowed `startswith("internal_")` to exact match on `internal_report`/`internal_error_report` only
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-17-child-parent-source-propagation.md` for full report
+
+### Child-Parent Source Propagation Status: ✅ READY FOR MERGE
+
+### Progressive Message Delivery — Initial (commit 388d64c)
 - **17 new progressive dispatch tests** — ALL PASS (dispatcher routing, skip rules, dedup, cleanup, error handling, manager streaming)
 - **704 existing tests pass** (125 sources + 579 core) — no regressions
 - **1 quick fix applied**: Added try/except around adapter.send() in dispatch_message() for error resilience
