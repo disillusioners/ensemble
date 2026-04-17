@@ -1287,3 +1287,487 @@ async def test_integration_external_source_child_report_dispatch(
         assert call_args.kwargs['source'] == "telegram:external_chat_789"
         assert "internal_report" not in call_args.kwargs['source']
 
+
+# ==============================================================================
+# Dispatcher: Source Narrowing Tests (C1 - internal_agent: is NOT internal_report)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_dispatch_message_internal_agent_dispatches_normally(dispatcher, mock_adapter, mock_registry):
+    """Test #25 (C1 - Dispatcher): internal_agent:* does NOT skip, dispatches normally.
+    
+    The fix narrowed the internal source check from ALL internal_* to ONLY
+    internal_report:* and internal_error_report:*. This means internal_agent:*
+    should be dispatched to the adapter, NOT skipped.
+    """
+    await dispatcher.start()
+
+    # internal_agent should dispatch normally (NOT be skipped like internal_report)
+    await dispatcher.dispatch_message("internal_agent:coder123", "Agent message content")
+
+    # Adapter SHOULD be called - internal_agent is NOT internal_report or internal_error_report
+    mock_adapter.send.assert_called_once()
+    call_args = mock_adapter.send.call_args[0][0]
+    assert call_args.external_user_id == "coder123"
+    assert call_args.content == "Agent message content"
+    assert call_args.source_id == "internal_agent"
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_internal_report_skips_and_retrieves_original_source(dispatcher, mock_adapter, mock_registry):
+    """Test #26: internal_report:* skips dispatcher AND triggers source recovery in manager.
+    
+    When manager sees internal_report:*, it:
+    1. Does NOT use internal_report as dispatch_source
+    2. Retrieves original_source from metadata
+    3. Uses original_source for dispatch
+    
+    This test verifies the dispatcher skips internal_report (matching behavior).
+    """
+    await dispatcher.start()
+
+    # internal_report should be skipped (not dispatched to adapter)
+    await dispatcher.dispatch_message("internal_report:child123:msg456", "Completion report")
+
+    # Adapter should NOT be called - internal_report is internal
+    mock_adapter.send.assert_not_called()
+
+    await dispatcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_internal_error_report_skips_and_retrieves_original_source(dispatcher, mock_adapter, mock_registry):
+    """Test #27: internal_error_report:* skips dispatcher AND triggers source recovery.
+    
+    Same as internal_report test but for error reports.
+    """
+    await dispatcher.start()
+
+    # internal_error_report should be skipped (not dispatched to adapter)
+    await dispatcher.dispatch_message("internal_error_report:child123", "Error report")
+
+    # Adapter should NOT be called - internal_error_report is internal
+    mock_adapter.send.assert_not_called()
+
+    await dispatcher.stop()
+
+
+# ==============================================================================
+# Manager: Warning Log Test (W2 - Warning instead of Debug for missing source)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_manager_warns_when_original_source_not_found(
+    mock_config, mock_checkpointer, mock_prompt_cache, caplog
+):
+    """Test #28 (W2): Warning logged when original_source not found in metadata.
+    
+    When an internal_report comes in but no original_source exists in metadata,
+    a WARNING should be logged (not debug) to help debugging.
+    """
+    import logging
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response that won't be dispatched"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-warning"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Create mock instance repository with NO original_source
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {}  # Empty - no original_source
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.return_value = mock_instance_meta
+    mock_instance_repo.set_metadata = MagicMock()
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+
+        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+        # Process with internal_report but no original_source stored
+        with caplog.at_level(logging.WARNING):
+            result = await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Child completed but no source",
+                message_id="test-msg-warning",
+                message_source="internal_report:child123:msg456"
+            )
+
+        # Verify WARNING was logged about missing original_source
+        assert any(
+            "No original_source found" in record.message and record.levelno == logging.WARNING
+            for record in caplog.records
+        ), "Expected WARNING log about missing original_source"
+
+        # Verify dispatch was NOT called (no source to use)
+        mock_dispatcher.dispatch_message.assert_not_called()
+
+
+# ==============================================================================
+# Full Chain Integration Test: External → Store → Child Inherits → Child Report → Dispatch
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_full_chain_external_msg_to_telegram_after_child_completion(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #29 (Full Integration): End-to-end test of the fixed source propagation.
+    
+    Full scenario:
+    1. External message from telegram:123 arrives
+    2. original_source stored as telegram:123 in metadata
+    3. Parent spawns child agent (child inherits telegram:123 via C2)
+    4. Child sends internal_report: back to parent
+    5. Parent retrieves original_source=telegram:123 from metadata
+    6. Parent's subsequent AI messages dispatch to telegram:123
+    
+    This is the exact scenario that was broken before the fix.
+    """
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    # Response for initial external message
+    ai_msg_initial = Mock()
+    ai_msg_initial.content = "Processing your request"
+    ai_msg_initial.type = 'ai'
+    ai_msg_initial.tool_calls = []
+    ai_msg_initial.id = "msg-initial"
+
+    # Response after child completion - THIS is what we need to verify dispatches
+    ai_msg_after_child = Mock()
+    ai_msg_after_child.content = "Child finished, here's the result to user"
+    ai_msg_after_child.type = 'ai'
+    ai_msg_after_child.tool_calls = []
+    ai_msg_after_child.id = "msg-after-child"
+
+    call_count = [0]
+    
+    async def mock_astream(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            yield ("updates", {"agent": {"messages": [ai_msg_initial]}})
+        else:
+            yield ("updates", {"agent": {"messages": [ai_msg_after_child]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg_initial]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Track metadata state for original_source
+    metadata_state = {"original_source": None, "children": []}
+    
+    def get_side_effect(instance_id):
+        meta = MagicMock()
+        if instance_id.startswith("22222222"):
+            # Child instance - empty metadata initially
+            meta.instance_metadata = {}
+        else:
+            # Parent instance - return stored state
+            if metadata_state["original_source"] is None:
+                meta.instance_metadata = {}
+            else:
+                meta.instance_metadata = {"original_source": metadata_state["original_source"]}
+        meta.children = metadata_state["children"]
+        return meta
+    
+    def set_metadata_side_effect(instance_id, key, value):
+        if key == "original_source" and metadata_state["original_source"] is None:
+            metadata_state["original_source"] = value
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.side_effect = get_side_effect
+    mock_instance_repo.set_metadata.side_effect = set_metadata_side_effect
+
+    parent_uuid = "11111111-1111-1111-1111-111111111111"
+    child_uuid = "22222222-2222-2222-2222-222222222222"
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+        manager.instances[parent_uuid] = (mock_graph, "agents/leader")
+
+        # Step 1: External message stores source
+        await manager._process_message_with_tracking(
+            instance_id=parent_uuid,
+            message="Start the task",
+            message_id="msg-ext-001",
+            message_source="telegram:123"
+        )
+
+        # Verify original_source was stored
+        assert metadata_state["original_source"] == "telegram:123"
+
+        # Step 2: Spawn child (simulating what happens in real flow)
+        child_id = manager.spawn_instance(
+            agent_id="coder",
+            instance_id=child_uuid,
+            parent_id=parent_uuid
+        )
+
+        # Verify child inherited original_source (C2 fix)
+        # The spawn should have called set_metadata on child with parent's original_source
+        # Check that set_metadata was called for the child with original_source
+        child_inherited_calls = [
+            call for call in mock_instance_repo.set_metadata.call_args_list
+            if call[0][0] == child_uuid and call[0][1] == "original_source"
+        ]
+        assert len(child_inherited_calls) > 0, "Child should inherit original_source from parent"
+        assert child_inherited_calls[0][0][2] == "telegram:123"
+
+        # Step 3: Child sends internal_report back to parent
+        # Update mock to return original_source for parent
+        mock_instance_repo.get.side_effect = lambda i: (
+            MagicMock(
+                instance_metadata={"original_source": "telegram:123"},
+                children=[]
+            ) if i == parent_uuid else MagicMock(instance_metadata={}, children=[])
+        )
+        
+        mock_dispatcher.dispatch_message.reset_mock()
+        
+        await manager._process_message_with_tracking(
+            instance_id=parent_uuid,
+            message="Child completed",
+            message_id="msg-child-complete",
+            message_source=f"internal_report:{child_uuid}:msg456"
+        )
+
+        # Step 4: Verify dispatch used telegram:123 (NOT internal_report)
+        mock_dispatcher.dispatch_message.assert_called()
+        call_args = mock_dispatcher.dispatch_message.call_args
+        assert call_args.kwargs['source'] == "telegram:123", \
+            f"Expected source=telegram:123, got source={call_args.kwargs['source']}"
+        assert "internal_report" not in call_args.kwargs['source'], \
+            "Source should be telegram:123, not internal_report"
+
+
+# ==============================================================================
+# Source Inheritance: Grandchild inherits from grandparent (chain)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_source_inheritance_grandchild_from_grandparent(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #30 (C2 Extended): Grandchild inherits original_source through chain.
+    
+    grandparent (telegram:xyz) → parent (inherits telegram:xyz) → child (inherits telegram:xyz)
+    
+    This ensures the source propagates correctly through multiple levels of spawning.
+    """
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+    mock_graph.invoke = Mock(return_value={"messages": []})
+    mock_graph.ainvoke = Mock(return_value={"messages": []})
+
+    grandparent_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    parent_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    grandchild_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    
+    metadata_state = {
+        grandparent_uuid: {"original_source": "telegram:grandparent_chat"},
+        parent_uuid: {},
+        grandchild_uuid: {},
+    }
+    
+    def get_side_effect(instance_id):
+        meta = MagicMock()
+        meta.instance_metadata = metadata_state.get(instance_id, {}).copy()
+        meta.children = []
+        return meta
+    
+    inheritance_calls = []
+    
+    def set_metadata_side_effect(instance_id, key, value):
+        if key == "original_source":
+            # Record the inheritance
+            inheritance_calls.append({
+                "child": instance_id,
+                "source": value
+            })
+            # Update metadata state
+            if instance_id in metadata_state:
+                metadata_state[instance_id]["original_source"] = value
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock()
+    mock_instance_repo.get.side_effect = get_side_effect
+    mock_instance_repo.set_metadata.side_effect = set_metadata_side_effect
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.instances[grandparent_uuid] = (mock_graph, "agents/leader")
+
+        # Simulate grandparent received external message and stored original_source
+        metadata_state[grandparent_uuid]["original_source"] = "telegram:grandparent_chat"
+
+        # Parent spawns from grandparent
+        manager.spawn_instance(
+            agent_id="coder",
+            instance_id=parent_uuid,
+            parent_id=grandparent_uuid
+        )
+
+        # Grandchild spawns from parent
+        manager.spawn_instance(
+            agent_id="coder",
+            instance_id=grandchild_uuid,
+            parent_id=parent_uuid
+        )
+
+        # Verify inheritance chain
+        # Parent should inherit from grandparent
+        parent_inheritance = [c for c in inheritance_calls if c["child"] == parent_uuid]
+        assert len(parent_inheritance) > 0, "Parent should inherit from grandparent"
+        assert parent_inheritance[0]["source"] == "telegram:grandparent_chat"
+
+        # Grandchild should inherit from parent (which has grandparent's source)
+        grandchild_inheritance = [c for c in inheritance_calls if c["child"] == grandchild_uuid]
+        assert len(grandchild_inheritance) > 0, "Grandchild should inherit from parent"
+        assert grandchild_inheritance[0]["source"] == "telegram:grandparent_chat", \
+            "Grandchild should inherit telegram:grandparent_chat (via parent)"
+
+
+# ==============================================================================
+# Write-Once Guard: Multiple external sources should not overwrite
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_write_once_guard_persists_through_multiple_external_messages(
+    mock_config, mock_checkpointer, mock_prompt_cache
+):
+    """Test #31 (W1 Extended): Write-once guard persists across multiple messages.
+    
+    First message from source A sets original_source=A.
+    Subsequent messages from sources B, C, D should NOT overwrite original_source=A.
+    This ensures the first source is "sticky" throughout the instance lifetime.
+    """
+    from daemon.manager import InstanceManager
+
+    mock_graph = Mock()
+
+    ai_msg = Mock()
+    ai_msg.content = "Response"
+    ai_msg.type = 'ai'
+    ai_msg.tool_calls = []
+    ai_msg.id = "msg-1"
+
+    async def mock_astream(*args, **kwargs):
+        yield ("updates", {"agent": {"messages": [ai_msg]}})
+        yield ("updates", {"agent": {"messages": []}})
+
+    mock_graph.astream = mock_astream
+    mock_graph.invoke = Mock(return_value={"messages": [ai_msg]})
+
+    mock_dispatcher = AsyncMock()
+    mock_dispatcher.dispatch_message = AsyncMock(return_value=None)
+
+    # Track original_source with write-once semantics
+    original_source = {"value": None}
+    
+    def get_side_effect(instance_id):
+        meta = MagicMock()
+        meta.instance_metadata = {"original_source": original_source["value"]} if original_source["value"] else {}
+        meta.children = []
+        return meta
+    
+    set_calls = []
+    
+    def set_metadata_side_effect(instance_id, key, value):
+        if key == "original_source":
+            set_calls.append(value)
+            if original_source["value"] is None:
+                original_source["value"] = value
+    
+    mock_instance_repo = MagicMock()
+    mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
+    mock_instance_repo.get.side_effect = get_side_effect
+    mock_instance_repo.set_metadata.side_effect = set_metadata_side_effect
+
+    instance_id = "test-instance-123"
+
+    with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+         patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
+         patch('daemon.manager.load_and_cache_prompt', return_value=("sys", 10)), \
+         patch('daemon.manager.create_instance_tools', return_value=[]):
+
+        manager = InstanceManager(mock_config)
+        manager._instance_repository = mock_instance_repo
+        manager.source_dispatcher = mock_dispatcher
+        manager.instances[instance_id] = (mock_graph, "agents/leader")
+
+        # First message from telegram:first_source
+        await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="First message",
+            message_id="msg-001",
+            message_source="telegram:first_source"
+        )
+        
+        assert original_source["value"] == "telegram:first_source"
+        initial_set_count = len(set_calls)
+
+        # Second message from discord:second_source - should NOT overwrite
+        await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Second message",
+            message_id="msg-002",
+            message_source="discord:second_source"
+        )
+        
+        # Should still be first source
+        assert original_source["value"] == "telegram:first_source"
+        assert len(set_calls) == initial_set_count, "Should NOT have called set_metadata again"
+
+        # Third message from slack:third_source - should NOT overwrite
+        await manager._process_message_with_tracking(
+            instance_id=instance_id,
+            message="Third message",
+            message_id="msg-003",
+            message_source="slack:third_source"
+        )
+        
+        # Should STILL be first source
+        assert original_source["value"] == "telegram:first_source"
+        assert len(set_calls) == initial_set_count, "Should NOT have called set_metadata again"
+

@@ -143,8 +143,9 @@ class ResponseDispatcher:
         logger.debug(f"Dispatching completed message for source={source_id}, user={external_user_id}")
         
         # Skip adapter lookup for internal sources (not external adapters)
-        if source_id.startswith("internal_"):
-            logger.debug(f"Skipping internal source (no adapter needed): {source_id}")
+        # C1 fix: Only skip internal_report and internal_error_report, NOT internal_agent
+        if source_id in ("internal_report", "internal_error_report"):
+            logger.debug(f"Skipping internal report source (no adapter needed): {source_id}")
             return
         
         # Get adapter from registry
@@ -212,8 +213,9 @@ class ResponseDispatcher:
         logger.debug(f"Dispatching progressive message for source={source_id}, user={external_user_id}")
         
         # Skip adapter lookup for internal sources (not external adapters)
-        if source_id.startswith("internal_"):
-            logger.debug(f"Skipping internal source (no adapter needed): {source_id}")
+        # C1 fix: Only skip internal_report and internal_error_report, NOT internal_agent
+        if source_id in ("internal_report", "internal_error_report"):
+            logger.debug(f"Skipping internal report source (no adapter needed): {source_id}")
             return
         
         # Get adapter from registry
