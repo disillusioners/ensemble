@@ -11,7 +11,7 @@
 | core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) | 2 min | 2026-04-17 | ✅ PASS (1138 passed, 8 skipped, 3 pre-existing fixes) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-07 | ✅ PASS (111 passed) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-07 | ✅ PASS (177 passed) |
-| job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-3 + Phase 2 observer/recovery/cancellation/atomic/state-machine + Phase 2 feedback verify tests | 2 min | 2026-04-17 | ✅ PASS (799 passed, 14 skipped) |
+| job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-3 + Phase 2 observer/recovery/cancellation/atomic/state-machine + Phase 2 feedback + Phase 4 event dispatch/idempotent enqueue verify tests | 2 min | 2026-04-17 | ✅ PASS (838 passed, 14 skipped) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend job queue (model, services, SSE, components) + Phase 3 queue service/model — Jest | 2 min | 2026-04-12 | ✅ PASS (197 passed) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-11 | ✅ PASS (13 passed, 3× verified no flakiness) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-12 | ✅ PASS (16 passed) |
