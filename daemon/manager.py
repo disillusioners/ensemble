@@ -704,6 +704,16 @@ class InstanceManager:
         else:
             logger.info(f"Instance {instance_id} created in DB with status={created.status}, parent_id={created.parent_id}")
         
+        # Inherit original_source from parent if parent has one (C2: source inheritance during spawn)
+        # This ensures grandchildren also get the original telegram source
+        if parent_id:
+            parent_meta = self._instance_repository.get(parent_id)
+            if parent_meta is not None and parent_meta.instance_metadata is not None:
+                parent_original_source = parent_meta.instance_metadata.get("original_source")
+                if parent_original_source:
+                    self._instance_repository.set_metadata(instance_id, "original_source", parent_original_source)
+                    logger.info(f"Inherited original_source '{parent_original_source}' from parent {parent_id[:8]}...")
+        
         # Update parent's children list and waiting_for counter
         if parent_id:
             with Session(self._engine) as session:
@@ -1029,11 +1039,16 @@ class InstanceManager:
         last_ai_message = None
         
         # Determine the effective source for progressive dispatch
-        # When processing an internal_report:* message, we need to use the original
+        # When processing an internal_report:* or internal_error_report:* message, we need to use the original
         # external source (e.g., telegram:123) instead of the internal report source
+        # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
         dispatch_source: str | None = None
         if message_source:
-            if message_source.startswith("internal_"):
+            is_internal_report = (
+                message_source.startswith("internal_report:") or
+                message_source.startswith("internal_error_report:")
+            )
+            if is_internal_report:
                 # This is an internal message (completion report, error report, etc.)
                 # Retrieve the original external source from instance metadata
                 instance_meta = self._instance_repository.get(instance_id)
@@ -1041,7 +1056,7 @@ class InstanceManager:
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
                 if not dispatch_source:
-                    logger.debug(
+                    logger.warning(
                         f"No original_source found for instance {instance_id[:8]}... "
                         f"(message_source={message_source})"
                     )
@@ -1049,7 +1064,15 @@ class InstanceManager:
                 # This is an external message - store as original source for future internal reports
                 dispatch_source = message_source
                 # Store in instance metadata for later retrieval when child completes
-                self._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                # Write-once guard: only set if not already set
+                instance_meta = self._instance_repository.get(instance_id)
+                if instance_meta is not None and instance_meta.instance_metadata is not None:
+                    current = instance_meta.instance_metadata.get("original_source")
+                    if not current:
+                        self._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                else:
+                    # Instance metadata doesn't exist yet, set it directly
+                    self._instance_repository.set_metadata(instance_id, "original_source", message_source)
         
         
         # Project context injection for first message only

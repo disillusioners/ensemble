@@ -154,15 +154,20 @@ class ProcessMessageProcessor(BaseProcessor):
             
             # Dispatch completed message to external sources (Telegram, Discord, etc.)
             # For internal messages (completion reports, etc.), use the original external source
+            # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
             dispatch_source = message_source
-            if message_source and message_source.startswith("internal_"):
+            is_internal_report = (
+                message_source.startswith("internal_report:") or
+                message_source.startswith("internal_error_report:")
+            )
+            if is_internal_report:
                 # Retrieve original external source from instance metadata
                 instance_meta = self._manager._instance_repository.get(task.instance_id)
                 # Use is not None check because empty dict {} is falsy
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
                 if not dispatch_source:
-                    logger.debug(
+                    logger.warning(
                         f"No original_source found for instance {task.instance_id[:8]}... "
                         f"(message_source={message_source})"
                     )
