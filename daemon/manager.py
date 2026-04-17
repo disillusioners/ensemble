@@ -975,7 +975,7 @@ class InstanceManager:
         cancellation_token: CancellationToken | None = None,
         is_retry: bool = False,
         retry_count: int = 0,  # FIX: C3 — new parameter
-        message_source: str | None = None,  # Source of message (e.g., "agent:xxx", "api", "telegram:xxx")
+        message_source: str | None = None,  # Source of message (e.g., "internal_agent:xxx", "api", "telegram:xxx")
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -1436,7 +1436,7 @@ Provide a concise summary:"""
         existing_report = session.exec(
             select(MessageQueue)
             .where(MessageQueue.instance_id == instance.parent_id)
-            .where(MessageQueue.source == f"report:{instance_id}:{completed_message_id}")
+            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,
@@ -1495,7 +1495,7 @@ Provide a concise summary:"""
             message_id=report_message_id,
             instance_id=instance.parent_id,
             content=last_content,  # Already fetched before transaction
-            source=f"report:{instance.instance_id}:{completed_message_id}",
+            source=f"internal_report:{instance.instance_id}:{completed_message_id}",
             type=MessageType.COMPLETION_REPORT.value,
             status=MessageStatus.READY.value,
             priority=0,  # System priority
@@ -1769,7 +1769,7 @@ Provide a concise summary:"""
                         limit=10
                     )
                     for existing_msg in existing:
-                        if existing_msg.source == f"error_report:{instance_id}":
+                        if existing_msg.source == f"internal_error_report:{instance_id}":
                             logger.debug(f"Error report already queued for instance {instance_id[:8]}..., skipping duplicate")
                             return
             
@@ -1802,7 +1802,7 @@ Provide a concise summary:"""
                 self._queue_repository.enqueue,
                 instance_id=parent_id,
                 content=error_report,
-                source=f"error_report:{instance_id}",
+                source=f"internal_error_report:{instance_id}",
                 priority=1,  # Normal priority
                 message_metadata={
                     "type": "error_report", 

@@ -84,7 +84,7 @@ def create_completion_report(engine, parent_id: str, child_id: str, content: str
             instance_id=parent_id,
             content=content,
             type=MessageType.COMPLETION_REPORT.value,
-            source=f"report:{child_id}",
+            source=f"internal_report:{child_id}",
             status=MessageStatus.READY.value,
             priority=1,
             enqueued_at=datetime.now(timezone.utc),
@@ -347,7 +347,7 @@ class TestCheckChildCompletionV2:
             existing = session.exec(
                 select(MessageQueue)
                 .where(MessageQueue.instance_id == parent_id)
-                .where(MessageQueue.source == f"report:{child_id}")
+                .where(MessageQueue.source == f"internal_report:{child_id}")
                 .where(MessageQueue.status != MessageStatus.FAILED.value)
             ).first()
 
@@ -364,7 +364,7 @@ class TestCheckChildCompletionV2:
             reports = session.exec(
                 select(MessageQueue)
                 .where(MessageQueue.instance_id == parent_id)
-                .where(MessageQueue.source == f"report:{child_id}")
+                .where(MessageQueue.source == f"internal_report:{child_id}")
             ).all()
 
         assert len(reports) == 1  # Idempotent - only one report
@@ -383,7 +383,7 @@ class TestCheckChildCompletionV2:
         # Verify report content
         assert report.content == child_output
         assert report.type == MessageType.COMPLETION_REPORT.value
-        assert report.source == f"report:{child_id}"
+        assert report.source == f"internal_report:{child_id}"
         assert report.instance_id == parent_id
 
     def test_completion_report_is_high_priority(self, engine, message_repo):
@@ -399,7 +399,7 @@ class TestCheckChildCompletionV2:
                 instance_id=parent_id,
                 content="Child complete",
                 type=MessageType.COMPLETION_REPORT.value,
-                source=f"report:{child_id}",
+                source=f"internal_report:{child_id}",
                 status=MessageStatus.READY.value,
                 priority=10,  # High priority
                 enqueued_at=datetime.now(timezone.utc),
@@ -662,7 +662,7 @@ class TestIntegrationScenarios:
             existing = session.exec(
                 select(MessageQueue)
                 .where(MessageQueue.instance_id == parent_id)
-                .where(MessageQueue.source == f"report:{child_id}")
+                .where(MessageQueue.source == f"internal_report:{child_id}")
             ).first()
 
             if not existing:
@@ -672,7 +672,7 @@ class TestIntegrationScenarios:
                     instance_id=parent_id,
                     content="Child completed",
                     type=MessageType.COMPLETION_REPORT.value,
-                    source=f"report:{child_id}",
+                    source=f"internal_report:{child_id}",
                     status=MessageStatus.READY.value,
                     priority=10,
                     enqueued_at=datetime.now(timezone.utc),
@@ -712,7 +712,7 @@ class TestIntegrationScenarios:
                     instance_id=parent_id,
                     content=f"Child {child_id} done",
                     type=MessageType.COMPLETION_REPORT.value,
-                    source=f"report:{child_id}",
+                    source=f"internal_report:{child_id}",
                     status=MessageStatus.READY.value,
                     priority=10,
                     enqueued_at=datetime.now(timezone.utc),
@@ -826,7 +826,7 @@ class TestCheckChildCompletionC3Fix:
                 select(MessageQueue)
                 .where(MessageQueue.instance_id == parent_id)
                 .where(MessageQueue.type == MessageType.COMPLETION_REPORT.value)
-                .where(MessageQueue.source == f"report:{child_id}")
+                .where(MessageQueue.source == f"internal_report:{child_id}")
             ).all()
         
         assert len(reports) == 0, "FIX C3 violation: Completion report created even though content was None"
@@ -894,7 +894,7 @@ class TestCheckChildCompletionC3Fix:
         reports = message_repo.get_by_instance(parent_id)
         completion_reports = [
             r for r in reports 
-            if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"report:{child_id}"
+            if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"internal_report:{child_id}"
         ]
         
         assert len(completion_reports) == 1, "Completion report should be created when content exists"

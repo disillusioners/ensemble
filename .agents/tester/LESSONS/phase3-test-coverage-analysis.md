@@ -34,7 +34,7 @@ if last_content is None:
 existing_report = session.exec(
     select(MessageQueue)
     .where(MessageQueue.instance_id == instance.parent_id)
-    .where(MessageQueue.source == f"report:{instance_id}")
+    .where(MessageQueue.source == f"internal_report:{instance_id}")
     ...
 ).first()
 if existing_report is not None:

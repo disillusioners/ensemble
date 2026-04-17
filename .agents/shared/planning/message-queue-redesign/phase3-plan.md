@@ -188,7 +188,7 @@ async def check_child_completion(self, instance_id: str):
         existing = session.exec(
             select(MessageQueue)
             .where(MessageQueue.instance_id == instance.parent_id)
-            .where(MessageQueue.source == f"report:{instance_id}")
+            .where(MessageQueue.source == f"internal_report:{instance_id}")
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,
@@ -209,7 +209,7 @@ async def check_child_completion(self, instance_id: str):
             instance_id=instance.parent_id,
             content=last_content,  # Already fetched above
             type=MessageType.COMPLETION_REPORT.value,
-            source=f"report:{instance_id}",
+            source=f"internal_report:{instance_id}",
             status=MessageStatus.READY.value,
             priority=0,  # System priority
             enqueued_at=datetime.now(timezone.utc)

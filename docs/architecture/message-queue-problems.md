@@ -48,7 +48,7 @@ The current message queue system has **three confirmed bugs** that manifest when
 │  │ message_id      | UUID (PK)                                         │    │
 │  │ instance_id     | FK to instance (indexed)                          │    │
 │  │ content         | TEXT - message body                               │    │
-│  │ source          | TEXT - "api", "telegram:user", "report:{id}"      │    │
+│  │ source          | TEXT - "api", "telegram:user", "internal_report:{id}"      │    │
 │  │ status          | ENUM - READY | PROCESSING | RETRYING | COMPLETED   │    │
 │  │ priority        | INT - 0 (system) | 1 (user)                        │    │
 │  │ retry_count     | INT                                                │    │
@@ -120,7 +120,7 @@ LEADER INSTANCE                          CODER INSTANCE
      │                                        │ 4. Queue becomes empty
      │                                        │ 5. _send_completion_report()
      │ ◀──────────────────────────────────────
-     │  Report enqueued to leader queue       source="report:{coder_id}"
+     │  Report enqueued to leader queue       source="internal_report:{coder_id}"
      │                                        │
      │  6. Leader dequeues report             │
      │  7. Leader processes report             │
@@ -353,7 +353,7 @@ async def _send_error_report(self, instance_id: str, ...) -> None:
         limit=10
     )
     for existing_msg in existing:
-        if existing_msg.source == f"error_report:{instance_id}":
+        if existing_msg.source == f"internal_error_report:{instance_id}":
             logger.debug(f"Error report already queued..., skipping duplicate")
             return  # ← Early return prevents duplicate
 
@@ -363,7 +363,7 @@ async def _send_completion_report(self, instance_id: str, ...) -> None:
     await asyncio.to_thread(
         self._queue_repository.enqueue,
         instance_id=parent_id,
-        source=f"report:{instance_id}",  # ← Source is set but never checked
+        source=f"internal_report:{instance_id}",  # ← Source is set but never checked
         ...
     )
 ```
@@ -840,7 +840,7 @@ def get_instance(self, instance_id: str) -> tuple[CompiledStateGraph, str]:
 |--------|---------|-----------|
 | `api` | Human message from REST API | Instance queue |
 | `telegram:user:{id}` | Human message from Telegram | Instance queue |
-| `agent:{id}` | Message from another agent | Instance queue |
-| `report:{instance_id}` | Completion report from child | Parent queue |
-| `error_report:{instance_id}` | Error report from child | Parent queue |
+| `internal_agent:{id}` | Message from another agent | Instance queue |
+| `internal_report:{instance_id}` | Completion report from child | Parent queue |
+| `internal_error_report:{instance_id}` | Error report from child | Parent queue |
 | `system` | System-generated message | Instance queue |

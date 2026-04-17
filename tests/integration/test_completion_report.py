@@ -400,7 +400,7 @@ async def test_completion_report_message_format(
     
     # Check for report in Leader's queue (direct DB query)
     cursor = manager.conn.execute(
-        "SELECT content, source, metadata FROM message_queue WHERE instance_id = ? AND source LIKE 'report:%'",
+        "SELECT content, source, metadata FROM message_queue WHERE instance_id = ? AND source LIKE 'internal_report:%'",
         (leader_instance_id,)
     )
     report_rows = cursor.fetchall()

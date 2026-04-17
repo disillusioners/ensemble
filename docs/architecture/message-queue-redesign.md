@@ -223,7 +223,7 @@ CREATE TABLE message (
     priority INTEGER DEFAULT 1,  -- 0 = system, 1 = user
     
     -- Source tracking
-    source TEXT,  -- "api", "telegram:user:123", "report:{instance_id}"
+    source TEXT,  -- "api", "telegram:user:123", "internal_report:{instance_id}"
     root_source TEXT,  -- Original external source for cascade
     
     -- Processing tracking
@@ -469,7 +469,7 @@ CREATE INDEX idx_event_undelivered ON event(delivered) WHERE delivered = FALSE;
 │    -- But check if we already sent completion report                │
 │    SELECT * FROM message                                            │
 │      WHERE instance_id = instance.parent_id                          │
-│        AND source = 'report:{instance_id}'                           │
+│        AND source = 'internal_report:{instance_id}'                           │
 │        AND status IN ('pending', 'completed')                       │
 │                                                                      │
 │    IF exists:                                                        │
@@ -553,7 +553,7 @@ CREATE INDEX idx_event_undelivered ON event(delivered) WHERE delivered = FALSE;
 │    3. INSERT INTO message (                                           │
 │        instance_id = parent_id,                                      │
 │        type = 'completion_report',                                   │
-│        source = 'report:{child_instance_id}',                       │
+│        source = 'internal_report:{child_instance_id}',                       │
 │        content = last_msg.content                                    │
 │      )                                                               │
 │                                                                      │

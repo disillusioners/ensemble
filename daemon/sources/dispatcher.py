@@ -127,6 +127,11 @@ class ResponseDispatcher:
         
         logger.debug(f"Dispatching completed message for source={source_id}, user={external_user_id}")
         
+        # Skip adapter lookup for internal sources (not external adapters)
+        if source_id.startswith("internal_"):
+            logger.debug(f"Skipping internal source (no adapter needed): {source_id}")
+            return
+        
         # Get adapter from registry
         adapter = self._registry.get(source_id)
         if adapter is None:

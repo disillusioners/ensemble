@@ -204,9 +204,9 @@ Jobs are classified by the **`source`** field — a plain string, not an enum.
 | `telegram` | Telegram adapter | Routes as `HUMAN` message |
 | `scheduler` | Scheduler adapter | Routes as `HUMAN` message |
 | `webhook` | Webhook | Routes as `HUMAN` message |
-| `report:` | Completion report | Routes as `COMPLETION_REPORT` |
-| `error_report:` | Error report | Routes as `COMPLETION_REPORT` |
-| `agent:` | Agent-to-agent message | Routes as `AGENT` message |
+| `internal_report:` | Completion report | Routes as `COMPLETION_REPORT` |
+| `internal_error_report:` | Error report | Routes as `COMPLETION_REPORT` |
+| `internal_agent:` | Agent-to-agent message | Routes as `AGENT` message |
 
 All job types follow the same processing pipeline. The `source` field only affects message type routing in `InstanceManager`.
 
@@ -330,8 +330,8 @@ Job (job_queue_items)
     └── source field ──→ message type routing
                             │
                             ├── api / telegram / scheduler / webhook → HUMAN
-                            ├── report: / error_report: → COMPLETION_REPORT
-                            └── agent: → AGENT
+                            ├── internal_report: / internal_error_report: → COMPLETION_REPORT
+                            └── internal_agent: → AGENT
 ```
 
 ### Communication Flow

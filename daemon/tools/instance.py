@@ -291,7 +291,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         result = await manager.enqueue_message(
             instance_id=instance_id,
             message=message,
-            source=f"agent:{current_instance_id}"
+            source=f"internal_agent:{current_instance_id}"
         )
         message_id = result.message_id
         

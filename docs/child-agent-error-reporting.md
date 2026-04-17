@@ -190,7 +190,7 @@ existing = self._queue_repository.list(
     limit=10
 )
 for existing_msg in existing:
-    if existing_msg.source == f"error_report:{instance_id}":
+    if existing_msg.source == f"internal_error_report:{instance_id}":
         return  # Skip duplicate
 ```
 

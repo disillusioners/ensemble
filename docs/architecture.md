@@ -112,7 +112,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 │                                                                     │
 │  4. Child completes                                                 │
 │     _check_child_completion_v2() → creates COMPLETION_REPORT      │
-│     └─> source="report:{child_id}"                                 │
+│     └─> source="internal_report:{child_id}"                                 │
 │     └─> parent.waiting_for -= 1                                    │
 │     └─> Task created for parent                                    │
 │                                                                     │
