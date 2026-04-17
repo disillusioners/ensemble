@@ -83,6 +83,7 @@ def _job_to_response(
         source=job.source,
         job_metadata=job.job_metadata,
         cancelled_at=job.cancelled_at,
+        idempotency_key=job.idempotency_key,
         position=position,
         message=message or job.message,
     )
@@ -94,9 +95,9 @@ def _job_to_response(
 @router.post(
     "",
     response_model=JobResponse,
-    status_code=202,
     responses={
-        202: {"description": "Job queued for processing"},
+        201: {"description": "Job created"},
+        200: {"description": "Existing job returned (idempotent)"},
         422: {"model": JobValidationError, "description": "Validation error"},
     },
 )
@@ -109,8 +110,12 @@ async def create_job(
     Jobs are queued and processed by the JobProcessor. The job starts
     as PENDING and transitions to PROCESSING when picked up by the processor.
     
+    With idempotency_key: if a job with the same key exists and is non-terminal,
+    returns HTTP 200 with the existing job instead of creating a duplicate.
+    
     Returns:
-        202 with job details (status=pending)
+        201 with job details (new job created)
+        200 with job details (existing non-terminal job returned)
         422 if validation errors
     """
     # Validate: queue_id requires project_id
@@ -132,7 +137,7 @@ async def create_job(
             detail={"error": "Invalid agent", "message": str(e)}
         )
     
-    # Enqueue the job
+    # Enqueue the job (service.enqueue handles idempotency check internally)
     try:
         job = await service.enqueue(
             agent_id=resolved_agent_id,
@@ -142,6 +147,7 @@ async def create_job(
             priority=request.priority,
             metadata=request.metadata,
             queue_id=request.queue_id,
+            idempotency_key=request.idempotency_key,
         )
     except ValidationError as e:
         raise HTTPException(
@@ -159,6 +165,14 @@ async def create_job(
             detail={"error": "Job submission failed", "message": "An internal error occurred while submitting the job"}
         )
     
+    # Check if this was an idempotent return (job existed before this request)
+    # This is detected by checking if the returned job has the same idempotency_key
+    # and was already non-pending when returned
+    is_idempotent_return = False
+    if request.idempotency_key and job.idempotency_key == request.idempotency_key:
+        if job.status != JobStatus.PENDING.value:
+            is_idempotent_return = True
+    
     # Job is always PENDING at creation - return position if project_id provided
     position = None
     if job.project_id:
@@ -168,8 +182,10 @@ async def create_job(
             pass  # Best effort - position is optional
     
     response = _job_to_response(job, position=position, message="Job queued for processing")
+    
+    # Return 200 for idempotent returns, 201 for new jobs
     return JSONResponse(
-        status_code=202,
+        status_code=200 if is_idempotent_return else 201,
         content=response.model_dump()
     )
 

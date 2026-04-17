@@ -483,3 +483,283 @@ class TestJobProcessorErrorHandling:
         mock_queue_service.complete_job.assert_called_once()
         call_args = mock_queue_service.complete_job.call_args
         assert call_args[1]["success"] is False
+
+
+@pytest.fixture
+def dispatch_bus():
+    """Create mock dispatch bus with AsyncMock wait_for_job."""
+    bus = AsyncMock()
+    bus.wait_for_job = AsyncMock(return_value=True)
+    return bus
+
+
+@pytest.fixture
+def processor_with_event_dispatch(
+    mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo, dispatch_bus
+):
+    """Create JobProcessor with event dispatch enabled."""
+    return JobProcessor(
+        queue_service=mock_queue_service,
+        instance_manager=mock_instance_manager,
+        project_repo=mock_project_repo,
+        queue_repo=mock_queue_repo,
+        poll_interval=0.1,
+        dispatch_bus=dispatch_bus,
+        event_dispatch_enabled=True,
+    )
+
+
+@pytest.fixture
+def processor_event_disabled(
+    mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+):
+    """Create JobProcessor with event dispatch disabled."""
+    return JobProcessor(
+        queue_service=mock_queue_service,
+        instance_manager=mock_instance_manager,
+        project_repo=mock_project_repo,
+        queue_repo=mock_queue_repo,
+        poll_interval=0.1,
+        dispatch_bus=None,
+        event_dispatch_enabled=False,
+    )
+
+
+@pytest.fixture
+def processor_no_dispatch_bus(
+    mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+):
+    """Create JobProcessor without dispatch bus (fallback to polling)."""
+    return JobProcessor(
+        queue_service=mock_queue_service,
+        instance_manager=mock_instance_manager,
+        project_repo=mock_project_repo,
+        queue_repo=mock_queue_repo,
+        poll_interval=0.1,
+        dispatch_bus=None,
+        event_dispatch_enabled=True,
+    )
+
+
+class TestJobProcessorEventDispatch:
+    """Tests for event-driven dispatch in JobProcessor._process_loop."""
+
+    @pytest.mark.asyncio
+    async def test_event_driven_wakeup(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo, dispatch_bus
+    ):
+        """Test that process_next_job is called immediately when dispatch_bus.wait_for_job returns True."""
+        # Create processor with event dispatch enabled
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=dispatch_bus,
+            event_dispatch_enabled=True,
+        )
+
+        # Configure dispatch_bus to return True (event received)
+        dispatch_bus.wait_for_job = AsyncMock(return_value=True)
+
+        # Mock _process_next_job to track calls and stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Run _process_loop for one iteration
+        processor._running = True
+        await processor._process_loop()
+
+        # Verify wait_for_job was called with correct parameters
+        dispatch_bus.wait_for_job.assert_called_once_with(project_id=None, timeout=0.1)
+
+        # Verify _process_next_job was called
+        processor._process_next_job.assert_called_once()
+
+        # Verify immediate counter was incremented
+        assert processor._jobs_dispatched_immediately == 1
+
+    @pytest.mark.asyncio
+    async def test_polling_fallback_on_timeout(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo, dispatch_bus
+    ):
+        """Test that polling fallback is used when dispatch_bus.wait_for_job returns False (timeout)."""
+        # Create processor with event dispatch enabled
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=dispatch_bus,
+            event_dispatch_enabled=True,
+        )
+
+        # Configure dispatch_bus to return False (timeout)
+        dispatch_bus.wait_for_job = AsyncMock(return_value=False)
+
+        # Mock _process_next_job to track calls and stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Run _process_loop for one iteration
+        processor._running = True
+        await processor._process_loop()
+
+        # Verify wait_for_job was called
+        dispatch_bus.wait_for_job.assert_called_once_with(project_id=None, timeout=0.1)
+
+        # Verify _process_next_job was still called
+        processor._process_next_job.assert_called_once()
+
+        # Verify polling counter was incremented
+        assert processor._jobs_dispatched_polling == 1
+
+    @pytest.mark.asyncio
+    async def test_event_dispatch_disabled_uses_pure_polling(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Test that asyncio.sleep is used when event_dispatch_enabled=False."""
+        # Create processor with event dispatch disabled
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=None,
+            event_dispatch_enabled=False,
+        )
+
+        # Mock _process_next_job to stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Patch asyncio.sleep to avoid actual waiting
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            # Run _process_loop for one iteration
+            processor._running = True
+            await processor._process_loop()
+
+            # Verify asyncio.sleep was called with poll_interval
+            mock_sleep.assert_called_once_with(0.1)
+
+            # Verify _process_next_job was called
+            processor._process_next_job.assert_called_once()
+
+            # Verify polling counter was incremented
+            assert processor._jobs_dispatched_polling == 1
+
+    @pytest.mark.asyncio
+    async def test_no_dispatch_bus_uses_pure_polling(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Test that asyncio.sleep is used when dispatch_bus=None even with event_dispatch_enabled=True."""
+        # Create processor with event_dispatch_enabled=True but no dispatch_bus
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=None,
+            event_dispatch_enabled=True,
+        )
+
+        # Mock _process_next_job to stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Patch asyncio.sleep to avoid actual waiting
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            # Run _process_loop for one iteration
+            processor._running = True
+            await processor._process_loop()
+
+            # Verify asyncio.sleep was called with poll_interval
+            mock_sleep.assert_called_once_with(0.1)
+
+            # Verify _process_next_job was called
+            processor._process_next_job.assert_called_once()
+
+            # Verify polling counter was incremented
+            assert processor._jobs_dispatched_polling == 1
+
+    @pytest.mark.asyncio
+    async def test_metrics_counters_immediate(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo, dispatch_bus
+    ):
+        """Test that _jobs_dispatched_immediately counter increments on event wakeup."""
+        # Create processor with event dispatch enabled
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=dispatch_bus,
+            event_dispatch_enabled=True,
+        )
+
+        # Verify initial counters are zero
+        assert processor._jobs_dispatched_immediately == 0
+        assert processor._jobs_dispatched_polling == 0
+
+        # Configure dispatch_bus to return True (event received)
+        dispatch_bus.wait_for_job = AsyncMock(return_value=True)
+
+        # Mock _process_next_job to stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Run _process_loop for one iteration
+        processor._running = True
+        await processor._process_loop()
+
+        # Verify immediate counter was incremented
+        assert processor._jobs_dispatched_immediately == 1
+        # Polling counter should remain zero
+        assert processor._jobs_dispatched_polling == 0
+
+    @pytest.mark.asyncio
+    async def test_metrics_counters_polling(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo, dispatch_bus
+    ):
+        """Test that _jobs_dispatched_polling counter increments on timeout."""
+        # Create processor with event dispatch enabled
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+            dispatch_bus=dispatch_bus,
+            event_dispatch_enabled=True,
+        )
+
+        # Verify initial counters are zero
+        assert processor._jobs_dispatched_immediately == 0
+        assert processor._jobs_dispatched_polling == 0
+
+        # Configure dispatch_bus to return False (timeout)
+        dispatch_bus.wait_for_job = AsyncMock(return_value=False)
+
+        # Mock _process_next_job to stop the loop
+        async def stop_loop():
+            processor._running = False
+        processor._process_next_job = AsyncMock(side_effect=stop_loop)
+
+        # Run _process_loop for one iteration
+        processor._running = True
+        await processor._process_loop()
+
+        # Verify polling counter was incremented
+        assert processor._jobs_dispatched_polling == 1
+        # Immediate counter should remain zero
+        assert processor._jobs_dispatched_immediately == 0

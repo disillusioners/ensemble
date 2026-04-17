@@ -201,6 +201,12 @@ async def lifespan(app: FastAPI):
         queue_repo=queue_repo,
         job_repo=job_repository,
     )
+    
+    # Create DispatchEventBus for event-driven job dispatch
+    # Must be created BEFORE setting it on services
+    dispatch_event_bus = DispatchEventBus()
+    dispatch_event_bus.set_event_loop(asyncio.get_running_loop())
+    
     # Set DispatchEventBus on JobQueueMgmtService for resume notifications
     job_queue_mgmt_service._dispatch_bus = dispatch_event_bus
     
@@ -215,9 +221,8 @@ async def lifespan(app: FastAPI):
     # W6: Store the event loop for sync→async operations in complete_job_sync()
     job_queue_service.set_event_loop(asyncio.get_running_loop())
     
-    # Create DispatchEventBus for event-driven job dispatch
-    dispatch_event_bus = DispatchEventBus()
-    dispatch_event_bus.set_event_loop(asyncio.get_running_loop())
+    # Set job system config for TTL and other settings
+    job_queue_service.set_config(config.job_system)
     
     # Set DispatchEventBus on JobQueueService for enqueue notifications
     job_queue_service.set_dispatch_bus(dispatch_event_bus)

@@ -40,6 +40,7 @@ class JobRepository:
         priority: int = 5,
         job_metadata: Optional[dict[str, Any]] = None,
         queue_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> JobItem:
         """Create a new job queue item.
         
@@ -52,6 +53,7 @@ class JobRepository:
             priority: Job priority (1-10, default 5).
             job_metadata: Optional metadata dictionary.
             queue_id: Optional queue ID for job routing.
+            idempotency_key: Optional idempotency key for deduplication.
             
         Returns:
             Created JobItem object.
@@ -67,6 +69,7 @@ class JobRepository:
                 status=JobStatus.PENDING.value,
                 job_metadata=job_metadata or {},
                 queue_id=queue_id,
+                idempotency_key=idempotency_key,
             )
 
             db_session.add(job)
@@ -103,6 +106,23 @@ class JobRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = select(JobItem).where(JobItem.instance_id == instance_id)
+            job = db_session.exec(stmt).first()
+            return job
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> Optional[JobItem]:
+        """Find a job by its idempotency key.
+        
+        Used for idempotent enqueue: before creating a new job, check if one
+        already exists with the same key.
+        
+        Args:
+            idempotency_key: The idempotency key to search for.
+            
+        Returns:
+            JobItem if found, None otherwise.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(JobItem).where(JobItem.idempotency_key == idempotency_key)
             job = db_session.exec(stmt).first()
             return job
 

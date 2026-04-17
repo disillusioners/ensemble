@@ -147,13 +147,15 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**SSE Message Unification — TESTING COMPLETE**
+**Phase 2 — Task↔Job Feedback Loop — TESTING COMPLETE**
 
 ### Status: ✅ READY FOR MERGE
 
-**Latest:** 1787 tests pass, 24 mock tests pass, 197 frontend tests pass, ensure.md validated
-**Commits:** 3f64993, 18868d5 (feature), 7f39b28 (test fixes)
-**Key verified:** MessageService coordination, error isolation, duplicate prevention, frontend handlers, edge cases
+**Latest:** 799 job_queue tests pass (14 skipped, 0 failed), 1138 core tests pass (8 skipped, 0 failed), dev.sh validated
+**Branch:** feature/job-system-improvements
+**Commits:** `6dd1941` (pre-existing fixes), `80be63b` (12 new verification tests), `8f5e97a` (dev.sh fixes)
+**Key verified:** JobFeedbackObserver, JobRecoveryService, INSTANCE_LIFECYCLE events, cancellation cascade, atomic transitions, dead code removal
+**All 10 functional/race/edge scenarios covered** — see RESULTS/2026-04-17-phase2-task-job-feedback-loop.md
 
 ### Phase 6 Test File
 - **test_timeout_retry_e2e.py** (10 tests): Config flow, timeout→retry→complete, max retries→permanent failure, exponential backoff, multiple timeouts→success, default config, env var overrides, stale recovery config threshold, real repo integration

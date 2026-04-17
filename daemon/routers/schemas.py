@@ -19,6 +19,7 @@ class JobCreateRequest(BaseModel):
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
     source: str = Field(default="api", description="Source of the job")
     metadata: Optional[dict[str, Any]] = Field(default=None, description="Optional metadata dictionary")
+    idempotency_key: Optional[str] = Field(default=None, max_length=255, description="Optional idempotency key for deduplication")
     
     @field_validator("priority")
     @classmethod
@@ -62,6 +63,7 @@ class JobResponse(BaseModel):
     source: Optional[str] = Field(default=None, description="Source of the job (api, telegram, scheduler)")
     job_metadata: Optional[dict[str, Any]] = Field(default=None, description="Job metadata dictionary")
     cancelled_at: Optional[str] = Field(default=None, description="Timestamp when job was cancelled")
+    idempotency_key: Optional[str] = Field(default=None, description="Idempotency key for deduplication")
     
     model_config = {
         "json_schema_extra": {

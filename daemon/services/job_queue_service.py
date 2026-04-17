@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
+    from daemon.services.dispatch_event_bus import DispatchEventBus
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
 from daemon.services.job_lock_manager import JobLockManager
@@ -56,6 +57,8 @@ class JobQueueService:
         self._instance_manager = instance_manager
         self._retry_engine = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._dispatch_bus: Optional["DispatchEventBus"] = None  # Dispatch event bus for job notifications
+        self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -81,6 +84,23 @@ class JobQueueService:
         """
         self._instance_manager = instance_manager
     
+    def set_dispatch_bus(self, dispatch_bus: "DispatchEventBus") -> None:
+        """Set the dispatch event bus for notifying new jobs.
+        
+        Args:
+            dispatch_bus: DispatchEventBus instance.
+        """
+        self._dispatch_bus = dispatch_bus
+    
+    def set_config(self, config: Any) -> None:
+        """Set job system config for TTL and other settings.
+        
+        Args:
+            config: JobSystemConfig instance with idempotency_key_ttl_hours and other settings.
+        """
+        if hasattr(config, 'idempotency_key_ttl_hours'):
+            self._idempotency_key_ttl_hours = config.idempotency_key_ttl_hours
+    
     # ========== Public API ==========
     
     async def enqueue(
@@ -92,6 +112,7 @@ class JobQueueService:
         priority: int = 5,
         metadata: Optional[dict[str, Any]] = None,
         queue_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> JobItem:
         """Submit a job for processing.
         
@@ -102,6 +123,9 @@ class JobQueueService:
         If project_id is set but queue_id is None, the job is assigned to the
         project's "system_fifo_queue" automatically.
         
+        With idempotency_key: if a job with the same key exists and is non-terminal,
+        returns the existing job instead of creating a duplicate.
+        
         Args:
             agent_id: Agent ID (e.g., 'coder').
             message: Job message/content.
@@ -111,13 +135,51 @@ class JobQueueService:
             metadata: Optional metadata dictionary.
             queue_id: Optional queue ID for job routing. If None and project_id
                      is set, defaults to the project's system_fifo_queue.
+            idempotency_key: Optional idempotency key for deduplication.
+                           If a non-terminal job with this key exists, returns it.
             
         Returns:
-            JobItem with PENDING status.
+            JobItem with PENDING status (or existing non-terminal job if idempotent).
             
         Raises:
             ValueError: If project_id is set but system_fifo_queue doesn't exist.
         """
+        # Idempotency check: if idempotency_key provided, check for existing job
+        if idempotency_key:
+            existing = await asyncio.to_thread(
+                self._repository.find_by_idempotency_key, idempotency_key
+            )
+            if existing is not None:
+                # Check TTL - jobs older than TTL are treated as new
+                try:
+                    created_time = datetime.fromisoformat(existing.created_at)
+                    ttl_cutoff = datetime.utcnow() - timedelta(hours=self._idempotency_key_ttl_hours)
+                    if created_time < ttl_cutoff:
+                        # Job is older than TTL, treat as new
+                        logger.info(
+                            f"Idempotency key '{idempotency_key}' matched job {existing.job_id} "
+                            f"but exceeded TTL ({self._idempotency_key_ttl_hours}h), creating new"
+                        )
+                        existing = None  # Reset so new job is created below
+                except (ValueError, TypeError):
+                    # If timestamp parsing fails, treat as existing
+                    pass
+                
+                if existing is not None:
+                    terminal_statuses = {JobStatus.COMPLETED.value, JobStatus.CANCELLED.value, JobStatus.DEAD_LETTER.value}
+                    if existing.status not in terminal_statuses:
+                        # Return existing non-terminal job (idempotent behavior)
+                        logger.debug(
+                            f"Idempotency key '{idempotency_key}' matched existing job {existing.job_id} "
+                            f"(status={existing.status})"
+                        )
+                        return existing
+                    # Terminal job with same key: allow creating new
+                    logger.info(
+                        f"Idempotency key '{idempotency_key}' matched terminal job {existing.job_id}, "
+                        "creating new job"
+                    )
+        
         # Derive agent_dir from agent_id using registry
         registry = get_registry()
         agent_meta = registry.get(agent_id)
@@ -165,7 +227,12 @@ class JobQueueService:
             priority=priority,
             job_metadata=metadata,
             queue_id=resolved_queue_id,
+            idempotency_key=idempotency_key,
         )
+        
+        # Notify dispatch bus of new job (for event-driven processing)
+        if self._dispatch_bus is not None:
+            self._dispatch_bus.notify_new_job(project_id)
         
         return job
     

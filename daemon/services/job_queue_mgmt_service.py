@@ -7,7 +7,10 @@ with IDOR protection and validation.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from daemon.services.dispatch_event_bus import DispatchEventBus
 
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
@@ -27,21 +30,25 @@ class JobQueueMgmtService:
     Attributes:
         _queue_repo: Repository for queue persistence.
         _job_repo: Repository for job persistence.
+        _dispatch_bus: Optional DispatchEventBus for resume notifications.
     """
     
     def __init__(
         self,
         queue_repo: JobQueueRepository,
         job_repo: JobRepository,
+        dispatch_bus: Optional["DispatchEventBus"] = None,
     ):
         """Initialize the JobQueueMgmtService.
         
         Args:
             queue_repo: Repository for queue database operations.
             job_repo: Repository for job database operations.
+            dispatch_bus: Optional DispatchEventBus for resume notifications.
         """
         self._queue_repo = queue_repo
         self._job_repo = job_repo
+        self._dispatch_bus = dispatch_bus
     
     # ========== System Queue Provisioning ==========
     
@@ -368,6 +375,8 @@ class JobQueueMgmtService:
     ) -> Optional[JobQueue]:
         """Resume a paused queue.
         
+        Notifies the dispatch bus to wake up the job processor after resume.
+        
         Args:
             project_id: Project identifier for ownership validation.
             queue_id: Queue identifier.
@@ -375,7 +384,13 @@ class JobQueueMgmtService:
         Returns:
             Updated JobQueue if successful, None if not found or not owned.
         """
-        return await self.update_queue(project_id, queue_id, is_paused=False)
+        result = await self.update_queue(project_id, queue_id, is_paused=False)
+        
+        # Notify dispatch bus of queue resume for immediate job processing
+        if result is not None and self._dispatch_bus is not None:
+            self._dispatch_bus.notify_new_job(project_id)
+        
+        return result
     
     async def stop_queue(
         self,

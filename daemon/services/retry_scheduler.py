@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Optional
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_retry_engine import JobRetryEngine
+    from daemon.services.dispatch_event_bus import DispatchEventBus
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class RetryScheduler:
         _poll_interval: Seconds between retry checks (default: 60).
         _running: Flag to control the scheduler loop.
         _task: The asyncio task running the scheduler loop.
+        _dispatch_bus: Optional DispatchEventBus for immediate wakeup.
     """
     
     def __init__(
@@ -91,6 +93,7 @@ class RetryScheduler:
         queue_service: "JobQueueService",
         poll_interval: float = 60.0,
         lock_dir: Optional[Path] = None,
+        dispatch_bus: Optional["DispatchEventBus"] = None,
     ):
         """Initialize RetryScheduler.
         
@@ -99,6 +102,7 @@ class RetryScheduler:
             queue_service: Queue service for triggering job processing.
             poll_interval: Seconds between retry checks (default: 60).
             lock_dir: Directory for lock file storage (default: ./data).
+            dispatch_bus: Optional DispatchEventBus for immediate job processor wakeup.
         """
         self._retry_engine = retry_engine
         self._queue_service = queue_service
@@ -106,6 +110,7 @@ class RetryScheduler:
         self._lock_dir = lock_dir or Path("./data")
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._dispatch_bus = dispatch_bus
     
     async def start(self) -> None:
         """Start the background scheduler loop.
@@ -163,7 +168,8 @@ class RetryScheduler:
         triggers the job processor for each project that has retryable jobs.
         
         The jobs are already in PENDING state - we just need to wake up
-        the processor to pick them up.
+        the processor to pick them up. Also fires dispatch events for
+        immediate processor wakeup via event-driven dispatch.
         """
         # Find all jobs ready for retry (sync call, so wrap in to_thread)
         retryable_jobs = await asyncio.to_thread(self._retry_engine.find_retryable_jobs)
@@ -184,3 +190,9 @@ class RetryScheduler:
                 logger.debug(f"Triggered job processor for project {project_id}")
             except Exception as e:
                 logger.error(f"Failed to trigger processor for project {project_id}: {e}")
+        
+        # Also notify dispatch bus for immediate wakeup
+        if self._dispatch_bus is not None:
+            for project_id in project_ids:
+                self._dispatch_bus.notify_new_job(project_id)
+            logger.debug(f"Fired dispatch events for {len(project_ids)} projects")

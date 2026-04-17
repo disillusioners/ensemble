@@ -2,7 +2,10 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from daemon.services.dispatch_event_bus import DispatchEventBus
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
@@ -34,6 +37,10 @@ class JobProcessor:
         _queue_repo: JobQueueRepository for listing queues and their pause state.
         _poll_interval: Time in seconds between poll cycles.
         _running: Flag to control the processing loop.
+        _dispatch_bus: Optional DispatchEventBus for event-driven wakeup.
+        _event_dispatch_enabled: Whether to use event-driven dispatch.
+        _jobs_dispatched_immediately: Counter for jobs dispatched via events.
+        _jobs_dispatched_polling: Counter for jobs dispatched via polling.
     """
     
     def __init__(
@@ -43,6 +50,8 @@ class JobProcessor:
         project_repo: SQLModelProjectRepository,
         queue_repo: JobQueueRepository,
         poll_interval: float = 2.0,
+        dispatch_bus: Optional["DispatchEventBus"] = None,
+        event_dispatch_enabled: bool = True,
     ):
         """Initialize the JobProcessor.
         
@@ -52,6 +61,8 @@ class JobProcessor:
             project_repo: SQLModelProjectRepository for checking project pause state.
             queue_repo: JobQueueRepository for listing queues and checking pause state.
             poll_interval: Seconds between poll cycles (default: 2.0).
+            dispatch_bus: Optional DispatchEventBus for event-driven job dispatch.
+            event_dispatch_enabled: Whether to use event-driven dispatch (default: True).
         """
         self._queue_service = queue_service
         self._instance_manager = instance_manager
@@ -60,6 +71,10 @@ class JobProcessor:
         self._poll_interval = poll_interval
         self._running = False
         self._job: Optional[asyncio.Task] = None
+        self._dispatch_bus = dispatch_bus
+        self._event_dispatch_enabled = event_dispatch_enabled
+        self._jobs_dispatched_immediately = 0
+        self._jobs_dispatched_polling = 0
     
     async def start(self) -> None:
         """Start the background processing loop."""
@@ -88,16 +103,34 @@ class JobProcessor:
         logger.info("JobProcessor stopped")
     
     async def _process_loop(self) -> None:
-        """Main processing loop - polls for and processes jobs."""
+        """Main processing loop - polls for and processes jobs with optional event-driven wakeup."""
         while self._running:
             try:
+                # Event-driven dispatch: wait for job event with polling fallback
+                if self._event_dispatch_enabled and self._dispatch_bus is not None:
+                    # Wait for event with poll_interval as timeout
+                    event_received = await self._dispatch_bus.wait_for_job(
+                        project_id=None,  # Global event for now (could optimize per-project later)
+                        timeout=self._poll_interval
+                    )
+                    if event_received:
+                        self._jobs_dispatched_immediately += 1
+                        logger.debug(
+                            f"JobProcessor woken by event (immediate={self._jobs_dispatched_immediately}, "
+                            f"polling={self._jobs_dispatched_polling})"
+                        )
+                    else:
+                        self._jobs_dispatched_polling += 1
+                else:
+                    # Fallback: pure polling
+                    await asyncio.sleep(self._poll_interval)
+                    self._jobs_dispatched_polling += 1
+                
                 await self._process_next_job()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.exception(f"Error in processing loop: {e}")
-            
-            await asyncio.sleep(self._poll_interval)
     
     async def _process_next_job(self) -> None:
         """Get the next pending job from any active queue and process it.
