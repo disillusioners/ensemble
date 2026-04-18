@@ -1,0 +1,372 @@
+"""Tests for per-agent tool filtering functionality."""
+
+import pytest
+from unittest.mock import MagicMock, patch
+
+from daemon.tools.instance import (
+    TOOL_CATEGORIES,
+    resolve_tool_filter,
+    _apply_tool_filter,
+)
+from daemon.registry import ToolFilter
+
+
+class TestToolFilterModel:
+    """Test ToolFilter Pydantic model validation."""
+
+    def test_valid_config_with_allow_and_deny(self):
+        """Valid config with both allow and deny lists."""
+        config = ToolFilter(allow=["bash", "filesystem"], deny=["write_file"])
+        assert config.allow == ["bash", "filesystem"]
+        assert config.deny == ["write_file"]
+
+    def test_empty_config(self):
+        """Empty ToolFilter should have None fields."""
+        config = ToolFilter()
+        assert config.allow is None
+        assert config.deny is None
+
+    def test_config_with_only_allow(self):
+        """Config with only allow list."""
+        config = ToolFilter(allow=["bash"])
+        assert config.allow == ["bash"]
+        assert config.deny is None
+
+    def test_config_with_only_deny(self):
+        """Config with only deny list."""
+        config = ToolFilter(deny=["write_file"])
+        assert config.allow is None
+        assert config.deny == ["write_file"]
+
+    def test_none_fields(self):
+        """Explicit None fields."""
+        config = ToolFilter(allow=None, deny=None)
+        assert config.allow is None
+        assert config.deny is None
+
+    def test_extra_fields_ignored(self):
+        """Extra fields should be ignored due to extra='ignore'."""
+        config = ToolFilter(allow=["bash"], extra_field="ignored")
+        assert config.allow == ["bash"]
+        assert not hasattr(config, "extra_field")
+
+
+class TestResolveToolFilter:
+    """Test resolve_tool_filter() function."""
+
+    def test_both_none_returns_none(self):
+        """allow=None, deny=None → returns None (all tools)."""
+        result = resolve_tool_filter(allow=None, deny=None)
+        assert result is None
+
+    def test_both_empty_lists_returns_none(self):
+        """allow=[], deny=[] → returns None (all tools)."""
+        result = resolve_tool_filter(allow=[], deny=[])
+        assert result is None
+
+    def test_allow_specific_tools(self):
+        """allow=["bash", "filesystem"], deny=None → returns only bash + filesystem tool names."""
+        result = resolve_tool_filter(allow=["bash", "filesystem"], deny=None)
+        expected = set(["bash", "list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"])
+        assert result == expected
+
+    def test_allow_only_bash(self):
+        """allow=["bash"] → returns only bash tool."""
+        result = resolve_tool_filter(allow=["bash"], deny=None)
+        assert result == {"bash"}
+
+    def test_deny_without_allow_denies_nothing(self):
+        """allow=None, deny=["write_file"] → returns all tools (deny without allow means all minus deny)."""
+        # Per implementation: if allow is None/empty, start with all tools, then apply deny
+        result = resolve_tool_filter(allow=None, deny=["write_file"])
+        # Should return all tools minus write_file
+        all_tools = set()
+        for category_tools in TOOL_CATEGORIES.values():
+            all_tools.update(category_tools)
+        assert result == all_tools - {"write_file"}
+
+    def test_allow_with_deny(self):
+        """allow=["filesystem"], deny=["write_file", "edit_file"] → filesystem minus write_file and edit_file."""
+        result = resolve_tool_filter(allow=["filesystem"], deny=["write_file", "edit_file"])
+        expected = {"list_directory", "read_file", "glob_files", "grep_files"}
+        assert result == expected
+
+    def test_mixed_categories_and_individual_tools(self):
+        """Mixed categories + individual tool names in same allow list."""
+        result = resolve_tool_filter(allow=["bash", "time"], deny=None)
+        expected = {"bash", "time"}
+        assert result == expected
+
+    def test_deny_wins_over_allow(self):
+        """If a tool is in both allow and deny, it should be denied."""
+        # bash is a category that expands to ["bash"]
+        # Explicitly allow bash but also deny it
+        result = resolve_tool_filter(allow=["bash"], deny=["bash"])
+        assert result == set()  # bash is denied
+
+    def test_deny_category_removes_category_tools(self):
+        """Deny a category removes all tools from that category."""
+        result = resolve_tool_filter(allow=["filesystem"], deny=["filesystem"])
+        assert result == set()
+
+    def test_individual_deny_in_allow_category(self):
+        """Deny individual tool in an allowed category."""
+        result = resolve_tool_filter(allow=["filesystem"], deny=["write_file"])
+        assert "write_file" not in result
+        assert "read_file" in result
+
+    def test_unknown_tool_names_pass_through(self):
+        """Unknown tool names should pass through in allow."""
+        result = resolve_tool_filter(allow=["unknown_tool"], deny=None)
+        assert "unknown_tool" in result
+
+    def test_empty_allow_with_empty_deny(self):
+        """Empty lists should be treated as None."""
+        result = resolve_tool_filter(allow=[], deny=[])
+        assert result is None
+
+
+class TestCategoryExpansion:
+    """Test that each category expands to expected tool names."""
+
+    def test_bash_category(self):
+        """bash category should contain just bash."""
+        result = resolve_tool_filter(allow=["bash"], deny=None)
+        assert result == {"bash"}
+
+    def test_filesystem_category(self):
+        """filesystem category should contain 6 tools."""
+        result = resolve_tool_filter(allow=["filesystem"], deny=None)
+        expected = {"list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"}
+        assert result == expected
+
+    def test_time_category(self):
+        """time category should contain just time."""
+        result = resolve_tool_filter(allow=["time"], deny=None)
+        assert result == {"time"}
+
+    def test_instance_category(self):
+        """instance category should contain instance tools."""
+        result = resolve_tool_filter(allow=["instance"], deny=None)
+        expected = {
+            "spawn_instance", "send_message", "terminate_instance",
+            "list_instances", "get_instance_info"
+        }
+        assert result == expected
+
+    def test_self_category(self):
+        """self category should contain inner_soul and access_memory."""
+        result = resolve_tool_filter(allow=["self"], deny=None)
+        expected = {"inner_soul", "access_memory"}
+        assert result == expected
+
+    def test_project_category(self):
+        """project category should contain project tools."""
+        result = resolve_tool_filter(allow=["project"], deny=None)
+        expected = {
+            "project_create", "project_get", "project_list", "project_search",
+            "project_get_by_instance", "project_get_by_directory", "project_update",
+            "project_set_status", "project_add_directory", "project_remove_directory",
+            "project_set_tags", "project_add_tag", "project_remove_tag",
+            "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
+            "project_set_metadata", "project_delete_metadata",
+            "project_link", "project_unlink", "project_delete",
+        }
+        assert result == expected
+
+    def test_help_category(self):
+        """help category should contain tool_help."""
+        result = resolve_tool_filter(allow=["help"], deny=None)
+        assert result == {"tool_help"}
+
+    def test_mother_category(self):
+        """mother category should contain agent management tools."""
+        result = resolve_tool_filter(allow=["mother"], deny=None)
+        expected = {"agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"}
+        assert result == expected
+
+    def test_all_categories_combined(self):
+        """All categories should cover all tools in TOOL_CATEGORIES."""
+        all_tools = set()
+        for category_tools in TOOL_CATEGORIES.values():
+            all_tools.update(category_tools)
+        
+        result = resolve_tool_filter(allow=list(TOOL_CATEGORIES.keys()), deny=None)
+        assert result == all_tools
+
+
+class TestApplyToolFilter:
+    """Test _apply_tool_filter() function."""
+
+    def _create_mock_tool(self, name: str):
+        """Create a mock tool with a name attribute."""
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    def test_no_filter_returns_all_tools(self):
+        """With no filter, all tools should be returned."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+            self._create_mock_tool("write_file"),
+        ]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_agent_meta = MagicMock()
+            mock_agent_meta.tools = None
+            mock_registry.return_value.get.return_value = mock_agent_meta
+            
+            result = _apply_tool_filter(tools, "test_agent")
+            assert len(result) == 3
+
+    def test_allow_filter_restricts_tools(self):
+        """With allow filter, only allowed tools should be returned."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+            self._create_mock_tool("write_file"),
+        ]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_agent_meta = MagicMock()
+            mock_filter = MagicMock()
+            mock_filter.allow = ["bash", "filesystem"]
+            mock_filter.deny = None
+            mock_agent_meta.tools = mock_filter
+            mock_registry.return_value.get.return_value = mock_agent_meta
+            
+            result = _apply_tool_filter(tools, "test_agent")
+            tool_names = {t.name for t in result}
+            assert tool_names == {"bash", "read_file", "write_file"}  # filesystem expands to these
+
+    def test_deny_filter_removes_tools(self):
+        """With deny filter, denied tools should be removed."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+            self._create_mock_tool("write_file"),
+        ]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_agent_meta = MagicMock()
+            mock_filter = MagicMock()
+            mock_filter.allow = None
+            mock_filter.deny = ["write_file"]
+            mock_agent_meta.tools = mock_filter
+            mock_registry.return_value.get.return_value = mock_agent_meta
+            
+            result = _apply_tool_filter(tools, "test_agent")
+            tool_names = {t.name for t in result}
+            assert "write_file" not in tool_names
+            assert "bash" in tool_names
+            assert "read_file" in tool_names
+
+    def test_tool_without_name_gets_warning(self):
+        """Tools without names should log a warning and be skipped."""
+        # Create a nameless tool using a class that has no name attribute
+        class NamelessTool:
+            pass
+        
+        nameless_tool = NamelessTool()
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.logger") as mock_logger:
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                mock_filter.allow = ["bash", "filesystem"]
+                mock_filter.deny = None
+                mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get.return_value = mock_agent_meta
+                
+                tools = [
+                    self._create_mock_tool("bash"),
+                    nameless_tool,
+                ]
+                result = _apply_tool_filter(tools, "test_agent")
+                
+                # Warning should be logged
+                assert mock_logger.warning.called
+
+    def test_agent_not_found_returns_all_tools(self):
+        """If agent is not in registry, all tools should be returned."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+        ]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_registry.return_value.get.return_value = None
+            
+            result = _apply_tool_filter(tools, "nonexistent_agent")
+            assert len(result) == 2
+
+    def test_tool_name_from_func_attribute(self):
+        """Tool name should be extracted from func.__name__ as fallback."""
+        # Create a custom mock class that doesn't auto-create attributes
+        class FuncBasedTool:
+            def __init__(self):
+                self.func = type('func', (), {'__name__': 'func_based_tool'})()
+        
+        tool = FuncBasedTool()
+        tools = [tool]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_agent_meta = MagicMock()
+            mock_filter = MagicMock()
+            mock_filter.allow = ["func_based_tool"]
+            mock_filter.deny = None
+            mock_agent_meta.tools = mock_filter
+            mock_registry.return_value.get.return_value = mock_agent_meta
+            
+            result = _apply_tool_filter(tools, "test_agent")
+            assert len(result) == 1
+
+    def test_tool_name_from_coroutine_attribute(self):
+        """Tool name should be extracted from coroutine.__name__ as fallback."""
+        # Create a custom mock class that doesn't auto-create attributes
+        class CoroutineBasedTool:
+            def __init__(self):
+                self.coroutine = type('coro', (), {'__name__': 'coroutine_based_tool'})()
+        
+        tool = CoroutineBasedTool()
+        tools = [tool]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            mock_agent_meta = MagicMock()
+            mock_filter = MagicMock()
+            mock_filter.allow = ["coroutine_based_tool"]
+            mock_filter.deny = None
+            mock_agent_meta.tools = mock_filter
+            mock_registry.return_value.get.return_value = mock_agent_meta
+            
+            result = _apply_tool_filter(tools, "test_agent")
+            assert len(result) == 1
+
+    def test_debug_logging_when_tools_filtered(self):
+        """Debug logging should be triggered when tools are filtered."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("write_file"),
+            self._create_mock_tool("edit_file"),
+        ]
+        
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.logger") as mock_logger:
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                mock_filter.allow = ["bash"]  # Only bash allowed
+                mock_filter.deny = None
+                mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get.return_value = mock_agent_meta
+                
+                result = _apply_tool_filter(tools, "test_agent")
+                
+                # Should have filtered from 3 to 1 tool
+                assert len(result) == 1
+                assert result[0].name == "bash"
+                
+                # Debug logging should have been called
+                assert mock_logger.debug.called
+                debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
+                assert any("Filtered tools for test_agent" in str(c) for c in debug_calls)

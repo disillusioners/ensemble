@@ -4,6 +4,5 @@
   "description": "Specializes in code generation and debugging",
   "icon": "💻",
   "color": "accent-cyan",
-  "version": "1.0.0",
-  "tools": {}
+  "version": "1.0.0"
 }

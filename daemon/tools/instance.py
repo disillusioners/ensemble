@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable
 from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
 
+logger = logging.getLogger(__name__)
+
 from .bash import bash
 from .filesystem import (
     list_directory,
@@ -531,7 +533,15 @@ def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
             if func:
                 tool_name = getattr(func, '__name__', None)
         
+        if tool_name is None:
+            logger.warning(f"Tool has no name attribute — skipping filter for: {type(tool)}")
+            continue
+        
         if tool_name and tool_name in allowed_tools:
             filtered_tools.append(tool)
+    
+    if len(filtered_tools) < len(tools):
+        logger.debug(f"Filtered tools for {agent_id}: {len(tools)} → {len(filtered_tools)} "
+                     f"(removed: {set(t.name for t in tools if hasattr(t, 'name')) - allowed_tools})")
     
     return filtered_tools

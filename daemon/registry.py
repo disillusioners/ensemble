@@ -152,7 +152,7 @@ class AgentRegistry:
             # Build AgentMetadata with defaults for missing fields
             tools_config = meta.get("tools")
             tools_filter = None
-            if tools_config:
+            if tools_config is not None:
                 try:
                     tools_filter = ToolFilter.model_validate(tools_config)
                 except Exception as e:
