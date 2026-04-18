@@ -319,8 +319,26 @@ class AgentRegistry:
         warnings: list[str] = []
         
         # Import here to avoid circular imports
-        from daemon.tools._tool_registry import list_tools_by_category
+        from daemon.tools._tool_registry import (
+            list_tools_by_category,
+            scan_tools_for_full_docs,
+            _tool_metadata,
+            CATEGORY_MODULES,
+        )
         from daemon.tools.instance import resolve_tool_filter
+        
+        # Populate metadata if not already done
+        if not _tool_metadata:
+            from daemon.tools import (
+                bash,
+                list_directory, read_file, glob_files, write_file, grep_files, edit_file,
+                time,
+            )
+            scan_tools_for_full_docs([
+                bash,
+                list_directory, read_file, glob_files, write_file, grep_files, edit_file,
+                time,
+            ])
         
         # Get available categories and tools
         available_categories = list_tools_by_category()  # {category_name: [tool_names]}
@@ -328,16 +346,20 @@ class AgentRegistry:
         for tools in available_categories.values():
             all_tool_names.update(tools)
         
+        # Known categories come from CATEGORY_MODULES (includes categories that may not have
+        # tools registered yet, e.g., dynamically created tools)
+        known_categories: set[str] = set(CATEGORY_MODULES.keys())
+        
         for agent_id, agent_meta in self._agents.items():
             if agent_meta.tools is None:
                 continue
             
             tools_filter = agent_meta.tools
             
-            # Check allow entries
+            # Check allow entries (entry is valid if it's a known category or tool name)
             if tools_filter.allow:
                 for entry in tools_filter.allow:
-                    if entry not in available_categories and entry not in all_tool_names:
+                    if entry not in known_categories and entry not in all_tool_names:
                         warnings.append(
                             f"Agent '{agent_id}': allow entry '{entry}' is neither a known category nor a known tool"
                         )
@@ -345,7 +367,7 @@ class AgentRegistry:
             # Check deny entries
             if tools_filter.deny:
                 for entry in tools_filter.deny:
-                    if entry not in available_categories and entry not in all_tool_names:
+                    if entry not in known_categories and entry not in all_tool_names:
                         warnings.append(
                             f"Agent '{agent_id}': deny entry '{entry}' is neither a known category nor a known tool"
                         )
