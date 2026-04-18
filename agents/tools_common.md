@@ -61,8 +61,19 @@ project_search(query, limit=20)
 project_update(project_id, name=None, description=None, tags=None)
 project_set_status(project_id, status)     # active|paused|completed|archived
 project_add_tag(project_id, tag)
+project_remove_tag(project_id, tag)
+project_set_tags(project_id, tags)
+project_add_directory(project_id, directory, is_main=False)
+project_remove_directory(project_id, directory)
+project_get_by_instance(instance_id)
+project_get_by_directory(directory)
 project_set_metadata(project_id, key, value)
+project_delete_metadata(project_id, key)
+project_set_shortnames(project_id, shortnames)
+project_add_shortname(project_id, shortname)
+project_remove_shortname(project_id, shortname)
 project_link(project_id, entity_type, entity_id)
+project_unlink(project_id, entity_type, entity_id)
 project_delete(project_id)
 ```
 
@@ -70,6 +81,7 @@ project_delete(project_id)
 
 ```raw
 inner_soul(intent, content)               # intent: remember|learn|change
+access_memory(topic=None, limit=5)        # Read memory files about a topic
 ```
 
 ## Help

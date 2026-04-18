@@ -1,7 +1,12 @@
 """Markdown loader for agent prompts."""
 
+import logging
 from pathlib import Path
 from typing import Any
+
+from .registry import ToolFilter
+
+logger = logging.getLogger(__name__)
 
 
 # Path to shared files (injected into all agents)
@@ -18,6 +23,104 @@ def load_common_tools() -> str:
     if COMMON_TOOLS_FILE.exists():
         return COMMON_TOOLS_FILE.read_text(encoding="utf-8")
     return ""
+
+
+# Section-to-tool-names mapping for filtering tools_common.md
+# Maps section headers to the tool names documented in each section
+# NOTE: All tool names MUST exist in TOOL_CATEGORIES in daemon/tools/instance.py
+SECTION_TOOLS: dict[str, set[str]] = {
+    "File Operations": {"list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"},
+    "Shell": {"bash", "time"},
+    "Instance Management": {
+        "spawn_instance", "send_message", "terminate_instance",
+        "list_instances", "get_instance_info"
+    },
+    "Project Management": {
+        "project_create", "project_get", "project_list", "project_search",
+        "project_get_by_instance", "project_get_by_directory", "project_update",
+        "project_set_status", "project_add_directory", "project_remove_directory",
+        "project_set_tags", "project_add_tag", "project_remove_tag",
+        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
+        "project_set_metadata", "project_delete_metadata",
+        "project_link", "project_unlink", "project_delete",
+    },
+    "Self-Modification": {"inner_soul", "access_memory"},
+    "Help": {"tool_help"},
+}
+
+
+def load_common_tools_filtered(tool_filter: ToolFilter | None) -> str:
+    """Load common tools documentation, filtered by agent's allowed tools.
+    
+    Args:
+        tool_filter: Agent's tool filter configuration. If None, returns full content.
+        
+    Returns:
+        Filtered content of tools_common.md, or full content if no filter.
+    """
+    if not COMMON_TOOLS_FILE.exists():
+        return ""
+    
+    # Read file content once at the start
+    content = COMMON_TOOLS_FILE.read_text(encoding="utf-8")
+    
+    if tool_filter is None:
+        # No filter → return full content (backward compatible)
+        return content
+    
+    # Import here to avoid circular imports
+    from .tools.instance import resolve_tool_filter
+    
+    # Resolve filter to set of allowed tool names
+    allowed_tools = resolve_tool_filter(
+        allow=tool_filter.allow,
+        deny=tool_filter.deny,
+    )
+    
+    # If None returned, all tools are allowed
+    if allowed_tools is None:
+        return content
+    
+    # Parse the file content and filter sections
+    lines = content.split("\n")
+    
+    # Extract header (lines before first ## section)
+    header_lines: list[str] = []
+    section_lines: list[tuple[str, list[str]]] = []  # (section_name, lines)
+    current_section: str | None = None
+    current_lines: list[str] = []
+    
+    for line in lines:
+        if line.startswith("## "):
+            # Save previous section
+            if current_section is not None:
+                section_lines.append((current_section, current_lines))
+            # Start new section
+            current_section = line[3:].strip()
+            current_lines = [line]
+        else:
+            if current_section is not None:
+                current_lines.append(line)
+            else:
+                header_lines.append(line)
+    
+    # Save last section
+    if current_section is not None:
+        section_lines.append((current_section, current_lines))
+    
+    # Filter sections: include if ANY tool in section is in allowed set
+    filtered_sections: list[list[str]] = []
+    for section_name, section_content in section_lines:
+        section_tool_names = SECTION_TOOLS.get(section_name, set())
+        if section_tool_names and section_tool_names & allowed_tools:
+            # At least one tool from this section is allowed
+            filtered_sections.append(section_content)
+    
+    # Reconstruct the filtered content
+    result_lines = header_lines + ["\n"]
+    result_lines.extend(["\n".join(s) for s in filtered_sections])
+    
+    return "\n".join(result_lines)
 
 
 def load_project_experience() -> str:
@@ -366,10 +469,21 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         if stored_mtimes == current_mtimes:
             return cached
     
+    # Get agent's tool filter for filtered common tools loading
+    tool_filter: ToolFilter | None = None
+    from .registry import get_registry
+    try:
+        registry = get_registry()
+        agent_meta = registry.get(agent_id)
+        if agent_meta is not None:
+            tool_filter = agent_meta.tools
+    except Exception:
+        pass  # Fallback to no filter
+    
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir)
-    common_tools = load_common_tools()
+    common_tools = load_common_tools_filtered(tool_filter)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
     system_prompt = compose_system_prompt(prompts, skills, common_tools, project_experience, recent_memories)
