@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-17 Child-Parent Source Propagation Fix)
+## Test Results (Latest: 2026-04-18 DLQ Retry Feature)
+
+### DLQ Retry Feature (commits 4b2f5c2, 8decef9)
+- **19 new backend tests** — Retry DEAD_LETTER job (9) + Bulk replay-all (10) — ALL PASS
+- **16 new frontend tests** — DeadLetterItem model (7) + DLQ service methods (9) — ALL PASS
+- **2362 total backend tests** (2340 passed, 22 skipped, 0 failed) — no regressions
+- **232 total frontend tests** (10 suites, all pass) — no regressions
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-18-dlq-retry-feature.md` for full report
+
+### DLQ Retry Feature Status: ✅ READY FOR MERGE
 
 ### Child-Parent Source Propagation Fix (commit 21ad4e1)
 - **7 new tests added** to `tests/test_progressive_dispatch.py` — all PASS
