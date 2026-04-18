@@ -323,8 +323,9 @@ async def test_single_message_no_duplicate_llm_calls(
         logger.error(f"[TEST]   Processing: {stats['processing_count']}")
         logger.error(f"[TEST]   Oldest age: {stats['oldest_message_age_seconds']}s")
         
-        logger.error("[TEST] Checking processing set...")
-        logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
+        # Log queue stats for debugging
+        if hasattr(manager, '_processing'):
+            logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
     
     assert llm_calls == 1, (
         f"Expected exactly 1 LLM call, but got {llm_calls} calls. "
