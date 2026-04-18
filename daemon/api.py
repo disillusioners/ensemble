@@ -94,6 +94,7 @@ from .repositories.instance.repository import SQLModelInstanceRepository
 from .repositories import create_job_repository, create_engine_from_config, DatabaseConfig
 from .registry import get_registry
 from .cancellation import CancellationReason
+from . import __version__
 
 
 def validate_agent_id(agent_id: str) -> tuple[str, Path]:
@@ -362,7 +363,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Ensemble Daemon",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan
 )
 
@@ -475,8 +476,19 @@ async def health_check():
     return HealthResponse(
         status="healthy",
         uptime_seconds=time.time() - start_time,
-        version="0.1.0"
+        version=__version__
     )
+
+
+# 1.1. GET /info - Project info
+@api_router.get("/info")
+async def get_info():
+    """Get basic project information."""
+    return {
+        "name": "agents-ensemble",
+        "version": __version__,
+        "description": "Multi-Agent AI Daemon with LangGraph",
+    }
 
 
 # 1.5. GET /agents - List available agents
