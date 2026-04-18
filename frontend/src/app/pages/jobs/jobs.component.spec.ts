@@ -11,6 +11,7 @@ const mockJobService = {
   listJobs: jest.fn(),
   cancelJob: jest.fn(),
   retryJob: jest.fn(),
+  retryAllDeadLetterJobs: jest.fn(),
   refreshJobs: jest.fn(),
   createJob: jest.fn(),
 };
@@ -48,7 +49,11 @@ class MockJobsComponent {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = mockProjectService.projects;
-  readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string }>({});
+  readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string }>({});
+  
+  // DLQ signals
+  readonly retryingAll = signal(false);
+  readonly isDeadLetterFilterActive = computed(() => this.filters().status === 'dead_letter');
   
   // SSE connection status
   readonly isConnected = mockJobSseService.isConnected;
@@ -131,6 +136,12 @@ class MockJobsComponent {
 
   onRetryJob(job: Job) {
     mockJobService.retryJob(job.job_id);
+  }
+
+  onRetryAllDeadLetterJobs() {
+    const projectId = this.filters().project_id;
+    if (!projectId) return;
+    mockJobService.retryAllDeadLetterJobs(projectId);
   }
 
   onViewJobDetails(job: Job) {
@@ -356,6 +367,37 @@ describe('JobsComponent Logic', () => {
       const job = mockJobs[0];
       component.onRetryJob(job);
       expect(mockJobService.retryJob).toHaveBeenCalledWith(job.job_id);
+    });
+  });
+
+  describe('onRetryAllDeadLetterJobs', () => {
+    it('should call jobService.retryAllDeadLetterJobs with project_id', () => {
+      component.filters.set({ project_id: 'project-123' });
+      component.onRetryAllDeadLetterJobs();
+      expect(mockJobService.retryAllDeadLetterJobs).toHaveBeenCalledWith('project-123');
+    });
+
+    it('should not call jobService.retryAllDeadLetterJobs when no project_id', () => {
+      component.filters.set({});
+      component.onRetryAllDeadLetterJobs();
+      expect(mockJobService.retryAllDeadLetterJobs).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('isDeadLetterFilterActive', () => {
+    it('should return true when status is dead_letter', () => {
+      component.onStatusFilterChange('dead_letter');
+      expect(component.isDeadLetterFilterActive()).toBe(true);
+    });
+
+    it('should return false when status is not dead_letter', () => {
+      component.onStatusFilterChange('pending');
+      expect(component.isDeadLetterFilterActive()).toBe(false);
+    });
+
+    it('should return false when status is undefined (all)', () => {
+      component.onStatusFilterChange('all');
+      expect(component.isDeadLetterFilterActive()).toBe(false);
     });
   });
 

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.dead_letter_service import get_dead_letter_service, DeadLetterService
 from daemon.repositories.job_queue.models import JobStatus
 from .schemas import (
     JobCreateRequest,
@@ -30,6 +31,7 @@ TERMINAL_STATUSES = {
     JobStatus.COMPLETED.value,
     JobStatus.FAILED.value,
     JobStatus.CANCELLED.value,
+    JobStatus.DEAD_LETTER.value,
 }
 
 # Dependency to get JobQueueService
@@ -60,10 +62,32 @@ def set_job_queue_service(service: JobQueueService) -> None:
     _job_queue_service = service
 
 
+# Dependency to get DeadLetterService
+_dead_letter_service: Optional[DeadLetterService] = None
+
+
+def get_dead_letter_svc() -> DeadLetterService:
+    """Get the DeadLetterService instance.
+    
+    Returns:
+        DeadLetterService instance.
+        
+    Raises:
+        HTTPException: If the service is not initialized.
+    """
+    global _dead_letter_service
+    if _dead_letter_service is None:
+        _dead_letter_service = get_dead_letter_service()
+    return _dead_letter_service
+
+
 def _job_to_response(
     job,
     position: Optional[int] = None,
     message: Optional[str] = None,
+    dlq_reason: Optional[str] = None,
+    retry_count: Optional[int] = None,
+    moved_to_dlq_at: Optional[str] = None,
 ) -> JobResponse:
     """Convert JobItem to JobResponse."""
     return JobResponse(
@@ -86,6 +110,9 @@ def _job_to_response(
         idempotency_key=job.idempotency_key,
         position=position,
         message=message or job.message,
+        dlq_reason=dlq_reason,
+        retry_count=retry_count,
+        moved_to_dlq_at=moved_to_dlq_at,
     )
 
 
@@ -200,6 +227,7 @@ async def create_job(
 async def get_job(
     job_id: str,
     service: JobQueueService = Depends(get_job_queue_service),
+    dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobResponse:
     """Get job status and details by ID.
     
@@ -226,7 +254,24 @@ async def get_job(
         except Exception:
             pass  # Best effort
 
-    return _job_to_response(job, position=position)
+    # Get DLQ info if job is in dead_letter state
+    dlq_reason = None
+    retry_count = None
+    moved_to_dlq_at = None
+    if job.status == JobStatus.DEAD_LETTER.value:
+        dlq_item = dlq_service.get_dlq_by_job_id(job_id)
+        if dlq_item:
+            dlq_reason = dlq_item.reason
+            retry_count = dlq_item.retry_count
+            moved_to_dlq_at = dlq_item.moved_to_dlq_at
+
+    return _job_to_response(
+        job, 
+        position=position,
+        dlq_reason=dlq_reason,
+        retry_count=retry_count,
+        moved_to_dlq_at=moved_to_dlq_at,
+    )
 
 
 @router.get(
@@ -239,6 +284,7 @@ async def list_jobs(
     queue_id: Optional[str] = None,
     limit: int = 50,
     service: JobQueueService = Depends(get_job_queue_service),
+    dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobListResponse:
     """List jobs with optional filters.
     
@@ -308,7 +354,24 @@ async def list_jobs(
             except Exception:
                 pass
         
-        job_responses.append(_job_to_response(job, position=position))
+        # Get DLQ info if job is in dead_letter state
+        dlq_reason = None
+        retry_count = None
+        moved_to_dlq_at = None
+        if job.status == JobStatus.DEAD_LETTER.value:
+            dlq_item = dlq_service.get_dlq_by_job_id(job.job_id)
+            if dlq_item:
+                dlq_reason = dlq_item.reason
+                retry_count = dlq_item.retry_count
+                moved_to_dlq_at = dlq_item.moved_to_dlq_at
+        
+        job_responses.append(_job_to_response(
+            job, 
+            position=position,
+            dlq_reason=dlq_reason,
+            retry_count=retry_count,
+            moved_to_dlq_at=moved_to_dlq_at,
+        ))
     
     return JobListResponse(
         jobs=job_responses,
@@ -386,30 +449,27 @@ async def cancel_job(
 @router.post(
     "/{job_id}/retry",
     responses={
-        200: {"description": "New job created for retry"},
-        400: {"description": "Job is not in FAILED state"},
+        200: {"description": "Job requeued for retry"},
+        400: {"description": "Job cannot be retried"},
         404: {"model": JobNotFoundResponse, "description": "Job not found"},
+        422: {"description": "DEAD_LETTER entry not found for job"},
     },
 )
 async def retry_job(
     job_id: str,
     service: JobQueueService = Depends(get_job_queue_service),
+    dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ):
-    """Retry a failed job by creating a new job with the same parameters.
+    """Retry a job by re-queuing it for processing.
     
-    Creates a new job with identical:
-    - agent_dir
-    - message
-    - project_id
-    - priority
-    - metadata
-    
-    The new job will be queued and processed according to normal rules.
+    - FAILED jobs: Creates a NEW job with the same parameters (leaves original as FAILED)
+    - DEAD_LETTER jobs: Resets the existing job to PENDING via DLQ replay
     
     Returns:
-        200 with new job details if retry successful
-        400 if original job is not in FAILED state
+        200 with job details if retry successful
+        400 if job is in neither FAILED nor DEAD_LETTER state
         404 if job not found
+        422 if DEAD_LETTER entry not found for DEAD_LETTER job
     """
     job = await service.get_job(job_id)
     
@@ -422,13 +482,58 @@ async def retry_job(
             ).model_dump()
         )
     
-    # Check if job is in FAILED state
+    # Handle DEAD_LETTER jobs - replay from DLQ
+    if job.status == JobStatus.DEAD_LETTER.value:
+        # Find the DLQ entry for this job
+        dlq_item = dlq_service.get_dlq_by_job_id(job_id)
+        
+        if dlq_item is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "DEAD_LETTER entry not found",
+                    "message": f"Job {job_id} is in DEAD_LETTER state but no DLQ entry exists",
+                    "job_id": job_id,
+                }
+            )
+        
+        # Replay from DLQ - resets job to PENDING and deletes DLQ entry atomically
+        try:
+            updated_job = dlq_service.replay_from_dlq(dlq_item.dlq_id)
+        except Exception as e:
+            logger.error(f"Failed to replay job {job_id} from DLQ: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Failed to replay job",
+                    "message": str(e),
+                }
+            )
+        
+        # Get position in queue
+        position = None
+        if updated_job.project_id:
+            try:
+                position = await service._get_queue_position(updated_job.job_id, updated_job.project_id)
+            except Exception:
+                pass
+
+        return _job_to_response(
+            updated_job,
+            position=position,
+            message="Job replayed from DEAD_LETTER queue",
+            dlq_reason=dlq_item.reason,
+            retry_count=dlq_item.retry_count,
+            moved_to_dlq_at=dlq_item.moved_to_dlq_at,
+        )
+    
+    # Handle FAILED jobs - create new job with same parameters
     if job.status != JobStatus.FAILED.value:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Job cannot be retried",
-                "message": f"Only FAILED jobs can be retried. Current status: {job.status}",
+                "message": f"Only FAILED or DEAD_LETTER jobs can be retried. Current status: {job.status}",
                 "current_status": job.status,
             }
         )

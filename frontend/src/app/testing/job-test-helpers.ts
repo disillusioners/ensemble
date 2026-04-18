@@ -1,5 +1,5 @@
 // Inline job model types to avoid module resolution issues
-export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
 export interface Job {

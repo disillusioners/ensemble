@@ -56,13 +56,15 @@ export class JobCardComponent {
       case 'completed': return 'check_circle';
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
+      case 'dead_letter': return 'report_problem';
       default: return 'help';
     }
   });
 
   statusLabel = computed(() => {
     const status = this.job().status;
-    return status.charAt(0).toUpperCase() + status.slice(1);
+    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter')
+    return status.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   });
 
   // Used to apply spinning animation to processing status icon
@@ -83,7 +85,7 @@ export class JobCardComponent {
     return status === 'pending' || status === 'processing';
   });
 
-  canRetry = computed(() => this.job().status === 'failed');
+  canRetry = computed(() => this.job().status === 'failed' || this.job().status === 'dead_letter');
 
   showPausedBadge = computed(() => {
     return this.job().status === 'pending' && this.projectPaused();

@@ -46,7 +46,7 @@ class JobResponse(BaseModel):
     """Response for a single job."""
     
     job_id: str = Field(..., description="Unique job identifier")
-    status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled)")
+    status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled, dead_letter)")
     priority: int = Field(..., description="Job priority (1-10)")
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
@@ -64,6 +64,10 @@ class JobResponse(BaseModel):
     job_metadata: Optional[dict[str, Any]] = Field(default=None, description="Job metadata dictionary")
     cancelled_at: Optional[str] = Field(default=None, description="Timestamp when job was cancelled")
     idempotency_key: Optional[str] = Field(default=None, description="Idempotency key for deduplication")
+    # Dead Letter Queue fields (populated when status is dead_letter)
+    dlq_reason: Optional[str] = Field(default=None, description="Reason for moving to DLQ (MAX_RETRIES, MANUAL, etc.)")
+    retry_count: Optional[int] = Field(default=None, description="Number of retries attempted before moving to DLQ")
+    moved_to_dlq_at: Optional[str] = Field(default=None, description="Timestamp when job was moved to DLQ")
     
     model_config = {
         "json_schema_extra": {

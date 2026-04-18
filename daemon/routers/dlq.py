@@ -172,6 +172,30 @@ class DLQCleanupResponse(BaseModel):
     }
 
 
+class DLQBulkReplayResponse(BaseModel):
+    """Response for bulk replay of DLQ items."""
+    
+    replayed: int = Field(..., description="Number of items successfully replayed")
+    failed: int = Field(..., description="Number of items that failed to replay")
+    errors: list[dict] = Field(
+        default_factory=list,
+        description="List of errors encountered during replay"
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "replayed": 5,
+                "failed": 2,
+                "errors": [
+                    {"dlq_id": "dlq-uuid-1", "error": "Job not in dead_letter state"},
+                    {"dlq_id": "dlq-uuid-2", "error": "Job not found"}
+                ]
+            }
+        }
+    }
+
+
 # ==================== Helper Functions ====================
 
 
@@ -249,6 +273,87 @@ async def list_dlq(
     return DLQListResponse(
         items=[_dlq_to_response(item) for item in items],
         total=total,  # Total count BEFORE pagination (correct)
+    )
+
+
+@router.post(
+    "/replay-all",
+    response_model=DLQBulkReplayResponse,
+    responses={
+        200: {"description": "Bulk replay completed"},
+        503: {"description": "Service not initialized"},
+    },
+)
+async def replay_all_dlq(
+    project_id: str,
+    queue_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    service: DeadLetterService = Depends(get_dead_letter_service),
+) -> DLQBulkReplayResponse:
+    """Replay all dead letter queue items for a project.
+    
+    Query params:
+        - queue_id: Optional filter by queue ID
+        - reason: Optional filter by reason (MAX_RETRIES, MANUAL, etc.)
+    
+    Atomically replays each DLQ item. If one replay fails, continues with
+    the remaining items and reports the failure in the errors array.
+    
+    Args:
+        project_id: Project identifier from path.
+        queue_id: Optional queue ID filter.
+        reason: Optional reason filter.
+        
+    Returns:
+        200 with summary of replayed/failed items and any errors
+    """
+    # Get all DLQ items for this project (use high limit to get all)
+    # First count total, then fetch all
+    total = service.count_dlq(project_id=project_id, queue_id=queue_id)
+    
+    if total == 0:
+        return DLQBulkReplayResponse(replayed=0, failed=0, errors=[])
+    
+    # Fetch all items (paginate if needed, use 1000 as batch size)
+    all_items: list[DLQModel] = []
+    offset = 0
+    batch_size = 1000
+    
+    while offset < total:
+        items, _ = service.list_dlq(
+            project_id=project_id,
+            queue_id=queue_id,
+            reason=reason,
+            limit=batch_size,
+            offset=offset,
+        )
+        all_items.extend(items)
+        offset += batch_size
+        
+        if len(items) < batch_size:
+            break
+    
+    # Replay each item, collecting results
+    replayed = 0
+    failed = 0
+    errors: list[dict] = []
+    
+    for item in all_items:
+        try:
+            service.replay_from_dlq(item.dlq_id)
+            replayed += 1
+        except Exception as e:
+            failed += 1
+            errors.append({
+                "dlq_id": item.dlq_id,
+                "error": str(e),
+            })
+            logger.warning(f"Failed to replay DLQ item {item.dlq_id}: {e}")
+    
+    return DLQBulkReplayResponse(
+        replayed=replayed,
+        failed=failed,
+        errors=errors,
     )
 
 

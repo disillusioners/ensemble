@@ -1,6 +1,6 @@
 // Job Queue Models for Frontend
 
-export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
 
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
@@ -22,6 +22,10 @@ export interface Job {
   queue_id?: string | null; // queue this job belongs to
   cancelled_at: string | null;
   position?: number; // queue position if pending
+  // Dead Letter Queue fields
+  dlq_reason?: string | null; // reason for moving to DLQ
+  retry_count?: number; // number of retries before going to DLQ
+  moved_to_dlq_at?: string | null; // timestamp when moved to DLQ
 }
 
 export interface JobCreate {
@@ -60,7 +64,7 @@ export interface JobEvent {
 // Helper Functions
 
 export function isTerminalStatus(status: JobStatus): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled';
+  return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
 }
 
 export function getStatusColor(status: JobStatus): string {
@@ -75,6 +79,8 @@ export function getStatusColor(status: JobStatus): string {
       return '#EF4444'; // red-500
     case 'cancelled':
       return '#F59E0B'; // amber-500
+    case 'dead_letter':
+      return '#7C3AED'; // purple-600
     default:
       return '#9CA3AF'; // gray-400
   }
@@ -85,4 +91,41 @@ export function getPriorityColor(priority: number): string {
   if (priority >= 5) return '#F59E0B'; // amber-500 - medium-high
   if (priority >= 3) return '#3B82F6'; // blue-500 - medium
   return '#22C55E'; // green-500 - low priority
+}
+
+// Dead Letter Queue Models
+
+export interface DeadLetterItem {
+  dlq_id: string;
+  job_id: string;
+  agent_id: string;
+  message: string;
+  source: string;
+  project_id: string;
+  queue_id: string | null;
+  error_message: string | null;
+  retry_count: number;
+  failed_at: string | null;
+  moved_to_dlq_at: string;
+  reason: string;
+  metadata_json: string | null;
+}
+
+export interface RetryAllResult {
+  replayed: number;
+  failed: number;
+  errors: { dlq_id: string; error: string }[];
+}
+
+// DLQ Replay Response (from /api/projects/{projectId}/dlq/{dlqId}/replay)
+export interface DLQReplayResponse {
+  job_id: string;
+  status: string;
+  message: string;
+}
+
+// DLQ List Response wrapper
+export interface DLQListResponse {
+  items: DeadLetterItem[];
+  total: number;
 }

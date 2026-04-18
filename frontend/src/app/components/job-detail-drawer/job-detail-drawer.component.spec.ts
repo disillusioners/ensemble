@@ -23,7 +23,9 @@ class MockJobDetailDrawerComponent {
 
   statusLabel = computed(() => {
     const status = this._job()?.status;
-    return status ? status.charAt(0).toUpperCase() + status.slice(1) : '';
+    if (!status) return '';
+    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter')
+    return status.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   });
 
   duration = computed(() => {
@@ -55,7 +57,8 @@ class MockJobDetailDrawerComponent {
   });
 
   canRetry = computed(() => {
-    return this._job()?.status === 'failed';
+    const status = this._job()?.status;
+    return status === 'failed' || status === 'dead_letter';
   });
 
   hasInstance = computed(() => {
@@ -140,6 +143,11 @@ describe('JobDetailDrawerComponent Logic', () => {
     it('should return capitalized status for cancelled', () => {
       component.setJob(createMockJob({ status: 'cancelled' }));
       expect(component.statusLabel()).toBe('Cancelled');
+    });
+
+    it('should return "Dead Letter" for dead_letter status (with space, not underscore)', () => {
+      component.setJob(createMockJob({ status: 'dead_letter' }));
+      expect(component.statusLabel()).toBe('Dead Letter');
     });
   });
 
@@ -229,6 +237,11 @@ describe('JobDetailDrawerComponent Logic', () => {
   describe('canRetry computed', () => {
     it('should return true for failed status', () => {
       component.setJob(createMockJob({ status: 'failed' }));
+      expect(component.canRetry()).toBe(true);
+    });
+
+    it('should return true for dead_letter status', () => {
+      component.setJob(createMockJob({ status: 'dead_letter' }));
       expect(component.canRetry()).toBe(true);
     });
 
@@ -388,6 +401,11 @@ describe('JobDetailDrawerComponent Logic', () => {
 
     it('should show retry button for failed job', () => {
       component.setJob(createMockJob({ status: 'failed' }));
+      expect(component.canRetry()).toBe(true);
+    });
+
+    it('should show retry button for dead_letter job', () => {
+      component.setJob(createMockJob({ status: 'dead_letter' }));
       expect(component.canRetry()).toBe(true);
     });
 

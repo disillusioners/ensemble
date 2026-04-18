@@ -79,6 +79,10 @@ export class JobsComponent implements OnInit, OnDestroy {
   // Filter signals
   readonly filters = signal<JobFilters>({});
   
+  // DLQ signals
+  readonly retryingAll = signal(false);
+  readonly isDeadLetterFilterActive = computed(() => this.filters().status === 'dead_letter');
+  
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
   readonly retryAttempt = this.jobSseService.retryAttempt;
@@ -160,7 +164,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     { value: 'processing', label: 'Processing' },
     { value: 'completed', label: 'Completed' },
     { value: 'failed', label: 'Failed' },
-    { value: 'cancelled', label: 'Cancelled' }
+    { value: 'cancelled', label: 'Cancelled' },
+    { value: 'dead_letter', label: 'Dead Letter' }
   ];
 
   // Source filter options
@@ -433,6 +438,42 @@ export class JobsComponent implements OnInit, OnDestroy {
         console.error('Failed to retry job:', err);
         this.snackBar.open(
           err.message || 'Failed to retry job',
+          'Dismiss',
+          {
+            duration: 5000,
+            panelClass: 'error-snackbar'
+          }
+        );
+      }
+    });
+  }
+
+  protected onRetryAllDeadLetterJobs(): void {
+    const projectId = this.filters().project_id;
+    if (!projectId) {
+      this.snackBar.open('Please select a project first', 'Dismiss', {
+        duration: 3000,
+        panelClass: 'error-snackbar'
+      });
+      return;
+    }
+
+    this.retryingAll.set(true);
+    this.jobService.retryAllDeadLetterJobs(projectId).subscribe({
+      next: (result) => {
+        this.retryingAll.set(false);
+        this.snackBar.open(
+          `Replayed ${result.replayed} job${result.replayed !== 1 ? 's' : ''}${result.failed > 0 ? `, ${result.failed} failed` : ''}`,
+          'Close',
+          { duration: 5000 }
+        );
+        this.loadJobs();
+      },
+      error: (err) => {
+        console.error('Failed to retry all dead letter jobs:', err);
+        this.retryingAll.set(false);
+        this.snackBar.open(
+          err.message || 'Failed to retry all dead letter jobs',
           'Dismiss',
           {
             duration: 5000,

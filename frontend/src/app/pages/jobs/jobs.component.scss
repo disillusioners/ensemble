@@ -188,6 +188,14 @@
       }
     }
   }
+
+  .retry-all-btn {
+    margin-left: auto;
+
+    mat-icon {
+      margin-right: 4px;
+    }
+  }
 }
 
 // Project Queue Controls

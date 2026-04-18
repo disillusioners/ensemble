@@ -13,8 +13,8 @@ import {
 describe('Job Model', () => {
   describe('JobStatus type', () => {
     it('should have all expected status values', () => {
-      const statuses: JobStatus[] = ['pending', 'processing', 'completed', 'failed', 'cancelled'];
-      expect(statuses).toHaveLength(5);
+      const statuses: JobStatus[] = ['pending', 'processing', 'completed', 'failed', 'cancelled', 'dead_letter'];
+      expect(statuses).toHaveLength(6);
     });
   });
 
@@ -45,6 +45,10 @@ describe('Job Model', () => {
     it('should return true for cancelled status', () => {
       expect(isTerminalStatus('cancelled')).toBe(true);
     });
+
+    it('should return true for dead_letter status', () => {
+      expect(isTerminalStatus('dead_letter')).toBe(true);
+    });
   });
 
   describe('getStatusColor', () => {
@@ -66,6 +70,10 @@ describe('Job Model', () => {
 
     it('should return amber-500 for cancelled status', () => {
       expect(getStatusColor('cancelled')).toBe('#F59E0B');
+    });
+
+    it('should return purple-600 for dead_letter status', () => {
+      expect(getStatusColor('dead_letter')).toBe('#7C3AED');
     });
 
     it('should return default gray-400 for unknown status', () => {

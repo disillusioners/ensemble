@@ -89,6 +89,12 @@
           <span class="value">{{ formatDate(job().cancelled_at) }}</span>
         </div>
       }
+      @if (job().moved_to_dlq_at) {
+        <div class="detail-item">
+          <span class="label">Moved to DLQ At</span>
+          <span class="value">{{ formatDate(job().moved_to_dlq_at) }}</span>
+        </div>
+      }
       @if (duration()) {
         <div class="detail-item">
           <span class="label">Duration</span>
@@ -126,11 +132,39 @@
     <mat-divider></mat-divider>
   }
 
-  <!-- Error Section (if failed) -->
-  @if (job().status === 'failed' && job().error_message) {
+  <!-- Error Section (if failed or dead_letter) -->
+  @if ((job().status === 'failed' || job().status === 'dead_letter') && job().error_message) {
     <section class="detail-section error-section">
       <h3 class="section-title">Error</h3>
       <pre class="error-block">{{ job().error_message }}</pre>
+    </section>
+    <mat-divider></mat-divider>
+  }
+
+  <!-- Dead Letter Info Section -->
+  @if (job().status === 'dead_letter') {
+    <section class="detail-section dead-letter-section">
+      <h3 class="section-title">Dead Letter Info</h3>
+      <div class="dead-letter-info">
+        @if (job().dlq_reason) {
+          <div class="detail-item">
+            <span class="label">Reason</span>
+            <span class="value dlq-reason">{{ job().dlq_reason }}</span>
+          </div>
+        }
+        @if (job().retry_count !== undefined && job().retry_count !== null) {
+          <div class="detail-item">
+            <span class="label">Retry Count</span>
+            <span class="value">{{ job().retry_count }} attempts before DLQ</span>
+          </div>
+        }
+        @if (job().moved_to_dlq_at) {
+          <div class="detail-item">
+            <span class="label">Moved to DLQ</span>
+            <span class="value">{{ formatDate(job().moved_to_dlq_at) }}</span>
+          </div>
+        }
+      </div>
     </section>
     <mat-divider></mat-divider>
   }

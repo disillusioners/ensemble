@@ -1,7 +1,7 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient, HttpParams, HttpResponse } from '@angular/common/http';
 import { Observable, tap, catchError, of, map } from 'rxjs';
-import { Job, JobCreate, JobFilters } from '../models/job.model';
+import { Job, JobCreate, JobFilters, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
 
 interface JobListResponse {
   jobs: Job[];
@@ -103,6 +103,45 @@ export class JobService {
       }),
       catchError((err) => {
         this.error.set(err.message || 'Failed to retry job');
+        throw err;
+      })
+    );
+  }
+
+  // Dead Letter Queue Methods
+
+  /**
+   * GET /api/projects/{projectId}/dlq
+   */
+  listDeadLetterItems(projectId: string): Observable<DeadLetterItem[]> {
+    return this.http.get<DLQListResponse>(`/api/projects/${encodeURIComponent(projectId)}/dlq`).pipe(
+      map((response) => response.items),
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to fetch dead letter items');
+        throw err;
+      })
+    );
+  }
+
+  /**
+   * POST /api/projects/{projectId}/dlq/{dlqId}/replay
+   */
+  retryDeadLetterJob(projectId: string, dlqId: string): Observable<DLQReplayResponse> {
+    return this.http.post<DLQReplayResponse>(`/api/projects/${encodeURIComponent(projectId)}/dlq/${encodeURIComponent(dlqId)}/replay`, {}).pipe(
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to replay dead letter job');
+        throw err;
+      })
+    );
+  }
+
+  /**
+   * POST /api/projects/{projectId}/dlq/replay-all
+   */
+  retryAllDeadLetterJobs(projectId: string): Observable<RetryAllResult> {
+    return this.http.post<RetryAllResult>(`/api/projects/${encodeURIComponent(projectId)}/dlq/replay-all`, {}).pipe(
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to replay all dead letter jobs');
         throw err;
       })
     );

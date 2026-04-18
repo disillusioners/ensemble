@@ -85,6 +85,24 @@
           </mat-chip-option>
         }
       </mat-chip-listbox>
+      
+      @if (isDeadLetterFilterActive() && filters().project_id) {
+        <button 
+          mat-flat-button 
+          color="warn"
+          (click)="onRetryAllDeadLetterJobs()"
+          [disabled]="retryingAll()"
+          class="retry-all-btn"
+          matTooltip="Replay all dead letter jobs">
+          @if (retryingAll()) {
+            <mat-icon class="spinning">sync</mat-icon>
+            Replaying...
+          } @else {
+            <mat-icon>replay</mat-icon>
+            Retry All
+          }
+        </button>
+      }
     </div>
 
     <div class="filter-row">

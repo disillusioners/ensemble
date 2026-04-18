@@ -77,6 +77,11 @@ mat-chip {
     background: rgba(158, 158, 158, 0.2);
     color: #9e9e9e;
   }
+
+  &.status-dead_letter {
+    background: rgba(124, 58, 237, 0.2);
+    color: #7c3aed;
+  }
 }
 
 // Badge Styles
@@ -202,6 +207,27 @@ mat-chip {
   white-space: pre-wrap;
   word-break: break-word;
   color: #f44336;
+}
+
+// Dead Letter Info Section
+.dead-letter-section {
+  .section-title {
+    color: #7c3aed;
+  }
+
+  .dead-letter-info {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .dlq-reason {
+    color: #d4a5ff;
+    background: rgba(124, 58, 237, 0.1);
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(124, 58, 237, 0.2);
+  }
 }
 
 // Actions Section

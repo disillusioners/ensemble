@@ -48,6 +48,8 @@ export class JobDetailDrawerComponent {
         return 'warn';
       case 'cancelled':
         return 'warn';
+      case 'dead_letter':
+        return 'accent';
       default:
         return 'primary';
     }
@@ -55,7 +57,8 @@ export class JobDetailDrawerComponent {
 
   statusLabel = computed(() => {
     const status = this.job().status;
-    return status.charAt(0).toUpperCase() + status.slice(1);
+    // Handle snake_case (e.g., 'dead_letter' -> 'Dead Letter')
+    return status.replace(/_/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   });
 
   duration = computed(() => {
@@ -87,7 +90,8 @@ export class JobDetailDrawerComponent {
   });
 
   canRetry = computed(() => {
-    return this.job().status === 'failed';
+    const status = this.job().status;
+    return status === 'failed' || status === 'dead_letter';
   });
 
   hasInstance = computed(() => {
