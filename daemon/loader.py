@@ -65,7 +65,12 @@ def load_tools_doc_for_agent(agent_id: str) -> str:
     sections: list[str] = []
     for category_key, tool_names in sorted(categories.items()):
         try:
-            category_name, category_doc = get_category_doc(category_key)
+            cat_result = get_category_doc(category_key)
+            if cat_result is not None:
+                category_name, category_doc = cat_result
+            else:
+                category_name = category_key
+                category_doc = ""
         except KeyError:
             # Category not in CATEGORY_MODULES - use key as name
             category_name = category_key

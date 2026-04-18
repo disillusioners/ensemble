@@ -32,7 +32,7 @@ from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
-from ._tool_registry import list_tools_by_category
+from ._tool_registry import list_tools_by_category, register_tool_category
 
 
 def resolve_tool_filter(
@@ -270,6 +270,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     def get_current_workdir() -> str | None:
         return _get_project_workdir(manager, current_instance_id)
     
+    @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
     def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'coder', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
@@ -330,6 +331,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         except Exception as e:
             return f"ERROR: Failed to spawn instance: {str(e)}"
     
+    @register_tool_category("instance")
     @tool
     async def send_message(instance_id: str, message: str) -> str:
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
@@ -378,6 +380,7 @@ Returns:
     The message_id for tracking (queue is async, response comes later)
 """
     
+    @register_tool_category("instance")
     @tool
     async def terminate_instance(instance_id: str) -> bool:
         """Terminate an instance. Use with caution. Use tool_help("terminate_instance") for details."""
@@ -392,6 +395,7 @@ Returns:
     True if termination was successful, False otherwise
 """
     
+    @register_tool_category("instance")
     @tool
     def list_instances() -> list[dict]:
         """List all active instances. Use tool_help("list_instances") for details."""
@@ -404,6 +408,7 @@ Returns:
     List of instance info dictionaries
 """
     
+    @register_tool_category("instance")
     @tool
     def get_instance_info(instance_id: str) -> dict:
         """Get information about a specific instance. Use tool_help("get_instance_info") for details."""

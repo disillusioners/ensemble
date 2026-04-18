@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
+from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "Project Management"
 CATEGORY_DOC = """\
@@ -65,7 +66,6 @@ Args:
     related_directories: Additional directories related to this project.
     description: Brief description of the project's purpose.
     tags: List of tags for categorization and filtering.
-    shortnames: List of alternative short names/nicknames for the project.
     metadata: Custom key-value pairs for type-specific data.
 
 Returns:
@@ -77,7 +77,6 @@ Example:
         project_type="software",
         main_directory="/home/user/projects/my-web-app",
         tags=["web", "frontend", "react"],
-        shortnames=["mwa", "webapp"],
         metadata={"framework": "React", "language": "TypeScript"}
     )""",
     
@@ -330,6 +329,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
     Returns:
         List of tool functions for project management.
     """
+    @register_tool_category("project")
     @tool
     def project_create(
         name: str,
@@ -377,6 +377,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
             return {"error": str(e)}
     project_create._full_doc_ = _FULL_DOCS["project_create"]
     
+    @register_tool_category("project")
     @tool
     def project_get(project_id: str | None = None, name: str | None = None, shortname: str | None = None) -> dict | None:
         """Get a project by ID or name. Use tool_help("project_get") for details."""
@@ -394,6 +395,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_get._full_doc_ = _FULL_DOCS["project_get"]
     
+    @register_tool_category("project")
     @tool
     def project_list(
         status: str | None = None,
@@ -411,6 +413,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return [p.to_dict() for p in projects]
     project_list._full_doc_ = _FULL_DOCS["project_list"]
     
+    @register_tool_category("project")
     @tool
     def project_search(query: str, limit: int = 20) -> list[dict]:
         """Search projects by name or description. Use tool_help("project_search") for details."""
@@ -418,6 +421,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return [p.to_dict() for p in projects]
     project_search._full_doc_ = _FULL_DOCS["project_search"]
     
+    @register_tool_category("project")
     @tool
     def project_get_by_instance(instance_id: str) -> list[dict]:
         """Get projects linked to an instance. Use tool_help("project_get_by_instance") for details."""
@@ -425,6 +429,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return [p.to_dict() for p in projects]
     project_get_by_instance._full_doc_ = _FULL_DOCS["project_get_by_instance"]
     
+    @register_tool_category("project")
     @tool
     def project_get_by_directory(directory: str) -> list[dict]:
         """Get projects referencing a directory. Use tool_help("project_get_by_directory") for details."""
@@ -432,6 +437,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return [p.to_dict() for p in projects]
     project_get_by_directory._full_doc_ = _FULL_DOCS["project_get_by_directory"]
     
+    @register_tool_category("project")
     @tool
     def project_update(
         project_id: str,
@@ -495,6 +501,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
             return {"error": str(e)}
     project_update._full_doc_ = _FULL_DOCS["project_update"]
     
+    @register_tool_category("project")
     @tool
     def project_set_status(project_id: str, status: str) -> dict | None:
         """Update project status. Use tool_help("project_set_status") for details."""
@@ -513,6 +520,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
             return {"error": str(e)}
     project_set_status._full_doc_ = _FULL_DOCS["project_set_status"]
     
+    @register_tool_category("project")
     @tool
     def project_add_directory(
         project_id: str, 
@@ -536,6 +544,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_add_directory._full_doc_ = _FULL_DOCS["project_add_directory"]
     
+    @register_tool_category("project")
     @tool
     def project_remove_directory(project_id: str, directory: str) -> dict | None:
         """Remove a directory from project. Use tool_help("project_remove_directory") for details."""
@@ -545,6 +554,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_remove_directory._full_doc_ = _FULL_DOCS["project_remove_directory"]
     
+    @register_tool_category("project")
     @tool
     def project_set_tags(project_id: str, tags: list[str]) -> dict | None:
         """Replace all tags on a project. Use tool_help("project_set_tags") for details."""
@@ -554,6 +564,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_set_tags._full_doc_ = _FULL_DOCS["project_set_tags"]
     
+    @register_tool_category("project")
     @tool
     def project_add_tag(project_id: str, tag: str) -> dict | None:
         """Add a tag to a project. Use tool_help("project_add_tag") for details."""
@@ -563,6 +574,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_add_tag._full_doc_ = _FULL_DOCS["project_add_tag"]
     
+    @register_tool_category("project")
     @tool
     def project_remove_tag(project_id: str, tag: str) -> dict | None:
         """Remove a tag from a project. Use tool_help("project_remove_tag") for details."""
@@ -572,6 +584,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_remove_tag._full_doc_ = _FULL_DOCS["project_remove_tag"]
     
+    @register_tool_category("project")
     @tool
     def project_set_shortnames(project_id: str, shortnames: list[str]) -> dict | None:
         """Replace all shortnames on a project. Use tool_help("project_set_shortnames") for details."""
@@ -581,6 +594,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_set_shortnames._full_doc_ = _FULL_DOCS["project_set_shortnames"]
     
+    @register_tool_category("project")
     @tool
     def project_add_shortname(project_id: str, shortname: str) -> dict | None:
         """Add a shortname to a project. Use tool_help("project_add_shortname") for details."""
@@ -590,6 +604,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_add_shortname._full_doc_ = _FULL_DOCS["project_add_shortname"]
     
+    @register_tool_category("project")
     @tool
     def project_remove_shortname(project_id: str, shortname: str) -> dict | None:
         """Remove a shortname from a project. Use tool_help("project_remove_shortname") for details."""
@@ -599,6 +614,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_remove_shortname._full_doc_ = _FULL_DOCS["project_remove_shortname"]
     
+    @register_tool_category("project")
     @tool
     def project_set_metadata(project_id: str, key: str, value) -> dict | None:
         """Set a custom metadata field. Use tool_help("project_set_metadata") for details."""
@@ -615,6 +631,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_set_metadata._full_doc_ = _FULL_DOCS["project_set_metadata"]
     
+    @register_tool_category("project")
     @tool
     def project_delete_metadata(project_id: str, key: str) -> dict | None:
         """Delete a metadata field. Use tool_help("project_delete_metadata") for details."""
@@ -624,6 +641,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_delete_metadata._full_doc_ = _FULL_DOCS["project_delete_metadata"]
     
+    @register_tool_category("project")
     @tool
     def project_link(
         project_id: str, 
@@ -637,6 +655,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_link._full_doc_ = _FULL_DOCS["project_link"]
     
+    @register_tool_category("project")
     @tool
     def project_unlink(
         project_id: str, 
@@ -650,6 +669,7 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         return project.to_dict()
     project_unlink._full_doc_ = _FULL_DOCS["project_unlink"]
     
+    @register_tool_category("project")
     @tool
     def project_delete(project_id: str) -> dict:
         """Delete a project permanently. Use tool_help("project_delete") for details."""

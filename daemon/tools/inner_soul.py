@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Literal, Optional
 import re
 import logging
 
+from ._tool_registry import register_tool_category
+
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Self-Modification"
@@ -190,6 +192,7 @@ def create_inner_soul_tool(
     agent_meta = registry.get(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
     
+    @register_tool_category("self")
     @tool
     def inner_soul(
         content: str | None = None,

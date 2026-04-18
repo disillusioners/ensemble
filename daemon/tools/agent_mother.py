@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
 
+from ._tool_registry import register_tool_category
+
 if TYPE_CHECKING:
     from ..manager import InstanceManager
 
@@ -35,6 +37,7 @@ def create_mother_tools(manager: "InstanceManager", current_instance_id: str):
         List of tool functions for agent management
     """
     
+    @register_tool_category("mother")
     @tool
     def agent_list(include_system: bool = False) -> list[dict]:
         """List all available agents. Use tool_help("agent_list") for details."""
@@ -102,6 +105,7 @@ Returns:
     List of agent info dictionaries with id, name, description, purpose
 """
     
+    @register_tool_category("mother")
     @tool
     def agent_create(
         name: str,
@@ -279,6 +283,7 @@ Returns:
     Dict with success status and agent info, or error message
 """
     
+    @register_tool_category("mother")
     @tool
     def agent_read(agent_name: str, file: str = "soul.md") -> dict:
         """Read an agent's file contents. Use tool_help("agent_read") for details."""
@@ -335,6 +340,7 @@ Returns:
     Dict with success status and file content, or error message
 """
     
+    @register_tool_category("mother")
     @tool
     def agent_modify(agent_name: str, file: str, content: str) -> dict:
         """Modify an agent's file contents. Use tool_help("agent_modify") for details."""
@@ -393,6 +399,7 @@ Returns:
     Dict with success status, or error message
 """
     
+    @register_tool_category("mother")
     @tool
     def agent_delete(agent_name: str, confirm: bool = False) -> dict:
         """Delete an agent (move to _trash). Use tool_help("agent_delete") for details."""

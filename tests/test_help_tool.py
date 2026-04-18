@@ -149,7 +149,7 @@ class TestHelpTool:
         help_tool = create_help_tool(sample_tools, agent_id="test")
         result = help_tool.invoke({"tool_name": "test_creat"})
         
-        assert "Similar tools" in result or "test_create" in result
+        assert "not found or not available" in result
     
     def test_help_by_category(self, sample_tools):
         """Test listing tools by category."""
@@ -164,9 +164,8 @@ class TestHelpTool:
         help_tool = create_help_tool(sample_tools, agent_id="test")
         result = help_tool.invoke({"category": "nonexistent"})
         
-        # Should show available categories
-        assert "Unknown category" in result
-        assert "available" in result.lower()
+        # Should show uniform not found message
+        assert "not found or not available" in result
     
     def test_help_short_doc_fallback(self):
         """Test that short doc is shown when full doc not available."""
@@ -416,3 +415,151 @@ class TestToolHelpBackwardCompatibility:
             # Should show full documentation, not "not available"
             assert "not available" not in result.lower()
             assert "Another tool" in result
+
+
+class TestToolHelpSecurity:
+    """Tests for tool_help() security - ensuring denied tools/categories are indistinguishable from non-existent ones."""
+
+    @pytest.fixture(autouse=True)
+    def setup_and_teardown(self):
+        """Clear registry before and after each test."""
+        clear_registry()
+        yield
+        clear_registry()
+
+    @pytest.fixture
+    def mock_agent_with_limited_tools(self):
+        """Set up a mock agent with only bash tool."""
+        from daemon.registry import ToolFilter
+
+        mock_agent_meta = MagicMock()
+        mock_agent_meta.tools = ToolFilter(allow=["bash"], deny=[])
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_agent_meta
+
+        return mock_registry
+
+    @pytest.fixture
+    def mock_agent_with_bash_only(self):
+        """Set up a mock agent with only bash category tools."""
+        from daemon.registry import ToolFilter
+
+        mock_agent_meta = MagicMock()
+        mock_agent_meta.tools = ToolFilter(allow=["bash"], deny=[])
+
+        mock_registry = MagicMock()
+        mock_registry.get.return_value = mock_agent_meta
+
+        return mock_registry
+
+    @pytest.fixture
+    def sample_security_tools(self):
+        """Create sample tools for security testing."""
+        clear_registry()
+
+        @tool
+        def send_message(recipient: str, message: str) -> dict:
+            """Send a message to a recipient."""
+            return {"recipient": recipient, "message": message}
+        send_message._full_doc_ = """Send a message to a recipient.
+
+Args:
+    recipient: The recipient name (required).
+    message: The message content (required).
+
+Returns:
+    Dictionary with delivery status."""
+
+        # Import and use actual bash tool which has proper category registration
+        from daemon.tools.bash import bash as real_bash
+
+        return [send_message, real_bash]
+
+    def test_denied_tool_same_message_as_nonexistent(self, sample_security_tools, mock_agent_with_limited_tools):
+        """Denied tool should return exact same message as non-existent tool."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_limited_tools):
+            help_tool = create_help_tool(sample_security_tools, agent_id="limited_agent")
+
+            # Call with denied tool (real tool but not in allow list)
+            denied_result = help_tool.invoke({"tool_name": "send_message"})
+
+            # Call with non-existent tool
+            nonexistent_result = help_tool.invoke({"tool_name": "nonexistent_fake_tool"})
+
+            # Both should return the exact same "not found" message
+            expected_msg = "Tool 'send_message' not found or not available."
+            assert denied_result == expected_msg
+            assert nonexistent_result == "Tool 'nonexistent_fake_tool' not found or not available."
+            assert denied_result == nonexistent_result.replace("nonexistent_fake_tool", "send_message")
+
+    def test_category_with_no_allowed_tools_same_as_unknown(self, sample_security_tools, mock_agent_with_bash_only):
+        """Category with no allowed tools should return same message as unknown category."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_bash_only):
+            help_tool = create_help_tool(sample_security_tools, agent_id="bash_agent")
+
+            # Call with real category but no allowed tools in it
+            real_empty_result = help_tool.invoke({"category": "project"})
+
+            # Call with fake category
+            fake_result = help_tool.invoke({"category": "fake_category"})
+
+            # Both should return the exact same "not found" message
+            assert real_empty_result == "Category 'project' not found or not available."
+            assert fake_result == "Category 'fake_category' not found or not available."
+
+    def test_no_args_only_shows_allowed_categories(self, sample_security_tools, mock_agent_with_limited_tools):
+        """tool_help() with no args should only show categories with allowed tools."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_limited_tools):
+            help_tool = create_help_tool(sample_security_tools, agent_id="limited_agent")
+            result = help_tool.invoke({})
+
+            # Should show bash (allowed)
+            assert "bash" in result.lower()
+
+            # Should NOT show project (denied/not in allow list)
+            assert "project" not in result.lower()
+
+    def test_allowed_tool_shows_docstring(self, sample_security_tools, mock_agent_with_limited_tools):
+        """Allowed tool should show its full documentation."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_limited_tools):
+            help_tool = create_help_tool(sample_security_tools, agent_id="limited_agent")
+            result = help_tool.invoke({"tool_name": "bash"})
+
+            # Should show the tool's documentation
+            assert "bash" in result.lower()
+            assert "Execute a bash command" in result
+
+    def test_denied_tool_returns_not_found_message(self, sample_security_tools, mock_agent_with_limited_tools):
+        """Denied tool should return the 'not found' message."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_limited_tools):
+            help_tool = create_help_tool(sample_security_tools, agent_id="limited_agent")
+            result = help_tool.invoke({"tool_name": "send_message"})
+
+            # Should return the not found message
+            assert result == "Tool 'send_message' not found or not available."
+
+    def test_allowed_category_shows_doc_and_tools(self, sample_security_tools, mock_agent_with_bash_only):
+        """Allowed category should show CATEGORY_DOC and list its tools."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_bash_only):
+            help_tool = create_help_tool(sample_security_tools, agent_id="bash_agent")
+            result = help_tool.invoke({"category": "bash"})
+
+            # Should show bash category (case insensitive)
+            assert "bash" in result.lower()
+
+            # Should contain the category documentation
+            from daemon.tools.bash import CATEGORY_DOC
+            assert CATEGORY_DOC[:50] in result or "Execute" in result
+
+            # Should list the allowed tools in the category
+            assert "bash" in result.lower() or "execute_command" in result.lower()
+
+    def test_denied_category_returns_not_found_message(self, sample_security_tools, mock_agent_with_limited_tools):
+        """Denied category should return the 'not found' message."""
+        with patch("daemon.registry.get_registry", return_value=mock_agent_with_limited_tools):
+            help_tool = create_help_tool(sample_security_tools, agent_id="limited_agent")
+            result = help_tool.invoke({"category": "project"})
+
+            # Should return the not found message
+            assert result == "Category 'project' not found or not available."

@@ -5,9 +5,11 @@ import signal
 from langchain_core.tools import tool
 from typing import Optional, Union, List
 
+from ._tool_registry import register_tool_category
+
 CATEGORY_NAME = "Shell"
 CATEGORY_DOC = """\
-Execute shell commands and get current time.
+Execute shell commands.
 
 **Rules**: Always set `workdir` to the project directory. Never omit it.
 """
@@ -26,6 +28,7 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+@register_tool_category("bash")
 @tool
 async def bash(
     command: Union[str, List[str]],

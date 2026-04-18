@@ -53,5 +53,5 @@ agent_read(agent_name="coder", file="soul.md")
 
 ## Common Tools
 
-I also have access to standard tools from `agents/tools_common.md`:
+I also have access to standard tools:
 - bash, read_file, list_directory, glob_files, time

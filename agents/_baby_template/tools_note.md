@@ -6,7 +6,7 @@
 
 ## Always Available
 
-These tools are always available from `agents/tools_common.md`:
+These tools are always available:
 
 - **bash** — Execute terminal commands
 - **time** — Get current time/date

@@ -15,6 +15,27 @@ _full_docs: dict[str, str] = {}
 _tool_metadata: dict[str, dict[str, Any]] = {}
 
 
+def register_tool_category(category: str):
+    """Decorator to mark a tool with its category.
+    
+    Usage:
+        @register_tool_category("filesystem")
+        @tool
+        def read_file(...):
+            ...
+    
+    Args:
+        category: The category key (e.g., "filesystem", "instance").
+    
+    Returns:
+        Decorator function that sets _tool_category on the tool.
+    """
+    def decorator(func):
+        func._tool_category = category
+        return func
+    return decorator
+
+
 def register_tool(
     tool_name: str,
     category: str = "general",
@@ -140,8 +161,10 @@ def scan_tools_for_full_docs(tools: list) -> None:
         elif hasattr(tool_func, '__doc__') and tool_func.__doc__:
             short_doc = tool_func.__doc__.split('\n')[0]
         
-        # Infer category from name (e.g., "project_create" -> "project")
-        category = tool_name.split('_')[0] if '_' in tool_name else 'general'
+        # Infer category from _tool_category attribute or name fallback
+        category = getattr(tool_func, '_tool_category', None)
+        if category is None:
+            category = tool_name.split('_')[0] if '_' in tool_name else 'general'
         
         # Register metadata
         if tool_name not in _tool_metadata:
@@ -206,23 +229,23 @@ def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list
     return categories
 
 
-def get_category_doc(category_key: str) -> tuple[str, str]:
+def get_category_doc(category_key: str) -> tuple[str, str] | None:
     """Get CATEGORY_NAME and CATEGORY_DOC for a category.
     
     Args:
         category_key: The category key (e.g., "bash", "filesystem").
     
     Returns:
-        Tuple of (CATEGORY_NAME, CATEGORY_DOC).
-    
-    Raises:
-        KeyError: If category doesn't exist in CATEGORY_MODULES.
+        Tuple of (CATEGORY_NAME, CATEGORY_DOC), or None if category doesn't exist.
     """
     if category_key not in CATEGORY_MODULES:
-        raise KeyError(f"Unknown category: {category_key}")
+        return None
     
-    module = import_module(CATEGORY_MODULES[category_key])
-    return (
-        getattr(module, "CATEGORY_NAME", category_key),
-        getattr(module, "CATEGORY_DOC", ""),
-    )
+    try:
+        module = import_module(CATEGORY_MODULES[category_key])
+        return (
+            getattr(module, "CATEGORY_NAME", category_key),
+            getattr(module, "CATEGORY_DOC", ""),
+        )
+    except ImportError:
+        return None

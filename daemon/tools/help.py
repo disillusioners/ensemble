@@ -18,6 +18,7 @@ from ._tool_registry import (
     list_tools_by_category,
     scan_tools_for_full_docs,
     CATEGORY_MODULES,
+    register_tool_category,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ def create_help_tool(all_tools: list, agent_id: str):
             "func": t,
         }
     
+    @register_tool_category("help")
     @tool
     def tool_help(tool_name: str | None = None, category: str | None = None) -> str:
         """Get help for tools. Call without args to list all tools.
@@ -111,7 +113,7 @@ def create_help_tool(all_tools: list, agent_id: str):
         if tool_name:
             # Check if tool is allowed
             if allowed_tools is not None and tool_name not in allowed_tools:
-                return f"Tool '{tool_name}' is not available. Use tool_help() to see available tools."
+                return f"Tool '{tool_name}' not found or not available."
             
             full_doc = get_full_doc(tool_name)
             if full_doc:
@@ -126,9 +128,9 @@ def create_help_tool(all_tools: list, agent_id: str):
             similar = [name for name in tool_index.keys() 
                       if tool_name.lower() in name.lower()]
             if similar:
-                return f"Tool '{tool_name}' not found. Similar tools: {', '.join(similar[:5])}"
+                return f"Tool '{tool_name}' not found or not available."
             
-            return f"Tool '{tool_name}' not found. Use tool_help() to list available tools."
+            return f"Tool '{tool_name}' not found or not available."
         
         # List tools by category
         if category:
@@ -137,8 +139,7 @@ def create_help_tool(all_tools: list, agent_id: str):
             
             # Check if category exists
             if category_key not in CATEGORY_MODULES:
-                available_cats = sorted(CATEGORY_MODULES.keys())
-                return f"Unknown category '{category}'. Available categories: {', '.join(available_cats)}"
+                return f"Category '{category}' not found or not available."
             
             # Get tools in this category from registry
             all_category_tools = list_tools_by_category()
@@ -149,12 +150,13 @@ def create_help_tool(all_tools: list, agent_id: str):
                 category_tools = [t for t in category_tools if t in allowed_tools]
             
             if not category_tools:
-                return f"No tools available in category '{category}'."
+                return f"Category '{category}' not found or not available."
             
             # Get category documentation
-            try:
-                cat_name, cat_doc = get_category_doc(category_key)
-            except KeyError:
+            cat_result = get_category_doc(category_key)
+            if cat_result:
+                cat_name, cat_doc = cat_result
+            else:
                 cat_name = category.title()
                 cat_doc = ""
             

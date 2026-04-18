@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from langchain_core.tools import tool
 from typing import Optional
 
+from ._tool_registry import register_tool_category
+
 CATEGORY_NAME = "Time"
 CATEGORY_DOC = """\
 Get current date and time.
@@ -12,6 +14,7 @@ Use `format_type="iso"` for ISO format, or provide a custom format string.
 """
 
 
+@register_tool_category("time")
 @tool
 def time(
     timezone_str: Optional[str] = None,

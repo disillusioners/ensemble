@@ -6,6 +6,8 @@ from pathlib import Path
 from langchain_core.tools import tool
 from typing import Optional
 
+from ._tool_registry import register_tool_category
+
 CATEGORY_NAME = "File Operations"
 CATEGORY_DOC = """\
 Read, write, edit, and search files and directories.
@@ -62,6 +64,7 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
     return False
 
 
+@register_tool_category("filesystem")
 @tool
 def list_directory(
     path: str,
@@ -125,6 +128,7 @@ Returns:
     - * suffix for executables
 """
 
+@register_tool_category("filesystem")
 @tool
 def read_file(
     path: str,
@@ -187,6 +191,7 @@ Returns:
 """
 
 
+@register_tool_category("filesystem")
 @tool
 def glob_files(
     pattern: str,
@@ -245,6 +250,7 @@ Returns:
 """
 
 
+@register_tool_category("filesystem")
 @tool
 def write_file(
     content: str,
@@ -289,6 +295,7 @@ Returns:
 """
 
 
+@register_tool_category("filesystem")
 @tool
 def grep_files(
     pattern: str,
@@ -366,6 +373,7 @@ Returns:
 """
 
 
+@register_tool_category("filesystem")
 @tool
 def edit_file(
     path: str,
