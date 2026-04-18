@@ -13,8 +13,8 @@ from daemon.registry import AgentMetadata
 
 
 @pytest.fixture
-def integration_config():
-    """Load real configuration from config.yaml (uses .env)."""
+def integration_config(tmp_path):
+    """Load real configuration from config.yaml (uses .env) with temp database paths."""
     from daemon.config import load_config
     
     project_root = Path(__file__).parent.parent.parent
@@ -23,7 +23,14 @@ def integration_config():
     if not config_path.exists():
         pytest.skip(f"config.yaml not found at {config_path}")
     
-    return load_config(str(config_path))
+    config = load_config(str(config_path))
+    
+    # Override database paths to use temp directories to avoid conflicts
+    # when tests run in different working directories
+    config.persistence.db_path = str(tmp_path / "instances.db")
+    config.persistence.checkpointer_db_path = str(tmp_path / "checkpoints.db")
+    
+    return config
 
 
 @pytest.fixture
