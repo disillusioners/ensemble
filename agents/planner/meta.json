@@ -6,7 +6,6 @@
   "color": "accent-indigo",
   "version": "1.0.0",
   "tools": {
-    "allow": ["filesystem", "time", "self", "help"],
-    "deny": ["write_file", "edit_file"]
+    "allow": ["filesystem", "time", "self", "help"]
   }
 }
