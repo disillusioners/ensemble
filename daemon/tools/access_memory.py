@@ -34,7 +34,7 @@ def create_access_memory_tool(agent_id: str):
     agent_meta = registry.get(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
 
-    @register_tool_category("access_memory")
+    @register_tool_category("self")
     @tool
     def access_memory(filename: str) -> str:
         """Read a memory file from your memories/ directory. Use tool_help("access_memory") for details."""

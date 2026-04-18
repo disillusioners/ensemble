@@ -180,14 +180,13 @@ def scan_tools_for_full_docs(tools: list) -> None:
                 _tool_metadata[tool_name]["full_doc"] = _full_docs[tool_name]
 
 
-# Category module mapping: category_key -> full module path
-CATEGORY_MODULES = {
+# Category module mapping: category_key -> full module path(s)
+CATEGORY_MODULES: dict[str, str | list[str]] = {
     "bash": "daemon.tools.bash",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
     "instance": "daemon.tools.instance",
-    "self": "daemon.tools.inner_soul",
-    "access_memory": "daemon.tools.access_memory",
+    "self": ["daemon.tools.inner_soul", "daemon.tools.access_memory"],
     "project": "daemon.tools.project",
     "help": "daemon.tools.help",
     "mother": "daemon.tools.agent_mother",
@@ -215,7 +214,10 @@ def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list
         # Look up CATEGORY_NAME from the module
         if category_key in CATEGORY_MODULES:
             try:
-                module = import_module(CATEGORY_MODULES[category_key])
+                module_paths = CATEGORY_MODULES[category_key]
+                # Handle both str and list[str] values
+                first_module = module_paths[0] if isinstance(module_paths, list) else module_paths
+                module = import_module(first_module)
                 category_name = getattr(module, "CATEGORY_NAME", category_key)
             except ImportError:
                 category_name = category_key
@@ -242,10 +244,24 @@ def get_category_doc(category_key: str) -> tuple[str, str] | None:
         return None
     
     try:
-        module = import_module(CATEGORY_MODULES[category_key])
-        return (
-            getattr(module, "CATEGORY_NAME", category_key),
-            getattr(module, "CATEGORY_DOC", ""),
-        )
+        module_paths = CATEGORY_MODULES[category_key]
+        # Handle both str and list[str] values
+        if isinstance(module_paths, list):
+            category_name = None
+            category_docs: list[str] = []
+            for path in module_paths:
+                module = import_module(path)
+                if category_name is None:
+                    category_name = getattr(module, "CATEGORY_NAME", category_key)
+                doc = getattr(module, "CATEGORY_DOC", "")
+                if doc:
+                    category_docs.append(doc)
+            return (category_name or category_key, "\n\n".join(category_docs))
+        else:
+            module = import_module(module_paths)
+            return (
+                getattr(module, "CATEGORY_NAME", category_key),
+                getattr(module, "CATEGORY_DOC", ""),
+            )
     except ImportError:
         return None
