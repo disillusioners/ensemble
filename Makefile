@@ -15,11 +15,9 @@ FRONTEND_DIST = frontend/dist/frontend/browser
 
 # PyInstaller settings
 PYINSTALLER_SPEC = ensemble.spec
-# Versioned output with timestamp (stored in dist/)
-VERSION_SUFFIX := $(shell date +%Y%m%d-%H%M%S)
-VERSIONED_BINARY = dist/ensemble-prod-$(VERSION_SUFFIX)
-# Final binary name (no timestamp) for production installation
-FINAL_BINARY = ensemble-prod
+# Binary name
+BINARY_NAME = ensemble-prod
+BACKUP_NAME = backup-$(BINARY_NAME)-$(shell date +%Y%m%d-%H%M%S).bak
 
 # Colors for output
 GREEN := \033[0;32m
@@ -32,8 +30,8 @@ NC := \033[0m
 help:
 	@echo "Available targets:"
 	@echo "  make build           - Build the frontend"
-	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod-YYYYMMDD-HHMMSS, preserves old builds)"
-	@echo "  make install         - Build and install to $(INSTALL_DIR) (preserves dist/ history)"
+	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod, clears dist first)"
+	@echo "  make install         - Build and install to $(INSTALL_DIR) (backs up existing binary)"
 	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
 	@echo "  make sync            - Install dependencies with uv sync"
 	@echo "  make start           - Start the daemon (kills existing process first)"
@@ -102,13 +100,23 @@ install: pyinstaller
 		sleep 1; \
 	} || echo "$(GREEN)Port $(PROD_PORT) is available.$(NC)"
 	
+	# Backup existing binary if present
+	@if [ -f "$(INSTALL_DIR)/$(BINARY_NAME)" ]; then \
+		echo "$(YELLOW)Backing up existing $(BINARY_NAME)...$(NC)"; \
+		mv $(INSTALL_DIR)/$(BINARY_NAME) $(INSTALL_DIR)/$(BACKUP_NAME); \
+		echo "$(GREEN)Backed up to $(BACKUP_NAME)$(NC)"; \
+	else \
+		echo "$(GREEN)No existing binary to backup.$(NC)"; \
+	fi
+	
 	# Create installation directory
 	mkdir -p $(INSTALL_DIR)
 	mkdir -p $(INSTALL_DIR)/data
 	
-	# Copy binary (versioned -> production name without timestamp)
-	@echo "$(YELLOW)Copying $(VERSIONED_BINARY) -> $(FINAL_BINARY)...$(NC)"
-	cp $(VERSIONED_BINARY) $(INSTALL_DIR)/$(FINAL_BINARY)
+	# Copy binary
+	@echo "$(YELLOW)Installing $(BINARY_NAME)...$(NC)"
+	cp dist/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
+	chmod +x $(INSTALL_DIR)/$(BINARY_NAME)
 	
 	# Create symlink to agents directory (points to source)
 	@echo "$(YELLOW)Linking agents...$(NC)"
@@ -163,10 +171,10 @@ pyinstaller-clean:
 
 pyinstaller: build
 	@echo "$(GREEN)Building production binary with PyInstaller...$(NC)"
+	@echo "$(YELLOW)Clearing dist directory...$(NC)"
+	rm -rf dist/
 	uv run python -m PyInstaller $(PYINSTALLER_SPEC)
-	@mv dist/ensemble-prod $(VERSIONED_BINARY)
-	@echo "$(GREEN)Binary built: $(VERSIONED_BINARY)$(NC)"
-	@echo "$(GREEN)Installed as: $(FINAL_BINARY)$(NC)"
+	@echo "$(GREEN)Binary built: dist/$(BINARY_NAME)$(NC)"
 
 # Uninstall production version
 uninstall:
