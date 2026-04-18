@@ -118,6 +118,12 @@ install: pyinstaller
 	cp dist/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 	chmod +x $(INSTALL_DIR)/$(BINARY_NAME)
 	
+	# Remove daemon folder if exists (binary is self-contained, local daemon would shadow bundled code)
+	@if [ -d "$(INSTALL_DIR)/daemon" ]; then \
+		echo "$(YELLOW)Removing old daemon folder (binary is self-contained)...$(NC)"; \
+		rm -rf "$(INSTALL_DIR)/daemon"; \
+	fi
+	
 	# Create symlink to agents directory (points to source)
 	@echo "$(YELLOW)Linking agents...$(NC)"
 	ln -sfn $(CURDIR)/agents $(INSTALL_DIR)/agents
