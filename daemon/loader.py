@@ -13,6 +13,55 @@ logger = logging.getLogger(__name__)
 PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
 
 
+def _ensure_tool_metadata_populated() -> None:
+    """Ensure _tool_metadata is populated by importing and scanning all tool modules.
+    
+    This enables category expansion in resolve_tool_filter() and ensures
+    CATEGORY_DOC is available for load_tools_doc_for_agent().
+    
+    Safe to call multiple times - subsequent calls are no-ops if already populated.
+    """
+    from .tools._tool_registry import _tool_metadata, scan_tools_for_full_docs
+    
+    if _tool_metadata:
+        return  # Already populated
+    
+    # Import all tool modules to trigger @register_tool_category decorators
+    # and collect @tool decorated functions
+    from .tools.bash import bash
+    from .tools.filesystem import (
+        list_directory, read_file, glob_files, write_file, grep_files, edit_file
+    )
+    from .tools.time import time
+    from .tools.inner_soul import create_inner_soul_tool
+    from .tools.access_memory import create_access_memory_tool
+    from .tools.help import create_help_tool
+    from .tools.project import create_project_tools
+    
+    # Create dummy instances to get the tools (these create closures with None manager)
+    # We just need the tool objects themselves for metadata scanning
+    inner_soul = create_inner_soul_tool(None, "", "")
+    access_memory = create_access_memory_tool("")
+    project_tools = create_project_tools(None, "", "")
+    
+    # Create help tool with empty tool list first
+    help_tool = create_help_tool([], "")
+    
+    # Scan all discovered tools
+    all_tools = [
+        bash,
+        list_directory, read_file, glob_files, write_file, grep_files, edit_file,
+        time,
+        inner_soul, access_memory, help_tool,
+    ]
+    
+    # Add project tools if any
+    if project_tools:
+        all_tools.extend(project_tools)
+    
+    scan_tools_for_full_docs(all_tools)
+
+
 def load_tools_doc_for_agent(agent_id: str) -> str:
     """Build tool documentation for an agent based on their allowed tools.
     
@@ -29,7 +78,13 @@ def load_tools_doc_for_agent(agent_id: str) -> str:
     """
     from .registry import get_registry
     from .tools.instance import resolve_tool_filter
-    from .tools._tool_registry import get_tool_categories, get_category_doc
+    from .tools._tool_registry import get_tool_categories, get_category_doc, _tool_metadata
+    
+    # Ensure _tool_metadata is populated by scanning tool modules
+    # This is needed because load_tools_doc_for_agent may be called before
+    # create_instance_tools (which also scans tools)
+    if not _tool_metadata:
+        _ensure_tool_metadata_populated()
     
     # Get agent's tool filter from registry
     tool_filter: ToolFilter | None = None

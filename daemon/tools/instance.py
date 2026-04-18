@@ -32,7 +32,7 @@ from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
-from ._tool_registry import list_tools_by_category, register_tool_category
+from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 
 
 def resolve_tool_filter(
@@ -475,6 +475,10 @@ Returns:
     # Add help tool (must be last so it knows about all other tools)
     help_tool = create_help_tool(tools, agent_id)
     tools.append(help_tool)
+    
+    # Scan tools to populate _tool_metadata before filtering
+    # This enables category expansion in resolve_tool_filter()
+    scan_tools_for_full_docs(tools)
     
     # Apply tool filtering based on agent's tools config
     tools = _apply_tool_filter(tools, agent_id)
