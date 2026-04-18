@@ -151,8 +151,13 @@ async def _reject_scheduler_lifecycle(source_id: str) -> None:
         )
 
 
-# Determine the base path
-BASE_DIR = Path(__file__).parent.parent
+# Determine the base path (use working directory for production)
+# PyInstaller runs from INSTALL_DIR where frontend/dist is expected
+import sys
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent.parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 # Max size in bytes for credentials JSON
