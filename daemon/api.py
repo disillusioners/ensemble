@@ -314,7 +314,7 @@ async def lifespan(app: FastAPI):
         instance_manager=manager,
         project_repo=manager._project_repository,
         queue_repo=queue_repo,
-        poll_interval=2.0,
+        poll_interval=30.0,
         dispatch_bus=dispatch_event_bus,
         event_dispatch_enabled=config.job_system.event_dispatch_enabled,
     )
