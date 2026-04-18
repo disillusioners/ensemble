@@ -5,6 +5,10 @@ import {
   JobCreate,
   JobFilters,
   JobEvent,
+  DeadLetterItem,
+  RetryAllResult,
+  DLQReplayResponse,
+  DLQListResponse,
   isTerminalStatus,
   getStatusColor,
   getPriorityColor,
@@ -333,6 +337,145 @@ describe('Job Model', () => {
       };
       expect(event.event).toBe('error');
       expect(event.data?.error_message).toBe('Something went wrong');
+    });
+  });
+
+  describe('DeadLetterItem interface', () => {
+    it('should have all required fields', () => {
+      const item: DeadLetterItem = {
+        dlq_id: 'dlq-1',
+        job_id: 'job-1',
+        agent_id: 'coder',
+        agent_dir: '/agents/coder',
+        message: 'Test message',
+        source: 'api',
+        project_id: 'project-1',
+        queue_id: null,
+        error_message: 'Some error',
+        retry_count: 3,
+        failed_at: '2024-01-01T00:00:00Z',
+        moved_to_dlq_at: '2024-01-02T00:00:00Z',
+        reason: 'max_retries_exceeded',
+      };
+      expect(item.dlq_id).toBe('dlq-1');
+      expect(item.job_id).toBe('job-1');
+      expect(item.agent_id).toBe('coder');
+      expect(item.agent_dir).toBe('/agents/coder');
+      expect(item.message).toBe('Test message');
+      expect(item.source).toBe('api');
+      expect(item.project_id).toBe('project-1');
+      expect(item.queue_id).toBeNull();
+      expect(item.error_message).toBe('Some error');
+      expect(item.retry_count).toBe(3);
+      expect(item.failed_at).toBe('2024-01-01T00:00:00Z');
+      expect(item.moved_to_dlq_at).toBe('2024-01-02T00:00:00Z');
+      expect(item.reason).toBe('max_retries_exceeded');
+    });
+
+    it('should allow optional fields', () => {
+      const item: DeadLetterItem = {
+        dlq_id: 'dlq-2',
+        job_id: 'job-2',
+        agent_id: 'tester',
+        agent_dir: '/agents/tester',
+        message: 'Test',
+        source: 'api',
+        project_id: 'project-2',
+        queue_id: 'queue-1',
+        error_message: null,
+        retry_count: 0,
+        failed_at: null,
+        moved_to_dlq_at: '2024-01-01T00:00:00Z',
+        reason: 'timeout',
+        metadata: { key: 'value', nested: { a: 1 } },
+      };
+      expect(item.queue_id).toBe('queue-1');
+      expect(item.metadata).toEqual({ key: 'value', nested: { a: 1 } });
+    });
+
+    it('should allow null for optional metadata', () => {
+      const item: DeadLetterItem = {
+        dlq_id: 'dlq-3',
+        job_id: 'job-3',
+        agent_id: 'dev',
+        agent_dir: '/agents/dev',
+        message: 'Test',
+        source: 'telegram',
+        project_id: 'project-3',
+        queue_id: null,
+        error_message: null,
+        retry_count: 0,
+        failed_at: null,
+        moved_to_dlq_at: '2024-01-01T00:00:00Z',
+        reason: 'error',
+        metadata: null,
+      };
+      expect(item.metadata).toBeNull();
+    });
+  });
+
+  describe('RetryAllResult interface', () => {
+    it('should have correct structure', () => {
+      const result: RetryAllResult = {
+        replayed: 5,
+        failed: 2,
+        errors: [
+          { dlq_id: 'dlq-1', error: 'Failed to replay' },
+          { dlq_id: 'dlq-2', error: 'Job not found' },
+        ],
+      };
+      expect(result.replayed).toBe(5);
+      expect(result.failed).toBe(2);
+      expect(result.errors).toHaveLength(2);
+      expect(result.errors[0].dlq_id).toBe('dlq-1');
+    });
+  });
+
+  describe('DLQReplayResponse interface', () => {
+    it('should have correct structure', () => {
+      const response: DLQReplayResponse = {
+        job_id: 'job-replayed',
+        status: 'pending',
+        message: 'Job replayed successfully',
+      };
+      expect(response.job_id).toBe('job-replayed');
+      expect(response.status).toBe('pending');
+      expect(response.message).toBe('Job replayed successfully');
+    });
+  });
+
+  describe('DLQListResponse interface', () => {
+    it('should have correct structure', () => {
+      const response: DLQListResponse = {
+        items: [],
+        total: 0,
+      };
+      expect(response.items).toEqual([]);
+      expect(response.total).toBe(0);
+    });
+
+    it('should contain DeadLetterItem array', () => {
+      const item: DeadLetterItem = {
+        dlq_id: 'dlq-1',
+        job_id: 'job-1',
+        agent_id: 'coder',
+        agent_dir: '/agents/coder',
+        message: 'Test',
+        source: 'api',
+        project_id: 'project-1',
+        queue_id: null,
+        error_message: null,
+        retry_count: 0,
+        failed_at: null,
+        moved_to_dlq_at: '2024-01-01T00:00:00Z',
+        reason: 'error',
+      };
+      const response: DLQListResponse = {
+        items: [item],
+        total: 1,
+      };
+      expect(response.items).toHaveLength(1);
+      expect(response.total).toBe(1);
     });
   });
 });

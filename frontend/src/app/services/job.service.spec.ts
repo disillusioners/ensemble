@@ -1,5 +1,5 @@
 import { signal } from '@angular/core';
-import { Job } from '../models/job.model';
+import { Job, DeadLetterItem, RetryAllResult, DLQReplayResponse, DLQListResponse } from '../models/job.model';
 import { createMockJob, createMockJobList } from '../testing/job-test-helpers';
 
 // Create a testable JobService with injected mock
@@ -110,6 +110,87 @@ class TestJobService {
 
   clearError() {
     this.error.set(null);
+  }
+
+  listDeadLetterItems(projectId: string) {
+    let params = new URLSearchParams();
+    if (projectId) params.set('project_id', projectId);
+    const queryString = params.toString();
+    const url = `/api/projects/${encodeURIComponent(projectId)}/dlq` + (queryString ? `?${queryString}` : '');
+    
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const mockResponse: DLQListResponse = {
+            items: [
+              {
+                dlq_id: 'dlq-1',
+                job_id: 'job-1',
+                agent_id: 'coder',
+                agent_dir: '/agents/coder',
+                message: 'Failed job',
+                source: 'api',
+                project_id: projectId,
+                queue_id: null,
+                error_message: 'Timeout error',
+                retry_count: 3,
+                failed_at: '2024-01-01T00:00:00Z',
+                moved_to_dlq_at: '2024-01-02T00:00:00Z',
+                reason: 'timeout',
+              },
+            ],
+            total: 1,
+          };
+          if (typeof observer === 'function') {
+            observer(mockResponse.items);
+          } else if (observer.next) {
+            observer.next(mockResponse.items);
+          }
+        }
+      })
+    };
+  }
+
+  retryDeadLetterJob(projectId: string, dlqId: string) {
+    const url = `/api/projects/${encodeURIComponent(projectId)}/dlq/${encodeURIComponent(dlqId)}/replay`;
+    
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const mockResponse: DLQReplayResponse = {
+            job_id: 'job-replayed',
+            status: 'pending',
+            message: 'Job replayed successfully',
+          };
+          if (typeof observer === 'function') {
+            observer(mockResponse);
+          } else if (observer.next) {
+            observer.next(mockResponse);
+          }
+        }
+      })
+    };
+  }
+
+  retryAllDeadLetterJobs(projectId: string) {
+    const url = `/api/projects/${encodeURIComponent(projectId)}/dlq/replay-all`;
+    
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const mockResponse: RetryAllResult = {
+            replayed: 5,
+            failed: 0,
+            errors: [],
+          };
+          if (typeof observer === 'function') {
+            observer(mockResponse);
+          } else if (observer.next) {
+            observer.next(mockResponse);
+          }
+        }
+      })
+    };
   }
 }
 
@@ -240,6 +321,76 @@ describe('JobService', () => {
       service.error.set('Test error');
       service.clearError();
       expect(service.error()).toBeNull();
+    });
+  });
+
+  describe('listDeadLetterItems', () => {
+    it('should call correct endpoint with project_id', () => {
+      const subscribeSpy = jest.fn();
+      service.listDeadLetterItems('project-123').pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should return DeadLetterItem array', () => {
+      let result: DeadLetterItem[] = [];
+      service.listDeadLetterItems('project-123').pipe().subscribe(items => { result = items; });
+      expect(result.length).toBe(1);
+      expect(result[0].dlq_id).toBe('dlq-1');
+      expect(result[0].agent_dir).toBe('/agents/coder');
+    });
+
+    it('should include all DLQ item fields', () => {
+      let result: DeadLetterItem[] = [];
+      service.listDeadLetterItems('project-123').pipe().subscribe(items => { result = items; });
+      const item = result[0];
+      expect(item.job_id).toBe('job-1');
+      expect(item.agent_id).toBe('coder');
+      expect(item.error_message).toBe('Timeout error');
+      expect(item.retry_count).toBe(3);
+      expect(item.reason).toBe('timeout');
+    });
+  });
+
+  describe('retryDeadLetterJob', () => {
+    it('should call POST endpoint for single DLQ item replay', () => {
+      const subscribeSpy = jest.fn();
+      service.retryDeadLetterJob('project-123', 'dlq-1').pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should pass project_id and dlq_id correctly', () => {
+      const subscribeSpy = jest.fn();
+      service.retryDeadLetterJob('project-abc', 'dlq-xyz').pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should return DLQReplayResponse with job_id and status', () => {
+      let result: DLQReplayResponse | null = null;
+      service.retryDeadLetterJob('project-123', 'dlq-1').pipe().subscribe(response => { result = response; });
+      expect(result?.job_id).toBe('job-replayed');
+      expect(result?.status).toBe('pending');
+    });
+  });
+
+  describe('retryAllDeadLetterJobs', () => {
+    it('should call POST replay-all endpoint', () => {
+      const subscribeSpy = jest.fn();
+      service.retryAllDeadLetterJobs('project-123').pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should pass project_id correctly', () => {
+      const subscribeSpy = jest.fn();
+      service.retryAllDeadLetterJobs('project-xyz').pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should return RetryAllResult with replayed count', () => {
+      let result: RetryAllResult | null = null;
+      service.retryAllDeadLetterJobs('project-123').pipe().subscribe(response => { result = response; });
+      expect(result?.replayed).toBe(5);
+      expect(result?.failed).toBe(0);
+      expect(result?.errors).toEqual([]);
     });
   });
 });
