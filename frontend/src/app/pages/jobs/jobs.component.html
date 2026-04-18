@@ -1,8 +1,30 @@
 <div class="jobs-container">
-  <!-- Header -->
+  <!-- Header with integrated Project Filter -->
   <div class="jobs-header">
     <div class="header-left">
-      <h1 class="page-title">Job Queue</h1>
+      <!-- Project Selection (Required) -->
+      <mat-form-field appearance="outline" class="project-select-field">
+        <mat-label>Project</mat-label>
+        <mat-select 
+          [value]="filters().project_id || ''"
+          (selectionChange)="onProjectFilterChange($event.value)">
+          <mat-option value="">Select project</mat-option>
+          @for (project of projects(); track project.project_id) {
+            <mat-option [value]="project.project_id">
+              {{ project.name }}
+            </mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+      
+      <!-- Hint when no project selected -->
+      @if (!filters().project_id) {
+        <span class="project-hint-inline">
+          <mat-icon>info</mat-icon>
+          Select a project to view jobs
+        </span>
+      }
+      
       @if (drawerOpen()) {
         @if (isConnected()) {
           <span class="connection-status connected" title="Real-time updates connected">
@@ -40,6 +62,7 @@
         mat-flat-button 
         color="primary"
         (click)="onOpenCreateDialog()"
+        [disabled]="!filters().project_id"
         class="create-btn">
         <mat-icon>add</mat-icon>
         New Job
@@ -85,20 +108,6 @@
           @for (agent of agents(); track agent.id) {
             <mat-option [value]="agent.id">
               {{ getAgentDisplayName(agent.id) }}
-            </mat-option>
-          }
-        </mat-select>
-      </mat-form-field>
-
-      <mat-form-field appearance="outline" class="filter-field">
-        <mat-label>Project</mat-label>
-        <mat-select 
-          [value]="filters().project_id || 'all'"
-          (selectionChange)="onProjectFilterChange($event.value)">
-          <mat-option value="all">All Projects</mat-option>
-          @for (project of projects(); track project.project_id) {
-            <mat-option [value]="project.project_id">
-              {{ project.name }}
             </mat-option>
           }
         </mat-select>

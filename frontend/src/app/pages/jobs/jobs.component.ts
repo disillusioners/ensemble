@@ -331,8 +331,10 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onProjectFilterChange(projectId: string): void {
     this.filters.update(filters => ({
       ...filters,
-      project_id: projectId === 'all' ? undefined : projectId
+      project_id: projectId || undefined
     }));
+    // Clear queue selection when project changes
+    this.selectedQueueId.set(null);
     this.loadJobs();
   }
 
@@ -492,6 +494,10 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected hasActiveFilters(): boolean {
     const filters = this.filters();
     return !!(filters.status || filters.source || filters.agent_id || filters.queue_id);
+  }
+
+  protected isProjectSelected(): boolean {
+    return !!this.filters().project_id;
   }
 
   protected onToggleProjectPause(project: Project): void {
