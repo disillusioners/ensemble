@@ -14,19 +14,7 @@ COMMON_TOOLS_FILE = Path(__file__).parent.parent / "agents" / "tools_common.md"
 PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
 
 
-def load_common_tools() -> str:
-    """Load common tools documentation shared by all agents.
-    
-    Returns:
-        Content of tools_common.md or empty string if not found.
-    """
-    if COMMON_TOOLS_FILE.exists():
-        return COMMON_TOOLS_FILE.read_text(encoding="utf-8")
-    return ""
-
-
 # Section-to-tool-names mapping for filtering tools_common.md
-# Maps section headers to the tool names documented in each section
 # NOTE: All tool names MUST exist in TOOL_CATEGORIES in daemon/tools/instance.py
 SECTION_TOOLS: dict[str, set[str]] = {
     "File Operations": {"list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"},
@@ -115,6 +103,9 @@ def load_common_tools_filtered(tool_filter: ToolFilter | None) -> str:
         if section_tool_names and section_tool_names & allowed_tools:
             # At least one tool from this section is allowed
             filtered_sections.append(section_content)
+        elif section_name not in SECTION_TOOLS:
+            # Section not in mapping - log for debugging
+            logger.debug(f"Skipping unmapped tools_common section: {section_name}")
     
     # Reconstruct the filtered content
     result_lines = header_lines + ["\n"]
@@ -433,6 +424,11 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     if PROJECT_EXPERIENCE_FILE.exists():
         current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
     
+    # Include meta.json mtime for cache invalidation (tool filter config)
+    meta_path = agent_dir / "meta.json"
+    if meta_path.exists():
+        current_mtimes["meta.json"] = meta_path.stat().st_mtime
+    
     for filename in prompt_files:
         filepath = agent_dir / filename
         if filepath.exists():
@@ -477,8 +473,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         agent_meta = registry.get(agent_id)
         if agent_meta is not None:
             tool_filter = agent_meta.tools
-    except Exception:
-        pass  # Fallback to no filter
+    except (KeyError, ValueError, RuntimeError) as e:
+        logger.debug(f"Registry lookup failed for {agent_id}: {e}")
     
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)

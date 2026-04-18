@@ -56,14 +56,14 @@ get_instance_info(instance_id)               # Get instance details
 ```raw
 project_create(name, project_type="general", main_directory=None, tags=[], metadata={})
 project_get(project_id=None, name=None, shortname=None)  # Get by ID, name, or shortname
-project_list(status=None, tags=[], limit=50)
+project_list(status=None, tags=[], limit=50, project_type=None)
 project_search(query, limit=20)
 project_update(project_id, name=None, description=None, tags=None)
 project_set_status(project_id, status)     # active|paused|completed|archived
 project_add_tag(project_id, tag)
 project_remove_tag(project_id, tag)
 project_set_tags(project_id, tags)
-project_add_directory(project_id, directory, is_main=False)
+project_add_directory(project_id, directory, as_main=False)
 project_remove_directory(project_id, directory)
 project_get_by_instance(instance_id)
 project_get_by_directory(directory)
@@ -81,7 +81,7 @@ project_delete(project_id)
 
 ```raw
 inner_soul(intent, content)               # intent: remember|learn|change
-access_memory(topic=None, limit=5)        # Read memory files about a topic
+access_memory(filename)                     # Read a memory file from your memories/ directory.
 ```
 
 ## Help
