@@ -188,6 +188,7 @@ class JobProcessor:
                         instance_id = self._instance_manager.spawn_instance(
                             agent_id=job.agent_id,
                             instance_id=started_job.instance_id,
+                            project_id=job.project_id,
                         )
                     except Exception as e:
                         logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
@@ -238,6 +239,7 @@ class JobProcessor:
                     instance_id = self._instance_manager.spawn_instance(
                         agent_id=job.agent_id,
                         instance_id=started_job.instance_id,
+                        project_id=job.project_id,
                     )
                     await self._instance_manager.enqueue_message(
                         instance_id=instance_id,
