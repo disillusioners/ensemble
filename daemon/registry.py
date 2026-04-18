@@ -309,6 +309,60 @@ class AgentRegistry:
                 agents_with_skill.append(agent_id)
         return agents_with_skill
 
+    def validate_tool_configs(self) -> list[str]:
+        """Validate all agents' tool configs. Returns list of warning messages.
+        
+        Checks for:
+        - Unknown categories/tools in allow/deny lists
+        - Configurations that result in zero available tools
+        """
+        warnings: list[str] = []
+        
+        # Import here to avoid circular imports
+        from daemon.tools._tool_registry import list_tools_by_category
+        from daemon.tools.instance import resolve_tool_filter
+        
+        # Get available categories and tools
+        available_categories = list_tools_by_category()  # {category_name: [tool_names]}
+        all_tool_names: set[str] = set()
+        for tools in available_categories.values():
+            all_tool_names.update(tools)
+        
+        for agent_id, agent_meta in self._agents.items():
+            if agent_meta.tools is None:
+                continue
+            
+            tools_filter = agent_meta.tools
+            
+            # Check allow entries
+            if tools_filter.allow:
+                for entry in tools_filter.allow:
+                    if entry not in available_categories and entry not in all_tool_names:
+                        warnings.append(
+                            f"Agent '{agent_id}': allow entry '{entry}' is neither a known category nor a known tool"
+                        )
+            
+            # Check deny entries
+            if tools_filter.deny:
+                for entry in tools_filter.deny:
+                    if entry not in available_categories and entry not in all_tool_names:
+                        warnings.append(
+                            f"Agent '{agent_id}': deny entry '{entry}' is neither a known category nor a known tool"
+                        )
+            
+            # Check that agent ends up with at least 1 tool
+            allowed = resolve_tool_filter(
+                tools_filter.allow,
+                tools_filter.deny,
+                tool_categories=available_categories,
+            )
+            if allowed is not None and len(allowed) == 0:
+                warnings.append(
+                    f"Agent '{agent_id}': tool config results in ZERO available tools"
+                )
+        
+        return warnings
+
     def exists(self, agent_id: str) -> bool:
         """Check if agent exists.
 
@@ -336,4 +390,8 @@ def get_registry() -> AgentRegistry:
         base_dir = Path(__file__).parent.parent
         _registry = AgentRegistry(base_dir / "agents")
         _registry.discover()
+        # Validate tool configs and log warnings
+        warnings = _registry.validate_tool_configs()
+        for w in warnings:
+            logger.warning(f"Tool config validation: {w}")
     return _registry

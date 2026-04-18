@@ -403,3 +403,179 @@ class TestRegistryIntegration:
         assert agent.color == "accent-amber"
         assert agent.version == "1.0.0"
         assert agent.system is False
+
+
+class TestValidateToolConfigs:
+    """Tests for tool config validation."""
+
+    def _setup_mock_tools(self, monkeypatch) -> None:
+        """Set up mock tool registry with known categories and tools."""
+        from daemon.tools import _tool_registry
+        
+        # Clear and set up mock data
+        _tool_registry._tool_metadata.clear()
+        _tool_registry._tool_metadata.update({
+            "bash": {"category": "bash", "short_doc": "Run bash"},
+            "read_file": {"category": "filesystem", "short_doc": "Read file"},
+            "write_file": {"category": "filesystem", "short_doc": "Write file"},
+            "spawn_instance": {"category": "instance", "short_doc": "Spawn"},
+        })
+        _tool_registry._full_docs.clear()
+
+    def _create_agent_with_tools(self, agents_dir: Path, agent_id: str, tools_config: dict | None) -> None:
+        """Helper to create an agent with tools config."""
+        agent_dir = agents_dir / agent_id
+        agent_dir.mkdir()
+        
+        meta = {
+            "id": agent_id,
+            "name": agent_id.title(),
+            "description": f"Test agent {agent_id}",
+            **({"tools": tools_config} if tools_config is not None else {}),
+        }
+        
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+
+    def test_valid_config_no_warnings(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that valid configs produce no warnings."""
+        self._setup_mock_tools(monkeypatch)
+        
+        # Create agent with valid tool config (known category and tool)
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["bash", "filesystem"], "deny": []}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert warnings == []
+
+    def test_none_tools_config_no_warnings(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that None tools config (no restrictions) produces no warnings."""
+        self._setup_mock_tools(monkeypatch)
+        
+        # Create agent without tools config
+        self._create_agent_with_tools(temp_agents_dir, "test_agent", None)
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert warnings == []
+
+    def test_unknown_category_in_allow_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that unknown category in allow list produces a warning."""
+        self._setup_mock_tools(monkeypatch)
+        
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["unknown_category", "bash"], "deny": []}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert len(warnings) == 1
+        assert "unknown_category" in warnings[0]
+        assert "allow" in warnings[0]
+        assert "test_agent" in warnings[0]
+
+    def test_unknown_tool_in_deny_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that unknown tool name in deny list produces a warning."""
+        self._setup_mock_tools(monkeypatch)
+        
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["bash"], "deny": ["nonexistent_tool"]}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert len(warnings) == 1
+        assert "nonexistent_tool" in warnings[0]
+        assert "deny" in warnings[0]
+        assert "test_agent" in warnings[0]
+
+    def test_zero_tools_result_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that a config resulting in zero tools produces a warning."""
+        self._setup_mock_tools(monkeypatch)
+        
+        # deny all known tools - should result in zero
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["bash"], "deny": ["bash"]}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert len(warnings) == 1
+        assert "ZERO available tools" in warnings[0]
+        assert "test_agent" in warnings[0]
+
+    def test_multiple_warnings_for_multiple_agents(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that multiple warnings are collected for multiple agents."""
+        self._setup_mock_tools(monkeypatch)
+        
+        # Agent 1: unknown allow entry
+        self._create_agent_with_tools(
+            temp_agents_dir, "agent1",
+            {"allow": ["bad_category"], "deny": []}
+        )
+        # Agent 2: unknown deny entry
+        self._create_agent_with_tools(
+            temp_agents_dir, "agent2",
+            {"allow": ["bash"], "deny": ["bad_tool"]}
+        )
+        # Agent 3: valid config
+        self._create_agent_with_tools(
+            temp_agents_dir, "agent3",
+            {"allow": ["bash", "filesystem"], "deny": []}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert len(warnings) == 2
+        warning_text = " ".join(warnings)
+        assert "agent1" in warning_text
+        assert "agent2" in warning_text
+        assert "agent3" not in warning_text
+
+    def test_valid_tool_name_in_allow_no_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that valid individual tool names in allow don't produce warnings."""
+        self._setup_mock_tools(monkeypatch)
+        
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": ["read_file", "write_file"], "deny": []}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert warnings == []
+
+    def test_empty_allow_deny_no_warning(self, temp_agents_dir: Path, monkeypatch) -> None:
+        """Test that empty allow/deny lists don't produce warnings."""
+        self._setup_mock_tools(monkeypatch)
+        
+        self._create_agent_with_tools(
+            temp_agents_dir, "test_agent",
+            {"allow": [], "deny": []}
+        )
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        warnings = registry.validate_tool_configs()
+        assert warnings == []
