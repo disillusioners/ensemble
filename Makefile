@@ -171,8 +171,8 @@ pyinstaller-clean:
 
 pyinstaller: build
 	@echo "$(GREEN)Building production binary with PyInstaller...$(NC)"
-	@echo "$(YELLOW)Clearing dist directory...$(NC)"
-	rm -rf dist/
+	@echo "$(YELLOW)Clearing build and dist directories...$(NC)"
+	rm -rf build/ dist/
 	uv run python -m PyInstaller $(PYINSTALLER_SPEC)
 	@echo "$(GREEN)Binary built: dist/$(BINARY_NAME)$(NC)"
 
