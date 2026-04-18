@@ -301,3 +301,35 @@ class JobFeedbackObserver:
             logger.warning(
                 f"Failed to release locks for instance {instance_id[:8]}...: {e}"
             )
+
+        # FIX: Also release in-memory locks from JobLockManager so the next job
+        # can be picked up immediately. The lock_repo only releases DB locks.
+        try:
+            released_projects = await self._job_queue_service.release_lock_by_instance(
+                instance_id
+            )
+            if released_projects:
+                logger.debug(
+                    f"Released in-memory locks for instance {instance_id[:8]}... "
+                    f"project(s): {released_projects}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to release in-memory locks for instance {instance_id[:8]}...: {e}"
+            )
+
+        # FIX: Trigger the next pending job immediately instead of waiting for
+        # the JobProcessor polling interval. This ensures zero-delay handoff
+        # between consecutive jobs in the same queue.
+        try:
+            if job.project_id:
+                next_job = await self._job_queue_service.trigger_next_job(job.project_id)
+                if next_job:
+                    logger.info(
+                        f"Observer: triggered next job {next_job.job_id[:8]}... "
+                        f"for project {job.project_id[:8]}..."
+                    )
+        except Exception as e:
+            logger.warning(
+                f"Failed to trigger next job for project {job.project_id[:8]}...: {e}"
+            )

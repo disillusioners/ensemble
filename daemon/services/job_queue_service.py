@@ -889,6 +889,9 @@ class JobQueueService:
         Called after a job completes to process any waiting jobs
         for the same queue or project.
         
+        Emits a dispatch event so JobProcessor wakes up to handle spawning
+        the instance and sending the message.
+        
         Args:
             project_id: The project to trigger next job for.
             queue_id: Optional specific queue to trigger next job for.
@@ -901,7 +904,14 @@ class JobQueueService:
         if next_job is None:
             return None
         
-        return await self.start_job(next_job.job_id)
+        result = await self.start_job(next_job.job_id)
+        
+        # Emit dispatch event so JobProcessor wakes up immediately to
+        # spawn instance and send the job message
+        if result and self._dispatch_bus:
+            self._dispatch_bus.notify_new_job(project_id)
+        
+        return result
     
     def trigger_next_job_sync(
         self,

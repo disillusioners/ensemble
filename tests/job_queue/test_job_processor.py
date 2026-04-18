@@ -343,6 +343,7 @@ class TestJobProcessorPerQueuePolling:
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = []  # No pending jobs
+        mock_queue_service._repository.list_by_queue.return_value = ([], 0)  # No orphan PROCESSING jobs
 
         # Should not raise an error
         await processor._process_next_job()
@@ -365,6 +366,7 @@ class TestJobProcessorPerQueuePolling:
             [queue2],  # project-2 queues
         ]
         mock_queue_service._repository.list_pending_by_queue.side_effect = [[], []]
+        mock_queue_service._repository.list_by_queue.return_value = ([], 0)  # No orphan PROCESSING jobs
 
         await processor._process_next_job()
 

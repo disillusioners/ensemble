@@ -172,6 +172,43 @@ class JobProcessor:
                     self._queue_service._repository.list_pending_by_queue, queue.queue_id
                 )
                 if not pending:
+                    # FIX: Also check for PROCESSING jobs started by trigger_next_job()
+                    # that have instance_id set but no spawned instance yet.
+                    # These jobs were transitioned to PROCESSING by trigger_next_job()
+                    # but the JobProcessor missed them (event-driven or polling gap).
+                    processing, _ = await asyncio.to_thread(
+                        self._queue_service._repository.list_by_queue, queue.queue_id,
+                        status="processing"
+                    )
+                    for proc_job in (processing or []):
+                        # Skip if instance already spawned (normal case)
+                        if proc_job.instance_id and self._instance_manager.get_instance(proc_job.instance_id):
+                            continue
+                        # This job was started by trigger_next_job() but instance not spawned
+                        logger.info(
+                            f"JobProcessor: resuming orphan PROCESSING job {proc_job.job_id[:8]}... "
+                            f"on queue {queue.queue_name}"
+                        )
+                        try:
+                            instance_id = self._instance_manager.spawn_instance(
+                                agent_id=proc_job.agent_id,
+                                instance_id=proc_job.instance_id,
+                                project_id=proc_job.project_id,
+                            )
+                            await self._instance_manager.enqueue_message(
+                                instance_id=instance_id,
+                                message=proc_job.message,
+                                source=proc_job.source,
+                            )
+                            logger.info(
+                                f"Job {proc_job.job_id} resumed for instance {instance_id} "
+                                f"on queue {queue.queue_name}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to resume orphan job {proc_job.job_id[:8]}...: {e}")
+                            await self._queue_service.complete_job(
+                                proc_job.job_id, success=False, error=str(e)
+                            )
                     continue
                 
                 job = pending[0]
