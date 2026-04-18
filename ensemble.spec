@@ -9,6 +9,8 @@ a = Analysis(
     datas=[
         # Include pyproject.toml for version info
         ('pyproject.toml', '.'),
+        # Include migrations (SQL files needed at runtime)
+        ('daemon/migrations', 'daemon/migrations'),
     ],
     hiddenimports=[
         # Tiktoken plugin system
@@ -76,6 +78,9 @@ a = Analysis(
         'daemon.sources.adapters',
         'daemon.sources.adapters.telegram',
         'daemon.sources.adapters.scheduler',
+        # Migrations
+        'daemon.migrations',
+        'daemon.migrations.runner',
     ],
     hookspath=[],
     hooksconfig={},
