@@ -28,6 +28,85 @@ if TYPE_CHECKING:
     from ..manager import InstanceManager
 
 
+# Tool categories mapping - maps category names to individual tool names
+TOOL_CATEGORIES: dict[str, list[str]] = {
+    "bash": ["bash"],
+    "filesystem": ["list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"],
+    "time": ["time"],
+    "instance": [
+        "spawn_instance", "send_message", "terminate_instance", 
+        "list_instances", "get_instance_info"
+    ],
+    "self": ["inner_soul", "access_memory"],
+    "project": [
+        "project_create", "project_get", "project_list", "project_search",
+        "project_get_by_instance", "project_get_by_directory", "project_update",
+        "project_set_status", "project_add_directory", "project_remove_directory",
+        "project_set_tags", "project_add_tag", "project_remove_tag",
+        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
+        "project_set_metadata", "project_delete_metadata",
+        "project_link", "project_unlink", "project_delete",
+    ],
+    "help": ["tool_help"],
+    "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
+}
+
+
+def resolve_tool_filter(
+    allow: list[str] | None, 
+    deny: list[str] | None
+) -> set[str] | None:
+    """Resolve tool filter allow/deny lists into a final set of allowed tool names.
+    
+    Logic:
+    - If both allow and deny are None/empty → return None (all tools allowed)
+    - If allow is set → start with allowed items, expand categories
+    - Apply deny → remove denied items (deny wins conflicts)
+    - Return the final set of allowed tool names
+    
+    Args:
+        allow: List of category names and/or individual tool names to allow
+        deny: List of category names and/or individual tool names to deny
+        
+    Returns:
+        Set of allowed tool names, or None if all tools should be allowed
+    """
+    # Both empty → all tools allowed
+    allow_empty = allow is None or len(allow) == 0
+    deny_empty = deny is None or len(deny) == 0
+    
+    if allow_empty and deny_empty:
+        return None
+    
+    # Start with all tools if no allow list, otherwise expand allow
+    if allow is None or len(allow) == 0:
+        # No allow list means everything is potentially allowed
+        # Start with all tools from all categories
+        allowed_tools: set[str] = set()
+        for category_tools in TOOL_CATEGORIES.values():
+            allowed_tools.update(category_tools)
+    else:
+        # Expand allow list (categories → individual tools)
+        allowed_tools = set()
+        for item in allow:
+            if item in TOOL_CATEGORIES:
+                allowed_tools.update(TOOL_CATEGORIES[item])
+            else:
+                allowed_tools.add(item)
+    
+    # Apply deny list (deny wins)
+    if deny:
+        denied_tools: set[str] = set()
+        for item in deny:
+            if item in TOOL_CATEGORIES:
+                denied_tools.update(TOOL_CATEGORIES[item])
+            else:
+                denied_tools.add(item)
+        allowed_tools -= denied_tools
+    
+    return allowed_tools
+
+
 def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> str | None:
     """Get the project_id from a parent instance's metadata.
     
@@ -404,4 +483,55 @@ Returns:
     help_tool = create_help_tool(tools)
     tools.append(help_tool)
     
+    # Apply tool filtering based on agent's tools config
+    tools = _apply_tool_filter(tools, agent_id)
+    
     return tools
+
+
+def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
+    """Apply tool filtering based on agent's tools configuration.
+    
+    Args:
+        tools: List of all tools (before filtering)
+        agent_id: The agent identifier to look up tools config
+        
+    Returns:
+        Filtered list of tools based on agent's tools config.
+        Returns all tools if no config or config is empty.
+    """
+    # Import registry locally to avoid circular imports
+    from ..registry import get_registry
+    
+    # Get agent metadata
+    registry = get_registry()
+    agent_meta = registry.get(agent_id)
+    
+    if agent_meta is None or agent_meta.tools is None:
+        # No tools config → all tools allowed (backward compatible)
+        return tools
+    
+    # Resolve the filter
+    allowed_tools = resolve_tool_filter(
+        allow=agent_meta.tools.allow,
+        deny=agent_meta.tools.deny,
+    )
+    
+    # If None returned, all tools are allowed
+    if allowed_tools is None:
+        return tools
+    
+    # Filter tools by name
+    filtered_tools = []
+    for tool in tools:
+        tool_name = getattr(tool, 'name', None)
+        if tool_name is None:
+            # Fallback: try to get from func
+            func = getattr(tool, 'func', None) or getattr(tool, 'coroutine', None)
+            if func:
+                tool_name = getattr(func, '__name__', None)
+        
+        if tool_name and tool_name in allowed_tools:
+            filtered_tools.append(tool)
+    
+    return filtered_tools

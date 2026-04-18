@@ -3,5 +3,8 @@
   "name": "Tester",
   "description": "Writes and runs tests, reports results",
   "icon": "🧪",
-  "color": "accent-green"
+  "color": "accent-green",
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help"]
+  }
 }

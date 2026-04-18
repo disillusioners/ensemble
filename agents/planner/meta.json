@@ -4,5 +4,9 @@
   "description": "Analyzes requests, creates structured execution plans, and tracks progress",
   "icon": "📋",
   "color": "accent-indigo",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["filesystem", "time", "self", "help"],
+    "deny": ["write_file", "edit_file"]
+  }
 }

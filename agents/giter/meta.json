@@ -4,5 +4,8 @@
   "description": "Git operator for repository management, commits, branches, and version control operations",
   "icon": "🔀",
   "color": "accent-orange",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help"]
+  }
 }

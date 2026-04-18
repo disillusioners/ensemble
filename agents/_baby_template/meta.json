@@ -1,0 +1,9 @@
+{
+  "id": "_baby_template",
+  "name": "Baby Template",
+  "description": "Template for spawning new agent instances",
+  "icon": "👶",
+  "color": "accent-gray",
+  "version": "1.0.0",
+  "tools": {}
+}

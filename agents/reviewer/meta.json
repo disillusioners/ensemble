@@ -3,5 +3,9 @@
   "name": "Reviewer",
   "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
   "icon": "🔍",
-  "color": "accent-purple"
+  "color": "accent-purple",
+  "tools": {
+    "allow": ["filesystem", "time", "self", "help"],
+    "deny": ["write_file", "edit_file"]
+  }
 }

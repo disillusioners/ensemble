@@ -5,5 +5,8 @@
   "icon": "🧬",
   "color": "accent-purple",
   "version": "1.0.0",
-  "system": true
+  "system": true,
+  "tools": {
+    "allow": ["instance", "self", "help", "mother"]
+  }
 }

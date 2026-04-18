@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -11,6 +11,38 @@ logger = logging.getLogger(__name__)
 
 # Directories to skip during agent discovery
 SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template"})
+
+
+class ToolFilter(BaseModel):
+    """Tool filtering configuration for an agent.
+    
+    Controls which tools an agent can access.
+    - allow: If present, ONLY these tools/categories are included
+    - deny: Tools/categories to exclude (deny wins over allow)
+    - Both empty/missing: All tools allowed (backward compatible)
+    """
+    
+    allow: Annotated[list[str] | None, Field(
+        default=None,
+        description="List of tool categories or individual tool names to allow. "
+                    "If present, only these tools are included."
+    )] = None
+    
+    deny: Annotated[list[str] | None, Field(
+        default=None,
+        description="List of tool categories or individual tool names to deny. "
+                    "These are excluded even if in allow."
+    )] = None
+    
+    model_config = ConfigDict(
+        extra="ignore",
+        json_schema_extra={
+            "example": {
+                "allow": ["bash", "filesystem", "instance", "help"],
+                "deny": ["write_file", "edit_file"]
+            }
+        }
+    )
 
 
 class AgentMetadata(BaseModel):
@@ -26,6 +58,10 @@ class AgentMetadata(BaseModel):
     system: bool = Field(default=False, description="Whether this is a system agent")
     capabilities: list[str] = Field(default_factory=list, description="Agent capabilities")
     tags: list[str] = Field(default_factory=list, description="Agent tags")
+    tools: ToolFilter | None = Field(
+        default=None,
+        description="Tool filtering configuration. None means all tools allowed."
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -40,7 +76,11 @@ class AgentMetadata(BaseModel):
                 "path": "/path/to/agents/coder",
                 "system": False,
                 "capabilities": ["code_generation", "debugging"],
-                "tags": ["coding", "development"]
+                "tags": ["coding", "development"],
+                "tools": {
+                    "allow": ["bash", "filesystem", "instance", "help"],
+                    "deny": ["write_file", "edit_file"]
+                }
             }
         }
     )
@@ -110,6 +150,14 @@ class AgentRegistry:
             agent_id = meta.get("id", agent_path.name)
 
             # Build AgentMetadata with defaults for missing fields
+            tools_config = meta.get("tools")
+            tools_filter = None
+            if tools_config:
+                try:
+                    tools_filter = ToolFilter.model_validate(tools_config)
+                except Exception as e:
+                    logger.warning(f"Failed to parse tools config for {agent_path.name}: {e}")
+            
             try:
                 agent_meta = AgentMetadata(
                     id=agent_id,
@@ -122,6 +170,7 @@ class AgentRegistry:
                     system=meta.get("system", False),
                     capabilities=meta.get("capabilities", []),
                     tags=meta.get("tags", []),
+                    tools=tools_filter,
                 )
                 self._agents[agent_id] = agent_meta
             except Exception as e:
