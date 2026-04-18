@@ -10,6 +10,13 @@ from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
+CATEGORY_NAME = "Instance Management"
+CATEGORY_DOC = """\
+Spawn, communicate with, and manage agent instances.
+
+**instance_name**: Optional short name for the instance to identify it in reports. Use concise, descriptive names. Examples: `create-feature-a`, `fix-bug-b`, `refactor-auth`.
+"""
+
 from .bash import bash
 from .filesystem import (
     list_directory,
@@ -25,38 +32,13 @@ from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
 from .help import create_help_tool
-
-if TYPE_CHECKING:
-    from ..manager import InstanceManager
-
-
-# Tool categories mapping - maps category names to individual tool names
-TOOL_CATEGORIES: dict[str, list[str]] = {
-    "bash": ["bash"],
-    "filesystem": ["list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"],
-    "time": ["time"],
-    "instance": [
-        "spawn_instance", "send_message", "terminate_instance", 
-        "list_instances", "get_instance_info"
-    ],
-    "self": ["inner_soul", "access_memory"],
-    "project": [
-        "project_create", "project_get", "project_list", "project_search",
-        "project_get_by_instance", "project_get_by_directory", "project_update",
-        "project_set_status", "project_add_directory", "project_remove_directory",
-        "project_set_tags", "project_add_tag", "project_remove_tag",
-        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
-        "project_set_metadata", "project_delete_metadata",
-        "project_link", "project_unlink", "project_delete",
-    ],
-    "help": ["tool_help"],
-    "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
-}
+from ._tool_registry import list_tools_by_category
 
 
 def resolve_tool_filter(
     allow: list[str] | None, 
-    deny: list[str] | None
+    deny: list[str] | None,
+    tool_categories: dict[str, list[str]] | None = None,
 ) -> set[str] | None:
     """Resolve tool filter allow/deny lists into a final set of allowed tool names.
     
@@ -69,6 +51,8 @@ def resolve_tool_filter(
     Args:
         allow: List of category names and/or individual tool names to allow
         deny: List of category names and/or individual tool names to deny
+        tool_categories: Optional dict mapping category names to tool name lists.
+            If None, uses the dynamic tool registry via list_tools_by_category().
         
     Returns:
         Set of allowed tool names, or None if all tools should be allowed
@@ -80,19 +64,21 @@ def resolve_tool_filter(
     if allow_empty and deny_empty:
         return None
     
-    # Start with all tools if no allow list, otherwise expand allow
+    # Use provided categories or fetch from registry
+    if tool_categories is None:
+        tool_categories = list_tools_by_category()
     if allow is None or len(allow) == 0:
         # No allow list means everything is potentially allowed
         # Start with all tools from all categories
         allowed_tools: set[str] = set()
-        for category_tools in TOOL_CATEGORIES.values():
+        for category_tools in tool_categories.values():
             allowed_tools.update(category_tools)
     else:
         # Expand allow list (categories → individual tools)
         allowed_tools = set()
         for item in allow:
-            if item in TOOL_CATEGORIES:
-                allowed_tools.update(TOOL_CATEGORIES[item])
+            if item in tool_categories:
+                allowed_tools.update(tool_categories[item])
             else:
                 allowed_tools.add(item)
     
@@ -100,8 +86,8 @@ def resolve_tool_filter(
     if deny:
         denied_tools: set[str] = set()
         for item in deny:
-            if item in TOOL_CATEGORIES:
-                denied_tools.update(TOOL_CATEGORIES[item])
+            if item in tool_categories:
+                denied_tools.update(tool_categories[item])
             else:
                 denied_tools.add(item)
         allowed_tools -= denied_tools
@@ -482,7 +468,7 @@ Returns:
         tools.extend(mother_tools)
     
     # Add help tool (must be last so it knows about all other tools)
-    help_tool = create_help_tool(tools)
+    help_tool = create_help_tool(tools, agent_id)
     tools.append(help_tool)
     
     # Apply tool filtering based on agent's tools config

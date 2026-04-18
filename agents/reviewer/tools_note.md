@@ -1,4 +1,4 @@
-# Tools
+# Tool Usage Notes
 
 - **opencode_skill** — Primary tool for code analysis and file operations
 - **Read** — Quick file checks (prefer opencode for complex analysis)

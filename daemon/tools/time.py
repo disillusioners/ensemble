@@ -4,6 +4,13 @@ from datetime import datetime, timezone
 from langchain_core.tools import tool
 from typing import Optional
 
+CATEGORY_NAME = "Time"
+CATEGORY_DOC = """\
+Get current date and time.
+
+Use `format_type="iso"` for ISO format, or provide a custom format string.
+"""
+
 
 @tool
 def time(

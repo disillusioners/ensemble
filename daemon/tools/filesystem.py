@@ -6,6 +6,23 @@ from pathlib import Path
 from langchain_core.tools import tool
 from typing import Optional
 
+CATEGORY_NAME = "File Operations"
+CATEGORY_DOC = """\
+Read, write, edit, and search files and directories.
+
+**Rules**:
+- `workdir` parameters are MUST for all file operations. Always specify them to avoid errors.
+- `path` is always relative to `workdir`. Never use absolute paths.
+
+Example read_file:
+```json
+{
+  "path": ".agents/shared/planning/<feature>/plan-overview.md",
+  "workdir": "/path_to/current/working/project/directory"
+}
+```
+"""
+
 def _is_within_workdir(workdir: Path, target: Path) -> bool:
     """Check if target path is within workdir boundary or a temp directory.
     

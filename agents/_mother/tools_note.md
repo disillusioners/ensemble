@@ -1,4 +1,4 @@
-# Tools
+# Tool Usage Notes
 
 I have access to special agent management tools that other agents don't have.
 

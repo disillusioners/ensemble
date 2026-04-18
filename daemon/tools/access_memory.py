@@ -3,6 +3,14 @@
 from pathlib import Path
 from langchain_core.tools import tool
 
+CATEGORY_NAME = "Memory Access"
+CATEGORY_DOC = """\
+Read memory files from your memories/ directory.
+
+**Filename convention**: `{date}-{descriptive-title}.md`
+- Example: `2026-04-01-k8s-db-connection.md`
+"""
+
 _FULL_DOC = """Read a specific memory file from your memories/ directory.
 
 You see your recent memory filenames in the '## Recent Memories' section of your system prompt.

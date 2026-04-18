@@ -10,108 +10,80 @@ logger = logging.getLogger(__name__)
 
 
 # Path to shared files (injected into all agents)
-COMMON_TOOLS_FILE = Path(__file__).parent.parent / "agents" / "tools_common.md"
 PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
 
 
-# Section-to-tool-names mapping for filtering tools_common.md
-# NOTE: All tool names MUST exist in TOOL_CATEGORIES in daemon/tools/instance.py
-SECTION_TOOLS: dict[str, set[str]] = {
-    "File Operations": {"list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"},
-    "Shell": {"bash", "time"},
-    "Instance Management": {
-        "spawn_instance", "send_message", "terminate_instance",
-        "list_instances", "get_instance_info"
-    },
-    "Project Management": {
-        "project_create", "project_get", "project_list", "project_search",
-        "project_get_by_instance", "project_get_by_directory", "project_update",
-        "project_set_status", "project_add_directory", "project_remove_directory",
-        "project_set_tags", "project_add_tag", "project_remove_tag",
-        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
-        "project_set_metadata", "project_delete_metadata",
-        "project_link", "project_unlink", "project_delete",
-    },
-    "Self-Modification": {"inner_soul", "access_memory"},
-    "Help": {"tool_help"},
-}
-
-
-def load_common_tools_filtered(tool_filter: ToolFilter | None) -> str:
-    """Load common tools documentation, filtered by agent's allowed tools.
+def load_tools_doc_for_agent(agent_id: str) -> str:
+    """Build tool documentation for an agent based on their allowed tools.
+    
+    Dynamically generates tool documentation by:
+    1. Getting the agent's tool filter from the registry
+    2. Resolving allowed tool names using resolve_tool_filter()
+    3. For each allowed category, building a section with CATEGORY_NAME and tool list
     
     Args:
-        tool_filter: Agent's tool filter configuration. If None, returns full content.
+        agent_id: The agent identifier to get tool documentation for.
         
     Returns:
-        Filtered content of tools_common.md, or full content if no filter.
+        Formatted string with tool documentation sections.
     """
-    if not COMMON_TOOLS_FILE.exists():
+    from .registry import get_registry
+    from .tools.instance import resolve_tool_filter
+    from .tools._tool_registry import get_tool_categories, get_category_doc
+    
+    # Get agent's tool filter from registry
+    tool_filter: ToolFilter | None = None
+    try:
+        registry = get_registry()
+        agent_meta = registry.get(agent_id)
+        if agent_meta is not None:
+            tool_filter = agent_meta.tools
+    except (KeyError, ValueError, RuntimeError) as e:
+        logger.debug(f"Registry lookup failed for {agent_id}: {e}")
         return ""
     
-    # Read file content once at the start
-    content = COMMON_TOOLS_FILE.read_text(encoding="utf-8")
-    
-    if tool_filter is None:
-        # No filter → return full content (backward compatible)
-        return content
-    
-    # Import here to avoid circular imports
-    from .tools.instance import resolve_tool_filter
-    
     # Resolve filter to set of allowed tool names
-    allowed_tools = resolve_tool_filter(
-        allow=tool_filter.allow,
-        deny=tool_filter.deny,
-    )
+    if tool_filter is None:
+        # No filter → all tools allowed, pass None to get all categories
+        allowed_tools: set[str] | None = None
+    else:
+        allowed_tools = resolve_tool_filter(
+            allow=tool_filter.allow,
+            deny=tool_filter.deny,
+        )
+        # If None returned, all tools are allowed
+        if allowed_tools is None:
+            allowed_tools = None
     
-    # If None returned, all tools are allowed
-    if allowed_tools is None:
-        return content
+    # Get categories with their tools
+    categories = get_tool_categories(allowed_tools)
     
-    # Parse the file content and filter sections
-    lines = content.split("\n")
+    if not categories:
+        return ""
     
-    # Extract header (lines before first ## section)
-    header_lines: list[str] = []
-    section_lines: list[tuple[str, list[str]]] = []  # (section_name, lines)
-    current_section: str | None = None
-    current_lines: list[str] = []
+    # Build sections for each category
+    sections: list[str] = []
+    for category_key, tool_names in sorted(categories.items()):
+        try:
+            category_name, category_doc = get_category_doc(category_key)
+        except KeyError:
+            # Category not in CATEGORY_MODULES - use key as name
+            category_name = category_key
+            category_doc = ""
+        
+        # Sort tools for deterministic output
+        sorted_tools = sorted(tool_names)
+        tools_list = ", ".join(sorted_tools)
+        
+        section = f"## {category_name}\n"
+        if category_doc:
+            section += f"{category_doc}\n\n"
+        section += f"**Available tools:** {tools_list}\n"
+        section += "Use tool_help(\"tool_name\") for detailed documentation."
+        
+        sections.append(section)
     
-    for line in lines:
-        if line.startswith("## "):
-            # Save previous section
-            if current_section is not None:
-                section_lines.append((current_section, current_lines))
-            # Start new section
-            current_section = line[3:].strip()
-            current_lines = [line]
-        else:
-            if current_section is not None:
-                current_lines.append(line)
-            else:
-                header_lines.append(line)
-    
-    # Save last section
-    if current_section is not None:
-        section_lines.append((current_section, current_lines))
-    
-    # Filter sections: include if ANY tool in section is in allowed set
-    filtered_sections: list[list[str]] = []
-    for section_name, section_content in section_lines:
-        section_tool_names = SECTION_TOOLS.get(section_name, set())
-        if section_tool_names and section_tool_names & allowed_tools:
-            # At least one tool from this section is allowed
-            filtered_sections.append(section_content)
-        elif section_name not in SECTION_TOOLS:
-            # Section not in mapping - log for debugging
-            logger.debug(f"Skipping unmapped tools_common section: {section_name}")
-    
-    # Reconstruct the filtered content
-    result_lines = header_lines + ["\n"]
-    result_lines.extend(["\n".join(s) for s in filtered_sections])
-    
-    return "\n".join(result_lines)
+    return "\n\n".join(sections)
 
 
 def load_project_experience() -> str:
@@ -186,7 +158,7 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
         Dict with filename (without .md) as key, content as value.
         Skips missing files.
     """
-    prompt_files = ["soul.md", "skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
+    prompt_files = ["soul.md", "skill.md", "workflow.md", "rule.md", "memory.md"]
     prompts: dict[str, str] = {}
     
     for filename in prompt_files:
@@ -194,13 +166,22 @@ def load_agent_prompts(agent_dir: Path) -> dict[str, str]:
         if filepath.exists():
             prompts[filename.replace(".md", "")] = filepath.read_text(encoding="utf-8")
     
+    # Load tools_note.md with fallback to tools.md (for backward compatibility)
+    tools_note_path = agent_dir / "tools_note.md"
+    tools_fallback_path = agent_dir / "tools.md"
+    
+    if tools_note_path.exists():
+        prompts["tools"] = tools_note_path.read_text(encoding="utf-8")
+    elif tools_fallback_path.exists():
+        prompts["tools"] = tools_fallback_path.read_text(encoding="utf-8")
+    
     return prompts
 
 
 def compose_system_prompt(
     prompts: dict[str, str], 
     skills: dict[str, str] | None = None,
-    common_tools: str = "",
+    dynamic_tools: str = "",
     project_experience: str = "",
     recent_memories: str = ""
 ) -> str:
@@ -211,7 +192,7 @@ def compose_system_prompt(
                  Expected keys: soul, rule, skill, tools, workflow, memory
         skills: Optional dict with skill name as key, skill.md content as value.
                 Loaded from agent's skills/ directory.
-        common_tools: Common tools content from tools_common.md (shared by all agents).
+        dynamic_tools: Dynamic tools content from load_tools_doc_for_agent() (agent's available tools).
         project_experience: Project experience content from project-experience.md (shared by all agents).
         
     Returns:
@@ -220,10 +201,12 @@ def compose_system_prompt(
         2. rule.md (constraints - highest priority)
         3. skill.md (base skill, if exists - backward compat)
         4. All skills from skills/ directory (each as separate section)
-        5. tools_common.md + tools.md (available tools - only if content exists)
-        6. workflow.md (methodology)
-        7. memory.md (knowledge)
-        8. project-experience.md (how to use .agents directory for project knowledge)
+        5. dynamic_tools (from load_tools_doc_for_agent - available tools based on agent config)
+        6. tools.md (agent-specific tools note)
+        7. workflow.md (methodology)
+        8. memory.md (knowledge)
+        9. Recent memories (filenames only)
+        10. project-experience.md (how to use .agents directory for project knowledge)
         Separated by "\n\n---\n\n". Headers come from the file content itself.
     """
     sections: list[str] = []
@@ -254,31 +237,28 @@ def compose_system_prompt(
             if content:
                 sections.append(content)
     
-    # 5. Add tools section (combine common + agent-specific, only if non-empty)
-    tools_parts = []
-    if common_tools.strip():
-        tools_parts.append(common_tools.strip())
+    # 5. Add dynamic tools section (from load_tools_doc_for_agent)
+    if dynamic_tools.strip():
+        sections.append(dynamic_tools.strip())
+    
+    # 6. Add agent-specific tools note (tools_note.md with fallback to tools.md)
     if "tools" in prompts:
         agent_tools = prompts["tools"].strip()
         if agent_tools:
-            tools_parts.append(agent_tools)
+            sections.append(agent_tools)
     
-    if tools_parts:
-        combined_tools = "\n\n---\n\n".join(tools_parts)
-        sections.append(combined_tools)
-    
-    # 6-7. Add workflow and memory sections
+    # 7-8. Add workflow and memory sections
     for key in ["workflow", "memory"]:
         if key in prompts:
             content = prompts[key].strip()
             if content:
                 sections.append(content)
     
-    # Add recent memories section (filenames only, max 5)
+    # 9. Add recent memories section (filenames only, max 5)
     if recent_memories:
         sections.append(f"## Recent Memories\n\n{recent_memories}")
     
-    # 8. Add project experience section (shared .agents directory usage)
+    # 10. Add project experience section (shared .agents directory usage)
     if project_experience.strip():
         sections.append(f"## Project Experience\n\n{project_experience.strip()}")
     
@@ -413,12 +393,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         Tuple of (system_prompt, token_count).
     """
     # Calculate current mtimes for all prompt files
-    prompt_files = ["soul.md", "skill.md", "tools.md", "workflow.md", "rule.md", "memory.md"]
+    prompt_files = ["soul.md", "skill.md", "workflow.md", "rule.md", "memory.md"]
     current_mtimes: dict[str, float] = {}
-    
-    # Include common tools file mtime for cache invalidation
-    if COMMON_TOOLS_FILE.exists():
-        current_mtimes["tools_common.md"] = COMMON_TOOLS_FILE.stat().st_mtime
     
     # Include project experience file mtime for cache invalidation
     if PROJECT_EXPERIENCE_FILE.exists():
@@ -433,6 +409,14 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         filepath = agent_dir / filename
         if filepath.exists():
             current_mtimes[filename] = filepath.stat().st_mtime
+    
+    # Include mtime for tools_note.md or tools.md for cache invalidation
+    tools_note_path = agent_dir / "tools_note.md"
+    tools_fallback_path = agent_dir / "tools.md"
+    if tools_note_path.exists():
+        current_mtimes["tools_note.md"] = tools_note_path.stat().st_mtime
+    elif tools_fallback_path.exists():
+        current_mtimes["tools.md"] = tools_fallback_path.stat().st_mtime
     
     # Include mtimes for all skill files in skills/ directory
     skills_dir = agent_dir / "skills"
@@ -465,24 +449,13 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         if stored_mtimes == current_mtimes:
             return cached
     
-    # Get agent's tool filter for filtered common tools loading
-    tool_filter: ToolFilter | None = None
-    from .registry import get_registry
-    try:
-        registry = get_registry()
-        agent_meta = registry.get(agent_id)
-        if agent_meta is not None:
-            tool_filter = agent_meta.tools
-    except (KeyError, ValueError, RuntimeError) as e:
-        logger.debug(f"Registry lookup failed for {agent_id}: {e}")
-    
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir)
-    common_tools = load_common_tools_filtered(tool_filter)
+    dynamic_tools = load_tools_doc_for_agent(agent_id)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
-    system_prompt = compose_system_prompt(prompts, skills, common_tools, project_experience, recent_memories)
+    system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache

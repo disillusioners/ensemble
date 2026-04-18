@@ -12,6 +12,14 @@ from langchain_core.tools import tool
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 
+CATEGORY_NAME = "Project Management"
+CATEGORY_DOC = """\
+Create, update, search, and manage projects.
+
+**Status values:** `active`, `paused`, `completed`, `archived`
+**Project types:** `software`, `documentation`, `research`, `task`, `general`, or custom
+"""
+
 
 def _validate_directory(path: str | None) -> tuple[str | None, str | None]:
     """Validate and sanitize a directory path.

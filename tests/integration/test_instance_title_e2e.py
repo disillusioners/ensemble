@@ -20,7 +20,24 @@ import pytest
 import asyncio
 import logging
 import time
+import uuid
 from pathlib import Path
+
+
+def _load_env():
+    """Load environment variables from .env file."""
+    env_path = Path(__file__).parent.parent.parent / ".env"
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ[key] = value
+
+
+# Load .env first so checks can see the key
+_load_env()
 
 # Setup logging
 logging.basicConfig(
@@ -52,15 +69,15 @@ def integration_config():
 
 
 @pytest.fixture
-def test_db_path():
-    """Return a test database path and cleanup after."""
-    project_root = Path(__file__).parent.parent.parent
-    db_path = project_root / "test_e2e_instance_title.db"
-    db_path.unlink(missing_ok=True)
-    yield db_path
-    # Cleanup
-    if db_path.exists():
-        db_path.unlink()
+def test_db_path(tmp_path):
+    """Return a unique test database path per test and cleanup after."""
+    import uuid
+    # Use unique path per test to avoid database corruption between tests
+    db_path = tmp_path / f"test_title_{uuid.uuid4().hex[:8]}.db"
+    # Also set checkpointer db path to avoid conflicts
+    checkpointer_path = tmp_path / f"test_checkpoints_{uuid.uuid4().hex[:8]}.db"
+    yield db_path, checkpointer_path
+    # Cleanup is automatic with tmp_path
 
 
 @pytest.mark.asyncio
@@ -82,8 +99,12 @@ async def test_instance_title_generation_e2e(
     # Use the manager's instance repository instead of standalone functions
     # The manager._instance_repository is a SQLModelInstanceRepository
     
+    # Unpack unique db paths
+    db_path, checkpointer_path = test_db_path
+    
     # Modify the persistence config for test isolation
-    integration_config.persistence.db_path = str(test_db_path)
+    integration_config.persistence.db_path = str(db_path)
+    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
     
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
@@ -171,9 +192,9 @@ async def test_instance_title_generation_e2e(
     while time.time() - start_time < wait_timeout:
         # Check if message was completed (check queue stats)
         stats = manager.get_queue_stats(instance_id)
-        logger.debug(f"[TEST] Queue stats: pending={stats.pending_count}, processing={stats.processing_count}")
+        logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
         
-        if stats.pending_count == 0 and stats.processing_count == 0:
+        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
             # Check if we got a response
             await asyncio.sleep(1)  # Small delay to ensure events are processed
             break
@@ -260,8 +281,12 @@ async def test_instance_title_not_regenerated(
     from daemon.manager import InstanceManager
     # Use manager._instance_repository instead of standalone persistence functions
     
+    # Unpack unique db paths
+    db_path, checkpointer_path = test_db_path
+    
     # Modify the persistence config for test isolation
-    integration_config.persistence.db_path = str(test_db_path)
+    integration_config.persistence.db_path = str(db_path)
+    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
     
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
@@ -295,7 +320,7 @@ async def test_instance_title_not_regenerated(
     
     while time.time() - start_time < wait_timeout:
         stats = manager.get_queue_stats(instance_id)
-        if stats.pending_count == 0 and stats.processing_count == 0:
+        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
             await asyncio.sleep(1)
             break
         await asyncio.sleep(0.5)

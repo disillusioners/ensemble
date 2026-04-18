@@ -5,6 +5,7 @@ tools to have short docstrings (for LLM context efficiency) while
 still providing detailed documentation via the tool_help() function.
 """
 
+from importlib import import_module
 from typing import Callable, Any
 
 # Global registry: tool_name -> full documentation string
@@ -154,3 +155,74 @@ def scan_tools_for_full_docs(tools: list) -> None:
             _tool_metadata[tool_name]["short_doc"] = short_doc
             if tool_name in _full_docs:
                 _tool_metadata[tool_name]["full_doc"] = _full_docs[tool_name]
+
+
+# Category module mapping: category_key -> full module path
+CATEGORY_MODULES = {
+    "bash": "daemon.tools.bash",
+    "filesystem": "daemon.tools.filesystem",
+    "time": "daemon.tools.time",
+    "instance": "daemon.tools.instance",
+    "self": "daemon.tools.inner_soul",
+    "access_memory": "daemon.tools.access_memory",
+    "project": "daemon.tools.project",
+    "help": "daemon.tools.help",
+    "mother": "daemon.tools.agent_mother",
+}
+
+
+def get_tool_categories(allowed_tools: set[str] | None = None) -> dict[str, list[str]]:
+    """Get tools grouped by their category, using CATEGORY_NAME as keys.
+    
+    Args:
+        allowed_tools: Optional set of tool names to filter by.
+    
+    Returns:
+        Dictionary mapping CATEGORY_NAME to list of tool names.
+    """
+    categories: dict[str, list[str]] = {}
+    
+    for tool_name, meta in _tool_metadata.items():
+        # Filter by allowed_tools if provided
+        if allowed_tools is not None and tool_name not in allowed_tools:
+            continue
+        
+        category_key = meta.get("category", "general")
+        
+        # Look up CATEGORY_NAME from the module
+        if category_key in CATEGORY_MODULES:
+            try:
+                module = import_module(CATEGORY_MODULES[category_key])
+                category_name = getattr(module, "CATEGORY_NAME", category_key)
+            except ImportError:
+                category_name = category_key
+        else:
+            category_name = category_key
+        
+        if category_name not in categories:
+            categories[category_name] = []
+        categories[category_name].append(tool_name)
+    
+    return categories
+
+
+def get_category_doc(category_key: str) -> tuple[str, str]:
+    """Get CATEGORY_NAME and CATEGORY_DOC for a category.
+    
+    Args:
+        category_key: The category key (e.g., "bash", "filesystem").
+    
+    Returns:
+        Tuple of (CATEGORY_NAME, CATEGORY_DOC).
+    
+    Raises:
+        KeyError: If category doesn't exist in CATEGORY_MODULES.
+    """
+    if category_key not in CATEGORY_MODULES:
+        raise KeyError(f"Unknown category: {category_key}")
+    
+    module = import_module(CATEGORY_MODULES[category_key])
+    return (
+        getattr(module, "CATEGORY_NAME", category_key),
+        getattr(module, "CATEGORY_DOC", ""),
+    )

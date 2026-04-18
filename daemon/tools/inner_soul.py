@@ -15,6 +15,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+CATEGORY_NAME = "Self-Modification"
+CATEGORY_DOC = """\
+Remember, learn, or change agent behavior and access memories.
+
+**Intent types**: `remember`, `learn`, `change`
+**Target types**: `memory`, `workflow`, `soul`, `user`
+"""
+
 if TYPE_CHECKING:
     from ..manager import InstanceManager
 

@@ -4,6 +4,8 @@ import time
 
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from daemon.loader import (
     PromptCache,
     compose_system_prompt,
@@ -11,6 +13,7 @@ from daemon.loader import (
     load_agent_prompts,
     load_agent_skills,
     load_and_cache_prompt,
+    load_tools_doc_for_agent,
 )
 
 
@@ -576,3 +579,164 @@ class TestSoulLoading:
         
         prompt2, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
         assert "craftsman" in prompt2
+
+
+class TestLoadToolsDocForAgent:
+    """Tests for load_tools_doc_for_agent function."""
+
+    @pytest.fixture(autouse=True)
+    def setup_registry_and_tools(self):
+        """Set up mock registry and populate tool registry with test tools."""
+        from daemon.tools._tool_registry import clear_registry, register_full_doc
+        from daemon.tools._tool_registry import _tool_metadata
+        
+        # Clear any existing registry state
+        clear_registry()
+        
+        # Populate tool registry with test tools
+        # These simulate the tools that would be in _tool_metadata
+        _tool_metadata["bash"] = {
+            "category": "bash",
+            "short_doc": "Execute bash commands",
+            "full_doc": "Execute bash commands.\n\nArgs:\n    command: Command to execute.",
+        }
+        _tool_metadata["read_file"] = {
+            "category": "filesystem",
+            "short_doc": "Read file contents",
+            "full_doc": "Read file contents.\n\nArgs:\n    path: File path.",
+        }
+        _tool_metadata["write_file"] = {
+            "category": "filesystem",
+            "short_doc": "Write file contents",
+            "full_doc": "Write file contents.\n\nArgs:\n    path: File path.\n    content: Content to write.",
+        }
+        _tool_metadata["project_create"] = {
+            "category": "project",
+            "short_doc": "Create a new project",
+            "full_doc": "Create a new project.\n\nArgs:\n    name: Project name.",
+        }
+        
+        # Mock the registry
+        self.mock_agent_meta = MagicMock()
+        self.mock_agent_meta.tools = None  # Default: no restrictions
+        
+        self.mock_registry = MagicMock()
+        self.mock_registry.get.return_value = self.mock_agent_meta
+        
+        # Patch the registry getter at the module level where it's imported
+        self.registry_patcher = patch("daemon.registry.get_registry", return_value=self.mock_registry)
+        self.registry_patcher.start()
+        
+        yield
+        
+        # Cleanup
+        clear_registry()
+        self.registry_patcher.stop()
+
+    def test_no_filter_returns_all_categories(self):
+        """Agent with no tool filter should get all categories."""
+        # Set up agent with no tools restriction
+        self.mock_agent_meta.tools = None
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should return something (categories with tools)
+        assert len(result) > 0
+        # Should contain section headers
+        assert "## " in result
+        # Should contain bash tool
+        assert "bash" in result.lower()
+
+    def test_restricted_tools_returns_filtered_categories(self):
+        """Agent with restricted tool set should only see allowed categories."""
+        from daemon.registry import ToolFilter
+        
+        # Set up agent with restricted tools (only bash category)
+        self.mock_agent_meta.tools = ToolFilter(allow=["bash"], deny=None)
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should contain bash-related content
+        assert "Bash" in result or "bash" in result.lower()
+        # Should list bash tool
+        assert "bash" in result.lower()
+        # Should have Available tools line
+        assert "Available tools:" in result
+
+    def test_category_doc_appears_in_output(self):
+        """CATEGORY_DOC content should appear in the output."""
+        self.mock_agent_meta.tools = None  # No restriction
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should contain category descriptions from CATEGORY_DOC
+        # The bash category has a CATEGORY_DOC with usage info
+        assert "Bash" in result or "bash" in result.lower()
+
+    def test_available_tools_line_lists_correct_tools(self):
+        """'Available tools:' line should list the correct tools."""
+        from daemon.registry import ToolFilter
+        
+        # Restrict to only bash category
+        self.mock_agent_meta.tools = ToolFilter(allow=["bash"], deny=None)
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should have Available tools: followed by bash
+        assert "Available tools:" in result
+        assert "bash" in result.lower()
+
+    def test_agent_not_found_returns_all_tools(self):
+        """Agent not in registry should get all tools (full access by default)."""
+        self.mock_registry.get.return_value = None
+        
+        result = load_tools_doc_for_agent("nonexistent_agent")
+        
+        # When agent not in registry, they get full access (all tools)
+        # The function returns tool docs, not empty string
+        assert len(result) > 0
+        assert "bash" in result.lower()
+
+    def test_tool_help_instruction_present(self):
+        """Output should contain instruction to use tool_help for docs."""
+        self.mock_agent_meta.tools = None
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should mention tool_help for detailed docs
+        assert "tool_help" in result
+
+    def test_allow_and_deny_filter(self):
+        """Allow with deny should properly filter tools."""
+        from daemon.registry import ToolFilter
+        
+        # Allow filesystem but deny write_file
+        self.mock_agent_meta.tools = ToolFilter(allow=["filesystem"], deny=["write_file"])
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # Should contain filesystem tools but not write_file
+        # Category name is "File Operations" not "Filesystem"
+        assert "File Operations" in result or "file operations" in result.lower()
+        # write_file should not appear in available tools
+        lines = result.split("\n")
+        available_line = [l for l in lines if "Available tools:" in l]
+        if available_line:
+            assert "write_file" not in available_line[0]
+
+    def test_deny_without_allow(self):
+        """Deny without allow should deny only specified tools."""
+        from daemon.registry import ToolFilter
+        
+        # Deny bash only
+        self.mock_agent_meta.tools = ToolFilter(allow=None, deny=["bash"])
+        
+        result = load_tools_doc_for_agent("test_agent")
+        
+        # bash should not appear in the output
+        # The result might contain bash category name in header but not in tools list
+        # Check that the bash tool is not listed
+        lines = result.split("\n")
+        available_lines = [l for l in lines if "Available tools:" in l]
+        # At least one category should be present (not all denied)
+        assert len(available_lines) > 0

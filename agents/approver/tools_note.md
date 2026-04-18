@@ -1,4 +1,4 @@
-# Tools
+# Tool Usage Notes
 
 ## Primary
 - `opencode_skill` — for spawning opencode sessions to verify plan claims

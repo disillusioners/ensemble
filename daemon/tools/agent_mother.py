@@ -15,6 +15,11 @@ from langchain_core.tools import tool
 if TYPE_CHECKING:
     from ..manager import InstanceManager
 
+CATEGORY_NAME = "Agent Management"
+CATEGORY_DOC = """\
+Mother agent specific tools for managing baby agent lifecycle.
+"""
+
 # Base directory for agents
 BASE_DIR = Path(__file__).parent.parent.parent
 

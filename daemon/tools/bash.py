@@ -5,6 +5,13 @@ import signal
 from langchain_core.tools import tool
 from typing import Optional, Union, List
 
+CATEGORY_NAME = "Shell"
+CATEGORY_DOC = """\
+Execute shell commands and get current time.
+
+**Rules**: Always set `workdir` to the project directory. Never omit it.
+"""
+
 
 async def _kill_process(proc: asyncio.subprocess.Process) -> None:
     """Gracefully kill a process: SIGTERM, wait 5s, then SIGKILL."""
