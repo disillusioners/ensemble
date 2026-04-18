@@ -1,6 +1,9 @@
+import logging
 import signal
 import sys
 import warnings
+
+logger = logging.getLogger(__name__)
 
 # Suppress langchain Pydantic V1 compatibility warning on Python 3.14+
 # This is safe: langchain still works, just uses deprecated Pydantic V1 shim
@@ -20,6 +23,10 @@ def main():
     """Main entry point."""
     # Load config to get host/port
     config = load_config()
+
+    # Log version for debugging
+    from . import __version__
+    logger.info(f"Starting Ensemble v{__version__}")
     
     # Note: uvicorn handles SIGTERM and SIGINT automatically.
     # The FastAPI lifespan shutdown (via @asynccontextmanager) will be

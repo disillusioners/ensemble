@@ -367,6 +367,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+logger.info(f"Starting Ensemble v{__version__}")
+
 # API Router with /api prefix
 api_router = APIRouter(prefix="/api")
 
