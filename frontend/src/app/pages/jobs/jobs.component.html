@@ -95,10 +95,14 @@
           class="retry-all-btn"
           matTooltip="Replay all dead letter jobs">
           @if (retryingAll()) {
-            <mat-icon class="spinning">sync</mat-icon>
+            <ng-container>
+              <mat-icon class="spinning">sync</mat-icon>
+            </ng-container>
             Replaying...
           } @else {
-            <mat-icon>replay</mat-icon>
+            <ng-container>
+              <mat-icon>replay</mat-icon>
+            </ng-container>
             Retry All
           }
         </button>
