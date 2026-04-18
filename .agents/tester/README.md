@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-18 DLQ Retry Feature)
+## Test Results (Latest: 2026-04-19 Per-Agent Tool Control)
+
+### Per-Agent Tool Control Feature (branch feature/per-agent-tools, commits 5de34b0, 10fd317)
+- **35 new tool filter tests** — ALL PASS
+- **2410 total tests pass** (0 failed, 22 skipped) — no regressions
+- **Integration validation**: All imports, category counts, smoke tests PASS
+- **Edge cases**: All 5 verified (backward compat, deny-wins, category expansion, _mother)
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-19-per-agent-tool-control.md` for full report
+
+### Per-Agent Tool Control Status: ✅ READY FOR MERGE
 
 ### DLQ Retry Feature (commits 4b2f5c2, 8decef9)
 - **19 new backend tests** — Retry DEAD_LETTER job (9) + Bulk replay-all (10) — ALL PASS
