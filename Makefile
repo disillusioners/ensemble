@@ -15,7 +15,11 @@ FRONTEND_DIST = frontend/dist/frontend/browser
 
 # PyInstaller settings
 PYINSTALLER_SPEC = ensemble.spec
-PYINSTALLER_OUT = dist/ensemble-prod
+# Versioned output with timestamp (stored in dist/)
+VERSION_SUFFIX := $(shell date +%Y%m%d-%H%M%S)
+VERSIONED_BINARY = dist/ensemble-prod-$(VERSION_SUFFIX)
+# Final binary name (no timestamp) for production installation
+FINAL_BINARY = ensemble-prod
 
 # Colors for output
 GREEN := \033[0;32m
@@ -28,8 +32,8 @@ NC := \033[0m
 help:
 	@echo "Available targets:"
 	@echo "  make build           - Build the frontend"
-	@echo "  make pyinstaller     - Build production binary (dist/ensemble-prod)"
-	@echo "  make install         - Build binary and install to $(INSTALL_DIR)"
+	@echo "  make pyinstaller     - Build binary (dist/ensemble-prod-YYYYMMDD-HHMMSS, preserves old builds)"
+	@echo "  make install         - Build and install to $(INSTALL_DIR) (preserves dist/ history)"
 	@echo "  make install-deps    - Install Python dependencies in $(INSTALL_DIR)"
 	@echo "  make sync            - Install dependencies with uv sync"
 	@echo "  make start           - Start the daemon (kills existing process first)"
@@ -102,9 +106,9 @@ install: pyinstaller
 	mkdir -p $(INSTALL_DIR)
 	mkdir -p $(INSTALL_DIR)/data
 	
-	# Copy binary
-	@echo "$(YELLOW)Copying binary...$(NC)"
-	cp $(PYINSTALLER_OUT) $(INSTALL_DIR)/
+	# Copy binary (versioned -> production name without timestamp)
+	@echo "$(YELLOW)Copying $(VERSIONED_BINARY) -> $(FINAL_BINARY)...$(NC)"
+	cp $(VERSIONED_BINARY) $(INSTALL_DIR)/$(FINAL_BINARY)
 	
 	# Create symlink to agents directory (points to source)
 	@echo "$(YELLOW)Linking agents...$(NC)"
@@ -157,10 +161,12 @@ pyinstaller-clean:
 	rm -rf build/ dist/
 	@echo "$(GREEN)PyInstaller clean complete!$(NC)"
 
-pyinstaller: pyinstaller-clean build
+pyinstaller: build
 	@echo "$(GREEN)Building production binary with PyInstaller...$(NC)"
 	uv run python -m PyInstaller $(PYINSTALLER_SPEC)
-	@echo "$(GREEN)Binary built: $(PYINSTALLER_OUT)$(NC)"
+	@mv dist/ensemble-prod $(VERSIONED_BINARY)
+	@echo "$(GREEN)Binary built: $(VERSIONED_BINARY)$(NC)"
+	@echo "$(GREEN)Installed as: $(FINAL_BINARY)$(NC)"
 
 # Uninstall production version
 uninstall:

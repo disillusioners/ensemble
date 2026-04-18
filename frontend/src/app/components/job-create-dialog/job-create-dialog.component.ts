@@ -1,4 +1,4 @@
-import { Component, inject, signal, OnInit, effect } from '@angular/core';
+import { Component, inject, signal, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ReactiveFormsModule, FormBuilder, FormGroup, Validators } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
@@ -8,6 +8,7 @@ import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { FormsModule } from '@angular/forms';
+import { Subject, takeUntil } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { ProjectService } from '../../services/project.service';
 import { QueueService } from '../../services/queue.service';
@@ -51,12 +52,13 @@ export interface JobCreateDialogResult {
   templateUrl: './job-create-dialog.html',
   styleUrl: './job-create-dialog.scss'
 })
-export class JobCreateDialogComponent implements OnInit {
+export class JobCreateDialogComponent implements OnInit, OnDestroy {
   private readonly fb = inject(FormBuilder);
   private readonly api = inject(ApiService);
   protected readonly projectService = inject(ProjectService);
   protected readonly queueService = inject(QueueService);
   private readonly snackBar = inject(MatSnackBar);
+  private readonly destroy$ = new Subject<void>();
   
   protected readonly dialogRef = inject(MatDialogRef<JobCreateDialogComponent>);
   protected readonly data = inject<JobCreateDialogData>(MAT_DIALOG_DATA);
@@ -83,21 +85,20 @@ export class JobCreateDialogComponent implements OnInit {
     { value: 'webhook', label: 'Webhook' }
   ];
 
-  constructor() {
-    // Load queues when project_id changes
-    effect(() => {
-      const projectId = this.form.get('project_id')?.value;
-      if (projectId) {
-        this.loadQueues(projectId);
-      } else {
-        this.queues.set([]);
-      }
-    });
-  }
-
   ngOnInit(): void {
     this.loadAgents();
     this.loadProjects();
+    
+    // Subscribe to project_id changes to load queues
+    this.form.get('project_id')?.valueChanges
+      .pipe(takeUntil(this.destroy$))
+      .subscribe((projectId: string | null) => {
+        if (projectId) {
+          this.loadQueues(projectId);
+        } else {
+          this.queues.set([]);
+        }
+      });
     
     // Pre-fill form if editing
     if (this.data?.editMode && this.data.agentId) {
@@ -109,6 +110,11 @@ export class JobCreateDialogComponent implements OnInit {
         source: this.data.source || 'api'
       });
     }
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
   }
 
   private loadQueues(projectId: string): void {
