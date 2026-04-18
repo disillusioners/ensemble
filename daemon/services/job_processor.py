@@ -49,7 +49,7 @@ class JobProcessor:
         instance_manager: InstanceManager,
         project_repo: SQLModelProjectRepository,
         queue_repo: JobQueueRepository,
-        poll_interval: float = 2.0,
+        poll_interval: float = 30.0,
         dispatch_bus: Optional["DispatchEventBus"] = None,
         event_dispatch_enabled: bool = True,
     ):
@@ -60,7 +60,7 @@ class JobProcessor:
             instance_manager: InstanceManager for spawning instances.
             project_repo: SQLModelProjectRepository for checking project pause state.
             queue_repo: JobQueueRepository for listing queues and checking pause state.
-            poll_interval: Seconds between poll cycles (default: 2.0).
+            poll_interval: Seconds between poll cycles (default: 30.0).
             dispatch_bus: Optional DispatchEventBus for event-driven job dispatch.
             event_dispatch_enabled: Whether to use event-driven dispatch (default: True).
         """
@@ -181,9 +181,21 @@ class JobProcessor:
                         status="processing"
                     )
                     for proc_job in (processing or []):
-                        # Skip if instance already spawned (normal case)
-                        if proc_job.instance_id and self._instance_manager.get_instance(proc_job.instance_id):
-                            continue
+                        # Skip if instance already spawned (normal case).
+                        # If instance_id is set but get_instance raises KeyError,
+                        # the instance might be in the process of being spawned
+                        # (e.g., by JobFeedbackObserver). Skip and let it complete.
+                        if proc_job.instance_id:
+                            try:
+                                self._instance_manager.get_instance(proc_job.instance_id)
+                                continue  # Instance exists, skip
+                            except KeyError:
+                                # Instance not in memory or DB. Could be:
+                                # 1. Being spawned right now (race with observer)
+                                # 2. Genuinely orphaned - skip, let normal flow handle
+                                continue
+                        # No instance_id: this is a genuine orphan (shouldn't happen
+                        # in normal operation, but kept as safety net)
                         # This job was started by trigger_next_job() but instance not spawned
                         logger.info(
                             f"JobProcessor: resuming orphan PROCESSING job {proc_job.job_id[:8]}... "

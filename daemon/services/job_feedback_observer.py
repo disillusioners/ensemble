@@ -321,14 +321,55 @@ class JobFeedbackObserver:
         # FIX: Trigger the next pending job immediately instead of waiting for
         # the JobProcessor polling interval. This ensures zero-delay handoff
         # between consecutive jobs in the same queue.
+        # Full spawn flow is done here so the orphan check in JobProcessor can
+        # safely skip jobs that already have a spawned instance (instance_id set
+        # but instance may not be in memory yet is fine — orphan check will skip).
         try:
             if job.project_id:
-                next_job = await self._job_queue_service.trigger_next_job(job.project_id)
-                if next_job:
-                    logger.info(
-                        f"Observer: triggered next job {next_job.job_id[:8]}... "
-                        f"for project {job.project_id[:8]}..."
+                # Get the next pending job without transitioning it yet
+                next_job = await self._job_queue_service._get_next_job(job.project_id)
+                if next_job is None:
+                    return
+
+                # Transition to PROCESSING and get instance_id
+                started_job = await self._job_queue_service.start_job(next_job.job_id)
+                if started_job is None:
+                    # Couldn't start (lock not acquired, cancelled, etc.)
+                    return
+
+                # Spawn the instance using the instance_id from start_job
+                instance_id = started_job.instance_id
+                try:
+                    self._instance_manager.spawn_instance(
+                        agent_id=started_job.agent_id,
+                        instance_id=instance_id,
+                        project_id=started_job.project_id,
                     )
+                except Exception as e:
+                    logger.error(f"Observer: failed to spawn instance for job {started_job.job_id[:8]}...: {e}")
+                    await self._job_queue_service.complete_job(
+                        started_job.job_id, success=False, error=str(e)
+                    )
+                    return
+
+                # Send the job message
+                try:
+                    await self._instance_manager.enqueue_message(
+                        instance_id=instance_id,
+                        message=started_job.message,
+                        source=started_job.source,
+                    )
+                except Exception as e:
+                    logger.error(f"Observer: failed to enqueue message for job {started_job.job_id[:8]}...: {e}")
+                    await self._job_queue_service.complete_job(
+                        started_job.job_id, success=False, error=str(e)
+                    )
+                    return
+
+                logger.info(
+                    f"Observer: triggered next job {started_job.job_id[:8]}... "
+                    f"for project {job.project_id[:8]}..."
+                )
         except Exception as e:
             logger.warning(
                 f"Failed to trigger next job for project {job.project_id[:8]}...: {e}"
