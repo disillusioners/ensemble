@@ -11,11 +11,10 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Optional
 
-from daemon.repositories.job_queue.models import JobLockInfo
+from daemon.repositories.job_queue.models import JobLock, JobLockInfo
 
 if TYPE_CHECKING:
     from daemon.repositories.job_queue.lock_repository import LockRepository
-    from daemon.repositories.job_queue.models import JobLock
 
 
 class LockInfo:

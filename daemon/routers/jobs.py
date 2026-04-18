@@ -579,8 +579,8 @@ async def stream_job_events(
                         logger.info(f"Job {job_id} completed with status: {current_job.status}")
                         break
 
-                # Wait before next poll (0.5 seconds)
-                await asyncio.sleep(0.5)
+                # Wait before next poll (2 seconds)
+                await asyncio.sleep(2)
 
         except asyncio.CancelledError:
             logger.info(f"SSE stream cancelled for job {job_id}")
