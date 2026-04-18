@@ -60,7 +60,15 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-18 Merge access_memory into self)
+## Test Results (Latest: 2026-04-18 Job Processor project_id injection)
+
+### Job Processor project_id injection (branch feature/job-autoinject-project-id)
+- **8 new unit tests** — ALL PASS (project_id propagation, edge cases, no regressions)
+- **865 job_queue tests pass** (14 skipped, 0 failed) — no regressions
+- **ensure.md validated** — dev.sh ran clean for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-18-job-processor-project-id.md` for full report
+
+### Job Processor project_id injection Status: ✅ READY FOR MERGE
 
 ### Merge access_memory into self (branch feature/merge-access-memory-self)
 - **2407 non-integration tests pass** (0 failed, 22 skipped) — no regressions
