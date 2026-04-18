@@ -673,15 +673,16 @@ class JobQueueService:
     async def start_job(self, job_id: str) -> Optional[JobItem]:
         """Mark job as processing and acquire lock.
         
-        C1 Fix: Attempts to start the job atomically FIRST, then acquires
-        the lock. This prevents phantom locks where a worker acquires a
-        concurrency slot but fails to start the job, wasting capacity.
+        C1 Fix: Acquires the lock FIRST, then transitions the job atomically.
+        This prevents the race condition where multiple workers transition the
+        same job to PROCESSING but only one can acquire the lock, causing
+        repeated PENDING→PROCESSING→rollback cycles.
         
         The flow is:
         1. Get job → check PENDING
-        2. Call start_job_atomic() FIRST (only one worker can succeed)
-        3. If start succeeds → THEN acquire lock
-        4. If lock fails → roll back job status to PENDING
+        2. Acquire queue/project lock FIRST (if at capacity, don't transition)
+        3. If lock acquired → THEN call start_job_atomic()
+        4. If start fails → release the lock we acquired
         
         Args:
             job_id: The job ID to start.
@@ -701,22 +702,12 @@ class JobQueueService:
         # Generate new instance ID for this job
         instance_id = str(uuid.uuid4())
         
-        # C1: Try to start job atomically FIRST
-        # This is the source of truth - only one worker can transition PENDING→PROCESSING
-        try:
-            started_job = await asyncio.to_thread(
-                self._repository.start_job_atomic, job_id, instance_id
-            )
-        except ValueError:
-            # Job state changed (already started/cancelled) - not an error
-            return None
-        
-        # Start succeeded - now acquire the lock
-        # If lock fails, roll back the job status
+        # Acquire lock FIRST - if we can't get it, don't transition the job
+        lock_acquired = False
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
             
-            acquired = await self._lock_manager.acquire_queue_lock(
+            lock_acquired = await self._lock_manager.acquire_queue_lock(
                 project_id=job.project_id,
                 queue_id=job.queue_id,
                 job_id=job_id,
@@ -724,46 +715,41 @@ class JobQueueService:
                 concurrency_limit=concurrency_limit,
             )
             
-            if not acquired:
-                # Lock acquisition failed - roll back job status
-                logger.warning(
-                    f"Lock acquisition failed for job {job_id}, rolling back to PENDING"
-                )
-                await asyncio.to_thread(
-                    self._repository.update,
-                    job_id,
-                    status=JobStatus.PENDING.value,
-                    instance_id=None,
-                )
+            if not lock_acquired:
+                # Can't acquire lock - another job is using the concurrency slot
+                # Don't transition the job to avoid the rollback loop
                 return None
-            
-            return started_job
-        
-        # If job has project_id but no queue_id, use backward-compatible project-based locking
-        if job.project_id:
-            acquired = await self._lock_manager.acquire(
+        elif job.project_id:
+            lock_acquired = await self._lock_manager.acquire(
                 project_id=job.project_id,
                 job_id=job_id,
                 instance_id=instance_id,
             )
             
-            if not acquired:
-                # Lock acquisition failed - roll back job status
-                logger.warning(
-                    f"Project-level lock acquisition failed for job {job_id}, rolling back"
-                )
-                await asyncio.to_thread(
-                    self._repository.update,
-                    job_id,
-                    status=JobStatus.PENDING.value,
-                    instance_id=None,
-                )
+            if not lock_acquired:
                 return None
-            
-            return started_job
         
-        # No project_id - started successfully without locking
-        return started_job
+        # Lock acquired (or no locking needed) - now try to start job atomically
+        try:
+            started_job = await asyncio.to_thread(
+                self._repository.start_job_atomic, job_id, instance_id
+            )
+            return started_job
+        except ValueError:
+            # Job state changed (already started/cancelled) - release the lock we acquired
+            if lock_acquired:
+                if job.queue_id and job.project_id:
+                    await self._lock_manager.release_queue_lock(
+                        project_id=job.project_id,
+                        queue_id=job.queue_id,
+                        job_id=job_id,
+                    )
+                elif job.project_id:
+                    await self._lock_manager.release(
+                        project_id=job.project_id,
+                        job_id=job_id,
+                    )
+            return None
     
     async def complete_job(
         self,
