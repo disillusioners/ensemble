@@ -10,7 +10,6 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
-import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
@@ -41,7 +40,6 @@ import { Agent } from '../../models';
     MatSidenavModule,
     MatSnackBarModule,
     MatDialogModule,
-    MatSlideToggleModule,
     MatTooltipModule,
     JobCardComponent,
     JobDetailDrawerComponent,
@@ -99,28 +97,16 @@ export class JobsComponent implements OnInit, OnDestroy {
     return map;
   });
 
+  // Get pause state for the currently selected project
+  readonly isCurrentProjectPaused = computed(() => {
+    const projectId = this.selectedProjectId();
+    return projectId ? (this.projectPauseMap().get(projectId) ?? false) : false;
+  });
+
   // Get pause state for a specific project
   readonly getProjectPaused = (projectId: string): boolean => {
     return this.projectPauseMap().get(projectId) ?? false;
   };
-
-  // Projects that have pending jobs
-  readonly projectsWithPendingJobs = computed(() => {
-    const pendingJobs = this.jobs().filter(job => job.status === 'pending');
-    const projectIds = new Set<string>();
-    pendingJobs.forEach(job => {
-      if (job.project_id) {
-        projectIds.add(job.project_id);
-      }
-    });
-
-    return this.projects()
-      .filter(project => projectIds.has(project.project_id))
-      .map(project => ({
-        ...project,
-        pendingCount: pendingJobs.filter(job => job.project_id === project.project_id).length
-      }));
-  });
 
   // Queue name map for job cards (queue_id -> queue_name)
   readonly queueNameMap = computed(() => {
@@ -541,53 +527,18 @@ export class JobsComponent implements OnInit, OnDestroy {
     return !!this.filters().project_id;
   }
 
-  protected onToggleProjectPause(project: Project): void {
-    if (project.job_queue_paused) {
-      this.resumeProjectQueue(project);
-    } else {
-      this.pauseProjectQueue(project);
-    }
-  }
+  // Handle project pause change from queue-list header
+  protected onProjectPauseChanged(isPaused: boolean): void {
+    const projectId = this.selectedProjectId();
+    if (!projectId) return;
 
-  private pauseProjectQueue(project: Project): void {
-    this.projectService.pauseJobQueue(project.project_id).subscribe({
-      next: () => {
-        this.snackBar.open(`Queue paused for "${project.name}"`, 'Close', {
-          duration: 3000
-        });
-      },
-      error: (err) => {
-        console.error('Failed to pause queue:', err);
-        this.snackBar.open(
-          `Failed to pause queue: ${err.message || 'Unknown error'}`,
-          'Dismiss',
-          {
-            duration: 5000,
-            panelClass: 'error-snackbar'
-          }
-        );
-      }
-    });
-  }
-
-  private resumeProjectQueue(project: Project): void {
-    this.projectService.resumeJobQueue(project.project_id).subscribe({
-      next: () => {
-        this.snackBar.open(`Queue resumed for "${project.name}"`, 'Close', {
-          duration: 3000
-        });
-      },
-      error: (err) => {
-        console.error('Failed to resume queue:', err);
-        this.snackBar.open(
-          `Failed to resume queue: ${err.message || 'Unknown error'}`,
-          'Dismiss',
-          {
-            duration: 5000,
-            panelClass: 'error-snackbar'
-          }
-        );
-      }
-    });
+    // Update local project state
+    this.projectService.projects.update(projects => 
+      projects.map(p => 
+        p.project_id === projectId 
+          ? { ...p, job_queue_paused: isPaused }
+          : p
+      )
+    );
   }
 }

@@ -4,9 +4,11 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { QueueService } from '../../services/queue.service';
+import { ProjectService } from '../../services/project.service';
 import { JobQueue, getQueueStatusColor, getQueueStatusLabel, getQueueTypeIcon, getQueueTypeLabel } from '../../models/job-queue.model';
 import { QueueCreateDialogComponent, QueueCreateDialogResult } from '../queue-create-dialog/queue-create-dialog.component';
 
@@ -19,6 +21,7 @@ import { QueueCreateDialogComponent, QueueCreateDialogResult } from '../queue-cr
     MatIconModule,
     MatTooltipModule,
     MatProgressSpinnerModule,
+    MatSlideToggleModule,
     MatDialogModule,
     MatSnackBarModule
   ],
@@ -27,16 +30,19 @@ import { QueueCreateDialogComponent, QueueCreateDialogResult } from '../queue-cr
 })
 export class QueueListComponent {
   private readonly queueService = inject(QueueService);
+  private readonly projectService = inject(ProjectService);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
   
   // Inputs
   projectId = input<string | null>(null);
   selectedQueueId = input<string | null>(null);
+  projectPaused = input<boolean>(false);
   
   // Outputs
   queueSelected = output<string | null>();
   queueChanged = output<void>();
+  projectPauseChanged = output<boolean>();
 
   // State
   readonly loading = signal(false);
@@ -94,6 +100,35 @@ export class QueueListComponent {
     if (projectId) {
       this.queueService.refreshQueues(projectId);
     }
+  }
+
+  protected onToggleProjectPause(): void {
+    const projectId = this.projectId();
+    if (!projectId) return;
+
+    const newPausedState = !this.projectPaused();
+    
+    const request$ = newPausedState 
+      ? this.projectService.pauseJobQueue(projectId)
+      : this.projectService.resumeJobQueue(projectId);
+
+    request$.subscribe({
+      next: () => {
+        this.projectPauseChanged.emit(newPausedState);
+        this.snackBar.open(
+          newPausedState ? 'Queue paused' : 'Queue resumed', 
+          'Close', 
+          { duration: 3000, panelClass: 'success-snackbar' }
+        );
+      },
+      error: (err) => {
+        this.snackBar.open(
+          'Failed to update queue state', 
+          'Close', 
+          { duration: 5000, panelClass: 'error-snackbar' }
+        );
+      }
+    });
   }
 
   protected onStartQueue(queue: JobQueue, event: Event): void {

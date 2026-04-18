@@ -5,14 +5,27 @@
       <mat-icon>queue</mat-icon>
       <span>Queues</span>
     </div>
-    <button 
-      mat-icon-button
-      (click)="onRefresh()"
-      [disabled]="loading()"
-      class="refresh-btn"
-      matTooltip="Refresh queues">
-      <mat-icon [class.spinning]="loading()">refresh</mat-icon>
-    </button>
+    <div class="header-actions">
+      <!-- Project pause toggle -->
+      @if (projectId()) {
+        <mat-slide-toggle
+          class="pause-toggle"
+          [checked]="!projectPaused()"
+          (change)="onToggleProjectPause()"
+          color="warn"
+          [matTooltip]="projectPaused() ? 'Resume project queue' : 'Pause project queue'">
+          {{ projectPaused() ? 'Paused' : 'Active' }}
+        </mat-slide-toggle>
+      }
+      <button 
+        mat-icon-button
+        (click)="onRefresh()"
+        [disabled]="loading()"
+        class="refresh-btn"
+        matTooltip="Refresh queues">
+        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+      </button>
+    </div>
   </div>
 
   <!-- Content -->
@@ -78,21 +91,19 @@
             </div>
             
             <div class="queue-actions">
-              <!-- Start/Stop button -->
-              @if (!queue.is_system) {
-                <button 
-                  mat-icon-button
-                  class="action-btn"
-                  [disabled]="isQueueOperating(queue.queue_id)"
-                  [matTooltip]="queue.is_paused ? 'Start queue' : 'Pause queue'"
-                  (click)="queue.is_paused ? onStartQueue(queue, $event) : onStopQueue(queue, $event)">
-                  @if (isQueueOperating(queue.queue_id)) {
-                    <mat-progress-spinner mode="indeterminate" diameter="16"></mat-progress-spinner>
-                  } @else {
-                    <mat-icon>{{ queue.is_paused ? 'play_arrow' : 'pause' }}</mat-icon>
-                  }
-                </button>
-              }
+              <!-- Start/Stop button (all queues including system) -->
+              <button 
+                mat-icon-button
+                class="action-btn"
+                [disabled]="isQueueOperating(queue.queue_id)"
+                [matTooltip]="queue.is_paused ? 'Start queue' : 'Pause queue'"
+                (click)="queue.is_paused ? onStartQueue(queue, $event) : onStopQueue(queue, $event)">
+                @if (isQueueOperating(queue.queue_id)) {
+                  <mat-progress-spinner mode="indeterminate" diameter="16"></mat-progress-spinner>
+                } @else {
+                  <mat-icon>{{ queue.is_paused ? 'play_arrow' : 'pause' }}</mat-icon>
+                }
+              </button>
 
               <!-- Delete button (custom queues only) -->
               @if (canDeleteQueue(queue)) {
