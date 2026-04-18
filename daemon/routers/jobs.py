@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
-from daemon.services.dead_letter_service import get_dead_letter_service, DeadLetterService
+from daemon.services.dead_letter_service import DeadLetterService
 from daemon.repositories.job_queue.models import JobStatus
 from .schemas import (
     JobCreateRequest,
@@ -75,10 +75,18 @@ def get_dead_letter_svc() -> DeadLetterService:
     Raises:
         HTTPException: If the service is not initialized.
     """
-    global _dead_letter_service
     if _dead_letter_service is None:
-        _dead_letter_service = get_dead_letter_service()
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Dead letter service not initialized"}
+        )
     return _dead_letter_service
+
+
+def set_dead_letter_service(service: DeadLetterService) -> None:
+    """Set the DeadLetterService instance (called during app startup)."""
+    global _dead_letter_service
+    _dead_letter_service = service
 
 
 def _job_to_response(

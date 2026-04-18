@@ -99,6 +99,7 @@ export interface DeadLetterItem {
   dlq_id: string;
   job_id: string;
   agent_id: string;
+  agent_dir: string;
   message: string;
   source: string;
   project_id: string;
@@ -108,7 +109,7 @@ export interface DeadLetterItem {
   failed_at: string | null;
   moved_to_dlq_at: string;
   reason: string;
-  metadata_json: string | null;
+  metadata?: Record<string, any> | null;
 }
 
 export interface RetryAllResult {

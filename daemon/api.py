@@ -251,6 +251,8 @@ async def lifespan(app: FastAPI):
     )
     from daemon.routers.dlq import set_dead_letter_service
     set_dead_letter_service(dead_letter_service)
+    from daemon.routers.jobs import set_dead_letter_service as set_jobs_dlq_service
+    set_jobs_dlq_service(dead_letter_service)
     
     # Initialize JobRetryEngine for automatic retry with backoff
     from daemon.services.job_retry_engine import JobRetryEngine

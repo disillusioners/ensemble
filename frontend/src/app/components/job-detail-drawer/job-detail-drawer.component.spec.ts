@@ -17,6 +17,7 @@ class MockJobDetailDrawerComponent {
       case 'completed': return 'primary';
       case 'failed': return 'warn';
       case 'cancelled': return 'warn';
+      case 'dead_letter': return 'accent';
       default: return 'primary';
     }
   });
