@@ -1600,7 +1600,7 @@ Provide a concise summary:"""
         
         return report_message, report_task, report_message_id
 
-    async def _update_parent_on_child_complete(self, session, instance) -> bool:
+    async def _update_parent_on_child_complete(self, session, instance) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
         
         Handles:
@@ -1614,7 +1614,10 @@ Provide a concise summary:"""
             instance: The child Instance object.
             
         Returns:
-            True if parent transitioned to RUNNING (has more work), False otherwise.
+            Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id):
+            - transitioned_to_running: True if parent transitioned to RUNNING (has more work)
+            - completed_parent_id: Instance ID if parent completed (for event publishing), None otherwise
+            - completed_parent_parent_id: Parent's parent_id if parent completed, None otherwise
         """
         from datetime import datetime, timezone
         from sqlalchemy import func, select, text
@@ -1622,7 +1625,7 @@ Provide a concise summary:"""
         
         parent = session.get(Instance, instance.parent_id)
         if not parent:
-            return False
+            return False, None, None
         
         # Decrement parent's waiting_for counter
         parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
@@ -1663,10 +1666,16 @@ Provide a concise summary:"""
             
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
+                # Publish lifecycle event to mark job as completed
                 parent.status = InstanceStatus.COMPLETED.value
                 parent.updated_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
-                return False
+                
+                # Capture parent_id for event publishing (instance will be detached after session closes)
+                completed_parent_id = parent.instance_id
+                completed_parent_parent_id = parent.parent_id
+                
+                return False, completed_parent_id, completed_parent_parent_id
             else:
                 # Has pending messages, transition to RUNNING to process them
                 parent.status = InstanceStatus.RUNNING.value
@@ -1674,10 +1683,10 @@ Provide a concise summary:"""
                     f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
                     f"transitioning to RUNNING"
                 )
-                return True
+                return True, None, None
         
-        return False
-
+        return False, None, None
+        
     async def _create_completion_events(
         self,
         session,
@@ -1764,16 +1773,28 @@ Provide a concise summary:"""
                 return
             
             # Not a child? Instance completed (no parent to send report to)
-            # Publish lifecycle event for the completed instance
+            # Check if we have active children - if so, wait for them before completing
             if instance.parent_id is None:
-                logger.debug(f"Instance {instance_id[:8]}... completed (no parent), publishing lifecycle event")
-                await self._publish_instance_lifecycle_event(
-                    instance_id=instance_id,
-                    status="completed",
-                    error=None,
-                    parent_id=None,
-                )
-                return
+                if instance.waiting_for > 0:
+                    # Has children still running - transition to WAITING_CHILDREN
+                    # Job will complete when last child finishes
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... completed message but waiting for "
+                        f"{instance.waiting_for} children, status=WAITING_CHILDREN"
+                    )
+                    return
+                else:
+                    # No children - safe to complete immediately
+                    logger.debug(f"Instance {instance_id[:8]}... completed (no parent, no children)")
+                    await self._publish_instance_lifecycle_event(
+                        instance_id=instance_id,
+                        status="completed",
+                        error=None,
+                        parent_id=None,
+                    )
+                    return
             
             # Idempotency checks
             if not await self._should_send_completion_report(session, instance_id, completed_message_id):
@@ -1788,7 +1809,7 @@ Provide a concise summary:"""
             )
             
             # Update parent state
-            parent_transitioned_to_running = await self._update_parent_on_child_complete(session, instance)
+            parent_transitioned_to_running, completed_parent_id, completed_parent_parent_id = await self._update_parent_on_child_complete(session, instance)
             
             # Calculate waiting_for remaining for event
             waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
@@ -1819,6 +1840,18 @@ Provide a concise summary:"""
             )
         except Exception as e:
             logger.warning(f"Failed to broadcast child completion event: {e}")
+        
+        # If parent completed (all children done), publish lifecycle event to mark job as completed
+        if completed_parent_id:
+            try:
+                await self._publish_instance_lifecycle_event(
+                    instance_id=completed_parent_id,
+                    status="completed",
+                    error=None,
+                    parent_id=completed_parent_parent_id,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to publish lifecycle event for completed parent {completed_parent_id[:8]}...: {e}")
 
     async def _send_error_report(
         self, 
