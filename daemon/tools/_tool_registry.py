@@ -188,6 +188,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "instance": "daemon.tools.instance",
     "self": ["daemon.tools.inner_soul", "daemon.tools.access_memory"],
     "project": "daemon.tools.project",
+    "job": "daemon.tools.job_queue",
     "help": "daemon.tools.help",
     "mother": "daemon.tools.agent_mother",
 }

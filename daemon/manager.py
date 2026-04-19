@@ -418,6 +418,8 @@ class InstanceManager:
 
         # NEW: Optional JobQueueService reference (set via set_job_queue_service)
         self._job_queue_service: Any = None
+        self._job_queue_mgmt_service: Any = None
+        self._dead_letter_service: Any = None
 
         # Worker pool for message queue redesign
         self._worker_pool: WorkerPool | None = None
@@ -469,6 +471,24 @@ class InstanceManager:
             self.source_registry._job_queue_service = service
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
         logger.info("JobQueueService connected to SessionManager")
+
+    def set_job_queue_mgmt_service(self, service: Any) -> None:
+        """Set the job queue management service.
+        
+        Args:
+            service: The JobQueueMgmtService instance.
+        """
+        self._job_queue_mgmt_service = service
+        logger.info("JobQueueMgmtService connected to SessionManager")
+
+    def set_dead_letter_service(self, service: Any) -> None:
+        """Set the dead letter service.
+        
+        Args:
+            service: The DeadLetterService instance.
+        """
+        self._dead_letter_service = service
+        logger.info("DeadLetterService connected to SessionManager")
 
     def setup_worker_pool(
         self,

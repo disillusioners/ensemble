@@ -31,6 +31,7 @@ from .inner_soul import create_inner_soul_tool
 from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
+from .job_queue import create_job_tools
 from .help import create_help_tool
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 
@@ -225,6 +226,24 @@ def _make_workdir_aware(
                 return func(*args, **kwargs)
         
         return wrapped_func
+
+
+def create_job_tools_if_available(manager, current_instance_id: str, agent_id: str) -> list:
+    """Create job tools if job services are available on the manager."""
+    job_service = getattr(manager, '_job_queue_service', None)
+    if job_service is None:
+        return []
+    queue_mgmt_service = getattr(manager, '_job_queue_mgmt_service', None)
+    dead_letter_service = getattr(manager, '_dead_letter_service', None)
+    if queue_mgmt_service is None or dead_letter_service is None:
+        return []
+    return create_job_tools(
+        job_service=job_service,
+        queue_mgmt_service=queue_mgmt_service,
+        dead_letter_service=dead_letter_service,
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+    )
 
 
 class SpawnInstanceInput(BaseModel):
@@ -466,6 +485,10 @@ Returns:
     
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
+    
+    # Create job tools if job service is available
+    job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id)
+    tools.extend(job_tools)
     
     # Add mother tools if this is the _mother agent
     if agent_id == "_mother":

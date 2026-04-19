@@ -290,6 +290,10 @@ async def lifespan(app: FastAPI):
     # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
     
+    # Wire job queue management and dead letter services to manager
+    manager.set_job_queue_mgmt_service(job_queue_mgmt_service)
+    manager.set_dead_letter_service(dead_letter_service)
+    
     # Wire InstanceManager into JobQueueService for cancellation cascade
     job_queue_service.set_instance_manager(manager)
     
