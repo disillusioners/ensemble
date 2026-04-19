@@ -1696,8 +1696,11 @@ Provide a concise summary:"""
             {"child_id": instance.instance_id}
         )
         
-        # Cascade check: if parent is WAITING_CHILDREN and waiting_for is 0, transition to RUNNING
-        if parent.waiting_for == 0 and parent.status == InstanceStatus.WAITING_CHILDREN.value:
+        # Cascade check: if waiting_for is 0, check if parent can complete
+        # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
+        # regardless of current status (e.g., RUNNING from previous cascade). This ensures
+        # parent waits for ALL children before completing, not just the first batch.
+        if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
             # Check if parent has any pending messages
             parent_pending = session.exec(
                 select(func.count())
@@ -1723,11 +1726,15 @@ Provide a concise summary:"""
                 
                 return False, completed_parent_id, completed_parent_parent_id
             else:
-                # Has pending messages, transition to RUNNING to process them
-                parent.status = InstanceStatus.RUNNING.value
+                # Has pending messages but all children done - transition to WAITING_CHILDREN
+                # FIX: Changed from RUNNING to WAITING_CHILDREN. Parent should wait for its own
+                # message processing to complete before marking job done. When parent completes
+                # its message, the status check will keep it in WAITING_CHILDREN, and the cascade
+                # will run again to mark it COMPLETED.
+                parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
-                    f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
-                    f"transitioning to RUNNING"
+                    f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                    f"pending messages, status=WAITING_CHILDREN"
                 )
                 return True, None, None
         
@@ -2036,8 +2043,10 @@ Provide a concise summary:"""
                         {"child_id": instance_id}
                     )
                     
-                    # g) Cascade: parent WAITING_CHILDREN -> RUNNING or COMPLETED
-                    if parent.waiting_for == 0 and parent.status == InstanceStatus.WAITING_CHILDREN.value:
+                    # g) Cascade: check if parent can complete after all children done/error
+                    # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
+                    # regardless of current status. Mirrors the fix in _update_parent_on_child_complete.
+                    if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
                         # Check if parent has any pending messages
                         parent_pending = session.exec(
                             select(func.count())
@@ -2051,14 +2060,32 @@ Provide a concise summary:"""
                         ).one()
                         
                         if parent_pending == 0:
+                            # No pending messages, parent is truly complete
                             parent.status = InstanceStatus.COMPLETED.value
                             parent.updated_at = datetime.now(timezone.utc).isoformat()
                             logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
+                            
+                            # Capture parent_id for event publishing (outside transaction)
+                            completed_parent_id = parent.instance_id
+                            completed_parent_parent_id = parent.parent_id
+                            
+                            session.commit()
+                            
+                            # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
+                            await self._publish_instance_lifecycle_event(
+                                instance_id=completed_parent_id,
+                                status="completed",
+                                error=None,
+                                parent_id=completed_parent_parent_id,
+                            )
                         else:
-                            parent.status = InstanceStatus.RUNNING.value
+                            # Has pending messages - transition to WAITING_CHILDREN
+                            # Parent should wait for its message processing to complete
+                            parent.status = InstanceStatus.WAITING_CHILDREN.value
+                            parent.updated_at = datetime.now(timezone.utc).isoformat()
                             logger.info(
-                                f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
-                                f"transitioning to RUNNING after child error"
+                                f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                                f"pending messages, status=WAITING_CHILDREN after child error"
                             )
             
             # Step 4: Enqueue error report message to parent (outside transaction)
