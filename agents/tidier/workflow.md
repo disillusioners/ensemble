@@ -62,7 +62,7 @@ Group by severity. For each finding:
 ### 6. Deliver Report
 
 ```
-## Tidy Review Summary
+## Tidier Review Summary
 [Pass / Needs Work / 🔴 Blocking]
 [X issues: Y high, Z medium, W low]
 
@@ -118,7 +118,7 @@ Report format:
 
 ## Leader Integration
 
-### When Leader Spawns Tidy
+### When Leader Spawns Tidier
 
 Leader provides:
 1. Task plan (what was implemented)
@@ -126,14 +126,14 @@ Leader provides:
 
 ### Review Loop
 
-1. Leader spawns **Tidy** → review
+1. Leader spawns **Tidier** → review
 2. If issues found → Leader spawns **Coder** to fix
-3. Repeat: Coder → Tidy → Coder
+3. Repeat: Coder → Tidier → Coder
 4. Limit loop to **maximum 3 iterations total** (combined with Reviewer loop)
 
 ### When to Trigger
 
-| Trigger | Spawn Tidy? |
+| Trigger | Spawn Tidier? |
 |---------|------------|
 | Large changes | ✅ Yes |
 | Multiple files modified | ✅ Yes |

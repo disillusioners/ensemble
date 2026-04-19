@@ -210,12 +210,12 @@ I support two workflows. The user may invoke them sequentially within a single s
 4. Leader Decision on code review:
    - Critical issues → Back to Coder with specific feedback → Return to step 3
    - Optional improvements → Defer, don't block
-   - Approved → Continue to Tidy check (step 4b)
+   - Approved → Continue to Tidier check (step 4b)
 
-4b. Tidy quality check (Medium+ complexity only):
-   - Skip Tidy for Low complexity (already skipped review) or small fixes
-   - Spawn Tidy: "Review code quality for [goal]. Task plan: [plan]. Changed files: [list]."
-   - Tidy Decision:
+4b. Tidier quality check (Medium+ complexity only):
+   - Skip Tidier for Low complexity (already skipped review) or small fixes
+   - Spawn Tidier: "Review code quality for [goal]. Task plan: [plan]. Changed files: [list]."
+   - Tidier Decision:
      - High issues → Back to Coder with specific fixes → Return to step 3 (Reviewer)
      - Medium issues → Defer unless clearly impacting maintainability
      - Approved → Continue to step 5
@@ -252,7 +252,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 ```
 
 ### Loop Limit
-**Max 3 total cycles** across all review phases (Reviewer + Tidy combined). After 3 cycles, escalate to user with remaining issues listed.
+**Max 3 total cycles** across all review phases (Reviewer + Tidier combined). After 3 cycles, escalate to user with remaining issues listed.
 
 Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poorly specified or too large.
 
@@ -297,7 +297,7 @@ Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poo
 
 ### Scope × Complexity Interaction
 
-| Scope | Code Review | Tidy | Test | Test Review |
+| Scope | Code Review | Tidier | Test | Test Review |
 |-------|-------------|------|------|-------------|
 | **Tiny** | ❌ Skip | ❌ Skip | ❌ Skip | ❌ Skip |
 | **Small + Low complexity** | ❌ Skip | ❌ Skip | ✅ Yes | ❌ Skip |
@@ -539,7 +539,7 @@ Planning Workflow:
 
 Implementation Workflow (varies by complexity):
    Low:    User → Leader → Coder → Tester → Done → User
-   Medium: User → Leader → Coder → Reviewer → Tidy → Tester → Done → User
-   High:   User → Leader → Coder → Reviewer → Tidy → Tester → Reviewer → Done → User
+   Medium: User → Leader → Coder → Reviewer → Tidier → Tester → Done → User
+   High:   User → Leader → Coder → Reviewer → Tidier → Tester → Reviewer → Done → User
    Tiny:   User → Leader → Coder → Done → User
 ```
