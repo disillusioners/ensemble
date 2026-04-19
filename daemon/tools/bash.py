@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from typing import Optional, Union, List
 
 from ._tool_registry import register_tool_category
+from ._truncate import truncate_output
 
 CATEGORY_NAME = "Shell"
 CATEGORY_DOC = """\
@@ -35,6 +36,7 @@ async def bash(
     timeout: Optional[int] = 1800,
     workdir: Optional[str] = None,
     input: Optional[str] = None,
+    max_output_chars: int = 10000,
 ) -> str:
     """Execute a bash command and return the output. Use tool_help("bash") for details."""
     try:
@@ -78,7 +80,20 @@ async def bash(
 
         output_parts.append(f"EXIT CODE: {proc.returncode}")
 
-        return "\n\n".join(output_parts)
+        content = "\n\n".join(output_parts)
+
+        # Apply truncation to prevent 413 errors
+        # Note: 6000 chars is the recommended limit for LLM context safety
+        trunc_result = truncate_output(
+            content,
+            tool_name="bash",
+            max_chars=max_output_chars,
+            max_lines=100,
+        )
+
+        if trunc_result.truncated:
+            return trunc_result.content + trunc_result.pagination_hint
+        return content
 
     except Exception as e:
         return f"ERROR: {str(e)}"
@@ -92,6 +107,7 @@ Args:
     timeout: Timeout in seconds (default: 1800, 30 minutes)
     workdir: Working directory for command execution (default: current directory)
     input: Optional string to pass to stdin
+    max_output_chars: Maximum output characters to capture (default: 10000, max: 50000)
 
 Returns:
     Command output including stdout, stderr, and exit code

@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
+from ._truncate import truncate_dict_result
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -59,6 +60,7 @@ Args:
     statuses: Filter by status - "pending", "processing", "completed", "failed", "cancelled", "dead_letter". Optional.
     project_id: Filter by project ID. Optional.
     queue_id: Filter by queue ID. Optional.
+    offset: Number of jobs to skip (default: 0).
     limit: Maximum number of jobs to return. Default: 50.
     include_deleted: Include soft-deleted jobs. Default: False.
 
@@ -240,6 +242,7 @@ def create_job_tools(
         project_id: Annotated[str | None, Field(default=None, description="Filter by project ID")] = None,
         statuses: Annotated[list[str] | None, Field(default=None, description="Filter by status values")] = None,
         queue_id: Annotated[str | None, Field(default=None, description="Filter by queue ID")] = None,
+        offset: Annotated[int, Field(default=0, ge=0, description="Number of jobs to skip")] = 0,
         limit: Annotated[int, Field(default=50, ge=1, le=100, description="Maximum jobs to return")] = 50,
         include_deleted: Annotated[bool, Field(default=False, description="Include soft-deleted jobs")] = False,
     ) -> dict:
@@ -249,13 +252,15 @@ def create_job_tools(
                 statuses=statuses,
                 project_id=project_id,
                 queue_id=queue_id,
+                offset=offset,
                 limit=limit,
                 include_deleted=include_deleted,
             )
-            return {
+            result = {
                 "jobs": [job.to_dict() for job in jobs],
                 "count": len(jobs),
             }
+            return truncate_dict_result(result, list_key="jobs", limit=limit)
         except Exception as e:
             return {"error": f"Failed to list jobs: {str(e)}"}
     job_list._full_doc_ = _FULL_DOCS["job_list"]
@@ -407,11 +412,12 @@ def create_job_tools(
                 queue_id=queue_id,
                 limit=limit,
             )
-            return {
+            result = {
                 "items": [item.to_dict() for item in items],
                 "count": len(items),
                 "total": total_count,
             }
+            return truncate_dict_result(result, list_key="items", limit=limit)
         except Exception as e:
             return {"error": f"Failed to list DLQ items: {str(e)}"}
     dlq_list._full_doc_ = _FULL_DOCS["dlq_list"]

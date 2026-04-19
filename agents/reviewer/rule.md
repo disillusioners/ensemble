@@ -51,7 +51,54 @@
 
 ---
 
+## Deep-Review Mode
+
+### 🚨 CRITICAL: AUTO-DETECTION
+- **Detect triggers BEFORE planning** — Scan the review target for Deep-Review triggers (see memory.md)
+- **Auto-escalate** — If any trigger matches, activate Deep-Review mode automatically
+- **Announce escalation** — Always output `🔴 Deep-Review activated: [trigger reason]`
+- **Explicit request overrides** — User can request or skip Deep-Review regardless of triggers
+
+### Deep-Review Execution
+18. **Use `--agent council`** — Deep-Review sessions MUST use council mode for multi-model consensus
+19. **Maximum ONE council session** — Deep-Review is resource-heavy. One session only, make it count
+20. **Use `review-deep` instance name** — Consistent naming for deep review sessions
+21. **Comprehensive prompt** — Pack all context, trigger reasons, and focus areas into the single session
+22. **No parallel deep reviews** — Even for MEDIUM+ scope, Deep-Review runs ONE council session
+
+### Full Bash Command Examples
+```bash
+# Deep-Review: init + sync (most common — single shot)
+opencode_skill init-session myapp review-deep /path/to/project
+opencode_skill --sync myapp review-deep "Deep-Review of payment processing module.
+Triggers: Business-Critical Logic, Data Integrity.
+Focus: transaction handling, error recovery, edge cases in payment flow.
+Provide thorough analysis." --agent council
+
+# Deep-Review with @file for long prompts
+cat > /tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt << 'EOF'
+Deep-Review of auth module.
+Triggers: Data Integrity / Security, Complex Concurrency / State.
+Focus: session management, token validation, race conditions in login flow.
+Provide thorough analysis of correctness, safety, edge cases.
+EOF
+opencode_skill --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt --agent council
+```
+
+⚠️ **`--agent council` MUST be the last argument** — after the message or @file, never before positional args.
+
+### Deep-Review with Standard Sessions
+23. **Combine when needed** — For MEDIUM+ scope where Deep-Review triggers in one area:
+    - Run standard parallel sessions for non-triggered areas
+    - Run ONE `review-deep` council session for the triggered area
+    - Aggregate all findings together
+
+---
+
 ### Never
 
 ### Sequential Review for Independent Areas
 Never review independent modules/files sequentially when parallel is possible.
+
+### Multiple Council Sessions
+Never spawn more than one `--agent council` session per review. Deep-Review is one shot.

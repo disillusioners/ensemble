@@ -9,6 +9,7 @@
 | `review` | Single-area review (SMALL) | 1 | Review auth module |
 | `review-<area>` | Parallel review (MEDIUM+) | 1-3 | review-auth, review-api |
 | `review-aggregate` | Pipeline report building | 1 | Aggregate findings |
+| `review-deep` | Deep-Review (council) | 1 | Deep review of payment logic |
 
 ---
 
@@ -19,7 +20,15 @@
 - Get reference documents/specs
 - Determine review type (code, plan, architecture, full)
 
-### 2. Generate Review Plan
+### 2. Deep-Review Detection
+Before planning, scan the review target for Deep-Review triggers (see memory.md checklist).
+
+If triggers detected:
+- Announce: `🔴 Deep-Review activated: [trigger reason(s)]`
+- Skip to **Step 2b (Deep-Review Plan)** instead of standard plan
+
+### 2a. Generate Standard Review Plan
+Standard planning when NO Deep-Review triggers detected.
 Before spawning any sessions, create a structured review plan:
 
 ```
@@ -47,7 +56,53 @@ Before spawning any sessions, create a structured review plan:
 - [Any specs/standards to verify against]
 ```
 
+### 2b. Generate Deep-Review Plan
+For auto-detected or explicitly requested Deep-Review:
+
+```
+## 🔴 Deep-Review Plan: [Name]
+
+### Trigger Reason
+- [Why Deep-Review was activated]
+
+### Scope
+[What will be deep-reviewed]
+
+### Deep-Review Focus Areas
+- [ ] [Critical area 1]
+- [ ] [Critical area 2]
+
+### Council Session Brief
+| Session | Target | Focus | Agent |
+|---------|--------|-------|-------|
+| review-deep | [scope] | [critical concerns] | council |
+
+### Standard Sessions (if applicable)
+| Session | Target | Focus | Priority |
+|---------|--------|-------|----------|
+| [Non-triggered areas] | ... | ... | P1 |
+```
+
 ### 3. Execute Review Plan
+
+#### Deep-Review execution (when triggered)
+- Spawn single `review-deep` session with `--agent council`
+- Pack ALL context into one comprehensive prompt:
+  - What is being reviewed and why Deep-Review triggered
+  - Specific concerns and focus areas
+  - Relevant code paths, files, dependencies
+  - Architecture context
+- Use `--sync` to wait for completion
+- Use timeout=660 for the bash command
+- **If combining with standard sessions**: spawn standard sessions in parallel, `review-deep` runs separately (still only ONE council session total)
+
+**Full command:**
+```bash
+opencode_skill init-session myapp review-deep /path/to/project
+opencode_skill --sync myapp review-deep "Deep-Review of [target].
+Triggers: [categories]. Focus: [concerns].
+Provide thorough analysis." --agent council
+```
 
 #### SMALL scope (1 session)
 - Spawn single `review` session

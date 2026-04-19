@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 from ._tool_registry import register_tool_category
+from ._truncate import truncate_dict_result
 
 CATEGORY_NAME = "Project Management"
 CATEGORY_DOC = """\
@@ -98,10 +99,12 @@ Args:
     status: Filter by status - "active", "paused", "completed", "archived".
     project_type: Filter by project type.
     tags: Filter by tags (projects must have ALL specified tags).
+    offset: Number of results to skip (default: 0).
     limit: Maximum number of results (default: 50).
 
 Returns:
-    List of project dictionaries, sorted by most recently updated.""",
+    Dictionary with projects list and pagination metadata.
+    Includes _pagination field when results are truncated.""",
     
     "project_search": """Search projects by name, description, or shortnames.
 
@@ -401,16 +404,22 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
         status: str | None = None,
         project_type: str | None = None,
         tags: list[str] | None = None,
+        offset: int = 0,
         limit: int = 50,
-    ) -> list[dict]:
+    ) -> dict:
         """List projects with optional filters. Use tool_help("project_list") for details."""
         projects = store.list_projects(
             status=status,
             project_type=project_type,
             tags=tags,
+            offset=offset,
             limit=limit,
         )
-        return [p.to_dict() for p in projects]
+        
+        result = {"projects": [p.to_dict() for p in projects]}
+        
+        # Add pagination metadata
+        return truncate_dict_result(result, list_key="projects", limit=limit)
     project_list._full_doc_ = _FULL_DOCS["project_list"]
     
     @register_tool_category("project")

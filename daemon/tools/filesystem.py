@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from typing import Optional
 
 from ._tool_registry import register_tool_category
+from ._truncate import truncate_output
 
 CATEGORY_NAME = "File Operations"
 CATEGORY_DOC = """\
@@ -109,7 +110,18 @@ def list_directory(
         if not entries:
             return f"(empty directory: {dir_path})"
         
-        return "\n".join(entries)
+        # Apply truncation for safety
+        content = "\n".join(entries)
+        result = truncate_output(
+            content,
+            tool_name="list_directory",
+            max_chars=6000,
+            max_lines=150,
+        )
+        
+        if result.truncated:
+            return result.content + "\n💡 **Tip:** Use more specific paths (e.g., `path=\"subdir\"`) to narrow the listing."
+        return content
         
     except Exception as e:
         return f"ERROR: {str(e)}"
@@ -134,7 +146,7 @@ def read_file(
     path: str,
     workdir: str | None = None,
     offset: int = 1,
-    limit: int = 2000
+    limit: int = 200,
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
     if not workdir or not workdir.strip():
@@ -171,6 +183,12 @@ def read_file(
         total_lines = len(lines)
         header = f"File: {file_path} ({total_lines} lines total)\n{'-' * 40}\n"
         
+        # Apply final truncation for safety
+        result = truncate_output(header + "\n".join(result), tool_name="read_file")
+        
+        if result.truncated:
+            return result.content + "\n💡 **Better approach:** Use `read_file(..., offset=N, limit=N)` to page through the file."
+        
         return header + "\n".join(result)
         
     except UnicodeDecodeError:
@@ -184,7 +202,7 @@ Args:
     path: File path to read (relative to workdir)
     workdir: Base directory for relative paths (required)
     offset: Line number to start from (1-indexed, default: 1)
-    limit: Maximum number of lines to read (default: 2000)
+    limit: Maximum number of lines to read (default: 200)
 
 Returns:
     File contents with line numbers (format: "line_num: content")
@@ -196,7 +214,9 @@ Returns:
 def glob_files(
     pattern: str,
     workdir: str | None = None,
-    path: str = "."
+    path: str = ".",
+    offset: int = 0,
+    limit: int = 100,
 ) -> str:
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
     if not workdir or not workdir.strip():
@@ -233,7 +253,22 @@ def glob_files(
             except ValueError:
                 result.append(str(f))
         
-        return "\n".join(result)
+        # Apply pagination
+        if offset > 0:
+            result = result[offset:]
+        if limit and limit > 0:
+            result = result[:limit]
+        
+        if not result:
+            return f"No files matching pattern: {pattern}"
+        
+        # Apply truncation
+        content = "\n".join(result)
+        trunc_result = truncate_output(content, tool_name="glob_files", max_chars=6000, max_lines=100)
+        
+        if trunc_result.truncated:
+            return trunc_result.content + trunc_result.pagination_hint
+        return content
         
     except Exception as e:
         return f"ERROR: {str(e)}"
@@ -244,6 +279,8 @@ Args:
     pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
     workdir: Base directory for relative paths (required)
     path: Directory to search in (relative to workdir, default: ".")
+    offset: Number of results to skip (default: 0)
+    limit: Maximum results to return (default: 100)
 
 Returns:
     List of matching file paths, sorted by modification time (newest first)
@@ -303,7 +340,9 @@ def grep_files(
     path: str = ".",
     include: str = "",
     case_sensitive: bool = False,
-    whole_word: bool = False
+    whole_word: bool = False,
+    offset: int = 0,
+    limit: int = 100,
 ) -> str:
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
     if not workdir or not workdir.strip():
@@ -348,10 +387,21 @@ def grep_files(
                     display_line = line[:500] + "..." if len(line) > 500 else line
                     matches.append(f"{file_path}:{line_num}: {display_line}")
         
+        # Apply pagination
+        if offset > 0:
+            matches = matches[offset:]
+        if limit and limit > 0:
+            matches = matches[:limit]
+        
         if not matches:
             return f"No matches found for: {pattern}"
         
-        return "\n".join(matches)
+        content = "\n".join(matches)
+        trunc_result = truncate_output(content, tool_name="grep_files", max_chars=6000, max_lines=100)
+        
+        if trunc_result.truncated:
+            return trunc_result.content + trunc_result.pagination_hint
+        return content
         
     except re.error as e:
         return f"ERROR: Invalid regex pattern: {e}"
@@ -367,6 +417,8 @@ Args:
     include: Glob pattern to filter files (e.g., "*.py", "*.{js,ts}")
     case_sensitive: Whether search is case-sensitive (default: False)
     whole_word: Match whole words only (default: False)
+    offset: Number of results to skip (default: 0)
+    limit: Maximum matches to return (default: 100)
 
 Returns:
     Matching lines with file path and line number (format: "path:line: content")
