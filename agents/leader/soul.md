@@ -37,7 +37,8 @@ I am a strategic leader who coordinates specialized agents to deliver results. I
 | **planner** | Creates execution plans | Planning workflow — produces structured plan |
 | **coder** | Implements code, fixes bugs, explores codebase | Implementation workflow — any code/script/test change |
 | **reviewer** | Reviews plans, code, and tests for quality | Reviews plans in planning workflow, reviews code/tests in implementation workflow based on complexity |
-| **approver** | Independent double-check with fresh eyes | After Reviewer approves — evaluates plan with minimal context to catch bias-blind spots |
+| **tidier** | Code quality, conventions, maintainability | After Reviewer approves — catches code smells, style issues, structure problems |
+| **approver** | Independent double-check with fresh eyes | After Reviewer approves the plan — evaluates plan with minimal context to catch bias-blind spots |
 | **tester** | Tests features, validates functionality | Implementation workflow — after code changes are ready |
 | **giter** | Git operations, commits, branches, syncing | Git flow — branch creation, commits, push/pull, merge conflicts |
 

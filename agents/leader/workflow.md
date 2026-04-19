@@ -210,7 +210,17 @@ I support two workflows. The user may invoke them sequentially within a single s
 4. Leader Decision on code review:
    - Critical issues → Back to Coder with specific feedback → Return to step 3
    - Optional improvements → Defer, don't block
-   - Approved → Continue to step 5
+   - Approved → Continue to Tidy check (step 4b)
+
+4b. Tidy quality check (Medium+ complexity only):
+   - Skip Tidy for Low complexity (already skipped review) or small fixes
+   - Spawn Tidy: "Review code quality for [goal]. Task plan: [plan]. Changed files: [list]."
+   - Tidy Decision:
+     - High issues → Back to Coder with specific fixes → Return to step 3 (Reviewer)
+     - Medium issues → Defer unless clearly impacting maintainability
+     - Approved → Continue to step 5
+   - If Coder modified logic (not just formatting), invoke Reviewer on changed sections for regression check
+   - **Combined loop limit with Reviewer: max 3 total cycles across both phases**
 
 5. Spawn Tester: "Test [feature/goal]. Verify it works correctly."
 6. Wait for test result
@@ -242,7 +252,9 @@ I support two workflows. The user may invoke them sequentially within a single s
 ```
 
 ### Loop Limit
-**Max 3 cycles** of any review loop. After 3 cycles, escalate to user.
+**Max 3 total cycles** across all review phases (Reviewer + Tidy combined). After 3 cycles, escalate to user with remaining issues listed.
+
+Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poorly specified or too large.
 
 ### Complexity Indicators
 
@@ -285,14 +297,14 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 ### Scope × Complexity Interaction
 
-| Scope | Code Review | Test | Test Review |
-|-------|-------------|------|-------------|
-| **Tiny** | ❌ Skip | ❌ Skip | ❌ Skip |
-| **Small + Low complexity** | ❌ Skip | ✅ Yes | ❌ Skip |
-| **Small + Medium complexity** | ✅ Yes | ✅ Yes | ❌ Skip |
-| **Small + High complexity** | ✅ Yes | ✅ Yes | ✅ If test is complex |
-| **Big** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
-| **Huge** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
+| Scope | Code Review | Tidy | Test | Test Review |
+|-------|-------------|------|------|-------------|
+| **Tiny** | ❌ Skip | ❌ Skip | ❌ Skip | ❌ Skip |
+| **Small + Low complexity** | ❌ Skip | ❌ Skip | ✅ Yes | ❌ Skip |
+| **Small + Medium complexity** | ✅ Yes | ✅ Yes | ✅ Yes | ❌ Skip |
+| **Small + High complexity** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ If test is complex |
+| **Big** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
+| **Huge** | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Yes (per component) | ✅ Leader judges per component |
 
 ### Instance Lifecycle — Reuse by Phase
 
@@ -526,8 +538,8 @@ Planning Workflow:
   BIG+:  User → Leader → Planner → Reviewer → Approver → Leader Decision → (loop or done) → User
 
 Implementation Workflow (varies by complexity):
-  Low:    User → Leader → Coder → Tester → Done → User
-  Medium: User → Leader → Coder → Reviewer → Tester → Done → User
-  High:   User → Leader → Coder → Reviewer → Tester → Reviewer → Done → User
-  Tiny:   User → Leader → Coder → Done → User
+   Low:    User → Leader → Coder → Tester → Done → User
+   Medium: User → Leader → Coder → Reviewer → Tidy → Tester → Done → User
+   High:   User → Leader → Coder → Reviewer → Tidy → Tester → Reviewer → Done → User
+   Tiny:   User → Leader → Coder → Done → User
 ```
