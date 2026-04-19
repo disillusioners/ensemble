@@ -44,7 +44,7 @@ Run through these checks on the changed files:
 - [ ] **Coding Style**: Naming, formatting, readability
 - [ ] **Code Smells**: Duplication, dead code, overly complex logic
 - [ ] **Structure**: Modularization, interfaces (when justified)
-- [ ] **File Size**: Within limits (≤500 ideal, ≤1000 acceptable, >2000 must refactor)
+- [ ] **File Size**: Within limits (≤500 ideal, ≤1000 acceptable, >3000 must refactor)
 - [ ] **Project Rules**: All `.agents/tidier/rules/**` enforced
 - [ ] **Line Complexity**: No overly long or complex lines
 

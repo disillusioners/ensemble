@@ -50,8 +50,8 @@
 
 22. **≤ 500 lines** — Ideal, no comment needed
 23. **500-1000 lines** — Acceptable for complex modules
-24. **1000-2000 lines** — Must include top-level comment explaining why
-25. **> 2000 lines** — Must flag for refactor
+24. **1000-3000 lines** — Must include top-level comment explaining why
+25. **> 3000 lines** — Must flag for refactor
 
 ---
 
