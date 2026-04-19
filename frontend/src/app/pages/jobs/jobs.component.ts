@@ -292,7 +292,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onRefresh(): void {
-    this.jobService.refreshJobs(this.filters());
+    this.loadJobs();
   }
 
   protected onStatusFilterChange(status: JobStatus | 'all'): void {
@@ -352,7 +352,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     const dialogRef = this.dialog.open(JobCreateDialogComponent, {
       width: '500px',
       panelClass: 'dark-modal-panel',
-      data: {}
+      data: {
+        agentId: 'leader',
+        projectId: this.selectedProjectId() || undefined
+      }
     });
 
     dialogRef.afterClosed().subscribe((result: JobCreateDialogResult | undefined) => {

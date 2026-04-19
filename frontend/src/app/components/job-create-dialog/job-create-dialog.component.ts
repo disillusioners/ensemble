@@ -100,8 +100,8 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
         }
       });
     
-    // Pre-fill form if editing
-    if (this.data?.editMode && this.data.agentId) {
+    // Pre-fill form if editing, or if projectId/agentId is provided
+    if (this.data?.editMode || this.data?.projectId || this.data?.agentId) {
       this.form.patchValue({
         agent_id: this.data.agentId || '',
         message: this.data.message || '',
@@ -109,6 +109,10 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
         priority: this.data.priority || 5,
         source: this.data.source || 'api'
       });
+      // Load queues for the pre-selected project
+      if (this.data.projectId) {
+        this.loadQueues(this.data.projectId);
+      }
     }
   }
 
