@@ -68,6 +68,7 @@ class JobResponse(BaseModel):
     dlq_reason: Optional[str] = Field(default=None, description="Reason for moving to DLQ (MAX_RETRIES, MANUAL, etc.)")
     retry_count: Optional[int] = Field(default=None, description="Number of retries attempted before moving to DLQ")
     moved_to_dlq_at: Optional[str] = Field(default=None, description="Timestamp when job was moved to DLQ")
+    deleted_at: Optional[str] = Field(default=None, description="Timestamp when job was soft-deleted")
     
     model_config = {
         "json_schema_extra": {

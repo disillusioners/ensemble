@@ -440,12 +440,35 @@ class JobQueueService:
         
         return new_job
     
+    async def soft_delete_job(self, job_id: str) -> Optional[JobItem]:
+        """Soft-delete a job by setting deleted_at timestamp.
+        
+        Args:
+            job_id: Job identifier.
+            
+        Returns:
+            Updated JobItem if successful, None if job not found.
+        """
+        return await asyncio.to_thread(self._repository.soft_delete, job_id)
+    
+    async def restore_job(self, job_id: str) -> Optional[JobItem]:
+        """Restore a soft-deleted job.
+        
+        Args:
+            job_id: Job identifier.
+            
+        Returns:
+            Updated JobItem if successful, None if job not found.
+        """
+        return await asyncio.to_thread(self._repository.restore, job_id)
+    
     async def list_jobs(
         self,
         statuses: Optional[list[str]] = None,
         project_id: Optional[str] = None,
         queue_id: Optional[str] = None,
         limit: int = 50,
+        include_deleted: bool = False,
     ) -> list[JobItem]:
         """List jobs with optional filters.
         
@@ -454,6 +477,7 @@ class JobQueueService:
             project_id: Optional project ID filter.
             queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
+            include_deleted: Whether to include soft-deleted jobs.
             
         Returns:
             List of JobItem objects.
@@ -464,6 +488,7 @@ class JobQueueService:
             project_id=project_id,
             queue_id=queue_id,
             limit=limit,
+            include_deleted=include_deleted,
         )
         return jobs
     

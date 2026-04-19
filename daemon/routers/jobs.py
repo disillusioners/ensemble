@@ -121,6 +121,7 @@ def _job_to_response(
         dlq_reason=dlq_reason,
         retry_count=retry_count,
         moved_to_dlq_at=moved_to_dlq_at,
+        deleted_at=job.deleted_at,
     )
 
 
@@ -291,6 +292,7 @@ async def list_jobs(
     project_id: Optional[str] = None,
     queue_id: Optional[str] = None,
     limit: int = 50,
+    include_deleted: bool = False,
     service: JobQueueService = Depends(get_job_queue_service),
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobListResponse:
@@ -301,6 +303,7 @@ async def list_jobs(
         - project_id: Filter by project ID
         - queue_id: Filter by queue ID
         - limit: Maximum number of jobs to return (default: 50)
+        - include_deleted: Include soft-deleted jobs (default: False)
     
     Returns:
         200 with list of jobs and total count
@@ -358,6 +361,7 @@ async def list_jobs(
         project_id=project_id,
         limit=limit,
         queue_id=queue_id,
+        include_deleted=include_deleted,
     )
     
     # Convert to response format
@@ -402,23 +406,24 @@ async def list_jobs(
 @router.delete(
     "/{job_id}",
     responses={
-        200: {"description": "Job cancelled successfully"},
-        400: {"description": "Job cannot be cancelled (already completed/failed/cancelled)"},
+        200: {"description": "Job cancelled or soft-deleted successfully"},
+        400: {"description": "Job already deleted"},
         404: {"model": JobNotFoundResponse, "description": "Job not found"},
     },
 )
-async def cancel_job(
+async def delete_job(
     job_id: str,
     service: JobQueueService = Depends(get_job_queue_service),
 ):
-    """Cancel a pending or processing job.
+    """Delete (cancel or soft-delete) a job.
     
-    - PENDING jobs are cancelled immediately
-    - PROCESSING jobs are aborted and the lock is released
+    - If job is PENDING or PROCESSING → cancel (existing behavior)
+    - If job is in terminal state (completed, failed, cancelled, dead_letter) → soft delete
+    - If job is already deleted → return 400
     
     Returns:
-        200 if cancelled successfully
-        400 if job is already in a terminal state (completed/failed/cancelled)
+        200 if cancelled/soft-deleted successfully
+        400 if job is already deleted
         404 if job not found
     """
     job = await service.get_job(job_id)
@@ -430,6 +435,91 @@ async def cancel_job(
                 error="Job not found",
                 job_id=job_id
             ).model_dump()
+        )
+    
+    # Check if already deleted
+    if job.deleted_at is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job already deleted",
+                "message": "This job has already been soft-deleted",
+                "job_id": job_id,
+            }
+        )
+    
+    # Handle based on status
+    if job.status in TERMINAL_STATUSES:
+        # Terminal state → soft delete
+        updated_job = await service.soft_delete_job(job_id)
+        if updated_job is None:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "Failed to soft-delete job"}
+            )
+        return _job_to_response(
+            updated_job,
+            message="Job soft-deleted successfully"
+        )
+    else:
+        # PENDING or PROCESSING → cancel
+        success = await service.cancel_job(job_id)
+        if not success:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Failed to cancel job",
+                    "message": f"Could not cancel job in state: {job.status}",
+                }
+            )
+        updated_job = await service.get_job(job_id)
+        return _job_to_response(
+            updated_job,
+            message="Job cancelled successfully"
+        )
+
+
+@router.post(
+    "/{job_id}/cancel",
+    responses={
+        200: {"description": "Job cancelled successfully"},
+        400: {"description": "Job cannot be cancelled"},
+        404: {"model": JobNotFoundResponse, "description": "Job not found"},
+    },
+)
+async def cancel_job_endpoint(
+    job_id: str,
+    service: JobQueueService = Depends(get_job_queue_service),
+):
+    """Cancel a pending or processing job.
+    
+    Explicit cancel endpoint for API consumers who want clear cancel semantics.
+    
+    Returns:
+        200 if cancelled successfully
+        400 if job is already in a terminal state or deleted
+        404 if job not found
+    """
+    job = await service.get_job(job_id)
+    
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=JobNotFoundResponse(
+                error="Job not found",
+                job_id=job_id
+            ).model_dump()
+        )
+    
+    # Check if already deleted
+    if job.deleted_at is not None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job cannot be cancelled",
+                "message": "This job has already been soft-deleted",
+                "job_id": job_id,
+            }
         )
     
     # Check if job is in a cancellable state
@@ -455,11 +545,77 @@ async def cancel_job(
             }
         )
     
-    # Return updated job status
     updated_job = await service.get_job(job_id)
     return _job_to_response(
         updated_job,
         message="Job cancelled successfully"
+    )
+
+
+@router.post(
+    "/{job_id}/restore",
+    responses={
+        200: {"description": "Job restored successfully"},
+        400: {"description": "Job cannot be restored (not deleted or terminal)"},
+        404: {"model": JobNotFoundResponse, "description": "Job not found"},
+    },
+)
+async def restore_job_endpoint(
+    job_id: str,
+    service: JobQueueService = Depends(get_job_queue_service),
+):
+    """Restore a soft-deleted job.
+    
+    Returns:
+        200 with restored job
+        400 if job is not deleted or is in terminal state
+        404 if job not found
+    """
+    job = await service.get_job(job_id)
+    
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=JobNotFoundResponse(
+                error="Job not found",
+                job_id=job_id
+            ).model_dump()
+        )
+    
+    # Check if job was deleted
+    if job.deleted_at is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job cannot be restored",
+                "message": "This job has not been soft-deleted",
+                "job_id": job_id,
+            }
+        )
+    
+    # Check if job is in a terminal state (restore not allowed for terminal jobs)
+    if job.status in TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Job cannot be restored",
+                "message": f"Cannot restore a job in terminal state: {job.status}. Retry the job instead.",
+                "current_status": job.status,
+            }
+        )
+    
+    # Restore the job
+    restored_job = await service.restore_job(job_id)
+    
+    if restored_job is None:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Failed to restore job"}
+        )
+    
+    return _job_to_response(
+        restored_job,
+        message="Job restored successfully"
     )
 
 
