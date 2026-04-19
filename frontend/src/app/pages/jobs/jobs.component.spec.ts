@@ -11,6 +11,8 @@ const mockJobService = {
   listJobs: jest.fn(),
   cancelJob: jest.fn(),
   retryJob: jest.fn(),
+  softDeleteJob: jest.fn(),
+  restoreJob: jest.fn(),
   retryAllDeadLetterJobs: jest.fn(),
   refreshJobs: jest.fn(),
   createJob: jest.fn(),
@@ -49,7 +51,10 @@ class MockJobsComponent {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = mockProjectService.projects;
-  readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string }>({});
+  readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string; include_deleted?: boolean }>({});
+  
+  // Deleted jobs filter
+  readonly showDeleted = signal(false);
   
   // DLQ signals
   readonly retryingAll = signal(false);
@@ -72,6 +77,11 @@ class MockJobsComponent {
     }
     if (currentFilters.agent_id) {
       filtered = filtered.filter(job => job.agent_id === currentFilters.agent_id);
+    }
+    
+    // Filter out deleted jobs when showDeleted is false
+    if (!this.showDeleted()) {
+      filtered = filtered.filter(job => !job.deleted_at);
     }
 
     return filtered;
@@ -128,6 +138,23 @@ class MockJobsComponent {
 
   onClearFilters() {
     this.filters.set({});
+    this.showDeleted.set(false);
+  }
+
+  onToggleShowDeleted(checked: boolean) {
+    this.showDeleted.set(checked);
+    this.filters.update(filters => ({
+      ...filters,
+      include_deleted: checked ? true : undefined
+    }));
+  }
+
+  onDeleteJob(job: Job) {
+    mockJobService.softDeleteJob(job.job_id);
+  }
+
+  onRestoreJob(job: Job) {
+    mockJobService.restoreJob(job.job_id);
   }
 
   onCancelJob(job: Job) {
@@ -490,6 +517,169 @@ describe('JobsComponent Logic', () => {
       component.agents.set([{ agent_id: 'coder', name: 'Coder', icon: '💻' }]);
       const displayName = component.getAgentDisplayName('unknown-agent');
       expect(displayName).toBe('unknown-agent');
+    });
+  });
+
+  describe('showDeleted signal', () => {
+    it('should default to false', () => {
+      const newComponent = new MockJobsComponent();
+      expect(newComponent.showDeleted()).toBe(false);
+    });
+
+    it('should be settable to true', () => {
+      component.showDeleted.set(true);
+      expect(component.showDeleted()).toBe(true);
+    });
+
+    it('should be togglable back to false', () => {
+      component.showDeleted.set(true);
+      component.showDeleted.set(false);
+      expect(component.showDeleted()).toBe(false);
+    });
+  });
+
+  describe('onToggleShowDeleted', () => {
+    it('should set showDeleted to true when checked', () => {
+      component.onToggleShowDeleted(true);
+      expect(component.showDeleted()).toBe(true);
+    });
+
+    it('should set showDeleted to false when unchecked', () => {
+      component.showDeleted.set(true);
+      component.onToggleShowDeleted(false);
+      expect(component.showDeleted()).toBe(false);
+    });
+
+    it('should add include_deleted filter when toggled on', () => {
+      component.onToggleShowDeleted(true);
+      expect(component.filters().include_deleted).toBe(true);
+    });
+
+    it('should remove include_deleted filter when toggled off', () => {
+      component.onToggleShowDeleted(true);
+      component.onToggleShowDeleted(false);
+      expect(component.filters().include_deleted).toBeUndefined();
+    });
+  });
+
+  describe('onDeleteJob', () => {
+    it('should call jobService.softDeleteJob', () => {
+      const job = mockJobs[0];
+      component.onDeleteJob(job);
+      expect(mockJobService.softDeleteJob).toHaveBeenCalledWith(job.job_id);
+    });
+
+    it('should call softDeleteJob with correct job_id', () => {
+      const job = createMockJob({ job_id: 'delete-me-123' });
+      component.onDeleteJob(job);
+      expect(mockJobService.softDeleteJob).toHaveBeenCalledWith('delete-me-123');
+    });
+  });
+
+  describe('onRestoreJob', () => {
+    it('should call jobService.restoreJob', () => {
+      const job = mockJobs[0];
+      component.onRestoreJob(job);
+      expect(mockJobService.restoreJob).toHaveBeenCalledWith(job.job_id);
+    });
+
+    it('should call restoreJob with correct job_id', () => {
+      const job = createMockJob({ job_id: 'restore-me-456' });
+      component.onRestoreJob(job);
+      expect(mockJobService.restoreJob).toHaveBeenCalledWith('restore-me-456');
+    });
+  });
+
+  describe('filteredJobs with deleted jobs', () => {
+    it('should hide deleted jobs when showDeleted is false', () => {
+      component.jobs.set([
+        createMockJob({ job_id: '1', status: 'pending' }),
+        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '3', status: 'failed' }),
+      ]);
+      component.showDeleted.set(false);
+
+      const filtered = component.filteredJobs();
+
+      expect(filtered.length).toBe(2);
+      expect(filtered.some(j => j.job_id === '1')).toBe(true);
+      expect(filtered.some(j => j.job_id === '2')).toBe(false);
+      expect(filtered.some(j => j.job_id === '3')).toBe(true);
+    });
+
+    it('should show deleted jobs when showDeleted is true', () => {
+      component.jobs.set([
+        createMockJob({ job_id: '1', status: 'pending' }),
+        createMockJob({ job_id: '2', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '3', status: 'failed' }),
+      ]);
+      component.showDeleted.set(true);
+
+      const filtered = component.filteredJobs();
+
+      expect(filtered.length).toBe(3);
+      expect(filtered.some(j => j.job_id === '1')).toBe(true);
+      expect(filtered.some(j => j.job_id === '2')).toBe(true);
+      expect(filtered.some(j => j.job_id === '3')).toBe(true);
+    });
+
+    it('should not filter jobs without deleted_at when showDeleted is false', () => {
+      component.jobs.set([
+        createMockJob({ job_id: '1', status: 'pending' }),
+        createMockJob({ job_id: '2', status: 'completed' }), // no deleted_at
+      ]);
+      component.showDeleted.set(false);
+
+      const filtered = component.filteredJobs();
+
+      expect(filtered.length).toBe(2);
+    });
+
+    it('should work with other filters combined', () => {
+      component.jobs.set([
+        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '2', status: 'pending' }),
+        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '4', status: 'completed' }),
+      ]);
+      component.showDeleted.set(true);
+      component.onStatusFilterChange('pending');
+
+      const filtered = component.filteredJobs();
+
+      expect(filtered.length).toBe(2);
+      expect(filtered.every(j => j.status === 'pending')).toBe(true);
+    });
+
+    it('should filter out deleted jobs and apply status filter', () => {
+      component.jobs.set([
+        createMockJob({ job_id: '1', status: 'pending', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '2', status: 'pending' }),
+        createMockJob({ job_id: '3', status: 'completed', deleted_at: '2024-01-15T10:00:00Z' }),
+        createMockJob({ job_id: '4', status: 'completed' }),
+      ]);
+      component.showDeleted.set(false); // Hide deleted
+      component.onStatusFilterChange('pending');
+
+      const filtered = component.filteredJobs();
+
+      expect(filtered.length).toBe(1);
+      expect(filtered[0].job_id).toBe('2');
+    });
+  });
+
+  describe('onClearFilters resets showDeleted', () => {
+    it('should reset showDeleted when clearing filters', () => {
+      component.showDeleted.set(true);
+      component.onClearFilters();
+      expect(component.showDeleted()).toBe(false);
+    });
+
+    it('should reset include_deleted filter when clearing filters', () => {
+      component.onToggleShowDeleted(true);
+      expect(component.filters().include_deleted).toBe(true);
+      component.onClearFilters();
+      expect(component.filters().include_deleted).toBeUndefined();
     });
   });
 });

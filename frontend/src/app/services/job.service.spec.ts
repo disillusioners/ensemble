@@ -4,17 +4,20 @@ import { createMockJob, createMockJobList } from '../testing/job-test-helpers';
 
 // Create a testable JobService with injected mock
 class TestJobService {
+  private jobCounter = 0;
+  
   readonly jobs = signal<Job[]>([]);
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
 
-  listJobs(filters?: { status?: string; source?: string; agent_id?: string; project_id?: string }) {
+  listJobs(filters?: { status?: string; source?: string; agent_id?: string; project_id?: string; include_deleted?: boolean }) {
     let params = new URLSearchParams();
     if (filters) {
       if (filters.status) params.set('status', filters.status);
       if (filters.source) params.set('source', filters.source);
       if (filters.agent_id) params.set('agent_id', filters.agent_id);
       if (filters.project_id) params.set('project_id', filters.project_id);
+      if (filters.include_deleted) params.set('include_deleted', 'true');
     }
     const queryString = params.toString();
     const url = '/api/jobs' + (queryString ? `?${queryString}` : '');
@@ -48,10 +51,11 @@ class TestJobService {
   }
 
   createJob(job: any) {
+    const uniqueId = `job-${++this.jobCounter}`;
     return {
       pipe: () => ({
         subscribe: (observer: any) => {
-          const created = createMockJob(job);
+          const created = createMockJob({ ...job, job_id: uniqueId });
           this.jobs.update(jobs => [created, ...jobs]);
           if (typeof observer === 'function') {
             observer(created);
@@ -94,6 +98,51 @@ class TestJobService {
             observer(retried);
           } else if (observer.next) {
             observer.next(retried);
+          }
+        }
+      })
+    };
+  }
+
+  softDeleteJob(jobId: string) {
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const deletedAt = new Date().toISOString();
+          this.jobs.update(jobs =>
+            jobs.map(job =>
+              job.job_id === jobId
+                ? { ...job, deleted_at: deletedAt }
+                : job
+            )
+          );
+          const deletedJob = this.jobs().find(j => j.job_id === jobId);
+          if (typeof observer === 'function') {
+            observer(deletedJob);
+          } else if (observer.next) {
+            observer.next(deletedJob);
+          }
+        }
+      })
+    };
+  }
+
+  restoreJob(jobId: string) {
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          this.jobs.update(jobs =>
+            jobs.map(job =>
+              job.job_id === jobId
+                ? { ...job, deleted_at: null }
+                : job
+            )
+          );
+          const restoredJob = this.jobs().find(j => j.job_id === jobId);
+          if (typeof observer === 'function') {
+            observer(restoredJob);
+          } else if (observer.next) {
+            observer.next(restoredJob);
           }
         }
       })
@@ -304,6 +353,138 @@ describe('JobService', () => {
       
       const retriedJob = service.jobs().find(j => j.job_id === jobId);
       expect(retriedJob?.status).toBe('pending');
+    });
+  });
+
+  describe('listJobs with include_deleted filter', () => {
+    it('should pass include_deleted=true when filter is set', () => {
+      const subscribeSpy = jest.fn();
+      service.listJobs({ include_deleted: true }).pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should not pass include_deleted when filter is false', () => {
+      const subscribeSpy = jest.fn();
+      service.listJobs({ include_deleted: false }).pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+
+    it('should build correct URL with include_deleted and other filters', () => {
+      const subscribeSpy = jest.fn();
+      service.listJobs({
+        status: 'pending',
+        include_deleted: true
+      }).pipe().subscribe(subscribeSpy);
+      expect(subscribeSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('softDeleteJob', () => {
+    it('should set deleted_at on the job', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      service.softDeleteJob(jobId).pipe().subscribe(() => {});
+      
+      const deletedJob = service.jobs().find(j => j.job_id === jobId);
+      expect(deletedJob?.deleted_at).toBeTruthy();
+    });
+
+    it('should update jobs signal', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      service.softDeleteJob(jobId).pipe().subscribe(() => {});
+      
+      expect(service.jobs().some(j => j.job_id === jobId && j.deleted_at)).toBe(true);
+    });
+
+    it('should return the deleted job', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      let result: any = null;
+      service.softDeleteJob(jobId).pipe().subscribe(job => { result = job; });
+      
+      expect(result?.job_id).toBe(jobId);
+      expect(result?.deleted_at).toBeTruthy();
+    });
+
+    it('should only mark the specified job as deleted', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test 1' }).pipe().subscribe(() => {});
+      const jobIdToDelete = service.jobs()[0].job_id;
+      
+      // Create a second job with a unique ID
+      service.createJob({ agent_id: 'coder', message: 'Test 2' }).pipe().subscribe(() => {});
+      const jobIdToKeep = service.jobs()[0].job_id;
+      
+      // Ensure they are different
+      expect(jobIdToDelete).not.toBe(jobIdToKeep);
+      
+      service.softDeleteJob(jobIdToDelete).pipe().subscribe(() => {});
+      
+      const deletedJob = service.jobs().find(j => j.job_id === jobIdToDelete);
+      const keptJob = service.jobs().find(j => j.job_id === jobIdToKeep);
+      expect(deletedJob?.deleted_at).toBeTruthy();
+      expect(keptJob?.deleted_at).toBeFalsy();
+    });
+  });
+
+  describe('restoreJob', () => {
+    it('should clear deleted_at on the job', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      service.softDeleteJob(jobId).pipe().subscribe(() => {});
+      expect(service.jobs().find(j => j.job_id === jobId)?.deleted_at).toBeTruthy();
+      
+      service.restoreJob(jobId).pipe().subscribe(() => {});
+      
+      const restoredJob = service.jobs().find(j => j.job_id === jobId);
+      expect(restoredJob?.deleted_at).toBeNull();
+    });
+
+    it('should update jobs signal', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      service.softDeleteJob(jobId).pipe().subscribe(() => {});
+      service.restoreJob(jobId).pipe().subscribe(() => {});
+      
+      expect(service.jobs().find(j => j.job_id === jobId)?.deleted_at).toBeNull();
+    });
+
+    it('should return the restored job', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      const jobId = service.jobs()[0].job_id;
+      
+      service.softDeleteJob(jobId).pipe().subscribe(() => {});
+      
+      let result: any = null;
+      service.restoreJob(jobId).pipe().subscribe(job => { result = job; });
+      
+      expect(result?.job_id).toBe(jobId);
+      expect(result?.deleted_at).toBeNull();
+    });
+
+    it('should only restore the specified job', () => {
+      service.createJob({ agent_id: 'coder', message: 'Test 1' }).pipe().subscribe(() => {});
+      const jobId1 = service.jobs()[0].job_id;
+      
+      service.createJob({ agent_id: 'coder', message: 'Test 2' }).pipe().subscribe(() => {});
+      const jobId2 = service.jobs()[0].job_id;
+      
+      // Ensure they are different
+      expect(jobId1).not.toBe(jobId2);
+      
+      service.softDeleteJob(jobId1).pipe().subscribe(() => {});
+      service.softDeleteJob(jobId2).pipe().subscribe(() => {});
+      service.restoreJob(jobId1).pipe().subscribe(() => {});
+      
+      const restoredJob = service.jobs().find(j => j.job_id === jobId1);
+      const stillDeletedJob = service.jobs().find(j => j.job_id === jobId2);
+      expect(restoredJob?.deleted_at).toBeNull();
+      expect(stillDeletedJob?.deleted_at).toBeTruthy();
     });
   });
 

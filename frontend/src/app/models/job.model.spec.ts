@@ -10,6 +10,7 @@ import {
   DLQReplayResponse,
   DLQListResponse,
   isTerminalStatus,
+  isJobDeleted,
   getStatusColor,
   getPriorityColor,
 } from './job.model';
@@ -52,6 +53,129 @@ describe('Job Model', () => {
 
     it('should return true for dead_letter status', () => {
       expect(isTerminalStatus('dead_letter')).toBe(true);
+    });
+  });
+
+  describe('isJobDeleted', () => {
+    it('should return false when deleted_at is null', () => {
+      const job: Job = {
+        job_id: 'test-1',
+        agent_id: 'agent-1',
+        project_id: 'project-1',
+        priority: 5,
+        status: 'completed',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        completed_at: new Date().toISOString(),
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        cancelled_at: null,
+        deleted_at: null,
+      };
+      expect(isJobDeleted(job)).toBe(false);
+    });
+
+    it('should return false when deleted_at is undefined', () => {
+      const job: Job = {
+        job_id: 'test-2',
+        agent_id: 'agent-1',
+        project_id: 'project-1',
+        priority: 5,
+        status: 'completed',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        completed_at: new Date().toISOString(),
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        cancelled_at: null,
+        // deleted_at is not present (undefined)
+      };
+      expect(isJobDeleted(job)).toBe(false);
+    });
+
+    it('should return true when deleted_at is set with ISO string', () => {
+      const job: Job = {
+        job_id: 'test-3',
+        agent_id: 'agent-1',
+        project_id: 'project-1',
+        priority: 5,
+        status: 'completed',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        completed_at: new Date().toISOString(),
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        cancelled_at: null,
+        deleted_at: '2024-01-15T10:30:00Z',
+      };
+      expect(isJobDeleted(job)).toBe(true);
+    });
+
+    it('should return true when deleted_at is set with current timestamp', () => {
+      const now = new Date().toISOString();
+      const job: Job = {
+        job_id: 'test-4',
+        agent_id: 'agent-1',
+        project_id: 'project-1',
+        priority: 5,
+        status: 'pending',
+        created_at: now,
+        started_at: null,
+        completed_at: null,
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        cancelled_at: null,
+        deleted_at: now,
+      };
+      expect(isJobDeleted(job)).toBe(true);
+    });
+
+    it('should return true for deleted_at with empty string', () => {
+      const job: Job = {
+        job_id: 'test-5',
+        agent_id: 'agent-1',
+        project_id: 'project-1',
+        priority: 5,
+        status: 'completed',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        completed_at: new Date().toISOString(),
+        instance_id: null,
+        error_message: null,
+        result_summary: null,
+        cancelled_at: null,
+        deleted_at: '',
+      };
+      // Empty string is falsy, so isJobDeleted returns false
+      expect(isJobDeleted(job)).toBe(false);
+    });
+
+    it('should correctly identify deleted job regardless of status', () => {
+      const statuses: JobStatus[] = ['pending', 'processing', 'completed', 'failed', 'cancelled', 'dead_letter'];
+      const deletedAt = '2024-01-15T10:30:00Z';
+
+      for (const status of statuses) {
+        const job: Job = {
+          job_id: `test-${status}`,
+          agent_id: 'agent-1',
+          project_id: 'project-1',
+          priority: 5,
+          status,
+          created_at: new Date().toISOString(),
+          started_at: null,
+          completed_at: null,
+          instance_id: null,
+          error_message: null,
+          result_summary: null,
+          cancelled_at: null,
+          deleted_at: deletedAt,
+        };
+        expect(isJobDeleted(job)).toBe(true);
+      }
     });
   });
 

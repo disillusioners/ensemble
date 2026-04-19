@@ -18,6 +18,7 @@ export interface Job {
   result_summary: string | null;
   job_metadata?: Record<string, any> | null;
   cancelled_at: string | null;
+  deleted_at?: string | null;
   position?: number;
 }
 
@@ -38,6 +39,7 @@ export function createMockJob(overrides?: Partial<Job>): Job {
     result_summary: null,
     job_metadata: {},
     cancelled_at: null,
+    deleted_at: null,
     ...overrides,
   };
 }
