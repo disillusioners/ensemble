@@ -390,13 +390,13 @@ class TestRepositoryJobLifecycle:
 
 
 class TestRepositoryDelete:
-    """Tests for job deletion."""
+    """Tests for job hard deletion."""
 
-    def test_delete_existing_job(self, repository, sample_job_data):
-        """Test deleting an existing job."""
+    def test_hard_delete_existing_job(self, repository, sample_job_data):
+        """Test hard_delete() removes existing job permanently."""
         job = repository.create(**sample_job_data)
         
-        result = repository.delete(job.job_id)
+        result = repository.hard_delete(job.job_id)
         
         assert result["deleted"] is True
         assert result["job_id"] == job.job_id
@@ -404,15 +404,15 @@ class TestRepositoryDelete:
         # Verify job is gone
         assert repository.get(job.job_id) is None
 
-    def test_delete_nonexistent_job(self, repository):
-        """Test deleting non-existent job returns error."""
-        result = repository.delete("nonexistent-id")
+    def test_hard_delete_nonexistent_job(self, repository):
+        """Test hard_delete() on non-existent job returns error."""
+        result = repository.hard_delete("nonexistent-id")
         
         assert result["deleted"] is False
         assert "error" in result
 
-    def test_delete_completed_jobs(self, repository, sample_job_data):
-        """Test deleting all completed jobs."""
+    def test_hard_delete_completed_jobs(self, repository, sample_job_data):
+        """Test hard_delete_completed() removes all completed jobs."""
         # Create and complete some jobs
         job1 = repository.create(**sample_job_data)
         job2 = repository.create(**sample_job_data)
@@ -424,15 +424,15 @@ class TestRepositoryDelete:
         repository.complete_job(job2.job_id)
         # job3 remains pending
         
-        deleted_count = repository.delete_completed()
+        deleted_count = repository.hard_delete_completed()
         
         assert deleted_count == 2
         assert repository.get(job1.job_id) is None
         assert repository.get(job2.job_id) is None
         assert repository.get(job3.job_id) is not None
 
-    def test_delete_by_project(self, repository, sample_job_data):
-        """Test deleting all jobs for a project."""
+    def test_hard_delete_by_project(self, repository, sample_job_data):
+        """Test hard_delete_by_project() removes all jobs for a project."""
         # Create jobs for multiple projects
         job1 = repository.create(**sample_job_data)  # test-project
         job2 = repository.create(**sample_job_data)  # test-project
@@ -440,16 +440,16 @@ class TestRepositoryDelete:
             **{**sample_job_data, "project_id": "other"}
         )
         
-        deleted_count = repository.delete_by_project("test-project")
+        deleted_count = repository.hard_delete_by_project("test-project")
         
         assert deleted_count == 2
         assert repository.get(job1.job_id) is None
         assert repository.get(job2.job_id) is None
         assert repository.get(job3.job_id) is not None
 
-    def test_delete_completed_when_none(self, repository):
-        """Test delete_completed when no completed jobs exist."""
-        count = repository.delete_completed()
+    def test_hard_delete_completed_when_none(self, repository):
+        """Test hard_delete_completed() when no completed jobs exist."""
+        count = repository.hard_delete_completed()
         assert count == 0
 
 
@@ -839,11 +839,11 @@ class TestRepositoryStartJobAtomic:
         assert retrieved.instance_id == "instance-1"
 
 
-class TestRepositoryDeleteByProject:
-    """Tests for delete_by_project method."""
+class TestRepositoryHardDeleteByProject:
+    """Tests for hard_delete_by_project method."""
 
-    def test_delete_by_project_removes_jobs(self, repository, sample_job_data):
-        """Test delete_by_project removes all jobs for specified project."""
+    def test_hard_delete_by_project_removes_jobs(self, repository, sample_job_data):
+        """Test hard_delete_by_project removes all jobs for specified project."""
         # Create jobs for multiple projects
         job1 = repository.create(**sample_job_data)  # test-project
         job2 = repository.create(**sample_job_data)  # test-project
@@ -851,8 +851,8 @@ class TestRepositoryDeleteByProject:
             **{**sample_job_data, "project_id": "other-project"}
         )
         
-        # Delete all jobs for test-project
-        deleted_count = repository.delete_by_project("test-project")
+        # Hard delete all jobs for test-project
+        deleted_count = repository.hard_delete_by_project("test-project")
         
         assert deleted_count == 2
         assert repository.get(job1.job_id) is None
@@ -860,19 +860,19 @@ class TestRepositoryDeleteByProject:
         # Other project's job should remain
         assert repository.get(other_job.job_id) is not None
 
-    def test_delete_by_project_returns_count(self, repository, sample_job_data):
-        """Test delete_by_project returns the number of deleted jobs."""
+    def test_hard_delete_by_project_returns_count(self, repository, sample_job_data):
+        """Test hard_delete_by_project returns the number of deleted jobs."""
         # Create multiple jobs for same project
         repository.create(**sample_job_data)  # job 1
         repository.create(**sample_job_data)  # job 2
         repository.create(**sample_job_data)  # job 3
         
-        deleted_count = repository.delete_by_project("test-project")
+        deleted_count = repository.hard_delete_by_project("test-project")
         
         assert deleted_count == 3
 
-    def test_delete_by_project_other_projects_unaffected(self, repository, sample_job_data):
-        """Test delete_by_project does not affect jobs from other projects."""
+    def test_hard_delete_by_project_other_projects_unaffected(self, repository, sample_job_data):
+        """Test hard_delete_by_project does not affect jobs from other projects."""
         # Create jobs for different projects
         project_a_job = repository.create(
             **{**sample_job_data, "project_id": "project-a"}
@@ -884,8 +884,8 @@ class TestRepositoryDeleteByProject:
             **{**sample_job_data, "project_id": "project-c"}
         )
         
-        # Delete only project-a's jobs
-        deleted_count = repository.delete_by_project("project-a")
+        # Hard delete only project-a's jobs
+        deleted_count = repository.hard_delete_by_project("project-a")
         
         assert deleted_count == 1
         assert repository.get(project_a_job.job_id) is None

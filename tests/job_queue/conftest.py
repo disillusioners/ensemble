@@ -36,9 +36,9 @@ def repository(engine):
     """Create JobRepository instance with fresh database."""
     repo = JobRepository(engine)
     yield repo
-    # Clean up after test
-    repo.delete_completed()
-    repo.delete_by_project("test-project")
+    # Clean up after test (use hard_delete since tests may create jobs in various states)
+    repo.hard_delete_completed()
+    repo.hard_delete_by_project("test-project")
 
 
 @pytest.fixture
