@@ -174,6 +174,7 @@ def create_job_tools(
     Returns:
         List of tool functions for job queue management.
     """
+    caller_agent_id = agent_id
 
     class JobCreateInput(BaseModel):
         """Input schema for job_create tool."""
@@ -200,6 +201,9 @@ def create_job_tools(
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""
         try:
+            # Override source if using default "api" and called by an agent
+            if source == "api" and caller_agent_id:
+                source = f"agent:{caller_agent_id}"
             job_item = await job_service.enqueue(
                 agent_id=agent_id,
                 message=message,
@@ -276,7 +280,7 @@ def create_job_tools(
         try:
             job_item = await job_service.retry_job(job_id)
             if job_item is not None:
-                return f"Job {job_id} retry initiated successfully. New job_id: {job_item.job_id}"
+                return f"Job {job_id} retry initiated successfully."
             return f"ERROR: Could not retry job {job_id}. Job may not be in a retryable state."
         except Exception as e:
             return f"ERROR: Failed to retry job {job_id}: {str(e)}"
