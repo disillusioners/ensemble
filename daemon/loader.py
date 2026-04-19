@@ -1,6 +1,7 @@
 """Markdown loader for agent prompts."""
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 # Path to shared files (injected into all agents)
-PROJECT_EXPERIENCE_FILE = Path(__file__).parent.parent / "agents" / "project-experience.md"
+# Handle PyInstaller frozen state - use executable parent for prod
+if getattr(sys, 'frozen', False):
+    _base_dir = Path(sys.executable).parent
+else:
+    _base_dir = Path(__file__).parent.parent
+PROJECT_EXPERIENCE_FILE = _base_dir / "agents" / "project-experience.md"
 
 
 def _ensure_tool_metadata_populated() -> None:

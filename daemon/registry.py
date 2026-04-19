@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -409,7 +410,11 @@ def get_registry() -> AgentRegistry:
     """
     global _registry
     if _registry is None:
-        base_dir = Path(__file__).parent.parent
+        # Handle PyInstaller frozen state - use executable parent for prod
+        if getattr(sys, 'frozen', False):
+            base_dir = Path(sys.executable).parent
+        else:
+            base_dir = Path(__file__).parent.parent
         _registry = AgentRegistry(base_dir / "agents")
         _registry.discover()
         # Validate tool configs and log warnings

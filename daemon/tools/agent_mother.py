@@ -6,6 +6,7 @@ They are only available to the Mother agent (agents/_mother/).
 
 import json
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,8 +23,11 @@ CATEGORY_DOC = """\
 Mother agent specific tools for managing baby agent lifecycle.
 """
 
-# Base directory for agents
-BASE_DIR = Path(__file__).parent.parent.parent
+# Base directory for agents (handle PyInstaller frozen state)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent.parent.parent
 
 
 def create_mother_tools(manager: "InstanceManager", current_instance_id: str):
