@@ -140,6 +140,9 @@ class JobItem(SQLModel, table=True):
     # Cancellation
     cancelled_at: Optional[str] = None
 
+    # Soft delete
+    deleted_at: Optional[str] = None
+
     # Retry handling
     retry_count: int = Field(default=0, ge=0)
     max_retries: Optional[int] = Field(default=None)
@@ -167,6 +170,7 @@ class JobItem(SQLModel, table=True):
             "result_summary": self.result_summary,
             "metadata": dict(self.job_metadata) if self.job_metadata else {},
             "cancelled_at": self.cancelled_at,
+            "deleted_at": self.deleted_at,
             "retry_count": self.retry_count,
             "max_retries": self.max_retries,
             "idempotency_key": self.idempotency_key,
