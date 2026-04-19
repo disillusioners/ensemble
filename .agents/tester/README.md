@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-19 Job Soft Delete Feature)
+## Test Results (Latest: 2026-04-19 Internal Source Log Level Fix)
+
+### Internal Source Log Level Fix (commit 611ddcb)
+- **12 new dispatcher tests** — Internal source log levels (dispatch_completed + dispatch_message paths) — ALL PASS
+- **2515 total tests pass** (22 skipped, 0 failed) — no regressions
+- **1 quick fix applied** — Updated version assertion in test_api.py ("0.1.0" → "0.1.1")
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-19-internal-source-log-level.md` for full report
+
+### Internal Source Log Level Fix Status: ✅ READY
 
 ### Job Soft Delete Feature (branch feature/job-soft-delete)
 - **34 new BE tests** — Repository (13) + API (11) + Scheduler safety (8) + Integration (2) — ALL PASS
@@ -215,7 +224,16 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Job Soft Delete Feature — TESTING COMPLETE**
+**Internal Source Log Level Fix — TESTING COMPLETE**
+
+### Status: ✅ READY
+
+**Latest:** 12 new tests pass (internal source log levels), 2515 total tests pass, dev.sh validated
+**Key verified:** Internal sources (internal_*) → DEBUG, non-internal → ERROR, edge cases covered
+**Commit:** `611ddcb`
+**See RESULTS/2026-04-19-internal-source-log-level.md for full report**
+
+### Previous Focus: Job Soft Delete Feature — TESTING COMPLETE
 
 ### Status: ✅ READY FOR MERGE
 
