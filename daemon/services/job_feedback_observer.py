@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -51,6 +52,8 @@ class JobFeedbackObserver:
         job_queue_service: "JobQueueService",
         job_repo: JobRepository,
         lock_repo: LockRepository,
+        project_repo: SQLModelProjectRepository,
+        instance_manager,
         config: Optional["JobSystemConfig"] = None,
     ) -> None:
         """Initialize the JobFeedbackObserver.
@@ -60,12 +63,16 @@ class JobFeedbackObserver:
             job_queue_service: JobQueueService for get_job_by_instance().
             job_repo: JobRepository for atomic_transition().
             lock_repo: LockRepository for releasing locks.
+            project_repo: SQLModelProjectRepository for pause state checks.
+            instance_manager: InstanceManager for spawning instances and enqueuing messages.
             config: Optional JobSystemConfig for health check interval.
         """
         self._event_bus = event_bus
         self._job_queue_service = job_queue_service
         self._job_repo = job_repo
         self._lock_repo = lock_repo
+        self._project_repo = project_repo
+        self._instance_manager = instance_manager
         self._config = config
 
         # Health monitoring configuration
@@ -332,6 +339,7 @@ class JobFeedbackObserver:
                     return
 
                 # Transition to PROCESSING and get instance_id
+                # Pause check is centralized in start_job()
                 started_job = await self._job_queue_service.start_job(next_job.job_id)
                 if started_job is None:
                     # Couldn't start (lock not acquired, cancelled, etc.)

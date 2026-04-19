@@ -293,6 +293,9 @@ async def lifespan(app: FastAPI):
     # Wire InstanceManager into JobQueueService for cancellation cascade
     job_queue_service.set_instance_manager(manager)
     
+    # Wire ProjectRepository into JobQueueService for pause state checks
+    job_queue_service.set_project_repo(manager._project_repository)
+    
     # Run startup recovery for orphaned PROCESSING jobs
     # This must run FIRST — clean up orphans before observer/processor start
     instance_repo = SQLModelInstanceRepository(engine=manager._engine)
@@ -310,6 +313,8 @@ async def lifespan(app: FastAPI):
         event_bus=manager._event_bus,
         job_repo=job_repository,
         lock_repo=lock_repo,
+        project_repo=manager._project_repository,
+        instance_manager=manager,
     )
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")

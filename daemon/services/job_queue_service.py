@@ -59,6 +59,7 @@ class JobQueueService:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._dispatch_bus: Optional["DispatchEventBus"] = None  # Dispatch event bus for job notifications
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
+        self._project_repo: Optional[Any] = None  # Project repository for pause state checks
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -67,6 +68,14 @@ class JobQueueService:
             retry_engine: The JobRetryEngine instance to use for auto-retries.
         """
         self._retry_engine = retry_engine
+    
+    def set_project_repo(self, project_repo: Any) -> None:
+        """Set the project repository for pause state checks.
+        
+        Args:
+            project_repo: The SQLModelProjectRepository instance.
+        """
+        self._project_repo = project_repo
     
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Store the event loop for sync→async operations.
@@ -699,6 +708,19 @@ class JobQueueService:
         if job.status != JobStatus.PENDING.value:
             return None
         
+        # CENTRALIZED PAUSE CHECK - protects ALL callers
+        if self._project_repo is not None and job.project_id:
+            project = await asyncio.to_thread(self._project_repo.get, job.project_id)
+            if project and project.job_queue_paused:
+                logger.debug(
+                    f"start_job: project {job.project_id[:8]}... is paused, skipping"
+                )
+                return None
+        
+        # Warn if project_repo is not set (can't check pause state)
+        if self._project_repo is None:
+            logger.warning("start_job: project_repo not set, cannot check pause state")
+        
         # Generate new instance ID for this job
         instance_id = str(uuid.uuid4())
         
@@ -904,6 +926,7 @@ class JobQueueService:
         if next_job is None:
             return None
         
+        # Pause check is centralized in start_job()
         result = await self.start_job(next_job.job_id)
         
         # Emit dispatch event so JobProcessor wakes up immediately to
@@ -945,6 +968,15 @@ class JobQueueService:
         next_job = pending[0] if pending else None
         if next_job is None:
             return None
+        
+        # PAUSE CHECK: Skip if project is paused (sync call - no wrapper needed)
+        if self._project_repo is not None:
+            project = self._project_repo.get(project_id)
+            if project and project.job_queue_paused:
+                logger.debug(
+                    f"trigger_next_job_sync: project {project_id[:8]}... is paused, skipping"
+                )
+                return None
         
         # Get the job
         job = self._repository.get(next_job.job_id)

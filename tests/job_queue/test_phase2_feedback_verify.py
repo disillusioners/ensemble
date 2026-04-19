@@ -73,6 +73,8 @@ class TestDoubleEventDelivery:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         event = {
@@ -124,6 +126,8 @@ class TestDoubleEventDelivery:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         event = {
@@ -165,6 +169,8 @@ class TestDoubleEventDelivery:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         event = {
@@ -297,6 +303,8 @@ class TestObserverObserverBehavior:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         event = {
@@ -328,6 +336,8 @@ class TestObserverObserverBehavior:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         event = {
@@ -360,6 +370,8 @@ class TestObserverObserverBehavior:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
 
         # Termination event

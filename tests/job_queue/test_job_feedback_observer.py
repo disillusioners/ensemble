@@ -30,23 +30,29 @@ def create_mock_observer(
     job_queue_service: AsyncMock = None,
     job_repo: MagicMock = None,
     lock_repo: MagicMock = None,
+    project_repo: MagicMock = None,
     config: MagicMock = None,
-) -> tuple[JobFeedbackObserver, MagicMock, MagicMock, MagicMock, AsyncMock]:
+    instance_manager: MagicMock = None,
+) -> tuple[JobFeedbackObserver, MagicMock, MagicMock, MagicMock, MagicMock, AsyncMock]:
     """Create a JobFeedbackObserver with mocked dependencies."""
     mock_event_bus = MagicMock()
     mock_job_queue_service = job_queue_service or AsyncMock()
     mock_job_repo = job_repo or MagicMock(spec=JobRepository)
     mock_lock_repo = lock_repo or MagicMock(spec=LockRepository)
+    mock_project_repo = project_repo or MagicMock()
+    mock_instance_manager = instance_manager or MagicMock()
     
     observer = JobFeedbackObserver(
         event_bus=mock_event_bus,
         job_queue_service=mock_job_queue_service,
         job_repo=mock_job_repo,
         lock_repo=mock_lock_repo,
+        project_repo=mock_project_repo,
+        instance_manager=mock_instance_manager,
         config=config,
     )
     
-    return observer, mock_event_bus, mock_job_repo, mock_lock_repo, mock_job_queue_service
+    return observer, mock_event_bus, mock_job_repo, mock_lock_repo, mock_project_repo, mock_job_queue_service
 
 
 class TestObserverFiltersLifecycleEvents:
@@ -60,7 +66,7 @@ class TestObserverFiltersLifecycleEvents:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -93,6 +99,8 @@ class TestObserverCompletesJob:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -132,6 +140,8 @@ class TestObserverFailsJob:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -164,7 +174,7 @@ class TestObserverSkipsTerminated:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -195,7 +205,7 @@ class TestObserverSkipsNoJob:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, mock_job_queue_service = create_mock_observer(
+        observer, _, mock_job_repo, _, _, mock_job_queue_service = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -228,7 +238,7 @@ class TestObserverSkipsNonProcessingJob:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -259,7 +269,7 @@ class TestObserverMissingDataHandling:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -284,7 +294,7 @@ class TestObserverMissingDataHandling:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -324,6 +334,8 @@ class TestObserverLockRelease:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -357,7 +369,7 @@ class TestObserverRaceCondition:
         )
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, mock_lock_repo, _ = create_mock_observer(
+        observer, _, mock_job_repo, mock_lock_repo, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -397,6 +409,8 @@ class TestObserverExceptionHandling:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -425,7 +439,7 @@ class TestObserverEdgeCases:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -447,7 +461,7 @@ class TestObserverEdgeCases:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -471,7 +485,7 @@ class TestObserverEdgeCases:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         
-        observer, _, mock_job_repo, _, _ = create_mock_observer(
+        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
@@ -508,6 +522,8 @@ class TestObserverDefaultErrorMessage:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -549,6 +565,8 @@ class TestObserverStartStop:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         await observer.start()
@@ -578,6 +596,8 @@ class TestObserverStartStop:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         await observer.start()
@@ -603,6 +623,8 @@ class TestObserverStartStop:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         await observer.start()
@@ -635,6 +657,8 @@ class TestObserverStartStop:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         # Set up queue manually (don't start to avoid event loop interference)
@@ -684,6 +708,8 @@ class TestObserverConfig:
             job_queue_service=MagicMock(),
             job_repo=MagicMock(),
             lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         assert observer._health_check_interval == 300
 
@@ -697,6 +723,8 @@ class TestObserverConfig:
             job_queue_service=MagicMock(),
             job_repo=MagicMock(),
             lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
             config=mock_config,
         )
         assert observer._health_check_interval == 60
@@ -728,6 +756,8 @@ class TestObserverLifecycleResilience:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -766,6 +796,8 @@ class TestObserverLifecycleResilience:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -804,6 +836,8 @@ class TestObserverLifecycleResilience:
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
         
         event = {
@@ -841,6 +875,8 @@ class TestObserverHealthCheck:
             job_queue_service=MagicMock(),
             job_repo=MagicMock(),
             lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
             config=mock_config,
         )
         assert observer._health_check_interval == 0
@@ -855,6 +891,8 @@ class TestObserverHealthCheck:
             job_queue_service=MagicMock(),
             job_repo=MagicMock(),
             lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
             config=mock_config,
         )
         assert observer._health_check_interval == 120
@@ -869,6 +907,8 @@ class TestObserverHealthCheck:
             job_queue_service=MagicMock(),
             job_repo=MagicMock(),
             lock_repo=MagicMock(),
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
             config=mock_config,
         )
         assert observer._health_check_interval == 3600
