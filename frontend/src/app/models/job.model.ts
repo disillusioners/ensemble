@@ -21,6 +21,7 @@ export interface Job {
   job_metadata?: Record<string, any> | null;
   queue_id?: string | null; // queue this job belongs to
   cancelled_at: string | null;
+  deleted_at?: string | null;
   position?: number; // queue position if pending
   // Dead Letter Queue fields
   dlq_reason?: string | null; // reason for moving to DLQ
@@ -44,6 +45,7 @@ export interface JobFilters {
   agent_id?: string;
   project_id?: string;
   queue_id?: string;
+  include_deleted?: boolean;
 }
 
 export interface JobEventPayload {
@@ -65,6 +67,10 @@ export interface JobEvent {
 
 export function isTerminalStatus(status: JobStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
+}
+
+export function isJobDeleted(job: Job): boolean {
+  return !!job.deleted_at;
 }
 
 export function getStatusColor(status: JobStatus): string {

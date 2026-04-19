@@ -21,7 +21,7 @@ export class JobService {
   readonly error = signal<string | null>(null);
 
   /**
-   * GET /api/jobs?status=...&source=...&agent_id=...&queue_id=...
+   * GET /api/jobs?status=...&source=...&agent_id=...&queue_id=...&include_deleted=...
    */
   listJobs(filters?: JobFilters): Observable<Job[]> {
     let params = new HttpParams();
@@ -33,6 +33,7 @@ export class JobService {
       if (filters.agent_id) params = params.set('agent_id', filters.agent_id);
       if (filters.project_id) params = params.set('project_id', filters.project_id);
       if (filters.queue_id) params = params.set('queue_id', filters.queue_id);
+      if (filters.include_deleted) params = params.set('include_deleted', 'true');
     }
 
     return this.http.get<JobListResponse>(this.API_BASE, { params }).pipe(
@@ -105,6 +106,40 @@ export class JobService {
       }),
       catchError((err) => {
         this.error.set(err.message || 'Failed to retry job');
+        throw err;
+      })
+    );
+  }
+
+  /**
+   * DELETE /api/jobs/{id} - Soft delete a job
+   */
+  softDeleteJob(jobId: string): Observable<Job> {
+    return this.http.delete<Job>(`${this.API_BASE}/${encodeURIComponent(jobId)}`).pipe(
+      tap((deletedJob) => {
+        this.jobs.update((jobs) =>
+          jobs.map((job) => (job.job_id === jobId ? deletedJob : job))
+        );
+      }),
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to delete job');
+        throw err;
+      })
+    );
+  }
+
+  /**
+   * POST /api/jobs/{id}/restore - Restore a soft-deleted job
+   */
+  restoreJob(jobId: string): Observable<Job> {
+    return this.http.post<Job>(`${this.API_BASE}/${encodeURIComponent(jobId)}/restore`, {}).pipe(
+      tap((restoredJob) => {
+        this.jobs.update((jobs) =>
+          jobs.map((job) => (job.job_id === jobId ? restoredJob : job))
+        );
+      }),
+      catchError((err) => {
+        this.error.set(err.message || 'Failed to restore job');
         throw err;
       })
     );
