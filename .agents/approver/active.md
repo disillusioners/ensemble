@@ -1,5 +1,5 @@
-Current Plan: Job System Improvements
-Tracking File: job-system-improvements-tracking.md
-Iteration: 003
+Current Plan: Job Soft Delete
+Tracking File: job-soft-delete-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-04-19 10:30
+Last Updated: 2026-04-19 11:15

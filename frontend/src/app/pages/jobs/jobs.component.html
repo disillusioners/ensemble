@@ -136,6 +136,13 @@
         </mat-select>
       </mat-form-field>
 
+      <mat-checkbox
+        [checked]="showDeleted()"
+        (change)="onToggleShowDeleted($event.checked)"
+        class="show-deleted-checkbox">
+        Show Deleted
+      </mat-checkbox>
+
   </div>
 
   <!-- Main Content with Queue Sidebar and Drawer -->
@@ -216,6 +223,8 @@
                 [queueMap]="queueNameMap()"
                 (cancel)="onCancelJob(job)"
                 (retry)="onRetryJob(job)"
+                (delete)="onDeleteJob(job)"
+                (restore)="onRestoreJob(job)"
                 (viewDetails)="onViewJobDetails(job)">
               </app-job-card>
             }

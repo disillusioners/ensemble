@@ -191,6 +191,25 @@
         color: var(--text-color, #e0e0e0);
       }
     }
+
+    .show-deleted-checkbox {
+      margin-left: auto;
+      font-size: 13px;
+      color: var(--text-secondary, #9e9e9e);
+
+      ::ng-deep {
+        .mdc-checkbox__background {
+          border-color: var(--border-color, #3c3c3c) !important;
+        }
+        .mdc-checkbox--selected~.mdc-checkbox__ripple {
+          background: var(--accent-cyan, #10a7f7);
+        }
+        .mdc-checkbox__native-control:checked~.mdc-checkbox__background {
+          background-color: var(--accent-cyan, #10a7f7) !important;
+          border-color: var(--accent-cyan, #10a7f7) !important;
+        }
+      }
+    }
   }
 
   .retry-all-btn {

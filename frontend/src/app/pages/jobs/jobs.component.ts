@@ -11,6 +11,7 @@ import { MatSidenavModule } from '@angular/material/sidenav';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
@@ -41,6 +42,7 @@ import { Agent } from '../../models';
     MatSnackBarModule,
     MatDialogModule,
     MatTooltipModule,
+    MatCheckboxModule,
     JobCardComponent,
     JobDetailDrawerComponent,
     QueueListComponent
@@ -80,6 +82,9 @@ export class JobsComponent implements OnInit, OnDestroy {
   // DLQ signals
   readonly retryingAll = signal(false);
   readonly isDeadLetterFilterActive = computed(() => this.filters().status?.includes('dead_letter') ?? false);
+  
+  // Deleted jobs filter
+  readonly showDeleted = signal(false);
   
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
@@ -331,6 +336,16 @@ export class JobsComponent implements OnInit, OnDestroy {
   protected onClearFilters(): void {
     this.filters.set({});
     this.selectedQueueId.set(null);
+    this.showDeleted.set(false);
+    this.loadJobs();
+  }
+
+  protected onToggleShowDeleted(checked: boolean): void {
+    this.showDeleted.set(checked);
+    this.filters.update(filters => ({
+      ...filters,
+      include_deleted: checked ? true : undefined
+    }));
     this.loadJobs();
   }
 
@@ -432,6 +447,47 @@ export class JobsComponent implements OnInit, OnDestroy {
             panelClass: 'error-snackbar'
           }
         );
+      }
+    });
+  }
+
+  protected onDeleteJob(job: Job): void {
+    this.jobService.softDeleteJob(job.job_id).subscribe({
+      next: () => {
+        this.snackBar.open('Job deleted', 'Undo', { duration: 5000 })
+          .onAction().subscribe(() => {
+            this.jobService.restoreJob(job.job_id).subscribe({
+              next: () => this.loadJobs(),
+              error: () => {}
+            });
+          });
+        if (!this.showDeleted()) {
+          // Remove from local list
+          this.jobs.update(jobs => jobs.filter(j => j.job_id !== job.job_id));
+        } else {
+          // Update the job in place (show as deleted)
+          this.jobs.update(jobs =>
+            jobs.map(j => j.job_id === job.job_id ? { ...j, deleted_at: new Date().toISOString() } : j)
+          );
+        }
+      },
+      error: (err) => {
+        this.snackBar.open(err.message || 'Failed to delete job', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar'
+        });
+      }
+    });
+  }
+
+  protected onRestoreJob(job: Job): void {
+    this.jobService.restoreJob(job.job_id).subscribe({
+      next: () => this.loadJobs(),
+      error: (err) => {
+        this.snackBar.open(err.message || 'Failed to restore job', 'Dismiss', {
+          duration: 5000,
+          panelClass: 'error-snackbar'
+        });
       }
     });
   }

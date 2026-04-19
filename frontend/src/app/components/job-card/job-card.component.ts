@@ -6,7 +6,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, getPriorityColor, getStatusColor } from '../../models/job.model';
+import { Job, JobStatus, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted } from '../../models/job.model';
 
 @Component({
   selector: 'app-job-card',
@@ -31,6 +31,8 @@ export class JobCardComponent {
   // Action outputs
   cancel = output<void>();
   retry = output<void>();
+  delete = output<void>();
+  restore = output<void>();
   viewDetails = output<void>();
 
   // Internal state
@@ -87,6 +89,16 @@ export class JobCardComponent {
 
   canRetry = computed(() => this.job().status === 'failed' || this.job().status === 'dead_letter');
 
+  // Soft delete computed values
+  isDeleted = computed(() => isJobDeleted(this.job()));
+
+  canDelete = computed(() => {
+    const job = this.job();
+    return isTerminalStatus(job.status) && !this.isDeleted();
+  });
+
+  canRestore = computed(() => this.isDeleted());
+
   showPausedBadge = computed(() => {
     return this.job().status === 'pending' && this.projectPaused();
   });
@@ -107,6 +119,14 @@ export class JobCardComponent {
 
   protected onRetry(): void {
     this.retry.emit();
+  }
+
+  protected onDelete(): void {
+    this.delete.emit();
+  }
+
+  protected onRestore(): void {
+    this.restore.emit();
   }
 
   protected onViewDetails(): void {
