@@ -202,11 +202,11 @@ class TestJobQueueServiceListJobs:
         await job_queue_service.enqueue(**sample_job_data_service)
         
         # List pending - should have 2
-        pending = await job_queue_service.list_jobs(status=JobStatus.PENDING)
+        pending = await job_queue_service.list_jobs(statuses=[JobStatus.PENDING.value])
         assert len(pending) == 2
         
         # List processing - should have 0 (jobs start as PENDING, JobProcessor handles starting)
-        processing = await job_queue_service.list_jobs(status=JobStatus.PROCESSING)
+        processing = await job_queue_service.list_jobs(statuses=[JobStatus.PROCESSING.value])
         assert len(processing) == 0
 
     @pytest.mark.asyncio
@@ -659,7 +659,7 @@ class TestJobQueueServiceFullWorkflow:
         
         # No more pending jobs
         pending = await job_queue_service.list_jobs(
-            status=JobStatus.PENDING,
+            statuses=[JobStatus.PENDING.value],
             project_id="test-project"
         )
         assert len(pending) == 0

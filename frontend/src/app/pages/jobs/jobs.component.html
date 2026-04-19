@@ -76,11 +76,12 @@
       <span class="filter-label">Status:</span>
       <mat-chip-listbox
         class="status-chips"
+        multiple
         (change)="onStatusFilterChange($event.value)">
         @for (option of statusOptions; track option.value) {
           <mat-chip-option
             [value]="option.value"
-            [selected]="filters().status === option.value || (option.value === 'all' && !filters().status)">
+            [selected]="filters().status?.includes(option.value) ?? false">
             {{ option.label }}
           </mat-chip-option>
         }

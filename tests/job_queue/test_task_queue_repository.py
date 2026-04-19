@@ -132,8 +132,8 @@ class TestRepositoryList:
         # Start job1
         repository.start_job(job1.job_id, "instance-1")
         
-        pending_jobs, total = repository.list(status=JobStatus.PENDING.value)
-        processing_jobs, _ = repository.list(status=JobStatus.PROCESSING.value)
+        pending_jobs, total = repository.list(statuses=[JobStatus.PENDING.value])
+        processing_jobs, _ = repository.list(statuses=[JobStatus.PROCESSING.value])
         
         assert len(pending_jobs) == 1
         assert pending_jobs[0].job_id == job2.job_id
@@ -511,7 +511,7 @@ class TestRepositoryEdgeCases:
         
         # Filter by both status and project
         jobs, total = repository.list(
-            status=JobStatus.PENDING.value,
+            statuses=[JobStatus.PENDING.value],
             project_id="test-project"
         )
         
@@ -749,14 +749,14 @@ class TestRepositoryListByQueue:
         
         # Filter by PENDING status
         pending_jobs, pending_total = repository.list_by_queue(
-            queue.queue_id, status=JobStatus.PENDING.value
+            queue.queue_id, statuses=[JobStatus.PENDING.value]
         )
         assert pending_total == 2
         assert len(pending_jobs) == 2
         
         # Filter by PROCESSING status
         processing_jobs, processing_total = repository.list_by_queue(
-            queue.queue_id, status=JobStatus.PROCESSING.value
+            queue.queue_id, statuses=[JobStatus.PROCESSING.value]
         )
         assert processing_total == 1
         assert len(processing_jobs) == 1

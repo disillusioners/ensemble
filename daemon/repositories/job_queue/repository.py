@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import delete as sql_delete, func
+from sqlalchemy import delete as sql_delete, func, select as sql_select
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -132,7 +132,7 @@ class JobRepository:
 
     def list(
         self,
-        status: Optional[str] = None,
+        statuses: Optional[list[str]] = None,
         project_id: Optional[str] = None,
         queue_id: Optional[str] = None,
         limit: int = 100,
@@ -141,7 +141,7 @@ class JobRepository:
         """List jobs with optional filters and pagination.
         
         Args:
-            status: Optional status filter.
+            statuses: Optional list of status filters.
             project_id: Optional project ID filter.
             queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
@@ -153,8 +153,8 @@ class JobRepository:
         with SQLModelSession(self.engine) as db_session:
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
-            if status:
-                count_stmt = count_stmt.where(JobItem.status == status)
+            if statuses:
+                count_stmt = count_stmt.where(JobItem.status.in_(statuses))
             if project_id:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
             if queue_id:
@@ -163,8 +163,8 @@ class JobRepository:
 
             # Build list query with filters
             stmt = select(JobItem)
-            if status:
-                stmt = stmt.where(JobItem.status == status)
+            if statuses:
+                stmt = stmt.where(JobItem.status.in_(statuses))
             if project_id:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if queue_id:
@@ -248,7 +248,7 @@ class JobRepository:
     def list_by_queue(
         self,
         queue_id: str,
-        status: Optional[str] = None,
+        statuses: Optional[list[str]] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[JobItem], int]:
@@ -256,7 +256,7 @@ class JobRepository:
         
         Args:
             queue_id: Queue identifier.
-            status: Optional status filter.
+            statuses: Optional list of status filters.
             limit: Maximum number of jobs to return.
             offset: Number of jobs to skip.
             
@@ -267,14 +267,14 @@ class JobRepository:
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
             count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
-            if status:
-                count_stmt = count_stmt.where(JobItem.status == status)
+            if statuses:
+                count_stmt = count_stmt.where(JobItem.status.in_(statuses))
             total = db_session.exec(count_stmt).one()
 
             # Build list query with filters
             stmt = select(JobItem).where(JobItem.queue_id == queue_id)
-            if status:
-                stmt = stmt.where(JobItem.status == status)
+            if statuses:
+                stmt = stmt.where(JobItem.status.in_(statuses))
             
             stmt = stmt.order_by(
                 col(JobItem.priority).desc(),

@@ -79,7 +79,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   
   // DLQ signals
   readonly retryingAll = signal(false);
-  readonly isDeadLetterFilterActive = computed(() => this.filters().status === 'dead_letter');
+  readonly isDeadLetterFilterActive = computed(() => this.filters().status?.includes('dead_letter') ?? false);
   
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
@@ -124,8 +124,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     const queueId = this.selectedQueueId();
     let filtered = this.jobs();
 
-    if (currentFilters.status) {
-      filtered = filtered.filter(job => job.status === currentFilters.status);
+    if (currentFilters.status && currentFilters.status.length > 0) {
+      filtered = filtered.filter(job => currentFilters.status!.includes(job.status));
     }
     if (currentFilters.source) {
       filtered = filtered.filter(job => job.source === currentFilters.source);
@@ -144,8 +144,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly isEmptyState = computed(() => !this.loading() && this.filteredJobs().length === 0 && !this.error());
 
   // Status filter options
-  readonly statusOptions: { value: JobStatus | 'all'; label: string }[] = [
-    { value: 'all', label: 'All' },
+  readonly statusOptions: { value: JobStatus; label: string }[] = [
     { value: 'pending', label: 'Pending' },
     { value: 'processing', label: 'Processing' },
     { value: 'completed', label: 'Completed' },
@@ -295,10 +294,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.loadJobs();
   }
 
-  protected onStatusFilterChange(status: JobStatus | 'all'): void {
+  protected onStatusFilterChange(statuses: JobStatus[]): void {
     this.filters.update(filters => ({
       ...filters,
-      status: status === 'all' ? undefined : status
+      status: statuses.length > 0 ? statuses : undefined
     }));
     this.loadJobs();
   }

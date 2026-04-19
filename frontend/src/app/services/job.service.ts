@@ -26,7 +26,9 @@ export class JobService {
   listJobs(filters?: JobFilters): Observable<Job[]> {
     let params = new HttpParams();
     if (filters) {
-      if (filters.status) params = params.set('status', filters.status);
+      if (filters.status && filters.status.length > 0) {
+        params = params.set('status', filters.status.join(','));
+      }
       if (filters.source) params = params.set('source', filters.source);
       if (filters.agent_id) params = params.set('agent_id', filters.agent_id);
       if (filters.project_id) params = params.set('project_id', filters.project_id);

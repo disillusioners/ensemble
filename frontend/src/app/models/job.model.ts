@@ -39,7 +39,7 @@ export interface JobCreate {
 }
 
 export interface JobFilters {
-  status?: JobStatus;
+  status?: JobStatus[];
   source?: JobSource;
   agent_id?: string;
   project_id?: string;

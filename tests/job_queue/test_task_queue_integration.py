@@ -903,7 +903,7 @@ class TestIntegrationPriorityQueue:
         for _ in jobs:
             # Get current processing job from repository and complete it
             processing, _ = integration_service._repository.list(
-                status=JobStatus.PROCESSING.value,
+                statuses=[JobStatus.PROCESSING.value],
                 project_id="project-1"
             )
             if processing:
@@ -1056,7 +1056,7 @@ class TestIntegrationEndToEnd:
             for i in range(jobs_per_project):
                 # Get current processing job from repository and complete it
                 processing, _ = integration_service._repository.list(
-                    status=JobStatus.PROCESSING.value,
+                    statuses=[JobStatus.PROCESSING.value],
                     project_id=f"project-{project_id}"
                 )
                 if processing:
@@ -1064,7 +1064,7 @@ class TestIntegrationEndToEnd:
                 # Start next job if there is one
                 if i + 1 < jobs_per_project:
                     next_pending, _ = integration_service._repository.list(
-                        status=JobStatus.PENDING.value,
+                        statuses=[JobStatus.PENDING.value],
                         project_id=f"project-{project_id}"
                     )
                     if next_pending:

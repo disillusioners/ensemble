@@ -442,7 +442,7 @@ class JobQueueService:
     
     async def list_jobs(
         self,
-        status: Optional[JobStatus] = None,
+        statuses: Optional[list[str]] = None,
         project_id: Optional[str] = None,
         queue_id: Optional[str] = None,
         limit: int = 50,
@@ -450,7 +450,7 @@ class JobQueueService:
         """List jobs with optional filters.
         
         Args:
-            status: Optional status filter.
+            statuses: Optional list of status filters.
             project_id: Optional project ID filter.
             queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
@@ -458,10 +458,9 @@ class JobQueueService:
         Returns:
             List of JobItem objects.
         """
-        status_value = status.value if status else None
         jobs, _ = await asyncio.to_thread(
             self._repository.list,
-            status=status_value,
+            statuses=statuses,
             project_id=project_id,
             queue_id=queue_id,
             limit=limit,

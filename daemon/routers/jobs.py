@@ -297,7 +297,7 @@ async def list_jobs(
     """List jobs with optional filters.
     
     Query params:
-        - status: Filter by status (pending, processing, completed, failed, cancelled)
+        - status: Filter by status(es), comma-separated (pending, processing, completed, failed, cancelled, dead_letter)
         - project_id: Filter by project ID
         - queue_id: Filter by queue ID
         - limit: Maximum number of jobs to return (default: 50)
@@ -305,16 +305,25 @@ async def list_jobs(
     Returns:
         200 with list of jobs and total count
     """
-    # Validate status if provided
-    job_status = None
+    # Parse and validate statuses if provided
+    statuses = None
     if status:
-        try:
-            job_status = JobStatus(status.lower())
-        except ValueError:
+        # Parse, deduplicate, and normalize
+        status_list = list(dict.fromkeys(
+            s.strip().lower() for s in status.split(',') if s.strip()
+        ))
+        if len(status_list) > 20:
             raise HTTPException(
                 status_code=400,
-                detail={"error": "Invalid status", "message": f"Invalid status: {status}. Valid values: pending, processing, completed, failed, cancelled"}
+                detail={"error": "Too many status filters", "message": "Maximum 20 status values allowed"}
             )
+        invalid_statuses = [s for s in status_list if not JobStatus.is_valid(s)]
+        if invalid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "Invalid status", "message": f"Invalid status: {', '.join(invalid_statuses)}. Valid values: pending, processing, completed, failed, cancelled, dead_letter"}
+            )
+        statuses = status_list
     
     # Clamp limit
     limit = max(1, min(limit, 100))
@@ -345,7 +354,7 @@ async def list_jobs(
     
     # List jobs
     jobs = await service.list_jobs(
-        status=job_status,
+        statuses=statuses,
         project_id=project_id,
         limit=limit,
         queue_id=queue_id,
