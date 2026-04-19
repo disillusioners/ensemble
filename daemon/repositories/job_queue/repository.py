@@ -105,7 +105,9 @@ class JobRepository:
             JobItem if found, None otherwise.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.instance_id == instance_id)
+            stmt = select(JobItem).where(JobItem.instance_id == instance_id).where(
+                JobItem.deleted_at.is_(None)
+            )
             job = db_session.exec(stmt).first()
             return job
 
@@ -122,7 +124,9 @@ class JobRepository:
             JobItem if found, None otherwise.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.idempotency_key == idempotency_key)
+            stmt = select(JobItem).where(JobItem.idempotency_key == idempotency_key).where(
+                JobItem.deleted_at.is_(None)
+            )
             job = db_session.exec(stmt).first()
             return job
 
@@ -137,6 +141,7 @@ class JobRepository:
         queue_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        include_deleted: bool = False,
     ) -> tuple[list[JobItem], int]:
         """List jobs with optional filters and pagination.
         
@@ -146,6 +151,7 @@ class JobRepository:
             queue_id: Optional queue ID filter.
             limit: Maximum number of jobs to return.
             offset: Number of jobs to skip.
+            include_deleted: If False (default), exclude soft-deleted jobs.
             
         Returns:
             Tuple of (list of jobs, total count).
@@ -153,6 +159,8 @@ class JobRepository:
         with SQLModelSession(self.engine) as db_session:
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
+            if not include_deleted:
+                count_stmt = count_stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 count_stmt = count_stmt.where(JobItem.status.in_(statuses))
             if project_id:
@@ -163,6 +171,8 @@ class JobRepository:
 
             # Build list query with filters
             stmt = select(JobItem)
+            if not include_deleted:
+                stmt = stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 stmt = stmt.where(JobItem.status.in_(statuses))
             if project_id:
@@ -193,6 +203,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.project_id == project_id)
                 .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
             jobs = list(db_session.exec(stmt))
@@ -208,6 +219,7 @@ class JobRepository:
             stmt = (
                 select(JobItem)
                 .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc())
             )
             jobs = list(db_session.exec(stmt))
@@ -222,7 +234,9 @@ class JobRepository:
             List of all processing JobItem objects.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.status == JobStatus.PROCESSING.value)
+            stmt = select(JobItem).where(JobItem.status == JobStatus.PROCESSING.value).where(
+                JobItem.deleted_at.is_(None)
+            )
             jobs = list(db_session.exec(stmt))
             return jobs
 
@@ -240,6 +254,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.queue_id == queue_id)
                 .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
             jobs = list(db_session.exec(stmt))
@@ -267,12 +282,14 @@ class JobRepository:
             # Build count query
             count_stmt = select(func.count()).select_from(JobItem)
             count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
+            count_stmt = count_stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 count_stmt = count_stmt.where(JobItem.status.in_(statuses))
             total = db_session.exec(count_stmt).one()
 
             # Build list query with filters
             stmt = select(JobItem).where(JobItem.queue_id == queue_id)
+            stmt = stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 stmt = stmt.where(JobItem.status.in_(statuses))
             
@@ -419,7 +436,11 @@ class JobRepository:
         job_id: str,
         instance_id: str,
     ) -> Optional[JobItem]:
-        """Start a job atomically (PENDING -> PROCESSING)."""
+        """Start a job atomically (PENDING -> PROCESSING).
+        
+        Note: No deleted_at IS NULL check needed here — defense is at the query level above
+        (list_pending_by_project, list_all_pending, list_pending_by_queue all exclude deleted jobs)
+        """
         now = datetime.utcnow().isoformat()
         return self.atomic_transition(
             job_id,
@@ -490,8 +511,48 @@ class JobRepository:
     # DELETE
     # --------------------------------------------------------
 
-    def delete(self, job_id: str) -> dict[str, Any]:
-        """Delete a job by ID.
+    def soft_delete(self, job_id: str) -> Optional[JobItem]:
+        """Soft-delete a job by setting deleted_at timestamp.
+        
+        Idempotent - if already deleted, returns the job as-is.
+        
+        Args:
+            job_id: Job identifier.
+            
+        Returns:
+            JobItem if found, None otherwise.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            job = db_session.get(JobItem, job_id)
+            if job is None:
+                return None
+            if job.deleted_at is not None:
+                return job  # Already deleted, idempotent
+            job.deleted_at = datetime.utcnow().isoformat()
+            db_session.commit()
+            db_session.refresh(job)
+            return job
+
+    def restore(self, job_id: str) -> Optional[JobItem]:
+        """Restore a soft-deleted job by clearing deleted_at.
+        
+        Args:
+            job_id: Job identifier.
+            
+        Returns:
+            Restored JobItem if found, None otherwise.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            job = db_session.get(JobItem, job_id)
+            if job is None:
+                return None
+            job.deleted_at = None
+            db_session.commit()
+            db_session.refresh(job)
+            return job
+
+    def hard_delete(self, job_id: str) -> dict[str, Any]:
+        """Hard delete — use soft_delete() for normal operations.
         
         Args:
             job_id: Job identifier.
@@ -513,8 +574,8 @@ class JobRepository:
                 "agent_dir": job.agent_dir,
             }
 
-    def delete_completed(self) -> int:
-        """Delete all completed jobs.
+    def hard_delete_completed(self) -> int:
+        """Hard delete all completed jobs — use soft_delete() for normal operations.
         
         Returns:
             Number of jobs deleted.
@@ -527,8 +588,8 @@ class JobRepository:
             db_session.commit()
             return result.rowcount
 
-    def delete_by_project(self, project_id: str) -> int:
-        """Delete all jobs for a specific project.
+    def hard_delete_by_project(self, project_id: str) -> int:
+        """Hard delete all jobs for a specific project — use soft_delete() for normal operations.
         
         Args:
             project_id: Project identifier.
@@ -565,6 +626,7 @@ class JobRepository:
                 .where(JobItem.status == JobStatus.FAILED.value)
                 .where(JobItem.next_retry_at.is_not(None))
                 .where(col(JobItem.next_retry_at) <= now)
+                .where(JobItem.deleted_at.is_(None))
             )
             
             if project_id is not None:
