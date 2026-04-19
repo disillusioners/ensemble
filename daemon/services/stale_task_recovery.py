@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable, TYPE_CHECKING
 
 from daemon.repositories.task.models import TaskStatus
 
@@ -45,6 +45,7 @@ class StaleTaskRecovery:
         retry_backoff_base: int = DEFAULT_RETRY_BACKOFF_BASE,
         retry_backoff_max: int = DEFAULT_RETRY_BACKOFF_MAX,
         event_repository=None,
+        on_task_permanently_failed: "Callable[[str, str, str | None], None] | None" = None,  # NEW: callback(instance_id, error, message_id)
     ):
         """Initialize stale task recovery.
         
@@ -58,6 +59,8 @@ class StaleTaskRecovery:
             retry_backoff_base: Base for exponential backoff (seconds).
             retry_backoff_max: Maximum backoff time (seconds).
             event_repository: Optional EventRepository for logging recovery events.
+            on_task_permanently_failed: Optional callback(instance_id, error, message_id)
+                called when a task permanently fails.
         """
         self._task_repo = task_repository
         self._message_repo = message_repository
@@ -70,6 +73,7 @@ class StaleTaskRecovery:
         self._retry_backoff_max = retry_backoff_max
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._on_task_permanently_failed = on_task_permanently_failed  # NEW
     
     def start(self) -> None:
         """Start the background recovery thread."""
@@ -208,6 +212,19 @@ class StaleTaskRecovery:
                             )
                             self._log_recovery_event(task, "permanently_failed")
                             task_acted_upon = True
+                            # NEW: Notify parent
+                            if self._on_task_permanently_failed:
+                                try:
+                                    self._on_task_permanently_failed(
+                                        task.instance_id,
+                                        f"Stale task permanently failed after {self._max_retries} retries",
+                                        task.message_id,
+                                    )
+                                except Exception as cb_err:
+                                    logger.error(
+                                        f"Failed to notify parent of permanent task failure "
+                                        f"(instance={task.instance_id[:8]}..., error={cb_err})"
+                                    )
                 
                 elif current.status == TaskStatus.CANCELLED.value:
                     # Worker already cancelled it — check if retry was scheduled
@@ -240,6 +257,19 @@ class StaleTaskRecovery:
                             )
                             self._log_recovery_event(task, "permanently_failed")
                             task_acted_upon = True
+                            # NEW: Notify parent
+                            if self._on_task_permanently_failed:
+                                try:
+                                    self._on_task_permanently_failed(
+                                        task.instance_id,
+                                        f"Stale task permanently failed after {self._max_retries} retries",
+                                        task.message_id,
+                                    )
+                                except Exception as cb_err:
+                                    logger.error(
+                                        f"Failed to notify parent of permanent task failure "
+                                        f"(instance={task.instance_id[:8]}..., error={cb_err})"
+                                    )
                 
                 # FIX: W6 — Only fail the associated message if we actually acted upon the task
                 if task_acted_upon and task.message_id:
@@ -311,6 +341,19 @@ class StaleTaskRecovery:
                         self._log_recovery_event(task, "startup_permanently_failed")
                     
                     recovered += 1
+                    # NEW: Notify parent
+                    if self._on_task_permanently_failed:
+                        try:
+                            self._on_task_permanently_failed(
+                                task.instance_id,
+                                f"Startup recovery: max retries ({self._max_retries}) exceeded",
+                                task.message_id,
+                            )
+                        except Exception as cb_err:
+                            logger.error(
+                                f"Failed to notify parent of permanent task failure "
+                                f"(instance={task.instance_id[:8]}..., error={cb_err})"
+                            )
                     
                 except Exception as e:
                     logger.error(f"Startup recovery failed for task {task.id}: {e}")
@@ -347,6 +390,19 @@ class StaleTaskRecovery:
                         )
                         self._log_recovery_event(task, "orphan_permanently_failed")
                         recovered += 1
+                        # NEW: Notify parent
+                        if self._on_task_permanently_failed:
+                            try:
+                                self._on_task_permanently_failed(
+                                    task.instance_id,
+                                    f"Startup recovery (orphan): max retries ({self._max_retries}) exceeded",
+                                    task.message_id,
+                                )
+                            except Exception as cb_err:
+                                logger.error(
+                                    f"Failed to notify parent of permanent task failure "
+                                    f"(instance={task.instance_id[:8]}..., error={cb_err})"
+                                )
                     
                 except Exception as e:
                     logger.error(

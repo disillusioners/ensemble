@@ -33,6 +33,82 @@ def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
     return error
 
 
+def _classify_error_type(e: Exception) -> str:
+    """Classify an exception into an error_type string for _send_error_report.
+
+    Args:
+        e: The exception to classify.
+
+    Returns:
+        Error type string (e.g., "payload_too_large", "timeout_exhausted").
+    """
+    import openai
+    import httpx
+    from socket import ConnectionResetError, ConnectionAbortedError
+    from concurrent.futures import BrokenPipeError
+
+    exc_type = type(e)
+    exc_name = exc_type.__name__
+
+    # API status errors (includes 413, 401, 403, 404, 400, etc.)
+    if isinstance(e, openai.APIStatusError):
+        status = getattr(e, 'status_code', None)
+        if status == 413:
+            return "payload_too_large"
+        if status == 401:
+            return "authentication_error"
+        if status == 403:
+            return "forbidden"
+        if status == 404:
+            return "endpoint_not_found"
+        if status == 400:
+            return "bad_request"
+        if status == 429:
+            return "rate_limit"
+        if status and 500 <= status < 600:
+            return "server_error"
+        return f"api_error_{status}" if status else "api_error"
+
+    # Timeout errors
+    if isinstance(e, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError)):
+        return "timeout_exhausted"
+
+    # Context length errors
+    if exc_name == "ContextLengthExceededError":
+        return "context_length_exceeded"
+
+    # Circuit breaker errors
+    if exc_name == "CircuitOpenError":
+        return "circuit_breaker_open"
+
+    # Connection errors
+    if isinstance(e, (openai.APIConnectionError, ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return "connection_error"
+
+    # Bad request (non-context)
+    if isinstance(e, openai.BadRequestError):
+        return "bad_request"
+
+    # Validation errors
+    if exc_name in ("LLMResponseValidationError", "APIResponseValidationError"):
+        return "validation_error"
+
+    # Transient API errors (shouldn't reach here, but just in case)
+    if exc_name == "TransientAPIError":
+        return "transient_error"
+
+    # Infrastructure / processing errors (Category C from error catalog)
+    if isinstance(e, KeyError):
+        return "instance_not_found"
+    if isinstance(e, ValueError):
+        return "invalid_data"
+    if isinstance(e, RuntimeError):
+        return "runtime_error"
+
+    # Default
+    return "execution_error"
+
+
 class BaseProcessor(ABC):
     """Base class for task processors."""
 
@@ -213,8 +289,8 @@ class ProcessMessageProcessor(BaseProcessor):
             logger.error(f"Failed to process message task {task.id}: {error_msg}", exc_info=True)
 
             # Create error event
-            if self._event_bus:
-                await self._event_bus.create_error_event(
+            if self._manager._event_bus:
+                await self._manager._event_bus.create_error_event(
                     instance_id=task.instance_id,
                     error={
                         "task_id": task.id,
@@ -248,7 +324,21 @@ class ProcessMessageProcessor(BaseProcessor):
                     )
                 except Exception as lifecycle_err:
                     logger.warning(f"Failed to publish lifecycle event for error: {lifecycle_err}")
-            
+
+            # Send error report to parent (child failure notification)
+            # TaskProcessor is the primary reporting layer for processing-phase errors.
+            # This prevents the parent from staying stuck in WAITING_CHILDREN forever.
+            if hasattr(self._manager, '_send_error_report'):
+                try:
+                    await self._manager._send_error_report(
+                        instance_id=task.instance_id,
+                        error=error_msg,
+                        error_type=_classify_error_type(e),
+                        message_id=task.message_id,
+                    )
+                except Exception as report_err:
+                    logger.warning(f"Failed to send error report to parent: {report_err}")
+
             raise
 
 

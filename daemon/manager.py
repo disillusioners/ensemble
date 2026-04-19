@@ -68,6 +68,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Error report severity classification
+CRITICAL_ERROR_TYPES = frozenset({"max_retries_exceeded", "circuit_breaker_open"})
+RECOVERABLE_ERROR_TYPES = frozenset({"watchdog_timeout", "circuit_breaker_open"})
+
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
 
@@ -490,6 +494,27 @@ class InstanceManager:
         self._dead_letter_service = service
         logger.info("DeadLetterService connected to SessionManager")
 
+    def _on_stale_task_permanent_failure(self, instance_id: str, error: str, message_id: str | None) -> None:
+        """Bridge from StaleTaskRecovery thread to InstanceManager._send_error_report.
+        
+        Called on the recovery thread when a task permanently fails.
+        Uses MainLoopBridge to safely invoke the async _send_error_report method.
+        
+        Args:
+            instance_id: The instance ID that had the stale task.
+            error: The error message describing the failure.
+            message_id: Optional message ID associated with the task.
+        """
+        from .services.main_loop_bridge import MainLoopBridge
+        MainLoopBridge.run_async_no_wait(
+            self._send_error_report(
+                instance_id=instance_id,
+                error=error,
+                error_type="stale_task_failure",
+                message_id=message_id,
+            )
+        )
+
     def setup_worker_pool(
         self,
         num_workers: int = 4,
@@ -542,6 +567,7 @@ class InstanceManager:
             max_retries=svc.max_task_retries,
             retry_backoff_base=svc.task_retry_backoff_base,
             retry_backoff_max=svc.task_retry_backoff_max,
+            on_task_permanently_failed=self._on_stale_task_permanent_failure,
         )
         # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
         # even if recover_on_startup() raises an exception
@@ -1884,9 +1910,18 @@ Provide a concise summary:"""
         
         Called when a child instance encounters an unrecoverable error:
         - Max retries exceeded
-        - Watchdog timeout
-        - Circuit breaker opened
+        - Stale task recovery failure
+        - Cancellation (shutdown, user request)
+        - Circuit breaker opened (via CircuitOpenError)
         - Unhandled exception
+        
+        This method:
+        - Checks for duplicate error reports (idempotency)
+        - Fetches metadata outside transaction
+        - Performs atomic DB update: child status, message status, parent counter/cache,
+          hierarchy deletion, and parent cascade
+        - Enqueues error report message to parent
+        - Broadcasts child_failed SSE event
         
         Args:
             instance_id: The child instance ID that has failed.
@@ -1894,24 +1929,54 @@ Provide a concise summary:"""
             error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
             message_id: Optional message ID that triggered the error.
         """
+        from datetime import datetime, timezone
+        from sqlalchemy import func, select
+        from .repositories.message_queue.models import MessageQueue, MessageStatus
+        
         try:
-            # Prevent duplicate error reports - check if we already sent one
+            # Step 1: Dedup check - prevent duplicate error reports
+            # First try message_id-based dedup (most precise)
+            dedup_key = f"internal_error_report:{instance_id}"
+            dedup_source_filter = message_id  # Use None if no message_id
+
             if message_id:
                 meta_check = await asyncio.to_thread(self._instance_repository.get, instance_id)
                 if meta_check and meta_check.parent_id:
                     # Check for existing error report in parent's queue
                     existing = await asyncio.to_thread(
                         self._queue_repository.list,
-                        instance_id=meta_check.parent_id, 
-                        status="ready", 
+                        instance_id=meta_check.parent_id,
+                        status="ready",
                         limit=10
                     )
                     for existing_msg in existing:
-                        if existing_msg.source == f"internal_error_report:{instance_id}":
+                        if existing_msg.source == dedup_key:
                             logger.debug(f"Error report already queued for instance {instance_id[:8]}..., skipping duplicate")
                             return
+            else:
+                # Fallback: dedup by instance_id + error_type when no message_id
+                # This prevents duplicate reports when the same instance fails multiple times
+                # without an associated message
+                meta_check = await asyncio.to_thread(self._instance_repository.get, instance_id)
+                if meta_check and meta_check.parent_id:
+                    existing = await asyncio.to_thread(
+                        self._queue_repository.list,
+                        instance_id=meta_check.parent_id,
+                        status="ready",
+                        limit=10
+                    )
+                    for existing_msg in existing:
+                        # Match: same instance + same error_type
+                        msg_metadata = existing_msg.message_metadata or {}
+                        if (existing_msg.source == dedup_key and
+                                msg_metadata.get("error_type") == error_type):
+                            logger.debug(
+                                f"Error report already queued for instance {instance_id[:8]}... "
+                                f"(type={error_type}), skipping duplicate"
+                            )
+                            return
             
-            # Get instance metadata
+            # Step 2: Fetch metadata outside transaction
             meta = await asyncio.to_thread(self._instance_repository.get, instance_id)
             if not meta:
                 logger.warning(f"Cannot send error report: instance {instance_id} not found")
@@ -1926,16 +1991,79 @@ Provide a concise summary:"""
             
             logger.info(f"Instance {instance_id[:8]}... failed, sending error report to parent {parent_id[:8]}...")
             
-            # Truncate error to prevent massive messages
+            # Compute these before transaction to avoid issues if computation fails
             truncated_error = error[:2000] if len(error) > 2000 else error
+            severity = "critical" if error_type in CRITICAL_ERROR_TYPES else "warning"
             
-            # Determine severity based on error type
-            severity = "critical" if error_type in ["max_retries_exceeded", "circuit_breaker_open"] else "warning"
+            # Step 3: Atomic DB transaction
+            with Session(self._engine) as session:
+                # a) Get child instance
+                instance = session.get(Instance, instance_id)
+                if not instance:
+                    return
+                
+                # b) Set child instance status to ERROR
+                instance.status = InstanceStatus.ERROR.value
+                instance.updated_at = datetime.now(timezone.utc).isoformat()
+                
+                # c) Fail associated message if provided
+                if message_id:
+                    message = session.get(MessageQueue, message_id)
+                    if message:
+                        message.status = MessageStatus.FAILED.value
+                        message.completed_at = datetime.now(timezone.utc).isoformat()
+                
+                # d) Decrement parent's waiting_for counter
+                parent = session.get(Instance, parent_id)
+                if parent:
+                    parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+                    parent.last_activity_at = datetime.now(timezone.utc)
+                    parent.version = (parent.version or 1) + 1
+                    
+                    # e) Update parent's children[] cache
+                    if parent.children:
+                        try:
+                            children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
+                            if instance_id in children_list:
+                                children_list = [c for c in children_list if c != instance_id]
+                                parent.children = json.dumps(children_list)
+                        except (json.JSONDecodeError, TypeError):
+                            logger.warning(f"Failed to parse children JSON for parent {parent_id[:8]}...")
+                    
+                    # f) Delete from instance_hierarchy
+                    session.execute(
+                        text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                        {"child_id": instance_id}
+                    )
+                    
+                    # g) Cascade: parent WAITING_CHILDREN -> RUNNING or COMPLETED
+                    if parent.waiting_for == 0 and parent.status == InstanceStatus.WAITING_CHILDREN.value:
+                        # Check if parent has any pending messages
+                        parent_pending = session.exec(
+                            select(func.count())
+                            .select_from(MessageQueue)
+                            .where(MessageQueue.instance_id == parent.instance_id)
+                            .where(MessageQueue.status.in_([
+                                MessageStatus.READY.value,
+                                MessageStatus.PROCESSING.value,
+                                MessageStatus.RETRYING.value,
+                            ]))
+                        ).one()
+                        
+                        if parent_pending == 0:
+                            parent.status = InstanceStatus.COMPLETED.value
+                            parent.updated_at = datetime.now(timezone.utc).isoformat()
+                            logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
+                        else:
+                            parent.status = InstanceStatus.RUNNING.value
+                            logger.info(
+                                f"Parent {parent.instance_id[:8]}... has {parent_pending} pending messages, "
+                                f"transitioning to RUNNING after child error"
+                            )
             
-            # Format error report message
+            # Step 4: Enqueue error report message to parent (outside transaction)
             error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"
             
-            # Enqueue error report message to parent using repository
             msg = await asyncio.to_thread(
                 self._queue_repository.enqueue,
                 instance_id=parent_id,
@@ -1949,25 +2077,30 @@ Provide a concise summary:"""
                     "error": truncated_error,
                     "original_message_id": message_id,
                     "severity": severity,
-                    "recoverable": error_type in ["watchdog_timeout", "circuit_breaker_open"],
+                    "recoverable": error_type in RECOVERABLE_ERROR_TYPES,
                 }
             )
             report_message_id = msg.message_id
             
-            # Broadcast error report event
-            await self._live_hub.stream_lifecycle(
-                instance_id=parent_id,
-                event_type="child_failed",
-                data={
-                    "type": "error_report",
-                    "child_instance_id": instance_id,
-                    "agent_name": agent_name,
-                    "error_type": error_type,
-                    "error": truncated_error,
-                    "original_message_id": message_id,
-                    "severity": severity,
-                }
-            )
+            # Step 5: Broadcast child_failed SSE event with null guard
+            if self._live_hub:
+                try:
+                    await self._live_hub.stream_lifecycle(
+                        instance_id=parent_id,
+                        event_type="child_failed",
+                        data={
+                            "type": "error_report",
+                            "child_instance_id": instance_id,
+                            "agent_name": agent_name,
+                            "error_type": error_type,
+                            "error": truncated_error,
+                            "original_message_id": message_id,
+                            "severity": severity,
+                            "report_message_id": report_message_id,
+                        }
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to broadcast child_failed event: {e}")
             
             logger.info(f"Sent error report from {agent_name} ({instance_id[:8]}...) to parent ({parent_id[:8]}...)")
             
