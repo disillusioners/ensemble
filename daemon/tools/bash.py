@@ -42,7 +42,6 @@ async def bash(
     timeout: Optional[int] = 1800,
     workdir: Optional[str] = None,
     input: Optional[str] = None,
-    max_output_chars: int = 10000,
 ) -> str:
     """Execute a bash command and return the output. Use tool_help("bash") for details."""
     try:
@@ -88,28 +87,16 @@ async def bash(
 
         content = "\n\n".join(output_parts)
 
-        # Apply truncation to prevent 413 errors
-        # Estimate max_lines based on max_output_chars (approx 150 chars per line)
-        estimated_lines = min(100, max(50, max_output_chars // 150))
-        trunc_result = truncate_output(
-            content,
-            tool_name="bash",
-            max_chars=max_output_chars,
-            max_lines=estimated_lines,
-        )
+        # Apply character limit only (no line limit)
+        if len(content) > 150000:
+            truncated = content[:150000] + "\n\n--- OUTPUT TRUNCATED ---"
+            hint = """
+**⚠️ Output truncated at 150,000 characters.**
 
-        if trunc_result.truncated:
-            hint = f"""
----
-⚠️ **Output truncated**: Showing {trunc_result.shown_items} of {trunc_result.total_items} lines.
-
-**For full output**, redirect to file:
+For full output, redirect to file:
   `command > /tmp/output.txt` then use `read_file`
-
-**To continue**, use shell pagination:
-  `sed -n '{trunc_result.shown_items + 1},$p' file` or similar
 """
-            return trunc_result.content + hint
+            return truncated + hint
         return content
 
     except Exception as e:
@@ -129,9 +116,8 @@ Args:
     timeout: Timeout in seconds (default: 1800, 30 minutes)
     workdir: Working directory for command execution (default: current directory)
     input: Optional string to pass to stdin
-    max_output_chars: Maximum output characters to capture (default: 10000, max: 50000)
 
 Returns:
     Command output including stdout, stderr, and exit code.
-    Large output may be truncated — write to file for full results.
+    Output is truncated at 150,000 characters — redirect to file for full results.
 """
