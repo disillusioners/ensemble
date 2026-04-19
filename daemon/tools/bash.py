@@ -89,16 +89,27 @@ async def bash(
         content = "\n\n".join(output_parts)
 
         # Apply truncation to prevent 413 errors
-        # Note: 6000 chars is the recommended limit for LLM context safety
+        # Estimate max_lines based on max_output_chars (approx 150 chars per line)
+        estimated_lines = min(100, max(50, max_output_chars // 150))
         trunc_result = truncate_output(
             content,
             tool_name="bash",
             max_chars=max_output_chars,
-            max_lines=100,
+            max_lines=estimated_lines,
         )
 
         if trunc_result.truncated:
-            return trunc_result.content + trunc_result.pagination_hint
+            hint = f"""
+---
+⚠️ **Output truncated**: Showing {trunc_result.shown_items} of {trunc_result.total_items} lines.
+
+**For full output**, redirect to file:
+  `command > /tmp/output.txt` then use `read_file`
+
+**To continue**, use shell pagination:
+  `sed -n '{trunc_result.shown_items + 1},$p' file` or similar
+"""
+            return trunc_result.content + hint
         return content
 
     except Exception as e:

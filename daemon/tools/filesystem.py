@@ -182,14 +182,15 @@ def read_file(
         
         total_lines = len(lines)
         header = f"File: {file_path} ({total_lines} lines total)\n{'-' * 40}\n"
+        formatted_content = header + "\n".join(result)
         
         # Apply final truncation for safety
-        result = truncate_output(header + "\n".join(result), tool_name="read_file")
+        trunc_result = truncate_output(formatted_content, tool_name="read_file")
         
-        if result.truncated:
-            return result.content + "\n💡 **Better approach:** Use `read_file(..., offset=N, limit=N)` to page through the file."
+        if trunc_result.truncated:
+            return trunc_result.content + trunc_result.pagination_hint
         
-        return header + "\n".join(result)
+        return formatted_content
         
     except UnicodeDecodeError:
         return f"ERROR: Cannot read file as text (binary file?): {path}"

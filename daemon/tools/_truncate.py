@@ -157,6 +157,6 @@ def _build_hint(tool_name: str, total: int, shown: int) -> str:
 - `{tool_name}(..., offset={shown})` - Continue from where you left off
 - `{tool_name}(..., limit=N)` - Adjust page size
 
-**💡 Better approach:** Consider refining your query
-(e.g., `include="*.py"`, `pattern="specific_term"`) to narrow results.
+**💡 Better approach:** For large output, redirect to a file:
+  `command > /tmp/output.txt` then use `read_file` to view it.
 """
