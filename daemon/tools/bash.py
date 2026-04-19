@@ -12,7 +12,13 @@ CATEGORY_NAME = "Shell"
 CATEGORY_DOC = """\
 Execute shell commands.
 
-**Rules**: Always set `workdir` to the project directory. Never omit it.
+**Rules**:
+- Always set `workdir` to the project directory. Never omit it.
+- Avoid blocking commands (e.g., `tail -f`, `watch`, interactive editors) — except via skills that use CLI.
+- For large output, redirect to file and read with `read_file`:
+  ```
+  command > /tmp/output.txt && echo "Done"
+  ```
 """
 
 
@@ -100,6 +106,11 @@ async def bash(
 
 bash._full_doc_ = """Execute a bash command and return the output.
 
+**Agent Guidelines:**
+- Avoid blocking/long-running commands (e.g., `tail -f`, `watch`, interactive editors) — except via skills that use CLI.
+- If output may be large or truncated, write to a file and use `read_file` instead.
+- Example for large output: `command > /tmp/output.txt && echo "Saved to /tmp/output.txt"`
+
 Args:
     command: The bash command to execute. Can be:
         - A string (interpreted as shell command with shell=True)
@@ -110,5 +121,6 @@ Args:
     max_output_chars: Maximum output characters to capture (default: 10000, max: 50000)
 
 Returns:
-    Command output including stdout, stderr, and exit code
+    Command output including stdout, stderr, and exit code.
+    Large output may be truncated — write to file for full results.
 """
