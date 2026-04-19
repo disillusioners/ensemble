@@ -178,7 +178,7 @@ class JobProcessor:
                     # but the JobProcessor missed them (event-driven or polling gap).
                     processing, _ = await asyncio.to_thread(
                         self._queue_service._repository.list_by_queue, queue.queue_id,
-                        status="processing"
+                        statuses=["processing"]
                     )
                     for proc_job in (processing or []):
                         # Skip if instance already spawned (normal case).
