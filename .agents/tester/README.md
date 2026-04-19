@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-18 Job Processor project_id injection)
+## Test Results (Latest: 2026-04-19 Job Soft Delete Feature)
+
+### Job Soft Delete Feature (branch feature/job-soft-delete)
+- **34 new BE tests** — Repository (13) + API (11) + Scheduler safety (8) + Integration (2) — ALL PASS
+- **35 new FE tests** — Model (7) + Service (11) + Component (17) — ALL PASS
+- **953 job_queue tests pass** (14 skipped, 0 failed) — no regressions
+- **267 FE tests pass** (10 suites, 0 failed) — no regressions
+- **2 quick fixes** — Updated test files for renamed `hard_delete` methods
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- **CRITICAL**: All 9 execution-path methods verified to exclude soft-deleted jobs
+- See `.agents/tester/RESULTS/2026-04-19-job-soft-delete.md` for full report
+
+### Job Soft Delete Status: ✅ READY FOR MERGE
 
 ### Job Processor project_id injection (branch feature/job-autoinject-project-id)
 - **8 new unit tests** — ALL PASS (project_id propagation, edge cases, no regressions)
@@ -203,15 +215,15 @@ tests/
 | `frontend/src/app/components/job-detail-drawer/job-detail-drawer.component.spec.ts` | Computed properties, template rendering |
 
 ## Current Focus
-**Phase 4 — Event-Driven Dispatch & Idempotent Enqueue — TESTING COMPLETE**
+**Job Soft Delete Feature — TESTING COMPLETE**
 
 ### Status: ✅ READY FOR MERGE
 
-**Latest:** 838 job_queue tests pass (14 skipped, 0 failed), 2024 core tests pass (13 pre-existing failures), dev.sh validated, **17 progressive dispatch tests pass**
-**Branch:** feature/job-system-improvements
-**Commits:** `388d64c` (progressive dispatch tests + error handling fix)
-**Key verified:** Event-driven wake ≤100ms, polling fallback, idempotent enqueue (new/existing/terminal/TTL), RetryScheduler dispatch, queue resume dispatch, concurrent enqueue, metrics counters
-**All 12 functional/race/edge scenarios covered** — see RESULTS/2026-04-17-phase4-event-dispatch-idempotent-enqueue.md
+**Latest:** 34 BE tests pass (repository + API + scheduler safety), 35 FE tests pass (model + service + component), dev.sh validated
+**Branch:** feature/job-soft-delete
+**Commits:** `2cc8998` → `34cf89e` → `740efbf` → `4421c02` → `ae2b4f6` (implementation) + `9185a08` → `45b4bae` (tests)
+**Key verified:** All 9 execution-path methods exclude deleted jobs, soft_delete() idempotent, API soft-deletes terminal / cancels active, restore works, scheduler never picks up deleted PENDING jobs
+**See RESULTS/2026-04-19-job-soft-delete.md for full report**
 
 ### Previous Phase: Phase 2 — Task↔Job Feedback Loop — COMPLETE
 **799 job_queue tests pass (14 skipped, 0 failed), 1138 core tests pass (8 skipped, 0 failed), dev.sh validated**
