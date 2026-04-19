@@ -151,7 +151,10 @@ class ResponseDispatcher:
         # Get adapter from registry
         adapter = self._registry.get(source_id)
         if adapter is None:
-            logger.error(f"No adapter found for source_id={source_id}")
+            if source_id.startswith("internal_"):
+                logger.debug(f"No adapter needed for internal source: {source_id}")
+            else:
+                logger.error(f"No adapter found for source_id={source_id}")
             return
         
         # Create OutgoingMessage
@@ -221,7 +224,10 @@ class ResponseDispatcher:
         # Get adapter from registry
         adapter = self._registry.get(source_id)
         if adapter is None:
-            logger.error(f"No adapter found for source_id={source_id}")
+            if source_id.startswith("internal_"):
+                logger.debug(f"No adapter needed for internal source: {source_id}")
+            else:
+                logger.error(f"No adapter found for source_id={source_id}")
             return
         
         # Create OutgoingMessage
