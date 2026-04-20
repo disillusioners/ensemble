@@ -411,7 +411,9 @@ def build_instance_llms(
 
     if model_vision:
         logger.info(f"[Graph] Vision model configured: {model_vision}, will use for FIRST call only per DEC-003")
-        vision_config = {**llm_config_with_headers, "model": model_vision}
+        # Filter model_vision from config to avoid passing it to the API
+        vision_config = {k: v for k, v in llm_config_with_headers.items() if k != "model_vision"}
+        vision_config["model"] = model_vision
         llm_with_tools = ThinkingChatOpenAI(**vision_config).bind_tools(tools)
     else:
         logger.info("[Graph] No vision model configured, using standard model for all calls")
