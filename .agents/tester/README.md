@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-19 Internal Source Log Level Fix)
+## Test Results (Latest: 2026-04-20 Backend Vision Pipeline)
+
+### Backend Vision Pipeline Phase 1 (commits 8ec692c + 650eef5)
+- **45 vision unit tests** — ALL PASS (37 original + 8 edge-case additions)
+- **All test packs pass** — No regressions from vision changes
+- **2 quick fixes applied** — test_api.py images=None assertion + stale test file references
+- **Tool binding verified** — Tools work without vision model configured
+- **Text-only backward compatibility** — No regression
+- **dev.sh validated** — Server starts and runs cleanly for 30 seconds
+- See `.agents/tester/RESULTS/2026-04-20-vision-backend-pipeline.md` for full report
+
+### Backend Vision Pipeline Status: ✅ READY
 
 ### Internal Source Log Level Fix (commit 611ddcb)
 - **12 new dispatcher tests** — Internal source log levels (dispatch_completed + dispatch_message paths) — ALL PASS

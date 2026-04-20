@@ -2,13 +2,15 @@
   type="file" 
   accept="image/*" 
   multiple 
-  class="image-input" 
+  class="image-input"
+  #fileInput
   (change)="onFileSelected($event)"
 >
 
 <form class="input-container" (submit)="$event.preventDefault()">
   <div 
     class="input-wrapper"
+    [class.drag-over]="isDragOver()"
     (dragover)="onDragOver($event)"
     (dragleave)="onDragLeave($event)"
     (drop)="onDrop($event)"
@@ -22,6 +24,8 @@
               type="button" 
               class="remove-image-btn" 
               (click)="removeImage(img.id)"
+              aria-label="Remove image"
+              [title]="'Remove ' + img.name"
             >
               x
             </button>
@@ -33,11 +37,15 @@
       </div>
     }
     
+    @if (validationError()) {
+      <div class="validation-error">{{ validationError() }}</div>
+    }
+    
     <textarea
       #textarea
       [value]="message()"
       (input)="onInput($event)"
-      (keydown.enter)="handleSubmit(); $event.preventDefault()"
+      (keydown.enter)="onKeydownEnter($event)"
       [disabled]="disabled"
       placeholder="Type your message or drag images here..."
       rows="1"
@@ -49,6 +57,8 @@
       type="button" 
       class="attach-button" 
       (click)="onAttachClick()"
+      aria-label="Attach images"
+      title="Attach images"
       [disabled]="images().length >= MAX_IMAGES"
     >
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">

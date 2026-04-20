@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -54,6 +54,8 @@ export class ChatComponent implements OnInit, OnDestroy {
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
   readonly showToolCalls = signal(localStorage.getItem('ensemble-show-toolcalls') === 'true');
+
+  @ViewChild(MessageInputComponent) messageInputRef!: MessageInputComponent;
 
   readonly isStreaming = this.sseService.isStreaming;
 
@@ -381,13 +383,14 @@ export class ChatComponent implements OnInit, OnDestroy {
     
     this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
       next: (_response) => {
-        // Wait for the message to arrive via SSE - server assigns message_id
-        // The SSE service will upsert it when received
+        // Clear input only on success — error recovery keeps input populated
+        this.messageInputRef?.clearInput();
       },
       error: (err) => {
         console.error('Failed to send message:', err);
         this.sendError.set(err instanceof Error ? err.message : 'Failed to send message');
         this.isSending.set(false);
+        // Do NOT clear input on error — user can retry
       }
     });
   }

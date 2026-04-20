@@ -1,5 +1,5 @@
 import { Injectable, NgZone, signal } from '@angular/core';
-import type { Message, SSEEvent } from '../models';
+import type { Message, SSEEvent, ToolCall } from '../models';
 
 @Injectable({
   providedIn: 'root'
@@ -43,17 +43,19 @@ export class SseService {
   /**
    * Map raw SSE message data to Message type.
    */
-  private mapToMessage(data: any): Message {
+  private mapToMessage(data: Record<string, unknown>): Message {
     return {
-      message_id: data.message_id,
-      role: data.role,
-      content: data.content || '',
-      thinking: data.thinking || null,
-      thinking_extracted: data.thinking_extracted || null,
-      tool_calls: data.tool_calls || null,
-      created_at: data.created_at || new Date().toISOString(),
-      instance_id: data.instance_id,
-      images: data.images || undefined,
+      message_id: data['message_id'] as string,
+      role: (data['role'] as 'user' | 'assistant' | 'system' | 'tool') || 'assistant',
+      content: (data['content'] as string) || '',
+      thinking: (data['thinking'] as string | null) || null,
+      thinking_extracted: (data['thinking_extracted'] as string | null) || null,
+      tool_calls: Array.isArray(data['tool_calls']) ? data['tool_calls'] as ToolCall[] : undefined,
+      created_at: (data['created_at'] as string) || new Date().toISOString(),
+      instance_id: data['instance_id'] as string | undefined,
+      images: Array.isArray(data['images']) 
+        ? (data['images'] as string[]).filter((img: unknown) => typeof img === 'string' && img.startsWith('data:image/'))
+        : undefined,
     };
   }
 

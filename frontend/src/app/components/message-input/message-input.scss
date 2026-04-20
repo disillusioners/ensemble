@@ -206,3 +206,13 @@ $border-color: #374151;
     cursor: not-allowed;
   }
 }
+
+// Validation error message
+.validation-error {
+  padding: 0.25rem 0.75rem;
+  color: #ef4444;
+  font-size: 0.8rem;
+  background-color: rgba(#ef4444, 0.1);
+  border-radius: 0.375rem;
+  margin: 0 0.75rem 0.25rem;
+}

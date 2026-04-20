@@ -1,9 +1,9 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, OnDestroy } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 export interface MessagePayload {
   content: string;
-  images: string[];
+  images?: string[];  // optional, not required
 }
 
 interface FilePreview {
@@ -20,8 +20,9 @@ interface FilePreview {
   templateUrl: './message-input.html',
   styleUrls: ['./message-input.scss']
 })
-export class MessageInputComponent implements OnDestroy {
+export class MessageInputComponent {
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
+  @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
   
   @Input() disabled = false;
   @Input() agentColor = 'coder';
@@ -31,6 +32,8 @@ export class MessageInputComponent implements OnDestroy {
 
   message = signal('');
   images = signal<FilePreview[]>([]);
+  isDragOver = signal(false);
+  validationError = signal<string | null>(null);
 
   protected readonly MAX_IMAGES = 3;
   protected readonly MAX_IMAGE_SIZE = 10 * 1024 * 1024;
@@ -67,10 +70,12 @@ export class MessageInputComponent implements OnDestroy {
     };
 
     this.sendMessage.emit(payload);
+    // Do NOT clear message/images here — parent calls clearInput() on API success
+  }
+
+  clearInput(): void {
     this.message.set('');
     this.images.set([]);
-    
-    // Reset textarea height
     if (this.textareaRef) {
       this.textareaRef.nativeElement.style.height = 'auto';
     }
@@ -85,11 +90,15 @@ export class MessageInputComponent implements OnDestroy {
     target.style.height = `${Math.min(target.scrollHeight, 150)}px`;
   }
 
+  onKeydownEnter(event: Event): void {
+    const keyboardEvent = event as KeyboardEvent;
+    if (keyboardEvent.shiftKey) return; // Allow newline
+    event.preventDefault();
+    this.handleSubmit();
+  }
+
   onAttachClick(): void {
-    const input = document.querySelector('.image-input') as HTMLInputElement;
-    if (input) {
-      input.click();
-    }
+    this.fileInputRef.nativeElement.click();
   }
 
   onFileSelected(event: Event): void {
@@ -110,23 +119,29 @@ export class MessageInputComponent implements OnDestroy {
     });
   }
 
+  private showValidationError(message: string): void {
+    this.validationError.set(message);
+    setTimeout(() => this.validationError.set(null), 4000);
+  }
+
   async processFiles(files: File[]): Promise<void> {
     for (const file of files) {
       // Check count limit
       if (this.images().length >= this.MAX_IMAGES) {
-        alert(`Maximum ${this.MAX_IMAGES} images allowed`);
+        this.showValidationError('You can only attach up to ' + this.MAX_IMAGES + ' images.');
         break;
       }
 
       // Check file type
       if (!this.ACCEPTED_TYPES.includes(file.type)) {
-        alert(`Invalid file type: ${file.type}. Please use PNG, JPEG, GIF, WebP, BMP, or TIFF.`);
+        this.showValidationError('Unsupported image type. Please use PNG, JPEG, GIF, WebP, BMP, or TIFF.');
         continue;
       }
 
       // Check file size
       if (file.size > this.MAX_IMAGE_SIZE) {
-        alert(`File too large: ${file.name}. Maximum size is 10MB.`);
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        this.showValidationError('File "' + file.name + '" is ' + sizeMB + 'MB. Maximum is 10MB.');
         continue;
       }
 
@@ -140,7 +155,7 @@ export class MessageInputComponent implements OnDestroy {
         };
         this.images.update(imgs => [...imgs, filePreview]);
       } catch (error) {
-        alert(`Failed to read file: ${file.name}`);
+        this.showValidationError('Failed to read file "' + file.name + '".');
       }
     }
   }
@@ -151,34 +166,21 @@ export class MessageInputComponent implements OnDestroy {
 
   onDragOver(event: DragEvent): void {
     event.preventDefault();
-    const wrapper = document.querySelector('.input-wrapper');
-    if (wrapper) {
-      wrapper.classList.add('drag-over');
-    }
+    this.isDragOver.set(true);
   }
 
   onDragLeave(event: DragEvent): void {
     event.preventDefault();
-    const wrapper = document.querySelector('.input-wrapper');
-    if (wrapper) {
-      wrapper.classList.remove('drag-over');
-    }
+    this.isDragOver.set(false);
   }
 
   onDrop(event: DragEvent): void {
     event.preventDefault();
-    const wrapper = document.querySelector('.input-wrapper');
-    if (wrapper) {
-      wrapper.classList.remove('drag-over');
-    }
+    this.isDragOver.set(false);
     
     const files = event.dataTransfer?.files;
     if (files) {
       this.processFiles(Array.from(files));
     }
-  }
-
-  ngOnDestroy(): void {
-    // No cleanup needed for data URIs
   }
 }
