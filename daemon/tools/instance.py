@@ -375,6 +375,15 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         if instance_info.get("terminated"):
             return f"ERROR: Instance '{instance_id}' is terminated. Cannot send message."
 
+        # Check if there's already a message in progress (pending or processing)
+        stats = manager.get_queue_stats(instance_id)
+        if stats["pending_count"] > 0 or stats["processing_count"] > 0:
+            return (
+                f"ERROR: Instance '{instance_id}' already has a message in progress. "
+                f"Pending: {stats['pending_count']}, Processing: {stats['processing_count']}. "
+                "Please wait for the current message to complete before sending another."
+            )
+
         # Enqueue the message via worker pool (creates MessageQueue + Task atomically)
         result = await manager.enqueue_message(
             instance_id=instance_id,
