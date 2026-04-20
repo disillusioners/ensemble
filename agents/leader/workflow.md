@@ -173,7 +173,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 ### Approver Call Limit
 **Max 3 calls** to Approver per plan. After 3 rejections:
 - **TrueAuto mode:** Proceed with implementation — planning cannot foresee everything, and fixing issues during implementation is the best solution
-- **Normal mode:** Present best plan to user with notes and let user decide
+- **SemiAuto mode:** Present best plan to user with notes and let user decide
 
 ---
 
@@ -187,7 +187,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 
 **The leader uses judgment to decide when review is needed, not rigid rules.**
 
-**⚠️ TrueAuto Override:** In TrueAuto mode, always use Reviewer and Tester for any scope except Tiny. Skip complexity assessment — always run full review cycle.
+**⚠️ SemiAuto Override:** In SemiAuto mode, use complexity-based skipping for Reviewer/Tester. Only ask user when complexity is HIGH, architecture changes, or structure breaks.
 
 ```raw
 1. Delegate to Coder: "Implement [goal]. [Key constraints]. [Context from plan if available]."
@@ -246,7 +246,7 @@ I support two workflows. The user may invoke them sequentially within a single s
      - Report to user with details
      - Stop workflow
 
-2. **Not in TrueAuto mode:**
+2. **In SemiAuto mode:**
    - Report to user immediately
    - Stop workflow
 ```
