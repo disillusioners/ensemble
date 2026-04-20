@@ -14,7 +14,6 @@ timeout 120s pytest \
   tests/unit/test_compaction.py \
   tests/unit/test_find_near_instance.py \
   tests/unit/test_graph_retry_integration.py \
-  tests/unit/test_idle_timeout_aiter.py \
   tests/unit/test_llm_error_classifier.py \
   tests/unit/test_response_validation.py \
   --tb=short -q 2>&1

@@ -331,7 +331,8 @@ async def test_send_message_success(client, mock_manager):
     mock_manager.enqueue_message.assert_called_once_with(
         instance_id="test-instance-id",
         message="Hello, agent!",
-        source="api"
+        source="api",
+        images=None
     )
 
 

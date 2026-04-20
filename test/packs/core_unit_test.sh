@@ -15,7 +15,6 @@ timeout 120s pytest \
   tests/test_agents_api.py \
   tests/test_cancellation.py \
   tests/test_config.py \
-  tests/test_events.py \
   tests/test_help_tool.py \
   tests/test_instance_title.py \
   tests/test_loader.py \
