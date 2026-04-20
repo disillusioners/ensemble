@@ -8,14 +8,14 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-04-20 | ✅ PASS (vision backend, no regressions) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-04-20 | ✅ PASS (611 passed, Phase 2 FE no regression) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-20 | ✅ PASS (137 passed) |
-| compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-20 | ✅ PASS |
-| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-04-20 | ✅ PASS (vision images=None fix applied) |
-| vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-20 | ✅ PASS (45 tests, includes 8 edge-case additions) |
-| job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-3 + Phase 2 observer/recovery/cancellation/atomic/state-machine + Phase 2 feedback + Phase 4 event dispatch/idempotent enqueue verify tests + DLQ retry + replay-all + project_id injection + soft delete (77 tests across 3 files) + 42 tool pack tests | 2 min | 2026-04-19 | ✅ PASS (42 new tool pack tests, 1316 core tests, no regressions) |
-| frontend_unit_test | frontend/jest.config.js | Angular frontend job queue (model, services, SSE, components) + Phase 3 queue service/model + DLQ model/service tests + soft delete (35 tests) — Jest | 2 min | 2026-04-19 | ✅ PASS (267 passed, includes 35 new soft delete tests) |
-| worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-20 | ✅ PASS (37 passed) |
+| compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-20 | ✅ PASS (171 passed) |
+| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-04-20 | ✅ PASS (148 passed, 8 skipped, project_list quick fix) |
+| vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-20 | ✅ PASS (45 tests) |
+| job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-3 + Phase 2 observer/recovery/cancellation/atomic/state-machine + Phase 2 feedback + Phase 4 event dispatch/idempotent enqueue verify tests + DLQ retry + replay-all + project_id injection + soft delete (77 tests across 3 files) + 42 tool pack tests | 2 min | 2026-04-20 | ✅ PASS (948 passed, 19 skipped, FIFO order fix) |
+| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service) | 2 min | 2026-04-20 | ✅ PASS (278 passed, Phase 2 image upload tests included) |
+| worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-20 | ✅ PASS (14 passed) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-12 | ✅ PASS (16 passed) |
 
 ## Integration Test Packs
