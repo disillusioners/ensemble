@@ -1875,7 +1875,7 @@ Provide a concise summary:"""
                     return
                 else:
                     # No children - safe to complete immediately
-                    logger.debug(f"Instance {instance_id[:8]}... completed (no parent, no children)")
+                    logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
                     await self._publish_instance_lifecycle_event(
                         instance_id=instance_id,
                         status="completed",
