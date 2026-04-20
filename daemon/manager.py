@@ -1574,15 +1574,16 @@ Provide a concise summary:"""
         from .repositories.message_queue.models import MessageQueue, MessageStatus
         
         # Check for pending/processing messages for this instance
-        # Note: Don't check PROCESSING status for the current message being checked
-        # (it's the message that just finished processing)
+        # Exclude only the completed message by ID (not by status) so that
+        # newly sent messages with PROCESSING status are properly counted
         pending_count = session.exec(
             select(func.count())
             .select_from(MessageQueue)
             .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.message_id != completed_message_id)
             .where(MessageQueue.status.in_([
                 MessageStatus.READY.value,
-                # MessageStatus.PROCESSING.value,  # Excluded - we're checking this message
+                MessageStatus.PROCESSING.value,  # Include - excluded by ID instead
                 MessageStatus.RETRYING.value,
             ]))
         ).one()
