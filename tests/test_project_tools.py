@@ -144,13 +144,13 @@ class TestProjectList:
         
         result = tool_map["project_list"].invoke({})
         
-        assert len(result) == 2
+        assert len(result["projects"]) == 2
 
     def test_list_empty(self, tool_map):
         """Test listing with no projects."""
         result = tool_map["project_list"].invoke({})
         
-        assert result == []
+        assert result["projects"] == []
 
     def test_list_by_status(self, tool_map):
         """Test filtering by status."""
@@ -163,7 +163,7 @@ class TestProjectList:
         
         result = tool_map["project_list"].invoke({"status": "paused"})
         
-        assert len(result) == 1
+        assert len(result["projects"]) == 1
 
     def test_list_by_type(self, tool_map):
         """Test filtering by project type."""
@@ -172,8 +172,8 @@ class TestProjectList:
         
         result = tool_map["project_list"].invoke({"project_type": "software"})
         
-        assert len(result) == 1
-        assert result[0]["project_type"] == "software"
+        assert len(result["projects"]) == 1
+        assert result["projects"][0]["project_type"] == "software"
 
     def test_list_by_tags(self, tool_map):
         """Test filtering by tags."""
@@ -182,7 +182,7 @@ class TestProjectList:
         
         result = tool_map["project_list"].invoke({"tags": ["python", "web"]})
         
-        assert len(result) == 1
+        assert len(result["projects"]) == 1
 
 
 class TestProjectSearch:
