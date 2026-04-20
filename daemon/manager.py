@@ -1709,7 +1709,12 @@ Provide a concise summary:"""
             return False, None, None
         
         # Decrement parent's waiting_for counter
-        parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+        old_waiting = parent.waiting_for or 0
+        parent.waiting_for = max(0, old_waiting - 1)
+        logger.info(
+            f"waiting_for decremented: {old_waiting} -> {parent.waiting_for} "
+            f"(parent={parent.instance_id[:8]}..., child={instance.instance_id[:8]}...)"
+        )
         parent.last_activity_at = datetime.now(timezone.utc)
         parent.version = (parent.version or 1) + 1
         
@@ -1747,6 +1752,7 @@ Provide a concise summary:"""
                     MessageStatus.RETRYING.value,
                 ]))
             ).one()
+            parent_pending = parent_pending[0] if isinstance(parent_pending, tuple) else parent_pending
             
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
@@ -1854,6 +1860,9 @@ Provide a concise summary:"""
             logger.warning(f"No content found for instance {instance_id[:8]}..., skipping completion check")
             return
         
+        from sqlalchemy import func, select
+        from .repositories.message_queue.models import MessageQueue, MessageStatus
+        
         with Session(self._engine) as session:
             # Get instance metadata
             instance = session.get(Instance, instance_id)
@@ -1873,16 +1882,40 @@ Provide a concise summary:"""
                         f"{instance.waiting_for} children, status=WAITING_CHILDREN"
                     )
                     return
-                else:
-                    # No children - safe to complete immediately
-                    logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
-                    await self._publish_instance_lifecycle_event(
-                        instance_id=instance_id,
-                        status="completed",
-                        error=None,
-                        parent_id=None,
+                
+                # waiting_for == 0, but check for pending messages before completing.
+                # This handles the case where child completion reports are still queued
+                # but waiting_for was already decremented by a previous cascade.
+                pending_count = session.exec(
+                    select(func.count())
+                    .select_from(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.READY.value,
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalar_one()
+                
+                if pending_count > 0:
+                    # Still has pending messages (e.g., child completion reports) - wait
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... waiting_for=0 but has {pending_count} "
+                        f"pending messages, status=WAITING_CHILDREN"
                     )
                     return
+                
+                # No children, no pending messages - safe to complete
+                logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
+                await self._publish_instance_lifecycle_event(
+                    instance_id=instance_id,
+                    status="completed",
+                    error=None,
+                    parent_id=None,
+                )
+                return
             
             # Idempotency checks
             if not await self._should_send_completion_report(session, instance_id, completed_message_id):
