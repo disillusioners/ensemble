@@ -1076,7 +1076,6 @@ class InstanceManager:
             message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
                 Used to skip project injection for internal agent messages.
             images: Optional list of base64-encoded images for multimodal content.
-        
 
         Returns:
             MessageResult with response data.

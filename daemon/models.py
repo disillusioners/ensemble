@@ -1,8 +1,11 @@
 from datetime import datetime
+import re
 from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_BASE64_IMAGE_PATTERN = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp|bmp|tiff);base64,[A-Za-z0-9+/=]+$')
 
 
 class InstanceStatus(str, Enum):
@@ -137,13 +140,8 @@ class MessageCreate(BaseModel):
         if len(v) > 3:
             raise ValueError("Maximum 3 images allowed per message")
         
-        import re
-        # Pattern for base64 data URI: allowlist of safe image MIME types only
-        # Excludes SVG (XSS risk) and any other non-image types
-        base64_pattern = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp|bmp|tiff);base64,[A-Za-z0-9+/=]+$')
-        
         for i, img in enumerate(v):
-            if not base64_pattern.match(img):
+            if not _BASE64_IMAGE_PATTERN.match(img):
                 raise ValueError(
                     f"Invalid image format at index {i}: must be a base64 data URI "
                     f"(e.g., 'data:image/png;base64,...')"

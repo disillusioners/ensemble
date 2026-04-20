@@ -406,15 +406,13 @@ def build_instance_llms(
     Returns:
         Tuple of (llm_with_tools, llm_standard)
     """
-    llm_vision = None
     llm_standard = None
     llm_with_tools = None
 
     if model_vision:
         logger.info(f"[Graph] Vision model configured: {model_vision}, will use for FIRST call only per DEC-003")
         vision_config = {**llm_config_with_headers, "model": model_vision}
-        llm_vision = ThinkingChatOpenAI(**vision_config)
-        llm_with_tools = llm_vision.bind_tools(tools)
+        llm_with_tools = ThinkingChatOpenAI(**vision_config).bind_tools(tools)
     else:
         logger.info("[Graph] No vision model configured, using standard model for all calls")
 
