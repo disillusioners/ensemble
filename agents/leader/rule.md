@@ -99,7 +99,7 @@ Need to do something?
   - Craft quick optimization plan to fix test time
   - Re-delegate to Tester with optimization plan
   - If still fails → Report to user and stop
-- **Non-TrueAuto mode:** Report to user immediately and stop
+- **SemiAuto mode:** Report to user immediately and stop
 
 ## Must Not
 

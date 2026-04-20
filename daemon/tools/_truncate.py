@@ -149,14 +149,21 @@ def truncate_dict_result(
 
 def _build_hint(tool_name: str, total: int, shown: int) -> str:
     """Build pagination hint message."""
-    return f"""
----
-⚠️ **Results truncated**: Showing {shown} of {total} items.
-
-**To see more, use paging parameters:**
-- `{tool_name}(..., offset={shown})` - Continue from where you left off
-- `{tool_name}(..., limit=N)` - Adjust page size
-
-**💡 Better approach:** For large output, redirect to a file:
-  `command > /tmp/output.txt` then use `read_file` to view it.
-"""
+    hint_lines = [
+        "---",
+        f"⚠️ **Results truncated**: Showing {shown} of {total} items.",
+        "",
+        "**To see more, use paging parameters:**",
+        f"- `{tool_name}(..., offset={shown})` - Continue from where you left off",
+        f"- `{tool_name}(..., limit=N)` - Adjust page size",
+    ]
+    
+    # Don't suggest redirect-to-file for tools with built-in paging
+    if tool_name not in ("read_file", "grep_files", "glob_files"):
+        hint_lines.extend([
+            "",
+            "**💡 Better approach:** For large output, redirect to a file:",
+            "  `command > /tmp/output.txt` then use `read_file` to view it.",
+        ])
+    
+    return "\n".join(hint_lines)
