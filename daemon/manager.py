@@ -792,13 +792,11 @@ class InstanceManager:
                         children_list.append(instance_id)
                         parent.children = json.dumps(children_list)
                         logger.info(f"Added child {instance_id} to parent's children list")
-                    parent.waiting_for += 1
-                    # Update parent status to WAITING_CHILDREN if it was IDLE
-                    if parent.status == InstanceStatus.IDLE.value:
-                        parent.status = InstanceStatus.WAITING_CHILDREN.value
-                        logger.info(f"Parent {parent_id} status changed to WAITING_CHILDREN")
+                    # NOTE: waiting_for is NOT incremented here
+                    # Only send_message to a child increments waiting_for
+                    # This ensures waiting_for accurately tracks pending work, not just child existence
                     session.commit()
-                    logger.info(f"Parent {parent_id} updated: children={children_list}, waiting_for={parent.waiting_for}")
+                    logger.info(f"Parent {parent_id} updated: children={children_list}")
                 else:
                     logger.warning(f"Parent {parent_id} not found in DB when updating children list for child {instance_id}")
         

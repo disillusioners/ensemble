@@ -382,6 +382,19 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             source=f"internal_agent:{current_instance_id}"
         )
         message_id = result.message_id
+
+        # Increment waiting_for counter if sender is the parent of the target instance
+        # This handles the case where a parent reuses an existing child (vs first spawn)
+        from sqlmodel import Session
+        from ..repositories.instance.models import Instance
+        with Session(manager._engine) as session:
+            target_instance = session.get(Instance, instance_id)
+            if target_instance and target_instance.parent_id == current_instance_id:
+                parent_instance = session.get(Instance, current_instance_id)
+                if parent_instance:
+                    parent_instance.waiting_for += 1
+                    session.add(parent_instance)
+                    session.commit()
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     
