@@ -138,8 +138,9 @@ class MessageCreate(BaseModel):
             raise ValueError("Maximum 3 images allowed per message")
         
         import re
-        # Pattern for base64 data URI: data:image/...;base64,... 
-        base64_pattern = re.compile(r'^data:image/[^;]+;base64,[A-Za-z0-9+/=]+$')
+        # Pattern for base64 data URI: allowlist of safe image MIME types only
+        # Excludes SVG (XSS risk) and any other non-image types
+        base64_pattern = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp|bmp|tiff);base64,[A-Za-z0-9+/=]+$')
         
         for i, img in enumerate(v):
             if not base64_pattern.match(img):
@@ -150,7 +151,9 @@ class MessageCreate(BaseModel):
             
             # Estimate original size from base64: base64_size * 3/4 ≈ original size
             # Max 10MB = 10 * 1024 * 1024 bytes
-            base64_size = len(img)
+            # Use only the base64 portion (after the comma) for accurate size calculation
+            base64_str = img.split(",", 1)[1] if "," in img else img[len("data:image/png;base64,"):]
+            base64_size = len(base64_str)
             original_size = base64_size * 3 // 4
             max_size = 10 * 1024 * 1024  # 10MB
             if original_size > max_size:

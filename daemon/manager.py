@@ -75,6 +75,25 @@ RECOVERABLE_ERROR_TYPES = frozenset({"watchdog_timeout", "circuit_breaker_open"}
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
 
+
+def _build_message_content(message: str, images: list[str] | None) -> str | list:
+    """Build multimodal content array for messages with optional images.
+    
+    Args:
+        message: The text content of the message.
+        images: Optional list of base64 image data URIs.
+        
+    Returns:
+        String message if no images, otherwise list with text and image_url blocks.
+    """
+    if images:
+        content = [{"type": "text", "text": message}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": img}})
+        return content
+    return message
+
+
 # Patterns for extracting project keywords from messages
 # Use [a-zA-Z][\w-]* to match identifiers starting with a letter (not partial words)
 # Use (?!\w) to ensure identifier is not followed by another word character
@@ -1221,33 +1240,15 @@ class InstanceManager:
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
-                # Build multimodal content if images present
-                if images:
-                    content = [{"type": "text", "text": message}]
-                    for img in images:
-                        content.append({"type": "image_url", "image_url": {"url": img}})
-                    graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
-                else:
-                    graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
+                content = _build_message_content(message, images)
+                graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
         else:
             # First attempt - add message to conversation
-            # Build multimodal content if images present
-            if images:
-                content = [{"type": "text", "text": message}]
-                for img in images:
-                    content.append({"type": "image_url", "image_url": {"url": img}})
-                graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
-            else:
-                graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
+            content = _build_message_content(message, images)
+            graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
         
         # Build user message for pre-emit - use multimodal content if images present
-        if images:
-            content = [{"type": "text", "text": message}]
-            for img in images:
-                content.append({"type": "image_url", "image_url": {"url": img}})
-            user_msg = HumanMessage(content=content, id=message_id)
-        else:
-            user_msg = HumanMessage(content=message, id=message_id)
+        user_msg = HumanMessage(content=_build_message_content(message, images), id=message_id)
         
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
@@ -1504,14 +1505,16 @@ class InstanceManager:
         conversation = "\n".join(conversation_text)
         
         # Create LLM client for summarization using the same config pattern
+        # Filter model_vision from config to avoid noisy LangChain warnings
         llm_config = {
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
-            "model_vision": self.config.llm.model_vision,
             "temperature": 0.3,  # Lower temperature for more focused summaries
             "default_headers": {"x-proxy-app": "ensemble"},
         }
+        # Remove model_vision if present (summarization doesn't need vision)
+        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
         
         # Import here to use the same pattern as graph.py
         from .graph import ThinkingChatOpenAI
@@ -2230,13 +2233,15 @@ Provide a concise summary:"""
         
         # Create LLM client for title generation
         # Use dedicated title model (falls back to main model if not configured)
+        # Filter model_vision from config to avoid noisy LangChain warnings
         llm_config = {
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model_title,
-            "model_vision": self.config.llm.model_vision,
             "temperature": 0.3,  # Lower temperature for more focused titles
         }
+        # Remove model_vision if present (title generation doesn't need vision)
+        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
         
         # Import here to use the same pattern as graph.py
         from .graph import ThinkingChatOpenAI

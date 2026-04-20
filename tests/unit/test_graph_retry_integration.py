@@ -383,12 +383,12 @@ class TestErrorClassifierIntegration:
     """Test 10: Error classifier is applied before with_retry."""
 
     def test_error_classifier_before_retry(self):
-        """Error classifier should be applied BEFORE with_retry in build_instance_graph."""
+        """Error classifier should be applied BEFORE with_retry in build_instance_llms."""
         import inspect
-        from daemon.graph import build_instance_graph
+        from daemon.graph import build_instance_llms
         
         # Read the source code to verify order
-        source = inspect.getsource(build_instance_graph)
+        source = inspect.getsource(build_instance_llms)
         
         # Remove comments to avoid false positives from docstrings/comments
         lines = source.split('\n')
@@ -414,9 +414,9 @@ class TestErrorClassifierIntegration:
     def test_retry_uses_retry_predicate(self):
         """with_retry should use retry=retry_predicate for per-category limits."""
         import inspect
-        from daemon.graph import build_instance_graph
+        from daemon.graph import build_instance_llms
         
-        source = inspect.getsource(build_instance_graph)
+        source = inspect.getsource(build_instance_llms)
         
         # Verify _make_llm_retry_strategy is used instead of TRANSIENT_EXCEPTIONS
         assert "_make_llm_retry_strategy" in source, (
@@ -488,10 +488,12 @@ class TestBuildInstanceGraphIntegration:
     async def test_build_instance_graph_with_retry_config(self, mock_checkpointer, mock_tools):
         """Test build_instance_graph applies retry config with tenacity-based retry."""
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
-            # Setup mock LLM - one instance with bind_tools returning same
+            # Setup mock LLM - bind_tools returns DIFFERENT objects each time
+            # This mirrors the real behavior where bind_tools creates new runnables
             mock_llm_instance = MagicMock()
             mock_llm_with_tools = MagicMock()
-            mock_llm_instance.bind_tools.return_value = mock_llm_with_tools
+            mock_llm_standard_bound = MagicMock()
+            mock_llm_instance.bind_tools.side_effect = [mock_llm_with_tools, mock_llm_standard_bound]
             mock_llm_class.return_value = mock_llm_instance
             
             # Mock classify_llm_errors - returns the input (wrapping behavior)
@@ -522,18 +524,13 @@ class TestBuildInstanceGraphIntegration:
                             )
                             
                             # Verify classify_llm_errors was called twice:
-                            # - Once for llm_with_tools (vision or bound standard)
-                            # - Once for llm_standard (standard model, separate from llm_with_tools)
-                            # Note: When vision is NOT configured, classify is called for both
-                            # because llm_standard and llm_with_tools are different objects
+                            # In build_instance_llms without vision model:
+                            # - Once for llm_with_tools (line: llm_with_tools = classify_llm_errors(...))
+                            # - Once for llm_standard (line: llm_standard = classify_llm_errors(...))
+                            # because bind_tools returns different objects, they are different
                             assert mock_classify.call_count == 2
                             
-                            # Verify Retrying was called once for llm_with_tools
-                            # Note: When vision is NOT configured, llm_standard is the same
-                            # unbound model as llm_with_tools after bind_tools, so only
-                            # llm_with_tools gets wrapped with Retrying. The dual-LLM
-                            # architecture with separate Retrying wrappers is only active
-                            # when vision model IS configured (model_vision is set).
+                            # Verify Retrying was called once (same Retrying instance wraps both LLMs)
                             assert mock_retrying.call_count == 1
                             
                             # Verify Retrying was called with correct parameters

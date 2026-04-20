@@ -390,37 +390,26 @@ def create_agent_node(
     return agent_node
 
 
-def build_instance_graph(
+def build_instance_llms(
+    llm_config_with_headers: dict,
+    model_standard: str,
+    model_vision: str | None,
     tools: list,
-    checkpointer,
-    llm_config: dict,
-    system_prompt: str,
     retry_config: dict | None = None,
-    compactor=None,
-    graph_config=None,
 ):
-    """Build and return a compiled instance graph with LLM-level retry.
-    
-    Per DEC-003: Vision model applies to FIRST LLM call only.
-    When model_vision is configured, we create two LLM instances:
-    - llm_with_tools (vision): Used for first call with images
-    - llm_standard: Used for subsequent calls (text-only)
+    """Create LLM instances for agent execution.
+
+    This function handles the logic for creating:
+    - llm_with_tools: Primary LLM bound to tools (vision if configured, else standard)
+    - llm_standard: Standard LLM (always bound to tools for tool-calling)
+
+    Returns:
+        Tuple of (llm_with_tools, llm_standard)
     """
-    # Add proxy header to all LLM requests
-    llm_config_with_headers = {
-        **llm_config,
-        "default_headers": {"x-proxy-app": "ensemble"},
-    }
-    
-    # Check if vision model is configured
-    model_vision = llm_config.get("model_vision")
-    model_standard = llm_config.get("model")
-    
-    # Create vision LLM if vision model is configured
     llm_vision = None
     llm_standard = None
     llm_with_tools = None
-    
+
     if model_vision:
         logger.info(f"[Graph] Vision model configured: {model_vision}, will use for FIRST call only per DEC-003")
         vision_config = {**llm_config_with_headers, "model": model_vision}
@@ -428,17 +417,17 @@ def build_instance_graph(
         llm_with_tools = llm_vision.bind_tools(tools)
     else:
         logger.info("[Graph] No vision model configured, using standard model for all calls")
-    
+
     # Create standard LLM (always needed, even if vision is configured)
-    standard_config = {**llm_config_with_headers, "model": model_standard}
+    # Filter model_vision from config to avoid noisy LangChain warnings
+    standard_config = {k: v for k, v in llm_config_with_headers.items() if k != "model_vision"}
+    standard_config["model"] = model_standard
     llm_standard = ThinkingChatOpenAI(**standard_config)
-    
-    # If vision wasn't configured, use standard for the primary llm_with_tools
+
+    # Always bind tools to llm_standard, regardless of vision configuration
     if llm_with_tools is None:
         llm_with_tools = llm_standard.bind_tools(tools)
-    else:
-        # Vision model configured: bind tools to standard as well
-        llm_standard = llm_standard.bind_tools(tools)
+    llm_standard = llm_standard.bind_tools(tools)
 
     # Wrap with error classification and retry if config provided
     if retry_config:
@@ -476,7 +465,7 @@ def build_instance_graph(
             return retrying(classified_llm.invoke, input_value)
 
         llm_with_tools = RunnableLambda(_run_with_retry)
-        
+
         # Also wrap standard LLM with Retrying if it's different from llm_with_tools.
         # This handles the dual-LLM architecture case where both vision and standard
         # models need their own retry wrappers.
@@ -490,12 +479,50 @@ def build_instance_graph(
             f"LLM configured with {transient_attempts} transient retries, "
             f"{timeout_attempts} timeout retries"
         )
-    
+
+    return llm_with_tools, llm_standard
+
+
+def build_instance_graph(
+    tools: list,
+    checkpointer,
+    llm_config: dict,
+    system_prompt: str,
+    retry_config: dict | None = None,
+    compactor=None,
+    graph_config=None,
+):
+    """Build and return a compiled instance graph with LLM-level retry.
+
+    Per DEC-003: Vision model applies to FIRST LLM call only.
+    When model_vision is configured, we create two LLM instances:
+    - llm_with_tools (vision): Used for first call with images
+    - llm_standard: Used for subsequent calls (text-only)
+    """
+    # Add proxy header to all LLM requests
+    llm_config_with_headers = {
+        **llm_config,
+        "default_headers": {"x-proxy-app": "ensemble"},
+    }
+
+    # Check if vision model is configured
+    model_vision = llm_config.get("model_vision")
+    model_standard = llm_config.get("model")
+
+    # Create LLMs using the helper function
+    llm_with_tools, llm_standard = build_instance_llms(
+        llm_config_with_headers=llm_config_with_headers,
+        model_standard=model_standard,
+        model_vision=model_vision,
+        tools=tools,
+        retry_config=retry_config,
+    )
+
     # Late binding for graph reference
     graph_ref = [None]
-    
+
     graph = StateGraph(SessionState)
-    
+
     # Add nodes - pass both vision and standard LLM for DEC-003 compliance
     graph.add_node("agent", create_agent_node(
         llm_with_tools,

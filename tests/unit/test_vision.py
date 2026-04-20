@@ -144,6 +144,17 @@ class TestMessageCreateImageFormatValidation:
                 MessageCreate(content="Test", images=[img])
             assert "invalid image format" in str(exc_info.value).lower()
 
+    def test_images_svg_rejected(self):
+        """SVG MIME type should be rejected (XSS defense-in-depth)."""
+        svg_images = [
+            "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvIj48L3N2Zz4=",  # With base64
+            "data:image/svg+xml;base64,",  # Minimal SVG
+        ]
+        for img in svg_images:
+            with pytest.raises(ValueError) as exc_info:
+                MessageCreate(content="Test", images=[img])
+            assert "invalid image format" in str(exc_info.value).lower()
+
     def test_images_valid_format(self):
         """Sending valid data:image/png;base64,abc123 should succeed."""
         valid_images = [
@@ -191,6 +202,27 @@ class TestMessageCreateImageSizeValidation:
         small_image = make_large_image(1)  # 1MB
         msg = MessageCreate(content="Test", images=[small_image])
         assert msg.images == [small_image]
+
+    def test_images_just_under_10mb_passes(self):
+        """Sending an image estimated at just under 10MB should succeed."""
+        # 10MB = 10,485,760 bytes
+        # Target: original_size < 10MB, use 9.9MB
+        image_9_9mb = make_large_image(9.9)
+        # Verify the estimated size is under 10MB
+        base64_str = image_9_9mb.split(",", 1)[1]
+        estimated_size = len(base64_str) * 3 // 4
+        assert estimated_size < 10 * 1024 * 1024, f"Image too large: {estimated_size} bytes"
+        msg = MessageCreate(content="Test", images=[image_9_9mb])
+        assert msg.images == [image_9_9mb]
+
+    def test_images_just_over_10mb_fails(self):
+        """Sending an image estimated at just over 10MB should fail."""
+        # 10MB = 10,485,760 bytes
+        # Target: original_size > 10MB, use 10.1MB
+        image_10_1mb = make_large_image(10.1)
+        with pytest.raises(ValueError) as exc_info:
+            MessageCreate(content="Test", images=[image_10_1mb])
+        assert "10mb" in str(exc_info.value).lower()
 
     def test_images_very_small(self):
         """Sending a tiny image should succeed."""
@@ -500,3 +532,70 @@ class TestVisionRegressionTests:
             assert result["images"] is not None
             assert len(result["images"]) == 1
             assert mime_type in result["images"][0]
+
+
+# =============================================================================
+# Tool Binding Tests (Critical Fix #1)
+# =============================================================================
+
+
+class TestToolBindingWithoutVision:
+    """Tests to ensure llm_standard is bound to tools when model_vision=None.
+
+    This is a critical regression test for the fix where llm_standard was not
+    being bound to tools when vision was not configured.
+    """
+
+    def test_tool_calling_without_vision_config(self):
+        """Verify that when model_vision=None, llm_standard is still bound to tools.
+
+        This test verifies the fix for the critical bug where:
+        - When vision WAS configured: llm_standard.bind_tools(tools) was called
+        - When vision was NOT configured: llm_standard remained unbound
+
+        The fix ensures tools are always bound to llm_standard regardless of
+        whether vision is configured.
+        """
+        from unittest.mock import MagicMock, patch
+
+        # Mock the tools
+        mock_tool = MagicMock()
+        mock_tool.name = "test_tool"
+        mock_tool.description = "A test tool"
+        mock_tools = [mock_tool]
+
+        # Mock the LLM config with no vision
+        mock_llm_config = {
+            "base_url": "https://api.example.com",
+            "api_key": "test-key",
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            # No model_vision - this is the key scenario
+        }
+
+        # Patch ThinkingChatOpenAI to capture what it receives
+        with patch("daemon.graph.ThinkingChatOpenAI") as MockLLM:
+            # Set up the mock to return an object that can be chained with bind_tools
+            mock_llm_instance = MagicMock()
+            mock_llm_instance.bind_tools = MagicMock(return_value=MagicMock())
+            MockLLM.return_value = mock_llm_instance
+
+            # Import and call the function we're testing
+            from daemon.graph import build_instance_llms
+
+            llm_with_tools, llm_standard = build_instance_llms(
+                llm_config_with_headers=mock_llm_config,
+                model_standard="gpt-4o",
+                model_vision=None,  # No vision configured
+                tools=mock_tools,
+                retry_config=None,
+            )
+
+            # Verify ThinkingChatOpenAI was called once to create the standard LLM
+            assert MockLLM.call_count == 1, f"Expected 1 call to ThinkingChatOpenAI, got {MockLLM.call_count}"
+
+            # Verify bind_tools was called on the standard LLM
+            # (called at least once - may be called twice: once for llm_with_tools, once for llm_standard)
+            assert mock_llm_instance.bind_tools.called, "bind_tools was not called on llm_standard"
+            # Verify it was called with the tools
+            mock_llm_instance.bind_tools.assert_called_with(mock_tools)
