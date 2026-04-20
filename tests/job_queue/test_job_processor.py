@@ -487,6 +487,130 @@ class TestJobProcessorErrorHandling:
         assert call_args[1]["success"] is False
 
 
+class TestOrphanJobRecovery:
+    """Tests for recovering orphaned PROCESSING jobs with missing instances.
+
+    These tests verify the fix for the bug where:
+    1. trigger_next_job() transitions a job to PROCESSING with instance_id set
+    2. Crash/kill happens before spawn_instance() is called
+    3. Job is left in PROCESSING with instance_id but no corresponding instance
+
+    The JobProcessor should detect this and spawn the missing instance.
+    """
+
+    @pytest.fixture
+    def processor(self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo):
+        """Create JobProcessor with mocked dependencies."""
+        # complete_job needs to be async
+        mock_queue_service.complete_job = AsyncMock()
+        return JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_recovers_orphan_processing_job_with_missing_instance(
+        self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Test that processor recovers PROCESSING job when instance doesn't exist.
+
+        This is the core bug fix: when a job has instance_id set but the instance
+        doesn't exist in DB/memory, the processor should spawn the instance.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        # Job in PROCESSING state with instance_id but no actual instance
+        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        orphan_job.instance_id = "missing-instance-id"
+        orphan_job.message = "recover me"
+        orphan_job.source = "api"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        # No pending jobs, but PROCESSING job exists
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([orphan_job], None)
+
+        # Instance doesn't exist - should raise KeyError
+        mock_instance_manager.get_instance.side_effect = KeyError("Instance not found")
+        mock_instance_manager.spawn_instance.return_value = "missing-instance-id"
+        mock_instance_manager.enqueue_message = AsyncMock()
+
+        await processor._process_next_job()
+
+        # Should have spawned the instance using the existing instance_id
+        mock_instance_manager.spawn_instance.assert_called_once()
+        call_kwargs = mock_instance_manager.spawn_instance.call_args[1]
+        assert call_kwargs["instance_id"] == "missing-instance-id"
+        assert call_kwargs["agent_id"] == "coder"
+        assert call_kwargs["project_id"] == "project-1"
+
+        # Should have enqueued the job message
+        mock_instance_manager.enqueue_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_marks_orphan_job_failed_when_spawn_fails(
+        self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Test that processor marks job as FAILED when spawn_instance also fails.
+
+        If we can't recover the orphan, we should mark it as failed to prevent
+        permanent orphaning.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        orphan_job.instance_id = "missing-instance-id"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([orphan_job], None)
+
+        mock_instance_manager.get_instance.side_effect = KeyError("Instance not found")
+        mock_instance_manager.spawn_instance.side_effect = Exception("Max instances reached")
+
+        await processor._process_next_job()
+
+        # Should have marked the job as failed
+        mock_queue_service.complete_job.assert_called_once()
+        call_kwargs = mock_queue_service.complete_job.call_args[1]
+        assert call_kwargs["success"] is False
+        assert "Max instances reached" in call_kwargs["error"]
+
+    @pytest.mark.asyncio
+    async def test_skips_processing_job_when_instance_exists(
+        self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Test that processor skips PROCESSING job when instance already exists.
+
+        Normal case: job is processing and instance exists - don't re-spawn.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        processing_job = MockJob("job-running", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        processing_job.instance_id = "existing-instance-id"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([processing_job], None)
+
+        # Instance exists - should not raise
+        mock_instance_manager.get_instance.return_value = MagicMock()
+
+        await processor._process_next_job()
+
+        # Should NOT have spawned a new instance
+        mock_instance_manager.spawn_instance.assert_not_called()
+
+
 @pytest.fixture
 def dispatch_bus():
     """Create mock dispatch bus with AsyncMock wait_for_job."""

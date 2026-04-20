@@ -190,10 +190,38 @@ class JobProcessor:
                                 self._instance_manager.get_instance(proc_job.instance_id)
                                 continue  # Instance exists, skip
                             except KeyError:
-                                # Instance not in memory or DB. Could be:
-                                # 1. Being spawned right now (race with observer)
-                                # 2. Genuinely orphaned - skip, let normal flow handle
-                                continue
+                                # Instance has instance_id but doesn't exist in DB.
+                                # This is an orphan from a crash between start_job_atomic()
+                                # and spawn_instance(). Recover it now.
+                                logger.info(
+                                    f"JobProcessor: recovering orphan PROCESSING job {proc_job.job_id[:8]}... "
+                                    f"(instance {proc_job.instance_id[:8]}... missing)"
+                                )
+                                try:
+                                    instance_id = self._instance_manager.spawn_instance(
+                                        agent_id=proc_job.agent_id,
+                                        instance_id=proc_job.instance_id,  # Reuse existing valid UUID
+                                        project_id=proc_job.project_id,
+                                    )
+                                    await self._instance_manager.enqueue_message(
+                                        instance_id=instance_id,
+                                        message=proc_job.message,
+                                        source=proc_job.source,
+                                    )
+                                    logger.info(
+                                        f"Job {proc_job.job_id} recovered for instance {instance_id} "
+                                        f"on queue {queue.queue_name}"
+                                    )
+                                    continue  # Successfully recovered
+                                except Exception as e:
+                                    # Failed to recover - mark as failed to prevent permanent orphan
+                                    logger.error(
+                                        f"Failed to recover orphan job {proc_job.job_id[:8]}...: {e}"
+                                    )
+                                    await self._queue_service.complete_job(
+                                        proc_job.job_id, success=False, error=str(e)
+                                    )
+                                    continue
                         # No instance_id: this is a genuine orphan (shouldn't happen
                         # in normal operation, but kept as safety net)
                         # This job was started by trigger_next_job() but instance not spawned
