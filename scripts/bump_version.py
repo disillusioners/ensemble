@@ -10,9 +10,9 @@ ROOT = Path(__file__).parent.parent
 
 # Version bump types
 BUMP_TYPES = {
-    "patch": (0, 1),  # 1.0.0 -> 1.0.1
+    "patch": (2, 1),  # 1.0.0 -> 1.0.1
     "minor": (1, 1),  # 1.0.0 -> 1.1.0
-    "major": (2, 1),  # 0.1.0 -> 1.0.0
+    "major": (0, 1),  # 0.1.0 -> 1.0.0
 }
 
 
