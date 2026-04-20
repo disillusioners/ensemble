@@ -262,17 +262,21 @@ def create_agent_node(
     config=None,
     llm_config=None,
     retry_config=None,
+    llm_standard=None,
 ):
     """Create the agent node function with optional reactive compaction.
     
     Args:
-        llm_with_tools: LLM already bound with tools.
+        llm_with_tools: LLM already bound with tools (vision model if configured).
         system_prompt: System prompt to prepend to messages.
         compactor: Optional ContextCompactor for reactive compaction.
         graph_ref: Optional list for late-bound graph reference.
         config: Optional config for compaction.
         llm_config: Optional LLM config for compaction context.
         retry_config: Optional retry configuration for logging.
+        llm_standard: Optional standard LLM bound with tools (for non-vision calls).
+            When provided, vision model is used only for FIRST LLM call with images,
+            then standard model is used for subsequent calls per DEC-003.
     """
     
     async def agent_node(state):
@@ -280,7 +284,38 @@ def create_agent_node(
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
         transient = retry_config.get('transient_attempts', 8) if retry_config else 8
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
-        logger.info(f'[LLM] Invoking LLM with {len(full_messages)} messages (transient_attempts={transient}, timeout_attempts={timeout})')
+        
+        # Check if vision model is being used (images present in user message)
+        model_vision = llm_config.get("model_vision") if llm_config else None
+        has_images = False
+        for msg in messages:
+            content = getattr(msg, 'content', None)
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "image_url":
+                        has_images = True
+                        break
+            if has_images:
+                break
+        
+        # Per DEC-003: Vision model applies to FIRST LLM call only.
+        # After first call, use standard model to avoid unnecessary vision model cost.
+        # Detect first call by checking if there are any AIMessages in the messages.
+        is_first_call = not any(
+            hasattr(msg, 'type') and msg.type == 'ai' 
+            for msg in messages
+        )
+        
+        # Select the appropriate LLM:
+        # - First call with images: use vision model (llm_with_tools which has vision model)
+        # - Subsequent calls OR no images: use standard model if available
+        use_vision_model = is_first_call and has_images and model_vision and llm_standard is not None
+        current_llm = llm_with_tools if use_vision_model else (llm_standard or llm_with_tools)
+        
+        model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
+        vision_log = f", vision={model_vision}" if model_vision and has_images else ""
+        call_type = "VISION" if use_vision_model else "STANDARD"
+        logger.info(f'[LLM] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
         
         try:
             # Use run_in_executor to avoid blocking the event loop.
@@ -288,7 +323,7 @@ def create_agent_node(
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: llm_with_tools.invoke(full_messages)
+                lambda: current_llm.invoke(full_messages)
             )
         except ContextLengthExceededError:
             if compactor is None or graph_ref is None or graph_ref[0] is None:
@@ -328,10 +363,11 @@ def create_agent_node(
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
             # Use run_in_executor to avoid blocking the event loop after compaction
+            # Continue with the same LLM that was being used (may be vision or standard)
             loop = asyncio.get_running_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: llm_with_tools.invoke(compact_messages)
+                lambda: current_llm.invoke(compact_messages)
             )
         except (openai.APITimeoutError, openai.APIConnectionError, ConnectionResetError, 
                 BrokenPipeError, ConnectionAbortedError, TransientAPIError, LLMResponseValidationError) as e:
@@ -363,21 +399,53 @@ def build_instance_graph(
     compactor=None,
     graph_config=None,
 ):
-    """Build and return a compiled instance graph with LLM-level retry."""
+    """Build and return a compiled instance graph with LLM-level retry.
+    
+    Per DEC-003: Vision model applies to FIRST LLM call only.
+    When model_vision is configured, we create two LLM instances:
+    - llm_with_tools (vision): Used for first call with images
+    - llm_standard: Used for subsequent calls (text-only)
+    """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
         **llm_config,
         "default_headers": {"x-proxy-app": "ensemble"},
     }
-    llm = ThinkingChatOpenAI(**llm_config_with_headers)
-
-    # Bind tools BEFORE wrapping with retry (RunnableRetry doesn't have bind_tools)
-    llm_with_tools = llm.bind_tools(tools)
+    
+    # Check if vision model is configured
+    model_vision = llm_config.get("model_vision")
+    model_standard = llm_config.get("model")
+    
+    # Create vision LLM if vision model is configured
+    llm_vision = None
+    llm_standard = None
+    llm_with_tools = None
+    
+    if model_vision:
+        logger.info(f"[Graph] Vision model configured: {model_vision}, will use for FIRST call only per DEC-003")
+        vision_config = {**llm_config_with_headers, "model": model_vision}
+        llm_vision = ThinkingChatOpenAI(**vision_config)
+        llm_with_tools = llm_vision.bind_tools(tools)
+    else:
+        logger.info("[Graph] No vision model configured, using standard model for all calls")
+    
+    # Create standard LLM (always needed, even if vision is configured)
+    standard_config = {**llm_config_with_headers, "model": model_standard}
+    llm_standard = ThinkingChatOpenAI(**standard_config)
+    
+    # If vision wasn't configured, use standard for the primary llm_with_tools
+    if llm_with_tools is None:
+        llm_with_tools = llm_standard.bind_tools(tools)
+    else:
+        # Vision model configured: bind tools to standard as well
+        llm_standard = llm_standard.bind_tools(tools)
 
     # Wrap with error classification and retry if config provided
     if retry_config:
         # CRITICAL: classify errors BEFORE retry so they can be caught
         llm_with_tools = classify_llm_errors(llm_with_tools)
+        if llm_standard is not llm_with_tools:
+            llm_standard = classify_llm_errors(llm_standard)
 
         from daemon.llm_error_classifier import _make_llm_retry_strategy
 
@@ -401,13 +469,22 @@ def build_instance_graph(
             reraise=True,
         )
 
-        # Capture the classified LLM for retry wrapper
+        # Capture the classified LLMs for retry wrapper
         classified_llm = llm_with_tools
 
         def _run_with_retry(input_value):
             return retrying(classified_llm.invoke, input_value)
 
         llm_with_tools = RunnableLambda(_run_with_retry)
+        
+        # Also wrap standard LLM with Retrying if it's different from llm_with_tools.
+        # This handles the dual-LLM architecture case where both vision and standard
+        # models need their own retry wrappers.
+        if llm_standard is not llm_with_tools:
+            classified_standard = llm_standard
+            def _run_standard_with_retry(input_value):
+                return retrying(classified_standard.invoke, input_value)
+            llm_standard = RunnableLambda(_run_standard_with_retry)
 
         logger.debug(
             f"LLM configured with {transient_attempts} transient retries, "
@@ -419,7 +496,7 @@ def build_instance_graph(
     
     graph = StateGraph(SessionState)
     
-    # Add nodes
+    # Add nodes - pass both vision and standard LLM for DEC-003 compliance
     graph.add_node("agent", create_agent_node(
         llm_with_tools,
         system_prompt,
@@ -428,6 +505,7 @@ def build_instance_graph(
         config=graph_config,
         llm_config=llm_config_with_headers,
         retry_config=retry_config,
+        llm_standard=llm_standard,
     ))
     graph.add_node("tools", ToolNode(tools))
     graph.add_node("nudge", nudge_node)

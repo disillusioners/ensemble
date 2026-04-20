@@ -7,6 +7,7 @@ llm:
   api_key: ${OPENAI_API_KEY}
   model: ${OPENAI_MODEL:-gpt-4}
   model_title: ${OPENAI_MODEL_TITLE:-}  # Optional separate model for title generation
+  model_vision: ${OPENAI_MODEL_VISION:-}  # Optional vision-capable model for image processing (e.g., gpt-4o)
   temperature: 0.7
   request_timeout: 660  # HTTP client timeout per LLM call (seconds). Counts
                         # toward task_timeout_minutes budget for each retry.

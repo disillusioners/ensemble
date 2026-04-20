@@ -69,6 +69,12 @@ class MessageQueue(SQLModel, table=True):
     
     # FK to task table
     processing_task_id: Optional[str] = Field(default=None, index=True)
+    
+    # Images for multimodal messages (base64 data URIs)
+    images: list[str] | None = Field(
+        default=None,
+        sa_column=Column("images", JSON)
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -87,6 +93,7 @@ class MessageQueue(SQLModel, table=True):
             "last_error": self.last_error,
             "processing_task_id": self.processing_task_id,
             "metadata": dict(self.message_metadata) if self.message_metadata else {},
+            "images": self.images,
             "enqueued_at": self.enqueued_at.isoformat() if self.enqueued_at else None,
             "processing_started_at": self.processing_started_at.isoformat() if self.processing_started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,

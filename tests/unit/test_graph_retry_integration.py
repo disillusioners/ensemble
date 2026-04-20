@@ -488,15 +488,15 @@ class TestBuildInstanceGraphIntegration:
     async def test_build_instance_graph_with_retry_config(self, mock_checkpointer, mock_tools):
         """Test build_instance_graph applies retry config with tenacity-based retry."""
         with patch('daemon.graph.ThinkingChatOpenAI') as mock_llm_class:
-            # Setup mock LLM
+            # Setup mock LLM - one instance with bind_tools returning same
             mock_llm_instance = MagicMock()
             mock_llm_with_tools = MagicMock()
             mock_llm_instance.bind_tools.return_value = mock_llm_with_tools
             mock_llm_class.return_value = mock_llm_instance
             
-            # Mock classify_llm_errors
+            # Mock classify_llm_errors - returns the input (wrapping behavior)
             with patch('daemon.graph.classify_llm_errors') as mock_classify:
-                mock_classify.return_value = mock_llm_with_tools
+                mock_classify.side_effect = lambda x: x  # Identity - returns wrapped LLM
                 
                 # Mock tenacity Retrying
                 with patch('daemon.graph.Retrying') as mock_retrying:
@@ -521,11 +521,22 @@ class TestBuildInstanceGraphIntegration:
                                 retry_config=retry_config,
                             )
                             
-                            # Verify classify_llm_errors was called (BEFORE retry wrapper)
-                            mock_classify.assert_called_once_with(mock_llm_with_tools)
+                            # Verify classify_llm_errors was called twice:
+                            # - Once for llm_with_tools (vision or bound standard)
+                            # - Once for llm_standard (standard model, separate from llm_with_tools)
+                            # Note: When vision is NOT configured, classify is called for both
+                            # because llm_standard and llm_with_tools are different objects
+                            assert mock_classify.call_count == 2
+                            
+                            # Verify Retrying was called once for llm_with_tools
+                            # Note: When vision is NOT configured, llm_standard is the same
+                            # unbound model as llm_with_tools after bind_tools, so only
+                            # llm_with_tools gets wrapped with Retrying. The dual-LLM
+                            # architecture with separate Retrying wrappers is only active
+                            # when vision model IS configured (model_vision is set).
+                            assert mock_retrying.call_count == 1
                             
                             # Verify Retrying was called with correct parameters
-                            mock_retrying.assert_called_once()
                             retry_call = mock_retrying.call_args_list[0]
                             # stop should be stop_after_attempt(max(8, 3)) = 8
                             assert "stop" in retry_call.kwargs

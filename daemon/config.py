@@ -39,6 +39,7 @@ class LLMConfig(BaseSettings):
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
     model_title: Optional[str] = Field(default=None, description="Model for title generation (falls back to model)")
+    model_vision: Optional[str] = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
     

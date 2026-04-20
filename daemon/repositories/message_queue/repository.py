@@ -36,6 +36,7 @@ class SQLModelMessageQueueRepository:
         max_retries: int = 5,
         message_metadata: dict[str, Any] | None = None,
         message_id: str | None = None,
+        images: list[str] | None = None,
     ) -> MessageQueue:
         """Add a message to the queue."""
         message_id = message_id or str(uuid.uuid4())
@@ -49,6 +50,7 @@ class SQLModelMessageQueueRepository:
             priority=priority,
             max_retries=max_retries,
             message_metadata=message_metadata or {},
+            images=images,
             enqueued_at=datetime.now(timezone.utc),
         )
 

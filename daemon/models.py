@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class InstanceStatus(str, Enum):
@@ -118,6 +118,48 @@ class MessageCreate(BaseModel):
     """Request for sending a message to an instance."""
 
     content: str = Field(..., description="Message content to send to the agent")
+    images: Optional[list[str]] = Field(default=None, description="Base64-encoded images (data URI format)")
+
+    @field_validator("images")
+    @classmethod
+    def validate_images(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        """Validate images: max 3, valid base64 data URI format, max 10MB each.
+        
+        Also converts empty list to None for clarity.
+        """
+        if v is None:
+            return None
+        
+        # Convert empty list to None for clarity
+        if len(v) == 0:
+            return None
+        
+        if len(v) > 3:
+            raise ValueError("Maximum 3 images allowed per message")
+        
+        import re
+        # Pattern for base64 data URI: data:image/...;base64,... 
+        base64_pattern = re.compile(r'^data:image/[^;]+;base64,[A-Za-z0-9+/=]+$')
+        
+        for i, img in enumerate(v):
+            if not base64_pattern.match(img):
+                raise ValueError(
+                    f"Invalid image format at index {i}: must be a base64 data URI "
+                    f"(e.g., 'data:image/png;base64,...')"
+                )
+            
+            # Estimate original size from base64: base64_size * 3/4 ≈ original size
+            # Max 10MB = 10 * 1024 * 1024 bytes
+            base64_size = len(img)
+            original_size = base64_size * 3 // 4
+            max_size = 10 * 1024 * 1024  # 10MB
+            if original_size > max_size:
+                raise ValueError(
+                    f"Image at index {i} exceeds maximum size of 10MB "
+                    f"(estimated: {original_size / (1024*1024):.1f}MB)"
+                )
+        
+        return v
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -137,6 +179,7 @@ class MessageResponse(BaseModel):
     thinking: str | None = Field(default=None, description="Thinking from metadata (reasoning_content, etc.)")
     thinking_extracted: str | None = Field(default=None, description="Thinking extracted from <think/> tags in content")
     tool_calls: list[dict[str, Any]] | None = Field(default=None, description="Tool calls made by the agent")
+    images: list[str] | None = Field(default=None, description="Images in the message (for vision messages)")
     created_at: datetime = Field(..., description="Message creation timestamp")
 
     model_config = ConfigDict(
@@ -148,6 +191,7 @@ class MessageResponse(BaseModel):
                 "thinking": None,
                 "thinking_extracted": None,
                 "tool_calls": None,
+                "images": None,
                 "created_at": "2024-01-01T00:00:00Z"
             }
         }

@@ -314,6 +314,7 @@ class InstanceManager:
                     "base_url": self.config.llm.base_url,
                     "api_key": self.config.llm.api_key,
                     "model": self.config.llm.model,
+                    "model_vision": self.config.llm.model_vision,
                     "temperature": self.config.llm.temperature,
                     "request_timeout": self.config.llm.request_timeout,
                 },
@@ -688,6 +689,7 @@ class InstanceManager:
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
+            "model_vision": self.config.llm.model_vision,
             "temperature": self.config.llm.temperature,
             "request_timeout": self.config.llm.request_timeout,
         }
@@ -909,7 +911,8 @@ class InstanceManager:
         instance_id: str, 
         message: str, 
         source: str = "api",
-        priority: int = 1
+        priority: int = 1,
+        images: list[str] | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message using the worker pool (DB-backed) path.
         
@@ -921,6 +924,7 @@ class InstanceManager:
             message: The message content.
             source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
+            images: Optional list of base64-encoded images for vision messages.
         
         Returns:
             AsyncMessageResult with message_id and status.
@@ -954,6 +958,10 @@ class InstanceManager:
             # User messages use UUID IDs
             message_id = str(uuid.uuid4())
         
+        # Log image count if images are provided
+        if images:
+            logger.info(f"Processing message with {len(images)} image(s)")
+        
         with Session(self._engine) as session:
             # 1. Insert the message
             db_message = MessageQueue(
@@ -964,6 +972,7 @@ class InstanceManager:
                 type=msg_type,
                 status=MessageStatus.READY.value,
                 priority=priority,
+                images=images,
                 enqueued_at=datetime.now(timezone.utc),
             )
             session.add(db_message)
@@ -1032,6 +1041,7 @@ class InstanceManager:
         is_retry: bool = False,
         retry_count: int = 0,  # FIX: C3 — new parameter
         message_source: str | None = None,  # Source of message (e.g., "internal_agent:xxx", "api", "telegram:xxx")
+        images: list[str] | None = None,  # Images for multimodal messages
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -1046,7 +1056,9 @@ class InstanceManager:
             is_retry: If True, attempt to resume from checkpoint.
             message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
                 Used to skip project injection for internal agent messages.
+            images: Optional list of base64-encoded images for multimodal content.
         
+
         Returns:
             MessageResult with response data.
             
@@ -1209,13 +1221,34 @@ class InstanceManager:
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
-                graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
+                # Build multimodal content if images present
+                if images:
+                    content = [{"type": "text", "text": message}]
+                    for img in images:
+                        content.append({"type": "image_url", "image_url": {"url": img}})
+                    graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+                else:
+                    graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
         else:
             # First attempt - add message to conversation
-            graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
+            # Build multimodal content if images present
+            if images:
+                content = [{"type": "text", "text": message}]
+                for img in images:
+                    content.append({"type": "image_url", "image_url": {"url": img}})
+                graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+            else:
+                graph_input = {"messages": [HumanMessage(content=message, id=message_id)]}
         
-        # Pre-emit user message before graph starts so frontend shows it immediately
-        user_msg = HumanMessage(content=message, id=message_id)
+        # Build user message for pre-emit - use multimodal content if images present
+        if images:
+            content = [{"type": "text", "text": message}]
+            for img in images:
+                content.append({"type": "image_url", "image_url": {"url": img}})
+            user_msg = HumanMessage(content=content, id=message_id)
+        else:
+            user_msg = HumanMessage(content=message, id=message_id)
+        
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
         await self._live_hub.stream_message(
@@ -1475,6 +1508,7 @@ class InstanceManager:
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
+            "model_vision": self.config.llm.model_vision,
             "temperature": 0.3,  # Lower temperature for more focused summaries
             "default_headers": {"x-proxy-app": "ensemble"},
         }
@@ -2200,6 +2234,7 @@ Provide a concise summary:"""
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model_title,
+            "model_vision": self.config.llm.model_vision,
             "temperature": 0.3,  # Lower temperature for more focused titles
         }
         
@@ -2330,6 +2365,7 @@ Title:"""
                     "base_url": self.config.llm.base_url,
                     "api_key": self.config.llm.api_key,
                     "model": self.config.llm.model,
+                    "model_vision": self.config.llm.model_vision,
                     "temperature": self.config.llm.temperature,
                     "request_timeout": self.config.llm.request_timeout,
                 },
@@ -2611,6 +2647,7 @@ Title:"""
             "base_url": self.config.llm.base_url,
             "api_key": self.config.llm.api_key,
             "model": self.config.llm.model,
+            "model_vision": self.config.llm.model_vision,
             "temperature": self.config.llm.temperature,
             "request_timeout": self.config.llm.request_timeout,
         }

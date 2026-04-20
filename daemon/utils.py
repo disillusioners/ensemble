@@ -65,6 +65,10 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
       4. msg.thinking attribute (Claude models)
       5. msg.content as list with type="reasoning" blocks
     
+    Also handles multimodal content (images):
+      - Extracts image URLs from content blocks with type="image_url"
+      - Preserves images in serialization for checkpoint persistence
+    
     Args:
         msg: LangChain BaseMessage (HumanMessage, AIMessage, ToolMessage, etc.)
         tool_outputs: Optional map of tool_call_id -> output content.
@@ -72,11 +76,38 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
             falls back to msg.id or generates a new UUID.
     
     Returns:
-        Dict with message_id, role, content, thinking, tool_calls, created_at.
+        Dict with message_id, role, content, thinking, tool_calls, images, created_at.
     """
     role_map = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
     role = role_map.get(msg.type, msg.type)
     content = getattr(msg, 'content', '') or ''
+    
+    # Extract images from multimodal content (list format)
+    images: list[str] | None = None
+    content_str = content if isinstance(content, str) else ""
+    
+    if isinstance(content, list):
+        # This is multimodal content - extract text and images
+        text_parts: list[str] = []
+        images_list: list[str] = []
+        
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_parts.append(block.get("text", ""))
+                elif block_type == "image_url":
+                    # Extract image URL from image_url block
+                    img_url = block.get("image_url", {})
+                    if isinstance(img_url, dict):
+                        url = img_url.get("url", "")
+                    else:
+                        url = str(img_url)
+                    if url:
+                        images_list.append(url)
+        
+        content_str = " ".join(text_parts)
+        images = images_list if images_list else None
     
     # Thinking extraction (5 paths)
     thinking = None
@@ -95,7 +126,6 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
                     break
     
     # Parse <think/> tags from content
-    content_str = content if isinstance(content, str) else str(content)
     content_str, thinking_extracted = parse_think_tags(content_str)
     
     # Tool calls for AIMessage
@@ -129,6 +159,7 @@ def serialize_message(msg, tool_outputs: dict | None = None, message_id: str | N
         "thinking": thinking,
         "thinking_extracted": thinking_extracted,
         "tool_calls": tool_calls,
+        "images": images,
         "created_at": _extract_timestamp(msg),
     }
 

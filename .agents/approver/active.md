@@ -1,5 +1,5 @@
-Current Plan: Job Soft Delete
-Tracking File: job-soft-delete-tracking.md
+Current Plan: Vision Support
+Tracking File: vision-support-tracking.md
 Iteration: 001
 Status: APPROVED
-Last Updated: 2026-04-19 11:15
+Last Updated: 2026-04-20 06:41

@@ -864,12 +864,24 @@ async def send_message(instance_id: str, message: MessageCreate):
             ).model_dump()
         )
 
+    # Check if images are provided but vision model is not configured
+    if message.images and not manager.config.llm.model_vision:
+        raise HTTPException(
+            status_code=400,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="Images provided but model_vision is not configured. "
+                        "Set OPENAI_MODEL_VISION environment variable or model_vision in config.yaml."
+            ).model_dump()
+        )
+
     # Enqueue the message (non-blocking)
     try:
         result = await manager.enqueue_message(
             instance_id=instance_id,
             message=message.content,
-            source="api"
+            source="api",
+            images=message.images,
         )
     except Exception as e:
         raise HTTPException(
@@ -890,6 +902,7 @@ async def send_message(instance_id: str, message: MessageCreate):
         thinking=None,
         thinking_extracted=None,
         tool_calls=None,
+        images=None,  # Images are stored in message_queue, not in response
         created_at=now,
     )
 

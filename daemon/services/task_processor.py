@@ -202,6 +202,7 @@ class ProcessMessageProcessor(BaseProcessor):
         
         message_content = message.content if message else ""
         message_source = message.source if message else None
+        message_images = getattr(message, 'images', None) if message else None
         is_retry = task.retry_count > 0
         
         try:
@@ -214,6 +215,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 is_retry=is_retry,
                 retry_count=task.retry_count,
                 message_source=message_source,
+                images=message_images,
             )
             
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
