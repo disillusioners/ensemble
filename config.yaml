@@ -83,3 +83,7 @@ services:
   #   This is the safety net if the graph hangs indefinitely.
   #   Default: 55 min. Set to 0 to disable.
   graph_timeout_minutes: 55
+
+# Job System Settings
+job_system:
+  job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.

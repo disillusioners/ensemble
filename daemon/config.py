@@ -180,6 +180,7 @@ class JobSystemConfig(BaseSettings):
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
     observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
+    job_retry_scheduler_enabled: Optional[bool] = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
 
 class Config(BaseSettings):

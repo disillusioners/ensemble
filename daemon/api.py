@@ -269,20 +269,23 @@ async def lifespan(app: FastAPI):
     # Wire retry engine into JobQueueService so it can use maybe_retry on job failure
     job_queue_service.set_retry_engine(retry_engine)
     
-    # Initialize and start RetryScheduler for background retry polling
+    # Initialize and start RetryScheduler for background retry polling (if enabled)
     # Use the same data directory as persistence for the lock file
     from pathlib import Path
     lock_dir = Path(config.persistence.db_path).parent
-    from daemon.services.retry_scheduler import RetryScheduler
-    retry_scheduler = RetryScheduler(
-        retry_engine=retry_engine,
-        queue_service=job_queue_service,
-        poll_interval=60.0,
-        lock_dir=lock_dir,
-        dispatch_bus=dispatch_event_bus,
-    )
-    await retry_scheduler.start()
-    logger.info("RetryScheduler started")
+    if config.job_system.job_retry_scheduler_enabled:
+        from daemon.services.retry_scheduler import RetryScheduler
+        retry_scheduler = RetryScheduler(
+            retry_engine=retry_engine,
+            queue_service=job_queue_service,
+            poll_interval=60.0,
+            lock_dir=lock_dir,
+            dispatch_bus=dispatch_event_bus,
+        )
+        await retry_scheduler.start()
+        logger.info("RetryScheduler started")
+    else:
+        logger.info("RetryScheduler disabled (job_retry_scheduler_enabled is not set)")
     
     # Wire JobQueueService into InstanceManager for proper cleanup
     manager.set_job_queue_service(job_queue_service)
