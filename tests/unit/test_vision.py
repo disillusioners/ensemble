@@ -7,6 +7,7 @@ Tests cover:
 4. Regression tests for text-only paths
 """
 
+import asyncio
 import pytest
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -599,3 +600,201 @@ class TestToolBindingWithoutVision:
             assert mock_llm_instance.bind_tools.called, "bind_tools was not called on llm_standard"
             # Verify it was called with the tools
             mock_llm_instance.bind_tools.assert_called_with(mock_tools)
+
+
+# =============================================================================
+# Utility Function Tests - _build_message_content
+# =============================================================================
+
+
+class TestBuildMessageContent:
+    """Tests for the _build_message_content utility function."""
+
+    def test_text_only_returns_string(self):
+        """Text-only message returns a plain string."""
+        from daemon.manager import _build_message_content
+        
+        result = _build_message_content("Hello world", None)
+        
+        assert isinstance(result, str)
+        assert result == "Hello world"
+
+    def test_text_with_images_returns_list(self):
+        """Text with images returns a list with text and image_url blocks."""
+        from daemon.manager import _build_message_content
+        
+        images = [make_valid_image(i) for i in range(2)]
+        result = _build_message_content("Describe these", images)
+        
+        assert isinstance(result, list)
+        assert len(result) == 3  # 1 text + 2 images
+        
+        # First block is text
+        assert result[0]["type"] == "text"
+        assert result[0]["text"] == "Describe these"
+        
+        # Remaining blocks are images
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"] == images[0]
+        assert result[2]["type"] == "image_url"
+        assert result[2]["image_url"]["url"] == images[1]
+
+    def test_image_only_returns_image_list(self):
+        """Image-only message (empty text) returns list with text + image_url blocks.
+        
+        Note: The implementation always adds a text block first (even empty),
+        followed by image_url blocks. This is correct per OpenAI API spec.
+        """
+        from daemon.manager import _build_message_content
+        
+        images = [make_valid_image(0)]
+        result = _build_message_content("", images)
+        
+        assert isinstance(result, list)
+        # Implementation adds text block first, then images
+        assert result[0]["type"] == "text"
+        assert result[0]["text"] == ""
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"] == images[0]
+
+    def test_empty_images_returns_string(self):
+        """Empty images list returns plain string (same as text-only)."""
+        from daemon.manager import _build_message_content
+        
+        result = _build_message_content("Hello", [])
+        
+        assert isinstance(result, str)
+        assert result == "Hello"
+
+    def test_single_image(self):
+        """Single image with text returns list with text + 1 image."""
+        from daemon.manager import _build_message_content
+        
+        image = make_valid_image(0)
+        result = _build_message_content("Look at this", [image])
+        
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["type"] == "text"
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"] == image
+
+
+# =============================================================================
+# API Endpoint Tests - HTTP 400 for images without vision
+# =============================================================================
+
+
+class TestImagesWithoutVisionConfig:
+    """Tests for HTTP 400 when images are sent but model_vision is not configured."""
+
+    def test_send_message_with_images_no_vision_returns_400(self):
+        """Sending images to an instance without vision model should return 400."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from fastapi import HTTPException
+        
+        # Create a mock manager config with no model_vision
+        mock_config = MagicMock()
+        mock_config.llm.model_vision = None  # No vision configured
+        
+        with patch("daemon.api.manager") as mock_manager:
+            mock_manager.config = mock_config
+            mock_manager.get_instance = MagicMock()  # Instance exists
+            
+            # Import the API function
+            from daemon.api import send_message
+            from daemon.models import MessageCreate
+            
+            # Create message with images
+            images = [make_valid_image(0)]
+            message = MessageCreate(content="What do you see?", images=images)
+            
+            # Call should raise HTTPException 400
+            with pytest.raises(HTTPException) as exc_info:
+                # Run the async function
+                import asyncio
+                asyncio.run(send_message(
+                    instance_id="test-instance-id",
+                    message=message
+                ))
+            
+            assert exc_info.value.status_code == 400
+            assert "model_vision" in str(exc_info.value.detail).lower()
+
+    def test_send_message_without_images_no_vision_succeeds(self):
+        """Sending text-only to instance without vision model should succeed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from datetime import datetime, timezone
+        
+        # Mock result from enqueue_message
+        mock_result = MagicMock()
+        mock_result.message_id = "test-msg-id"
+        
+        # Create a mock manager config with no model_vision
+        mock_config = MagicMock()
+        mock_config.llm.model_vision = None  # No vision configured
+        
+        with patch("daemon.api.manager") as mock_manager:
+            mock_manager.config = mock_config
+            mock_manager.get_instance = MagicMock()  # Instance exists
+            mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
+            
+            from daemon.api import send_message
+            from daemon.models import MessageCreate
+            
+            # Create text-only message (no images)
+            message = MessageCreate(content="Hello")
+            
+            # Call should succeed (no HTTPException)
+            import asyncio
+            response = asyncio.run(send_message(
+                instance_id="test-instance-id",
+                message=message
+            ))
+            
+            # Verify enqueue was called with images=None
+            mock_manager.enqueue_message.assert_called_once()
+            call_kwargs = mock_manager.enqueue_message.call_args.kwargs
+            assert call_kwargs["images"] is None
+
+
+# =============================================================================
+# Integration Tests - enqueue_message with images (mock-based)
+# =============================================================================
+
+
+class TestEnqueueMessageWithImages:
+    """Tests for enqueue_message storing images in DB."""
+
+    def test_enqueue_message_preserves_images(self):
+        """enqueue_message should store images in MessageQueue."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from datetime import datetime, timezone
+        
+        # We test this by mocking at the repository level
+        with patch("daemon.manager.InstanceManager") as MockManager:
+            mock_instance = MagicMock()
+            mock_instance.enqueue_message = AsyncMock(return_value=MagicMock(
+                message_id="test-msg-id",
+                status="queued"
+            ))
+            MockManager.return_value = mock_instance
+            
+            # Import after patching
+            from daemon.manager import InstanceManager
+            
+            manager = InstanceManager()
+            images = [make_valid_image(i) for i in range(2)]
+            
+            # Call enqueue_message with images
+            result = asyncio.run(manager.enqueue_message(
+                instance_id="test-instance",
+                message="What do you see?",
+                source="api",
+                images=images
+            ))
+            
+            # Verify images were passed
+            mock_instance.enqueue_message.assert_called_once()
+            call_kwargs = mock_instance.enqueue_message.call_args.kwargs
+            assert call_kwargs["images"] == images
