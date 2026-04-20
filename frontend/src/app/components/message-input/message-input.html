@@ -1,16 +1,60 @@
+<input 
+  type="file" 
+  accept="image/*" 
+  multiple 
+  class="image-input" 
+  (change)="onFileSelected($event)"
+>
+
 <form class="input-container" (submit)="$event.preventDefault()">
-  <div class="input-wrapper">
+  <div 
+    class="input-wrapper"
+    (dragover)="onDragOver($event)"
+    (dragleave)="onDragLeave($event)"
+    (drop)="onDrop($event)"
+  >
+    @if (images().length > 0) {
+      <div class="image-preview-strip">
+        @for (img of images(); track img.id) {
+          <div class="image-preview-item">
+            <img [src]="img.dataUrl" class="preview-thumbnail" alt="Preview">
+            <button 
+              type="button" 
+              class="remove-image-btn" 
+              (click)="removeImage(img.id)"
+            >
+              x
+            </button>
+            <span class="preview-filename">
+              {{ img.name.length > 12 ? img.name.slice(0, 12) + '...' : img.name }}
+            </span>
+          </div>
+        }
+      </div>
+    }
+    
     <textarea
       #textarea
       [value]="message()"
       (input)="onInput($event)"
       (keydown.enter)="handleSubmit(); $event.preventDefault()"
       [disabled]="disabled"
-      placeholder="Type your message..."
+      placeholder="Type your message or drag images here..."
       rows="1"
       class="input-textarea"
       [class.active]="canSend"
     ></textarea>
+
+    <button 
+      type="button" 
+      class="attach-button" 
+      (click)="onAttachClick()"
+      [disabled]="images().length >= MAX_IMAGES"
+    >
+      <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+      </svg>
+    </button>
     
     @if (isStreaming) {
         <button class="stop-button" (click)="stopInstance.emit()" title="Stop">

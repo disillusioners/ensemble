@@ -37,6 +37,7 @@ export interface JobCreate {
   source?: JobSource;
   queue_id?: string;
   metadata?: Record<string, any>;
+  image_urls?: string[]; // base64 data URIs for vision support
 }
 
 export interface JobFilters {
@@ -56,11 +57,13 @@ export interface JobEventPayload {
   result_summary?: string;
   error_message?: string;
   queue_id?: string | null;
+  image_urls?: string[]; // base64 data URIs for vision support
 }
 
 export interface JobEvent {
   event: 'connected' | 'status_update' | 'completed' | 'error' | 'keepalive';
   data: JobEventPayload | null;
+  image_urls?: string[]; // base64 data URIs for vision support
 }
 
 // Helper Functions

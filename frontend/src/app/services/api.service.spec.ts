@@ -78,8 +78,9 @@ class TestApiService {
     return this.http.post(`${this.API_BASE}/instances/${instanceId}/stop`, {});
   }
 
-  sendMessage(instanceId: string, content: string): Observable<any> {
-    return this.http.post(`${this.API_BASE}/instances/${instanceId}/messages`, { content });
+  sendMessage(instanceId: string, content: string, images?: string[]): Observable<any> {
+    const body = images?.length ? { content, images } : { content };
+    return this.http.post(`${this.API_BASE}/instances/${instanceId}/messages`, body);
   }
 
   getMessages(instanceId: string): Observable<any> {
@@ -127,6 +128,77 @@ describe('ApiService', () => {
       expect(requests.length).toBe(2);
       expect(requests[0].url).toBe('/api/instances/instance-abc/stop');
       expect(requests[1].url).toBe('/api/instances/instance-xyz/stop');
+    });
+  });
+
+  describe('sendMessage', () => {
+    it('should make POST request to /api/instances/{instanceId}/messages', () => {
+      const testInstanceId = 'test-instance-123';
+      const testContent = 'Hello, world!';
+
+      service.sendMessage(testInstanceId, testContent);
+
+      const requests = httpMock.getRequests();
+      expect(requests.length).toBe(1);
+      
+      const request = requests[0];
+      expect(request.method).toBe('POST');
+      expect(request.url).toBe(`/api/instances/${testInstanceId}/messages`);
+    });
+
+    it('should send just content when no images provided', () => {
+      const testInstanceId = 'test-instance-123';
+      const testContent = 'Hello!';
+
+      service.sendMessage(testInstanceId, testContent);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent });
+    });
+
+    it('should send content with images when images provided', () => {
+      const testInstanceId = 'test-instance-123';
+      const testContent = 'Check this out!';
+      const testImages = ['data:image/png;base64,abc123', 'data:image/png;base64,def456'];
+
+      service.sendMessage(testInstanceId, testContent, testImages);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent, images: testImages });
+    });
+
+    it('should send just content when images array is empty', () => {
+      const testInstanceId = 'test-instance-123';
+      const testContent = 'Hello!';
+      const emptyImages: string[] = [];
+
+      service.sendMessage(testInstanceId, testContent, emptyImages);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent });
+    });
+
+    it('should send content with images array even if it contains empty strings', () => {
+      const testInstanceId = 'test-instance-123';
+      const testContent = 'Hello!';
+      const emptyImages = [''];
+
+      service.sendMessage(testInstanceId, testContent, emptyImages);
+
+      // Implementation checks array length, not content - empty strings still included
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent, images: emptyImages });
+    });
+
+    it('should include single image correctly', () => {
+      const testInstanceId = 'instance-abc';
+      const testContent = 'Here is one image';
+      const singleImage = ['data:image/jpeg;base64,singleimage'];
+
+      service.sendMessage(testInstanceId, testContent, singleImage);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).toEqual({ content: testContent, images: singleImage });
     });
   });
 

@@ -53,6 +53,7 @@ export class SseService {
       tool_calls: data.tool_calls || null,
       created_at: data.created_at || new Date().toISOString(),
       instance_id: data.instance_id,
+      images: data.images || undefined,
     };
   }
 

@@ -33,6 +33,8 @@ export interface Message {
   // Instance ID for tracking which instance this message belongs to
   // Used for instance validation in SSE event routing
   instance_id?: string;
+  // Vision support: base64 data URIs of attached images (up to 3)
+  images?: string[];
 }
 
 // SSE event types
@@ -65,6 +67,8 @@ export interface ToolCall {
 
 export interface MessageCreate {
   content: string;
+  // Vision support: base64 data URIs of attached images (up to 3)
+  images?: string[];
 }
 
 export interface MessageResponse {
@@ -75,6 +79,8 @@ export interface MessageResponse {
   thinking_extracted?: string | null;
   tool_calls: unknown[] | null;
   created_at: string;
+  // Vision support: base64 data URIs of attached images (up to 3)
+  images?: string[];
 }
 
 // Health types

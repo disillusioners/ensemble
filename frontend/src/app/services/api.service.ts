@@ -76,8 +76,9 @@ export class ApiService {
   }
 
   // Messages
-  sendMessage(instanceId: string, content: string): Observable<MessageResponse> {
-    return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, { content });
+  sendMessage(instanceId: string, content: string, images?: string[]): Observable<MessageResponse> {
+    const body = images?.length ? { content, images } : { content };
+    return this.http.post<MessageResponse>(`${this.API_BASE}/instances/${instanceId}/messages`, body);
   }
 
   getMessages(instanceId: string): Observable<Message[]> {

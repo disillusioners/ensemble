@@ -2,16 +2,31 @@ import { signal } from '@angular/core';
 import { EventEmitter } from '@angular/core';
 
 // Simplified MessageInputComponent for testing (mirrors actual component structure)
+interface MessagePayload {
+  content: string;
+  images: string[];
+}
+
+interface FilePreview {
+  id: string;
+  dataUrl: string;
+  name: string;
+  size: number;
+}
+
 class TestMessageInputComponent {
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   
   @Input() disabled = false;
   @Input() agentColor = 'coder';
   @Input() isStreaming = false;
-  @Output() sendMessage = new EventEmitter<string>();
+  @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() stopInstance = new EventEmitter<void>();
 
   message = signal('');
+  images = signal<FilePreview[]>([]);
+
+  protected readonly MAX_IMAGES = 3;
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
@@ -24,20 +39,30 @@ class TestMessageInputComponent {
   }
 
   get canSend(): boolean {
-    return !!this.message().trim() && !this.disabled;
+    return (!!this.message().trim() || this.images().length > 0) && !this.disabled;
   }
 
   handleSubmit(): void {
     const trimmedMessage = this.message().trim();
-    if (!trimmedMessage || this.disabled) return;
+    if ((!trimmedMessage && this.images().length === 0) || this.disabled) return;
 
-    this.sendMessage.emit(trimmedMessage);
+    const payload: MessagePayload = {
+      content: trimmedMessage,
+      images: this.images().map(img => img.dataUrl)
+    };
+
+    this.sendMessage.emit(payload);
     this.message.set('');
+    this.images.set([]);
   }
 
   onInput(event: Event): void {
     const target = event.target as HTMLTextAreaElement;
     this.message.set(target.value);
+  }
+
+  removeImage(id: string): void {
+    this.images.update(imgs => imgs.filter(img => img.id !== id));
   }
 }
 
@@ -161,10 +186,13 @@ describe('MessageInputComponent', () => {
 
       component.handleSubmit();
 
-      expect(emitSpy).toHaveBeenCalledWith('Hello, world!');
+      expect(emitSpy).toHaveBeenCalledWith({
+        content: 'Hello, world!',
+        images: []
+      });
     });
 
-    it('should not emit when message is empty', () => {
+    it('should not emit when message is empty and no images', () => {
       const emitSpy = jest.spyOn(component.sendMessage, 'emit');
       component.message.set('');
 
@@ -181,10 +209,42 @@ describe('MessageInputComponent', () => {
 
       expect(component.message()).toBe('');
     });
+
+    it('should clear images after successful send', () => {
+      component.images.set([{
+        id: 'test-id',
+        dataUrl: 'data:image/png;base64,test',
+        name: 'test.png',
+        size: 100
+      }]);
+      expect(component.images().length).toBe(1);
+
+      component.handleSubmit();
+
+      expect(component.images()).toEqual([]);
+    });
+
+    it('should emit with images when images are attached', () => {
+      const emitSpy = jest.spyOn(component.sendMessage, 'emit');
+      component.message.set('Check this out!');
+      component.images.set([{
+        id: 'img-1',
+        dataUrl: 'data:image/png;base64,abc123',
+        name: 'photo.png',
+        size: 5000
+      }]);
+
+      component.handleSubmit();
+
+      expect(emitSpy).toHaveBeenCalledWith({
+        content: 'Check this out!',
+        images: ['data:image/png;base64,abc123']
+      });
+    });
   });
 
   describe('canSend', () => {
-    it('should be false when message is empty', () => {
+    it('should be false when message is empty and no images', () => {
       component.message.set('');
       expect(component.canSend).toBe(false);
     });
@@ -199,6 +259,42 @@ describe('MessageInputComponent', () => {
       component.message.set('Hello!');
       component.disabled = false;
       expect(component.canSend).toBe(true);
+    });
+
+    it('should be true when images are attached even without text', () => {
+      component.message.set('');
+      component.images.set([{
+        id: 'img-1',
+        dataUrl: 'data:image/png;base64,test',
+        name: 'test.png',
+        size: 100
+      }]);
+      expect(component.canSend).toBe(true);
+    });
+  });
+
+  describe('removeImage', () => {
+    it('should remove image by id', () => {
+      component.images.set([
+        { id: 'img-1', dataUrl: 'data1', name: 'a.png', size: 100 },
+        { id: 'img-2', dataUrl: 'data2', name: 'b.png', size: 200 }
+      ]);
+
+      component.removeImage('img-1');
+
+      expect(component.images()).toEqual([
+        { id: 'img-2', dataUrl: 'data2', name: 'b.png', size: 200 }
+      ]);
+    });
+
+    it('should do nothing when id not found', () => {
+      component.images.set([
+        { id: 'img-1', dataUrl: 'data1', name: 'a.png', size: 100 }
+      ]);
+
+      component.removeImage('non-existent');
+
+      expect(component.images().length).toBe(1);
     });
   });
 });

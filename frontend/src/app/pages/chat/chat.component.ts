@@ -9,7 +9,7 @@ import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
-import { MessageInputComponent } from '../../components/message-input/message-input.component';
+import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
 
 const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
@@ -371,7 +371,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     localStorage.setItem(NEXT_AGENT_STORAGE_KEY, agent.id);
   }
 
-  protected onSendMessage(content: string): void {
+  protected onSendMessage(payload: MessagePayload): void {
     const instance = this.currentInstance();
     if (!instance) return;
 
@@ -379,7 +379,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sendError.set(null);
     this.isSending.set(true);
     
-    this.api.sendMessage(instance.instance_id, content).subscribe({
+    this.api.sendMessage(instance.instance_id, payload.content, payload.images).subscribe({
       next: (_response) => {
         // Wait for the message to arrive via SSE - server assigns message_id
         // The SSE service will upsert it when received
