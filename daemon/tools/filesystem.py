@@ -146,7 +146,7 @@ def read_file(
     path: str,
     workdir: str | None = None,
     offset: int = 1,
-    limit: int = 3000,
+    limit: int = 2000,
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
     if not workdir or not workdir.strip():
@@ -203,7 +203,7 @@ Args:
     path: File path to read (relative to workdir)
     workdir: Base directory for relative paths (required)
     offset: Line number to start from (1-indexed, default: 1)
-    limit: Maximum number of lines to read (default: 3000)
+    limit: Maximum number of lines to read (default: 2000)
 
 Returns:
     File contents with line numbers (format: "line_num: content")
