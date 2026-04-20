@@ -4,5 +4,8 @@
   "description": "Specializes in code generation and debugging",
   "icon": "💻",
   "color": "accent-cyan",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help"]
+  }
 }
