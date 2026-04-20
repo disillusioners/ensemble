@@ -296,7 +296,8 @@ class JobFeedbackObserver:
 
         # Release locks held by this instance
         # This is done AFTER successful transition to ensure we only release
-        # locks for jobs that were actually completed/failed
+        # locks for jobs that were actually completed/failed.
+        # Database is the single source of truth - lock_repo releases DB records directly.
         try:
             released_count = self._lock_repo.release_by_instance(instance_id)
             if released_count > 0:
@@ -307,22 +308,6 @@ class JobFeedbackObserver:
             # Lock release failure is not critical - log and continue
             logger.warning(
                 f"Failed to release locks for instance {instance_id[:8]}...: {e}"
-            )
-
-        # FIX: Also release in-memory locks from JobLockManager so the next job
-        # can be picked up immediately. The lock_repo only releases DB locks.
-        try:
-            released_projects = await self._job_queue_service.release_lock_by_instance(
-                instance_id
-            )
-            if released_projects:
-                logger.debug(
-                    f"Released in-memory locks for instance {instance_id[:8]}... "
-                    f"project(s): {released_projects}"
-                )
-        except Exception as e:
-            logger.warning(
-                f"Failed to release in-memory locks for instance {instance_id[:8]}...: {e}"
             )
 
         # FIX: Trigger the next pending job immediately instead of waiting for

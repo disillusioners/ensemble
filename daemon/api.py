@@ -191,12 +191,9 @@ async def lifespan(app: FastAPI):
     # create_job_repository is imported (via its import chain)
     job_repository = create_job_repository(engine=manager._engine, create_tables=True)
     
-    # Create LockRepository for job lock persistence
+    # Create LockRepository for job lock persistence (database is single source of truth)
     lock_repo = LockRepository(engine=manager._engine)
     job_lock_manager = JobLockManager(lock_repo=lock_repo)
-    
-    # Reconcile locks from DB on startup to rebuild in-memory state
-    await job_lock_manager.reconcile_locks()
     
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager._engine)

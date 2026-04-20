@@ -902,7 +902,20 @@ class JobQueueService:
                 )
         elif job.project_id:
             # Legacy project-level lock (backward compatibility)
-            self._lock_manager.release_sync(job.project_id, job_id)
+            # Use asyncio.run_coroutine_threadsafe to release async lock
+            if self._loop and self._loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._lock_manager.release(job.project_id, job_id),
+                    self._loop,
+                )
+                try:
+                    future.result(timeout=5)
+                except Exception as e:
+                    logger.error(f"Failed to release project lock for job {job_id}: {e}")
+            else:
+                logger.warning(
+                    f"Cannot release project lock for job {job_id} - no event loop available"
+                )
         
         # Mark job based on success/failure
         try:
@@ -1028,11 +1041,26 @@ class JobQueueService:
         
         # If job has project_id but no queue_id, try backward-compatible locking
         if job.project_id:
-            acquired = self._lock_manager.acquire_sync(
-                project_id=job.project_id,
-                job_id=next_job.job_id,
-                instance_id=instance_id,
-            )
+            # Use asyncio.run_coroutine_threadsafe to acquire async lock
+            if self._loop and self._loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    self._lock_manager.acquire(
+                        project_id=job.project_id,
+                        job_id=next_job.job_id,
+                        instance_id=instance_id,
+                    ),
+                    self._loop,
+                )
+                try:
+                    acquired = future.result(timeout=5)
+                except Exception as e:
+                    logger.error(f"Failed to acquire project lock for job {next_job.job_id}: {e}")
+                    return None
+            else:
+                logger.warning(
+                    f"Cannot acquire project lock for job {next_job.job_id} - no event loop available"
+                )
+                return None
             
             if not acquired:
                 return None
@@ -1040,7 +1068,16 @@ class JobQueueService:
             try:
                 return self._repository.start_job(next_job.job_id, instance_id)
             except ValueError:
-                self._lock_manager.release_sync(job.project_id, next_job.job_id)
+                # Release on failure - use async release
+                if self._loop and self._loop.is_running():
+                    release_future = asyncio.run_coroutine_threadsafe(
+                        self._lock_manager.release(job.project_id, next_job.job_id),
+                        self._loop,
+                    )
+                    try:
+                        release_future.result(timeout=5)
+                    except Exception as e:
+                        logger.error(f"Failed to release project lock after start failure: {e}")
                 return None
         
         # No project_id - start immediately without locking

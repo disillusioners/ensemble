@@ -21,6 +21,7 @@ from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
+from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobStatus
 
 
@@ -76,11 +77,20 @@ def dlq_repository(engine):
 
 
 @pytest.fixture
-def lock_manager():
+def lock_repo(engine):
+    """Create LockRepository with test engine."""
+    return LockRepository(engine)
+
+
+@pytest.fixture
+def lock_manager(lock_repo):
     """Create fresh JobLockManager instance."""
-    manager = JobLockManager()
+    manager = JobLockManager(lock_repo=lock_repo)
     yield manager
-    manager.clear()
+    # Clean up using lock_repo directly
+    all_locks = lock_repo.get_all_locks()
+    for lock in all_locks:
+        lock_repo.release(lock.lock_id)
 
 
 @pytest.fixture

@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 import pytest
 
-from daemon.services.job_lock_manager import JobLockManager, LockInfo
+from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories.job_queue.models import JobLockInfo
 
 
@@ -427,8 +427,13 @@ class TestLockManagerReleaseByInstance:
 
 
 class TestLockManagerSyncMethods:
-    """Tests for synchronous lock methods."""
+    """Tests for synchronous lock methods.
+    
+    NOTE: These tests are skipped because acquire_sync() and release_sync()
+    were removed in the DB-only redesign. The manager now uses async-only operations.
+    """
 
+    @pytest.mark.skip(reason="acquire_sync() removed in DB-only redesign")
     def test_acquire_sync_success(self, lock_manager):
         """Test synchronous lock acquisition."""
         result = lock_manager.acquire_sync(
@@ -441,6 +446,7 @@ class TestLockManagerSyncMethods:
         queue_id = lock_manager._get_default_queue_id("project-1")
         assert lock_manager._queue_locks.get(("project-1", queue_id)) is not None
 
+    @pytest.mark.skip(reason="acquire_sync() removed in DB-only redesign")
     def test_acquire_sync_already_held(self, lock_manager):
         """Test synchronous acquisition when already held."""
         lock_manager.acquire_sync("project-1", "job-1", "instance-1")
@@ -448,6 +454,7 @@ class TestLockManagerSyncMethods:
         result = lock_manager.acquire_sync("project-1", "job-2", "instance-2")
         assert result is False
 
+    @pytest.mark.skip(reason="release_sync() removed in DB-only redesign")
     def test_release_sync_success(self, lock_manager):
         """Test synchronous lock release."""
         lock_manager.acquire_sync("project-1", "job-1", "instance-1")
@@ -457,6 +464,7 @@ class TestLockManagerSyncMethods:
         queue_id = lock_manager._get_default_queue_id("project-1")
         assert lock_manager._queue_locks.get(("project-1", queue_id)) is None
 
+    @pytest.mark.skip(reason="release_sync() removed in DB-only redesign")
     def test_release_sync_wrong_job(self, lock_manager):
         """Test sync release with wrong job_id."""
         lock_manager.acquire_sync("project-1", "job-1", "instance-1")
@@ -542,8 +550,14 @@ class TestLockManagerContextManager:
 
 
 class TestLockManagerClear:
-    """Tests for clear() method."""
+    """Tests for clear() method.
+    
+    NOTE: All tests are skipped because clear() was removed
+    and now raises NotImplementedError. Use release_by_instance()
+    for specific cleanup.
+    """
 
+    @pytest.mark.skip(reason="clear() removed - raises NotImplementedError in DB-only redesign")
     @pytest.mark.asyncio
     async def test_clear_removes_all_locks(self, lock_manager):
         """Test clear removes all locks and waiters."""
@@ -575,56 +589,6 @@ class TestLockManagerClear:
         lock_manager.clear()
         
         assert await lock_manager.get_waiter_count("project-1") == 0
-
-
-class TestLockInfo:
-    """Tests for LockInfo internal class."""
-
-    def test_lock_info_creation(self):
-        """Test LockInfo creation with default timestamp."""
-        info = LockInfo(
-            job_id="job-1",
-            project_id="project-1",
-            queue_id="queue-1",
-            instance_id="instance-1"
-        )
-        
-        assert info.job_id == "job-1"
-        assert info.project_id == "project-1"
-        assert info.queue_id == "queue-1"
-        assert info.instance_id == "instance-1"
-        assert info.locked_at is not None
-
-    def test_lock_info_custom_timestamp(self):
-        """Test LockInfo creation with custom timestamp."""
-        custom_time = datetime(2024, 1, 1, 12, 0, 0)
-        info = LockInfo(
-            job_id="job-1",
-            project_id="project-1",
-            queue_id="queue-1",
-            instance_id="instance-1",
-            locked_at=custom_time
-        )
-        
-        assert info.locked_at == custom_time
-
-    def test_lock_info_to_job_lock_info(self):
-        """Test conversion to JobLockInfo."""
-        info = LockInfo(
-            job_id="job-1",
-            project_id="project-1",
-            queue_id="queue-1",
-            instance_id="instance-1"
-        )
-        
-        lock_info = info.to_lock_info()
-        
-        assert isinstance(lock_info, JobLockInfo)
-        assert lock_info.job_id == "job-1"
-        assert lock_info.project_id == "project-1"
-        assert lock_info.queue_id == "queue-1"
-        assert lock_info.instance_id == "instance-1"
-        assert lock_info.locked_at == info.locked_at
 
 
 class TestLockManagerPerQueueLocking:

@@ -16,6 +16,7 @@ from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
 
@@ -50,11 +51,15 @@ def integration_repository(integration_engine):
 
 
 @pytest.fixture
-def integration_lock_manager():
-    """Create fresh lock manager."""
-    manager = JobLockManager()
+def integration_lock_manager(integration_engine):
+    """Create fresh lock manager with lock_repo."""
+    lock_repo = LockRepository(integration_engine)
+    manager = JobLockManager(lock_repo=lock_repo)
     yield manager
-    manager.clear()
+    # Clean up using lock_repo directly
+    all_locks = lock_repo.get_all_locks()
+    for lock in all_locks:
+        lock_repo.release(lock.lock_id)
 
 
 @pytest.fixture
@@ -476,7 +481,13 @@ class TestIntegrationCrashRecovery:
     async def test_recovery_from_lock_manager_crash(
         self, integration_service, integration_lock_manager, integration_queue_repository
     ):
-        """Test recovery when lock manager state is lost (simulated crash)."""
+        """Test recovery when lock manager state is lost (simulated crash).
+        
+        In the DB-only model, locks are persisted in the database.
+        To simulate a crash, we clear the locks directly from the database.
+        """
+        # Get the lock_repo from the fixture (we need to add it as a fixture parameter)
+        lock_repo = integration_lock_manager._lock_repo
         queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
         
         # Enqueue and start a job
@@ -494,8 +505,11 @@ class TestIntegrationCrashRecovery:
         assert started_job.status == JobStatus.PROCESSING.value
         assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is True
         
-        # Simulate crash: clear lock manager
-        integration_lock_manager.clear()
+        # Simulate crash: clear locks directly from database
+        # In DB-only model, this is how we simulate losing lock state
+        all_locks = lock_repo.get_all_locks()
+        for lock in all_locks:
+            lock_repo.release(lock.lock_id)
         
         # Lock should be released (simulating crash recovery)
         assert await integration_service._lock_manager.is_queue_locked("project-1", queue1.queue_id) is False

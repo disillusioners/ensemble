@@ -9,6 +9,7 @@ from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
 
@@ -42,11 +43,20 @@ def repository(engine):
 
 
 @pytest.fixture
-def lock_manager():
-    """Create fresh JobLockManager instance."""
-    manager = JobLockManager()
+def lock_repo(engine):
+    """Create LockRepository instance with fresh database."""
+    return LockRepository(engine)
+
+
+@pytest.fixture
+def lock_manager(lock_repo):
+    """Create fresh JobLockManager instance with lock_repo."""
+    manager = JobLockManager(lock_repo=lock_repo)
     yield manager
-    manager.clear()
+    # Clean up locks using lock_repo directly (clear() raises NotImplementedError)
+    all_locks = lock_repo.get_all_locks()
+    for lock in all_locks:
+        lock_repo.release(lock.lock_id)
 
 
 @pytest.fixture
