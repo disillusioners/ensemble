@@ -507,6 +507,21 @@ class JobRepository:
                 f"Cannot cancel job in '{job.status}' state, must be PENDING or PROCESSING"
             )
 
+    def terminate_job(
+        self,
+        job_id: str,
+        error_message: str,
+    ) -> Optional[JobItem]:
+        """Terminate a job (PROCESSING -> TERMINATED). No retry triggered."""
+        now = datetime.utcnow().isoformat()
+        return self.atomic_transition(
+            job_id,
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.TERMINATED.value,
+            completed_at=now,
+            error_message=error_message,
+        )
+
     # --------------------------------------------------------
     # DELETE
     # --------------------------------------------------------

@@ -48,6 +48,7 @@ from .tools import create_instance_tools
 from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
 from .services.event_bus import EventBus
+from .services.job_queue_service import DemandState
 from .cancellation import (
     CancellationToken, 
     CancellationReason,
@@ -2566,13 +2567,13 @@ Title:"""
             except Exception as e:
                 logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
 
-        # 7. Mark any associated job as failed
+        # 7. Mark any associated job as terminated (no retry)
         if self._job_queue_service is not None:
             try:
                 job = self._job_queue_service.get_job_by_instance_sync(instance_id)
                 if job is not None and job.status == "processing":
                     self._job_queue_service.complete_job_sync(
-                        job.job_id, success=False, error="Instance terminated",
+                        job.job_id, DemandState.TERMINATED, error="Instance terminated",
                         result_summary=None,
                     )
                     # Trigger next pending job for this project

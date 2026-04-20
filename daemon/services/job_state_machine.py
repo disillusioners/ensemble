@@ -15,6 +15,8 @@ _STATUS_FAILED = "failed"
 _STATUS_CANCELLED = "cancelled"
 _STATUS_DEAD_LETTER = "dead_letter"
 
+_STATUS_TERMINATED = "terminated"
+
 # State transition table: (from_state, to_state) -> transition_name
 # Using string literals directly to avoid circular imports
 TRANSITIONS: Dict[Tuple[Optional[str], str], str] = {
@@ -23,6 +25,7 @@ TRANSITIONS: Dict[Tuple[Optional[str], str], str] = {
     (_STATUS_PENDING, _STATUS_CANCELLED): "cancel",
     (_STATUS_PROCESSING, _STATUS_COMPLETED): "complete",
     (_STATUS_PROCESSING, _STATUS_FAILED): "fail",
+    (_STATUS_PROCESSING, _STATUS_TERMINATED): "terminate",
     (_STATUS_PROCESSING, _STATUS_CANCELLED): "abort",
     (_STATUS_FAILED, _STATUS_PENDING): "retry",
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",

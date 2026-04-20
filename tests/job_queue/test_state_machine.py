@@ -191,8 +191,9 @@ class TestStateMachineGetValidTransitions:
         targets = {target for target, name in result}
         assert "completed" in targets   # complete
         assert "failed" in targets      # fail
+        assert "terminated" in targets # terminate
         assert "cancelled" in targets  # abort
-        assert len(result) == 3
+        assert len(result) == 4
 
     def test_get_valid_transitions_from_failed(self):
         """Test valid transitions from FAILED state."""
@@ -291,9 +292,9 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_ten_entries(self):
-        """Test TRANSITIONS dict has 10 entries."""
-        assert len(TRANSITIONS) == 10
+    def test_transitions_has_eleven_entries(self):
+        """Test TRANSITIONS dict has 11 entries."""
+        assert len(TRANSITIONS) == 11
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""

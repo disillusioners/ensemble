@@ -24,6 +24,7 @@ class JobStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    TERMINATED = "terminated"  # External termination (no retry)
     DEAD_LETTER = "dead_letter"
 
     @classmethod

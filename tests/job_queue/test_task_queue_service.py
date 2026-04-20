@@ -7,6 +7,7 @@ and lock manager for job queue operations.
 import pytest
 
 from daemon.repositories.job_queue.models import JobStatus
+from daemon.services.job_queue_service import DemandState
 
 
 class TestJobQueueServiceEnqueue:
@@ -298,7 +299,7 @@ class TestJobQueueServiceCompleteJob:
         
         result = await job_queue_service.complete_job(
             job.job_id,
-            success=False,
+            DemandState.FAILED,
             error="Something went wrong"
         )
         
@@ -704,7 +705,7 @@ class TestJobQueueServiceFullWorkflow:
         # Fail the job
         failed = await job_queue_service.complete_job(
             job.job_id,
-            success=False,
+            DemandState.FAILED,
             error="Simulated failure"
         )
         
@@ -763,7 +764,7 @@ class TestCompleteJobWithResultSummary:
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
         completed = await job_queue_service.complete_job(
-            job.job_id, success=True, result_summary="Custom summary here"
+            job.job_id, DemandState.COMPLETED, result_summary="Custom summary here"
         )
         assert completed is not None
         assert completed.status == "completed"
@@ -784,18 +785,18 @@ class TestCompleteJobWithResultSummary:
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
         completed = job_queue_service.complete_job_sync(
-            job.job_id, success=True, result_summary="Sync summary"
+            job.job_id, DemandState.COMPLETED, result_summary="Sync summary"
         )
         assert completed is not None
         assert completed.result_summary == "Sync summary"
     
     @pytest.mark.asyncio
     async def test_complete_job_sync_failure(self, job_queue_service, sample_job_data_service):
-        """complete_job_sync marks job as failed when success=False."""
+        """complete_job_sync marks job as failed when demand_state=FAILED."""
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
         completed = job_queue_service.complete_job_sync(
-            job.job_id, success=False, error="Sync error"
+            job.job_id, DemandState.FAILED, error="Sync error"
         )
         assert completed is not None
         assert completed.status == "failed"
@@ -804,7 +805,7 @@ class TestCompleteJobWithResultSummary:
     @pytest.mark.asyncio
     async def test_complete_job_sync_returns_none_for_nonexistent(self, job_queue_service):
         """complete_job_sync returns None for unknown job_id."""
-        result = job_queue_service.complete_job_sync("nonexistent", success=True)
+        result = job_queue_service.complete_job_sync("nonexistent", DemandState.COMPLETED)
         assert result is None
     
     @pytest.mark.asyncio
@@ -813,9 +814,9 @@ class TestCompleteJobWithResultSummary:
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
         # Complete once
-        job_queue_service.complete_job_sync(job.job_id, success=True)
+        job_queue_service.complete_job_sync(job.job_id, DemandState.COMPLETED)
         # Try again - should return None (not raise ValueError)
-        result = job_queue_service.complete_job_sync(job.job_id, success=True)
+        result = job_queue_service.complete_job_sync(job.job_id, DemandState.COMPLETED)
         assert result is None
 
 
@@ -833,7 +834,7 @@ class TestTriggerNextJobSync:
         assert job2.status == "pending"
         
         # Complete job1
-        job_queue_service.complete_job_sync(job1.job_id, success=True)
+        job_queue_service.complete_job_sync(job1.job_id, DemandState.COMPLETED)
         
         # Trigger next
         next_job = job_queue_service.trigger_next_job_sync("test-project")
@@ -846,7 +847,7 @@ class TestTriggerNextJobSync:
         """trigger_next_job_sync returns None when no pending jobs."""
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
-        job_queue_service.complete_job_sync(job.job_id, success=True)
+        job_queue_service.complete_job_sync(job.job_id, DemandState.COMPLETED)
         
         result = job_queue_service.trigger_next_job_sync("test-project")
         assert result is None

@@ -7,6 +7,7 @@ coordinating between the database repository and the lock manager.
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -22,6 +23,18 @@ from daemon.services.job_state_machine import job_state_machine, InvalidTransiti
 from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+
+class DemandState(enum.Enum):
+    """Job demand state for completion.
+    
+    Used by complete_job/complete_job_sync to specify the terminal state.
+    Unlike success:bool, this enum explicitly distinguishes FAILED (retry)
+    from TERMINATED (no retry).
+    """
+    COMPLETED = "completed"   # Successful completion, no retry
+    FAILED = "failed"        # Failed with error, may trigger retry
+    TERMINATED = "terminated" # Externally terminated, no retry
 
 
 class JobQueueService:
@@ -800,16 +813,16 @@ class JobQueueService:
     async def complete_job(
         self,
         job_id: str,
-        success: bool = True,
+        demand_state: DemandState = DemandState.COMPLETED,
         error: Optional[str] = None,
         result_summary: Optional[str] = None,
     ) -> Optional[JobItem]:
-        """Mark job as completed or failed and release lock.
+        """Mark job as completed/failed/terminated and release lock.
         
         Args:
             job_id: The job ID to complete.
-            success: True to mark as completed, False to mark as failed.
-            error: Error message if success=False.
+            demand_state: Terminal state (COMPLETED, FAILED, or TERMINATED).
+            error: Error message if demand_state is FAILED or TERMINATED.
             result_summary: Optional summary text for completed jobs.
             
         Returns:
@@ -829,14 +842,14 @@ class JobQueueService:
             # Backward compatibility: project without queue
             await self._lock_manager.release(job.project_id, job_id)
         
-        # Mark job based on success/failure
+        # Mark job based on demand_state
         try:
-            if success:
+            if demand_state == DemandState.COMPLETED:
                 summary = result_summary or "Job completed successfully"
                 return await asyncio.to_thread(
                     self._repository.complete_job, job_id, result_summary=summary
                 )
-            else:
+            elif demand_state == DemandState.FAILED:
                 failed_job = await asyncio.to_thread(
                     self._repository.fail_job, job_id, error_message=error or "Unknown error"
                 )
@@ -851,6 +864,11 @@ class JobQueueService:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
                 
                 return failed_job
+            elif demand_state == DemandState.TERMINATED:
+                # TERMINATED state does not trigger retry
+                return await asyncio.to_thread(
+                    self._repository.terminate_job, job_id, error_message=error or "Terminated"
+                )
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
@@ -858,11 +876,11 @@ class JobQueueService:
     def complete_job_sync(
         self,
         job_id: str,
-        success: bool,
+        demand_state: DemandState,
         error: Optional[str] = None,
         result_summary: Optional[str] = None,
     ) -> Optional[JobItem]:
-        """Mark job as completed or failed and release lock (synchronous version).
+        """Mark job as completed/failed/terminated and release lock (synchronous version).
         
         W6 Fix: Uses asyncio.run_coroutine_threadsafe() to properly release
         per-queue locks from synchronous context by scheduling the async
@@ -870,9 +888,9 @@ class JobQueueService:
         
         Args:
             job_id: The job ID to complete.
-            success: True to mark as completed, False to mark as failed.
-            error: Error message if success=False.
-            result_summary: Optional summary of the job result (for success=True).
+            demand_state: Terminal state (COMPLETED, FAILED, or TERMINATED).
+            error: Error message if demand_state is FAILED or TERMINATED.
+            result_summary: Optional summary of the job result (for COMPLETED).
             
         Returns:
             Updated JobItem if completed successfully, None if
@@ -917,11 +935,11 @@ class JobQueueService:
                     f"Cannot release project lock for job {job_id} - no event loop available"
                 )
         
-        # Mark job based on success/failure
+        # Mark job based on demand_state
         try:
-            if success:
+            if demand_state == DemandState.COMPLETED:
                 return self._repository.complete_job(job_id, result_summary=result_summary)
-            else:
+            elif demand_state == DemandState.FAILED:
                 failed_job = self._repository.fail_job(job_id, error_message=error or "Unknown error")
                 
                 # Try auto-retry if retry engine is configured
@@ -934,6 +952,9 @@ class JobQueueService:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
                 
                 return failed_job
+            elif demand_state == DemandState.TERMINATED:
+                # TERMINATED state does not trigger retry
+                return self._repository.terminate_job(job_id, error_message=error or "Terminated")
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
