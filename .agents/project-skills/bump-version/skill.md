@@ -25,6 +25,12 @@ Skill for bumping versions across project files with conventional commit support
 
 ## Workflow
 
+**Preferred: Use the automation script**
+```bash
+python scripts/bump_version.py [patch|minor|major|prerelease]
+```
+
+**Manual workflow (if script unavailable):**
 1. Identify current version from `pyproject.toml` or `package.json`
 2. Determine bump type (default: patch)
 3. Update all version files atomically:
@@ -42,3 +48,7 @@ Skill for bumping versions across project files with conventional commit support
 | Python (uv) | `pyproject.toml`, `daemon/__init__.py`, `tests/test_api.py`, `uv.lock` |
 | Node.js | `package.json`, `package-lock.json` |
 | Rust | `Cargo.toml` |
+
+## Automation Script
+
+Located at `scripts/bump_version.py` — handles all Python project files atomically.
