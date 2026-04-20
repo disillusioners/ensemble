@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-20 Vision Frontend Phase 2)
+## Test Results (Latest: 2026-04-20 Job Drawer Button Repositioning)
+
+### Job Detail Drawer — Button Repositioning (commit c3139b0)
+- **278 frontend tests** — ALL PASS (0 failed)
+- **Angular build** — SUCCESS (no compilation errors)
+- **Code review** — ALL 5 criteria PASS (buttons at top, sticky positioning, functionality intact, no duplicates, structural correctness)
+- **ensure.md** — dev.sh runs clean for 30 seconds
+- **No quick fixes needed** — HTML/SCSS-only change, no regressions
+- See `.agents/tester/RESULTS/2026-04-20-job-drawer-button-repositioning.md` for full report
+
+### Job Detail Drawer Button Repositioning Status: ✅ READY
 
 ### Vision Frontend Phase 2 — Image Upload UI (commits f4a3a93 + 6bdae97)
 - **278 frontend tests** — ALL PASS (0 failed)
