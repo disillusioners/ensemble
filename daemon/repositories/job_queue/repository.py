@@ -204,7 +204,7 @@ class JobRepository:
                 .where(JobItem.project_id == project_id)
                 .where(JobItem.status == JobStatus.PENDING.value)
                 .where(JobItem.deleted_at.is_(None))
-                .order_by(col(JobItem.priority).desc(), JobItem.created_at.desc())
+                .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
             jobs = list(db_session.exec(stmt))
             return jobs
@@ -220,7 +220,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.status == JobStatus.PENDING.value)
                 .where(JobItem.deleted_at.is_(None))
-                .order_by(col(JobItem.priority).desc(), col(JobItem.created_at).desc())
+                .order_by(col(JobItem.priority).desc(), col(JobItem.created_at).asc())
             )
             jobs = list(db_session.exec(stmt))
             return jobs
@@ -255,7 +255,7 @@ class JobRepository:
                 .where(JobItem.queue_id == queue_id)
                 .where(JobItem.status == JobStatus.PENDING.value)
                 .where(JobItem.deleted_at.is_(None))
-                .order_by(col(JobItem.priority).desc(), JobItem.created_at.desc())
+                .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
             jobs = list(db_session.exec(stmt))
             return jobs
