@@ -28,6 +28,43 @@
 
   <mat-divider></mat-divider>
 
+  <!-- Actions Section (Sticky) -->
+  <section class="detail-section actions-section sticky-actions">
+    <div class="action-buttons">
+      @if (canCancel()) {
+        <button mat-stroked-button
+                color="warn"
+                (click)="onCancel()">
+          <mat-icon>cancel</mat-icon>
+          Cancel Job
+        </button>
+      }
+      @if (canRetry()) {
+        <button mat-stroked-button
+                color="primary"
+                (click)="onRetry()">
+          <mat-icon>refresh</mat-icon>
+          Retry Job
+        </button>
+      }
+      @if (hasInstance()) {
+        <button mat-stroked-button
+                color="accent"
+                (click)="onViewSession()">
+          <mat-icon>visibility</mat-icon>
+          View Instance
+        </button>
+      }
+      <button mat-stroked-button
+              (click)="onCopyJobId()">
+        <mat-icon>content_copy</mat-icon>
+        Copy Job ID
+      </button>
+    </div>
+  </section>
+
+  <mat-divider></mat-divider>
+
   <!-- Overview Section -->
   <section class="detail-section">
     <h3 class="section-title">Overview</h3>
@@ -178,38 +215,5 @@
     <mat-divider></mat-divider>
   }
 
-  <!-- Actions Section -->
-  <section class="detail-section actions-section">
-    <div class="action-buttons">
-      @if (canCancel()) {
-        <button mat-stroked-button
-                color="warn"
-                (click)="onCancel()">
-          <mat-icon>cancel</mat-icon>
-          Cancel Job
-        </button>
-      }
-      @if (canRetry()) {
-        <button mat-stroked-button
-                color="primary"
-                (click)="onRetry()">
-          <mat-icon>refresh</mat-icon>
-          Retry Job
-        </button>
-      }
-      @if (hasInstance()) {
-        <button mat-stroked-button
-                color="accent"
-                (click)="onViewSession()">
-          <mat-icon>visibility</mat-icon>
-          View Instance
-        </button>
-      }
-      <button mat-stroked-button
-              (click)="onCopyJobId()">
-        <mat-icon>content_copy</mat-icon>
-        Copy Job ID
-      </button>
-    </div>
-  </section>
+
 </div>

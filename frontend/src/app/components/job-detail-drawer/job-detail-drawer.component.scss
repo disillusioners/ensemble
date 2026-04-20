@@ -232,7 +232,15 @@ mat-chip {
 
 // Actions Section
 .actions-section {
-  padding: 20px;
+  padding: 12px 20px;
+
+  &.sticky-actions {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--surface-color, #1e1e1e);
+    border-bottom: 1px solid var(--border-color, #3c3c3c);
+  }
 
   .action-buttons {
     display: flex;
