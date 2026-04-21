@@ -2087,7 +2087,7 @@ Provide a concise summary:"""
                     message = session.get(MessageQueue, message_id)
                     if message:
                         message.status = MessageStatus.FAILED.value
-                        message.completed_at = datetime.now(timezone.utc).isoformat()
+                        message.completed_at = datetime.now(timezone.utc)
                 
                 # d) Decrement parent's waiting_for counter
                 parent = session.get(Instance, parent_id)
