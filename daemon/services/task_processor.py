@@ -44,8 +44,6 @@ def _classify_error_type(e: Exception) -> str:
     """
     import openai
     import httpx
-    from socket import ConnectionResetError, ConnectionAbortedError
-    from concurrent.futures import BrokenPipeError
 
     exc_type = type(e)
     exc_name = exc_type.__name__
