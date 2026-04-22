@@ -507,6 +507,35 @@ class JobQueueService:
     
     # ========== Helper Methods ==========
     
+    async def _release_job_lock(
+        self,
+        *,
+        project_id: str | None,
+        queue_id: str | None,
+        job_id: str,
+        instance_id: str | None = None,
+        fallback_mode: str = "by_instance",
+    ) -> None:
+        """Safely release a job's queue lock with backward-compatible fallback.
+        
+        Args:
+            project_id: The project owning the lock.
+            queue_id: The queue ID (if any).
+            job_id: The job ID to release.
+            instance_id: The instance ID (for by_instance fallback mode).
+            fallback_mode: "by_instance" uses release_by_instance (from _complete_job),
+                           "by_project" uses release (from complete_job).
+        """
+        if queue_id and project_id:
+            await self._lock_manager.release_queue_lock(
+                project_id, queue_id, job_id
+            )
+        elif project_id:
+            if fallback_mode == "by_instance" and instance_id:
+                await self._lock_manager.release_by_instance(instance_id)
+            else:
+                await self._lock_manager.release(project_id, job_id)
+    
     async def _get_concurrency_limit(self, queue_id: str) -> int:
         """Get the concurrency limit for a queue.
         
@@ -601,15 +630,14 @@ class JobQueueService:
             result_summary: Optional summary of the job result.
         """
         # Release the lock first
-        if job.queue_id and job.project_id:
-            await self._lock_manager.release_queue_lock(
-                job.project_id, job.queue_id, job.job_id
-            )
-        elif job.project_id:
-            # Backward compatibility: project without queue - release by instance
-            if job.instance_id:
-                await self._lock_manager.release_by_instance(job.instance_id)
-        
+        await self._release_job_lock(
+            project_id=job.project_id,
+            queue_id=job.queue_id,
+            job_id=job.job_id,
+            instance_id=job.instance_id,
+            fallback_mode="by_instance",
+        )
+
         # Mark job as completed
         await asyncio.to_thread(self._repository.complete_job, job.job_id, result_summary)
     
@@ -621,15 +649,14 @@ class JobQueueService:
             error_message: Error message describing the failure.
         """
         # Release the lock first
-        if job.queue_id and job.project_id:
-            await self._lock_manager.release_queue_lock(
-                job.project_id, job.queue_id, job.job_id
-            )
-        elif job.project_id:
-            # Backward compatibility: project without queue - release by instance
-            if job.instance_id:
-                await self._lock_manager.release_by_instance(job.instance_id)
-        
+        await self._release_job_lock(
+            project_id=job.project_id,
+            queue_id=job.queue_id,
+            job_id=job.job_id,
+            instance_id=job.instance_id,
+            fallback_mode="by_instance",
+        )
+
         # Mark job as failed
         await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
     
@@ -834,13 +861,12 @@ class JobQueueService:
             return None
         
         # Release the per-queue lock first
-        if job.queue_id and job.project_id:
-            await self._lock_manager.release_queue_lock(
-                job.project_id, job.queue_id, job_id
-            )
-        elif job.project_id:
-            # Backward compatibility: project without queue
-            await self._lock_manager.release(job.project_id, job_id)
+        await self._release_job_lock(
+            project_id=job.project_id,
+            queue_id=job.queue_id,
+            job_id=job_id,
+            fallback_mode="by_project",
+        )
         
         # Mark job based on demand_state
         try:

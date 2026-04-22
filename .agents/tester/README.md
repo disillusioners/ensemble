@@ -60,9 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-23 Code Quality Refactoring Phase 2)
+## Test Results (Latest: 2026-04-23 Code Quality Refactoring Phase 3)
 
-### Code Quality Refactoring Phase 2 — Models Split
+### Code Quality Refactoring Phase 3 — API Router Extraction
+- **2,151 backend tests** — ALL PASS (27 skipped, 0 failed) — no regressions
+- **47 new Phase 3 tests** — ALL PASS (route registration, app.state, backward compat, _validate_instance_mode, _get_manager DI, router structure, API size)
+- **278 frontend tests** — ALL PASS (0 failed)
+- **dev.sh validated** — Server runs cleanly for 30 seconds
+- **Live API validation** — All 12 endpoint groups respond correctly
+- **2 quick fix commits** — Missing Any import + test fixture updates for app.state migration
+- See `.agents/tester/RESULTS/2026-04-23-phase3-api-router-extraction.md` for full report
+
+### Phase 3 Status: ✅ READY
 - **1,968 backend tests** — ALL PASS (19 skipped, 0 failed) — no regressions
 - **30 new Phase 2 tests** — ALL PASS (backward compat, __all__, cross-module refs, instantiation, HealthResponse, Pydantic behavior)
 - **dev.sh validated** — Server runs cleanly for 30 seconds
