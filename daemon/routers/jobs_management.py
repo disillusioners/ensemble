@@ -1,14 +1,12 @@
 """Job Queue Management API endpoints."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.repositories.job_queue.models import JobStatus
-from daemon.utils import create_service_dependency
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,

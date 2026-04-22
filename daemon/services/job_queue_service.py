@@ -514,7 +514,7 @@ class JobQueueService:
         queue_id: str | None,
         job_id: str,
         instance_id: str | None = None,
-        fallback_mode: str = "by_instance",
+        release_by_instance: bool = True,
     ) -> None:
         """Safely release a job's queue lock with backward-compatible fallback.
         
@@ -522,16 +522,16 @@ class JobQueueService:
             project_id: The project owning the lock.
             queue_id: The queue ID (if any).
             job_id: The job ID to release.
-            instance_id: The instance ID (for by_instance fallback mode).
-            fallback_mode: "by_instance" uses release_by_instance (from _complete_job),
-                           "by_project" uses release (from complete_job).
+            instance_id: The instance ID (for release_by_instance mode).
+            release_by_instance: If True, uses release_by_instance (from _complete_job);
+                                 if False, uses release (from complete_job).
         """
         if queue_id and project_id:
             await self._lock_manager.release_queue_lock(
                 project_id, queue_id, job_id
             )
         elif project_id:
-            if fallback_mode == "by_instance":
+            if release_by_instance:
                 if instance_id:
                     await self._lock_manager.release_by_instance(instance_id)
                 # else: do nothing (matches original Pattern A)
@@ -637,7 +637,7 @@ class JobQueueService:
             queue_id=job.queue_id,
             job_id=job.job_id,
             instance_id=job.instance_id,
-            fallback_mode="by_instance",
+            release_by_instance=True,
         )
 
         # Mark job as completed
@@ -656,7 +656,7 @@ class JobQueueService:
             queue_id=job.queue_id,
             job_id=job.job_id,
             instance_id=job.instance_id,
-            fallback_mode="by_instance",
+            release_by_instance=True,
         )
 
         # Mark job as failed
@@ -867,7 +867,7 @@ class JobQueueService:
             project_id=job.project_id,
             queue_id=job.queue_id,
             job_id=job_id,
-            fallback_mode="by_project",
+            release_by_instance=False,
         )
         
         # Mark job based on demand_state

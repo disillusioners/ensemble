@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from daemon.services.job_queue_service import JobQueueService
-from daemon.utils import create_service_dependency
 from .schemas import JobNotFoundResponse
 from .jobs_crud import get_job_queue_service, TERMINAL_STATUSES
 
