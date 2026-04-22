@@ -75,72 +75,6 @@ else:
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 
-def _setup_router_dependencies(
-    manager=None,
-    credential_manager=None,
-    job_queue_service=None,
-    job_processor=None,
-    job_queue_mgmt_service=None,
-    retry_scheduler=None,
-    dispatch_event_bus=None,
-) -> None:
-    """Set up dependency injection for all routers.
-    
-    This is called from the lifespan startup function to register
-    all shared services with their respective routers.
-    """
-    # Instances router uses request.app.state.manager directly
-    # Messages router
-    if hasattr(messages_router, 'set_manager') and manager:
-        messages_router.set_manager(manager)
-    
-    # Sources router
-    if hasattr(sources_router, 'set_manager') and manager:
-        sources_router.set_manager(manager)
-    if hasattr(sources_router, 'set_credential_manager') and credential_manager:
-        sources_router.set_credential_manager(credential_manager)
-    
-    # Mappings router
-    if hasattr(mappings_router, 'set_manager') and manager:
-        mappings_router.set_manager(manager)
-    
-    # Schedules router
-    if hasattr(schedules_router, 'set_manager') and manager:
-        schedules_router.set_manager(manager)
-    
-    # Webhooks router
-    if hasattr(webhooks_router, 'set_manager') and manager:
-        webhooks_router.set_manager(manager)
-    
-    # Jobs router
-    if hasattr(jobs_router, 'set_job_queue_service') and job_queue_service:
-        jobs_router.set_job_queue_service(job_queue_service)
-    if hasattr(jobs_router, 'set_dead_letter_service'):
-        from daemon.services.dead_letter_service import DeadLetterService
-        if hasattr(jobs_router, '_dead_letter_service'):
-            jobs_router.set_dead_letter_service(jobs_router._dead_letter_service)
-    
-    # Projects router
-    if hasattr(projects_router, 'set_project_repository') and manager:
-        projects_router.set_project_repository(manager._project_repository)
-    if hasattr(projects_router, 'set_job_queue_mgmt_service') and job_queue_mgmt_service:
-        projects_router.set_job_queue_mgmt_service(job_queue_mgmt_service)
-    
-    # Queues router
-    if hasattr(queues_router, 'set_job_queue_mgmt_service') and job_queue_mgmt_service:
-        queues_router.set_job_queue_mgmt_service(job_queue_mgmt_service)
-    
-    # DLQ router
-    if hasattr(dlq_router, '_dead_letter_repository'):
-        from daemon.repositories.job_queue.dead_letter_repository import set_dead_letter_repository, DeadLetterRepository
-        if hasattr(dlq_router, '_dlq_repository'):
-            set_dead_letter_repository(dlq_router._dlq_repository)
-    if hasattr(dlq_router, '_dead_letter_service'):
-        from daemon.routers.dlq import set_dead_letter_service
-        if hasattr(dlq_router, '_dlq_service'):
-            set_dead_letter_service(dlq_router._dlq_service)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan context manager.
@@ -306,17 +240,6 @@ async def lifespan(app: FastAPI):
     
     # Start message sources
     await manager.start_sources()
-    
-    # Set up router dependencies
-    _setup_router_dependencies(
-        manager=manager,
-        credential_manager=credential_manager,
-        job_queue_service=job_queue_service,
-        job_processor=job_processor,
-        job_queue_mgmt_service=job_queue_mgmt_service,
-        retry_scheduler=retry_scheduler,
-        dispatch_event_bus=dispatch_event_bus,
-    )
     
     # Store references on app.state for health check endpoint
     app.state.manager = manager

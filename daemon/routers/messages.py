@@ -3,7 +3,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -16,38 +16,10 @@ from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter(prefix="/instances", tags=["instances-messages"])
 
-# Module-level manager reference (set during app startup)
-_manager: Optional["InstanceManager"] = None
 
-
-def set_manager(manager: "InstanceManager") -> None:
-    """Set the InstanceManager instance (called during app startup)."""
-    global _manager
-    _manager = manager
-
-
-def _get_manager(request: Request) -> "InstanceManager":
-    """Get the manager instance from request state or module-level reference.
-    
-    Args:
-        request: FastAPI request object.
-        
-    Returns:
-        InstanceManager instance.
-        
-    Raises:
-        HTTPException: If manager is not available.
-    """
-    # Try request state first (set during startup)
-    if hasattr(request.app.state, "manager") and request.app.state.manager is not None:
-        return request.app.state.manager
-    # Fall back to module-level reference
-    if _manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Manager not initialized"
-        )
-    return _manager
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 # 1. POST /instances/{instance_id}/messages - Send message

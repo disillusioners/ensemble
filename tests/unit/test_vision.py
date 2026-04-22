@@ -706,7 +706,8 @@ class TestImagesWithoutVisionConfig:
         mock_request = MagicMock()
         mock_request.app.state.manager = mock_manager
         
-        with patch("daemon.routers.messages._manager", mock_manager):
+        # Patch _get_manager to return our mock
+        with patch("daemon.routers.messages._get_manager", return_value=mock_manager):
             # Import the API function
             from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
@@ -751,7 +752,8 @@ class TestImagesWithoutVisionConfig:
         mock_request = MagicMock()
         mock_request.app.state.manager = mock_manager
         
-        with patch("daemon.routers.messages._manager", mock_manager):
+        # Patch _get_manager to return our mock
+        with patch("daemon.routers.messages._get_manager", return_value=mock_manager):
             from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
             

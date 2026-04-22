@@ -31,7 +31,7 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 async def list_agents():
     """List all available agents by scanning the agents directory."""
     agents_dir = BASE_DIR / "agents"
-    agents = []
+    result = []
     
     if agents_dir.exists():
         for agent_path in sorted(agents_dir.iterdir()):
@@ -53,7 +53,7 @@ async def list_agents():
                     with open(meta_path, "r") as f:
                         meta = json.load(f)
                     
-                    agents.append(AgentInfo(
+                    result.append(AgentInfo(
                         id=meta.get("id", agent_path.name),
                         name=meta.get("name", agent_path.name.title()),
                         description=meta.get("description", ""),
@@ -66,7 +66,7 @@ async def list_agents():
                 except (json.JSONDecodeError, KeyError) as e:
                     logger.warning(f"Failed to load meta.json for {agent_path.name}: {e}")
     
-    return AgentListResponse(agents=agents)
+    return AgentListResponse(agents=result)
 
 
 @router.post("", response_model=AgentInfo, status_code=201)

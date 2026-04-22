@@ -19,93 +19,17 @@ from daemon.models import (
     SourceActionResponse,
     SourceStatus,
 )
-from daemon.utils import parse_utc_datetime
+from daemon.utils import parse_utc_datetime, validate_instance_mode
 
 logger = logging.getLogger(__name__)
 
 # Create router with /api/schedules prefix
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
-# Module-level manager reference (set during app startup)
-_manager: Optional["InstanceManager"] = None
-
-
-def set_manager(manager: "InstanceManager") -> None:
-    """Set the InstanceManager instance (called during app startup)."""
-    global _manager
-    _manager = manager
-
 
 def _get_manager(request: Request) -> "InstanceManager":
-    """Get the manager instance from request state or module-level reference.
-    
-    Args:
-        request: FastAPI request object.
-        
-    Returns:
-        InstanceManager instance.
-        
-    Raises:
-        HTTPException: If manager is not available.
-    """
-    # Try request state first (set during startup)
-    if hasattr(request.app.state, "manager") and request.app.state.manager is not None:
-        return request.app.state.manager
-    # Fall back to module-level reference
-    if _manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Manager not initialized"
-        )
-    return _manager
-
-
-def _validate_instance_mode(instance_mode: str | None, schedule_type: str | None = None, config: dict | None = None) -> dict[str, Any]:
-    """Validate instance_mode and return processed config.
-    
-    Args:
-        instance_mode: The instance mode to validate ('new_instance', 'reuse_instance', or None).
-        schedule_type: The schedule type ('cron', 'interval', 'one_time') if known.
-        config: The schedule config dict to potentially modify.
-        
-    Returns:
-        Processed config dict with instance_mode set appropriately.
-        
-    Raises:
-        HTTPException: If instance_mode is invalid.
-    """
-    VALID_INSTANCE_MODES = {"new_instance", "reuse_instance"}
-    default_instance_mode = "new_instance"
-    
-    # Determine schedule type from config if not provided
-    if schedule_type is None and config:
-        if "run_at" in config and config["run_at"]:
-            schedule_type = "one_time"
-        elif "interval_seconds" in config:
-            schedule_type = "interval"
-        elif "schedule" in config:
-            schedule_type = "cron"
-    
-    # For one_time schedules: ALWAYS force to new_instance
-    if schedule_type == "one_time":
-        if instance_mode is not None and instance_mode != "new_instance":
-            logger.info("Forcing instance_mode to 'new_instance' for one_time schedule")
-        return {"instance_mode": "new_instance"}
-    
-    # Validate instance_mode if provided
-    if instance_mode is not None and instance_mode not in VALID_INSTANCE_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid instance_mode: '{instance_mode}'. Valid options: {list(VALID_INSTANCE_MODES)}"
-            ).model_dump()
-        )
-    
-    # Use provided value or default
-    resolved_mode = instance_mode if instance_mode is not None else default_instance_mode
-    
-    return {"instance_mode": resolved_mode}
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 # ==================== Endpoints ====================
@@ -182,7 +106,7 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         updated_config = merged_config
     
     # Validate and process instance_mode
-    instance_mode_config = _validate_instance_mode(
+    instance_mode_config = validate_instance_mode(
         instance_mode=schedule_update.instance_mode,
         config=updated_config
     )

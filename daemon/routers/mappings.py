@@ -2,11 +2,10 @@
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
-from daemon.manager import InstanceManager
 from daemon.models import (
     InstanceMappingCreate,
     InstanceMappingInfo,
@@ -19,41 +18,20 @@ from daemon.utils import parse_utc_datetime, validate_agent_id
 
 logger = logging.getLogger(__name__)
 
-# Create router with /sources prefix
+# Create router for mapping endpoints under /sources prefix
 router = APIRouter(prefix="/sources", tags=["mappings"])
 
-# Manager dependency
-_manager: Optional[InstanceManager] = None
 
-
-def _get_manager() -> InstanceManager:
-    """Get the InstanceManager instance.
-    
-    Returns:
-        InstanceManager instance.
-        
-    Raises:
-        HTTPException: If the manager is not initialized.
-    """
-    if _manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "Manager not initialized"}
-        )
-    return _manager
-
-
-def set_manager(manager: InstanceManager) -> None:
-    """Set the InstanceManager instance (called during app startup)."""
-    global _manager
-    _manager = manager
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 # GET /sources/{source_id}/mappings - List mappings for a source
 @router.get("/{source_id}/mappings", response_model=InstanceMappingListResponse)
-async def list_mappings(source_id: str):
+async def list_mappings(source_id: str, request: Request):
     """List all instance mappings for a source."""
-    manager = _get_manager()
+    manager = _get_manager(request)
     
     # Check source exists
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
@@ -85,10 +63,10 @@ async def list_mappings(source_id: str):
 
 # POST /sources/{source_id}/mappings - Create or update a mapping
 @router.post("/{source_id}/mappings", response_model=InstanceMappingInfo, status_code=201)
-async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
+async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, request: Request):
     """Create an instance mapping for an external user."""
     import uuid
-    manager = _get_manager()
+    manager = _get_manager(request)
     
     # Validate agent_id
     resolved_agent_id, agent_path = validate_agent_id(mapping_create.agent_id)
@@ -178,9 +156,9 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
 
 # DELETE /sources/{source_id}/mappings/{mapping_id} - Delete a mapping
 @router.delete("/{source_id}/mappings/{mapping_id}", response_model=DeleteResponse)
-async def delete_mapping(source_id: str, mapping_id: str):
+async def delete_mapping(source_id: str, mapping_id: str, request: Request):
     """Delete an instance mapping."""
-    manager = _get_manager()
+    manager = _get_manager(request)
     
     result = await asyncio.to_thread(manager._source_repository.delete_instance_mapping, mapping_id)
     if not result.get("deleted"):

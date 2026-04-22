@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -22,126 +22,22 @@ from daemon.models import (
     SourceUpdate,
 )
 from daemon.constants import MAX_CREDENTIALS_SIZE
-from daemon.utils import parse_utc_datetime
+from daemon.utils import parse_utc_datetime, validate_instance_mode
 
 logger = logging.getLogger(__name__)
 
 # Create router with /sources prefix
 router = APIRouter(prefix="/sources", tags=["sources"])
 
-# Global state for dependency injection
-# These will be set up in daemon/api.py during app initialization
-_manager: Optional[Any] = None
-_credential_manager: Optional[Any] = None
 
-
-def get_manager() -> Any:
-    """Get the InstanceManager instance.
-    
-    Returns:
-        InstanceManager instance.
-        
-    Raises:
-        HTTPException: If the manager is not initialized.
-    """
-    if _manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "Instance manager not initialized"}
-        )
-    return _manager
-
-
-def set_manager(manager: Any) -> None:
-    """Set the InstanceManager instance (called during app startup)."""
-    global _manager
-    _manager = manager
-
-
-def get_credential_manager() -> Any:
-    """Get the CredentialManager instance.
-    
-    Returns:
-        CredentialManager instance.
-        
-    Raises:
-        HTTPException: If the credential manager is not initialized.
-    """
-    if _credential_manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "Credential manager not initialized"}
-        )
-    return _credential_manager
-
-
-def set_credential_manager(manager: Any) -> None:
-    """Set the CredentialManager instance (called during app startup)."""
-    global _credential_manager
-    _credential_manager = manager
-
-
-# Convenience aliases for backward compatibility
 def _get_manager(request: Request) -> Any:
-    """Get manager from request (compatibility alias)."""
-    return get_manager()
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 def _get_credential_manager(request: Request) -> Any:
-    """Get credential manager from request (compatibility alias)."""
-    return get_credential_manager()
-
-
-def _validate_instance_mode(
-    instance_mode: str | None,
-    schedule_type: str | None = None,
-    config: dict | None = None,
-) -> dict[str, Any]:
-    """Validate instance_mode and return processed config.
-    
-    Args:
-        instance_mode: The instance mode to validate ('new_instance', 'reuse_instance', or None).
-        schedule_type: The schedule type ('cron', 'interval', 'one_time') if known.
-        config: The schedule config dict to potentially modify.
-        
-    Returns:
-        Processed config dict with instance_mode set appropriately.
-        
-    Raises:
-        HTTPException: If instance_mode is invalid.
-    """
-    VALID_INSTANCE_MODES = {"new_instance", "reuse_instance"}
-    default_instance_mode = "new_instance"
-    
-    # Determine schedule type from config if not provided
-    if schedule_type is None and config:
-        if "run_at" in config and config["run_at"]:
-            schedule_type = "one_time"
-        elif "interval_seconds" in config:
-            schedule_type = "interval"
-        elif "schedule" in config:
-            schedule_type = "cron"
-    
-    # For one_time schedules: ALWAYS force to new_instance
-    if schedule_type == "one_time":
-        if instance_mode is not None and instance_mode != "new_instance":
-            logger.info("Forcing instance_mode to 'new_instance' for one_time schedule")
-        return {"instance_mode": "new_instance"}
-    
-    # Validate instance_mode if provided
-    if instance_mode is not None and instance_mode not in VALID_INSTANCE_MODES:
-        raise HTTPException(
-            status_code=400,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Invalid instance_mode: '{instance_mode}'. Valid options: {list(VALID_INSTANCE_MODES)}"
-            ).model_dump()
-        )
-    
-    # Use provided value or default
-    resolved_mode = instance_mode if instance_mode is not None else default_instance_mode
-    
-    return {"instance_mode": resolved_mode}
+    """Get the CredentialManager from app state."""
+    return request.app.state.credential_manager
 
 
 async def _reject_scheduler_lifecycle(source_id: str, manager: Any) -> None:
@@ -188,19 +84,19 @@ def _source_to_info(source) -> SourceInfo:
 
 
 @router.get("", response_model=SourceListResponse)
-async def list_sources():
+async def list_sources(request: Request):
     """List all configured message sources."""
-    manager = get_manager()
+    manager = _get_manager(request)
     sources_data = await asyncio.to_thread(manager._source_repository.list_source_configs)
     sources = [_source_to_info(src) for src in sources_data]
     return SourceListResponse(sources=sources)
 
 
 @router.post("", response_model=SourceInfo, status_code=201)
-async def create_source(source_create: SourceCreate):
+async def create_source(source_create: SourceCreate, request: Request):
     """Create a new message source."""
-    manager = get_manager()
-    credential_manager = get_credential_manager()
+    manager = _get_manager(request)
+    credential_manager = _get_credential_manager(request)
     
     # Check if source already exists
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_create.source_id)
@@ -226,7 +122,7 @@ async def create_source(source_create: SourceCreate):
     
     # For scheduler sources, validate instance_mode in config
     instance_mode = source_create.config.get("instance_mode")
-    validated = _validate_instance_mode(
+    validated = validate_instance_mode(
         instance_mode=instance_mode,
         config=source_create.config
     )
@@ -316,9 +212,9 @@ async def test_source(test_request: SourceTestRequest):
 
 
 @router.get("/{source_id}", response_model=SourceInfo)
-async def get_source(source_id: str):
+async def get_source(source_id: str, request: Request):
     """Get a specific message source."""
-    manager = get_manager()
+    manager = _get_manager(request)
     
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
@@ -334,10 +230,10 @@ async def get_source(source_id: str):
 
 
 @router.put("/{source_id}", response_model=SourceInfo)
-async def update_source(source_id: str, source_update: SourceUpdate):
+async def update_source(source_id: str, source_update: SourceUpdate, request: Request):
     """Update a message source configuration."""
-    manager = get_manager()
-    credential_manager = get_credential_manager()
+    manager = _get_manager(request)
+    credential_manager = _get_credential_manager(request)
     
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not existing:
@@ -399,9 +295,9 @@ async def update_source(source_id: str, source_update: SourceUpdate):
 
 
 @router.delete("/{source_id}", response_model=DeleteResponse)
-async def delete_source(source_id: str):
+async def delete_source(source_id: str, request: Request):
     """Delete a message source."""
-    manager = get_manager()
+    manager = _get_manager(request)
     
     # Get source to check type first
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
@@ -431,12 +327,12 @@ async def delete_source(source_id: str):
 
 
 @router.post("/{source_id}/start", response_model=SourceActionResponse)
-async def start_source(source_id: str):
+async def start_source(source_id: str, request: Request):
     """Start a message source adapter."""
     from daemon.sources.base import SourceConfig
     
-    manager = get_manager()
-    credential_manager = get_credential_manager()
+    manager = _get_manager(request)
+    credential_manager = _get_credential_manager(request)
     
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
@@ -521,9 +417,9 @@ async def start_source(source_id: str):
 
 
 @router.post("/{source_id}/stop", response_model=SourceActionResponse)
-async def stop_source(source_id: str):
+async def stop_source(source_id: str, request: Request):
     """Stop a message source adapter."""
-    manager = get_manager()
+    manager = _get_manager(request)
     
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:

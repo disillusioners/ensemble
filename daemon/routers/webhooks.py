@@ -2,7 +2,7 @@
 
 import logging
 import secrets
-from typing import Optional
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -13,41 +13,10 @@ logger = logging.getLogger(__name__)
 # Create router with /webhooks prefix
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
-# Module-level manager reference (set during app startup)
-_manager: Optional["InstanceManager"] = None
 
-
-def _get_manager(request: Request) -> "InstanceManager":
-    """Get the manager instance from app state.
-    
-    Args:
-        request: FastAPI request object.
-        
-    Returns:
-        InstanceManager instance.
-        
-    Raises:
-        HTTPException: If the manager is not initialized.
-    """
-    if _manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail=ErrorResponse(
-                code=ErrorCodes.SERVICE_UNAVAILABLE,
-                message="Manager not initialized"
-            ).model_dump()
-        )
-    return _manager
-
-
-def set_manager(manager: "InstanceManager") -> None:
-    """Set the manager instance (called during app startup).
-    
-    Args:
-        manager: InstanceManager instance to use.
-    """
-    global _manager
-    _manager = manager
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 # POST /webhooks/{source_id} - Receive webhook from external source
