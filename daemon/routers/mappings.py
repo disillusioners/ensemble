@@ -43,7 +43,7 @@ def _get_manager() -> InstanceManager:
     return _manager
 
 
-def _set_manager(manager: InstanceManager) -> None:
+def set_manager(manager: InstanceManager) -> None:
     """Set the InstanceManager instance (called during app startup)."""
     global _manager
     _manager = manager

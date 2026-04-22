@@ -101,8 +101,8 @@ def _setup_router_dependencies(
         sources_router.set_credential_manager(credential_manager)
     
     # Mappings router
-    if hasattr(mappings_router, '_set_manager') and manager:
-        mappings_router._set_manager(manager)
+    if hasattr(mappings_router, 'set_manager') and manager:
+        mappings_router.set_manager(manager)
     
     # Schedules router
     if hasattr(schedules_router, 'set_manager') and manager:

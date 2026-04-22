@@ -234,7 +234,7 @@ async def trigger_schedule(schedule_id: str, request: Request):
     
     Triggers the schedule immediately, regardless of its configured schedule.
     """
-    from .sources.base import SourceConfig
+    from daemon.sources.base import SourceConfig
     
     manager = _get_manager(request)
     
