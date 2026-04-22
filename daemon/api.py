@@ -102,10 +102,12 @@ from .utils import validate_agent_id as validate_agent_id, parse_utc_datetime
 from .constants import (
     DEFAULT_PAGE_LIMIT,
     MAX_PAGE_LIMIT,
+    MAX_CREDENTIALS_SIZE,
     SSE_TIMEOUT_S,
     SSE_PING_INTERVAL,
     SSE_QUEUE_MAXSIZE,
     MAX_SCHEDULE_EXECUTION_LIMIT,
+    DEFAULT_SCHEDULE_EXECUTIONS_LIMIT,
 )
 
 
@@ -142,9 +144,6 @@ else:
     BASE_DIR = Path(__file__).parent.parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
-# Max size in bytes for credentials JSON
-MAX_CREDENTIALS_SIZE = 4096
-
 # Global state
 manager: InstanceManager = None
 start_time: float = None
@@ -164,7 +163,7 @@ async def lifespan(app: FastAPI):
     await manager.initialize()  # Initialize async checkpointer within async context
     
     # Set up worker pool for message processing
-    manager.setup_worker_pool(num_workers=4)
+    manager.setup_worker_pool()
     start_time = time.time()
     
     # Initialize JobQueueService with shared engine from manager
@@ -1880,7 +1879,7 @@ async def stop_schedule(schedule_id: str):
 @api_router.get("/schedules/{schedule_id}/executions", response_model=ScheduleExecutionListResponse)
 async def get_schedule_executions(
     schedule_id: str,
-    limit: int = DEFAULT_PAGE_LIMIT * 5,  # 100
+    limit: int = DEFAULT_SCHEDULE_EXECUTIONS_LIMIT,  # 100
     offset: int = 0
 ):
     """Get execution history for a scheduled job.

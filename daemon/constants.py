@@ -7,6 +7,7 @@ and maintainability. Constants are organized by category.
 # ── API Limits ──────────────────────────────────────────────────────────────────
 DEFAULT_PAGE_LIMIT: int = 20  # Default pagination limit for instance/message listing
 DEFAULT_JOB_LIST_LIMIT: int = 50  # Default limit for job listing
+DEFAULT_SCHEDULE_EXECUTIONS_LIMIT: int = 100  # Default limit for schedule execution history
 MAX_PAGE_LIMIT: int = 100  # Maximum allowed pagination limit
 MAX_JOB_LIST_LIMIT: int = 100  # Maximum job list limit
 MAX_SCHEDULE_EXECUTION_LIMIT: int = 1000  # Maximum schedule execution history limit
