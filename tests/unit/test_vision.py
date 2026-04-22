@@ -697,12 +697,18 @@ class TestImagesWithoutVisionConfig:
         mock_config = MagicMock()
         mock_config.llm.model_vision = None  # No vision configured
         
-        with patch("daemon.api.manager") as mock_manager:
-            mock_manager.config = mock_config
-            mock_manager.get_instance = MagicMock()  # Instance exists
-            
+        # Create mock manager
+        mock_manager = MagicMock()
+        mock_manager.config = mock_config
+        mock_manager.get_instance = MagicMock()  # Instance exists
+        
+        # Create mock request with app.state.manager
+        mock_request = MagicMock()
+        mock_request.app.state.manager = mock_manager
+        
+        with patch("daemon.routers.messages._manager", mock_manager):
             # Import the API function
-            from daemon.api import send_message
+            from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
             
             # Create message with images
@@ -715,7 +721,8 @@ class TestImagesWithoutVisionConfig:
                 import asyncio
                 asyncio.run(send_message(
                     instance_id="test-instance-id",
-                    message=message
+                    message=message,
+                    request=mock_request
                 ))
             
             assert exc_info.value.status_code == 400
@@ -734,12 +741,18 @@ class TestImagesWithoutVisionConfig:
         mock_config = MagicMock()
         mock_config.llm.model_vision = None  # No vision configured
         
-        with patch("daemon.api.manager") as mock_manager:
-            mock_manager.config = mock_config
-            mock_manager.get_instance = MagicMock()  # Instance exists
-            mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
-            
-            from daemon.api import send_message
+        # Create mock manager
+        mock_manager = MagicMock()
+        mock_manager.config = mock_config
+        mock_manager.get_instance = MagicMock()  # Instance exists
+        mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
+        
+        # Create mock request with app.state.manager
+        mock_request = MagicMock()
+        mock_request.app.state.manager = mock_manager
+        
+        with patch("daemon.routers.messages._manager", mock_manager):
+            from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
             
             # Create text-only message (no images)
@@ -749,7 +762,8 @@ class TestImagesWithoutVisionConfig:
             import asyncio
             response = asyncio.run(send_message(
                 instance_id="test-instance-id",
-                message=message
+                message=message,
+                request=mock_request
             ))
             
             # Verify enqueue was called with images=None
