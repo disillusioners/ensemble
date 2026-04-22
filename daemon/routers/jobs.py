@@ -13,6 +13,7 @@ from sse_starlette.sse import EventSourceResponse
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.repositories.job_queue.models import JobStatus
+from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from .schemas import (
     JobCreateRequest,
     JobResponse,
@@ -163,7 +164,7 @@ async def create_job(
 
     # Validate and resolve agent input
     try:
-        from daemon.api import validate_agent_id
+        from daemon.utils import validate_agent_id
         resolved_agent_id, agent_path = validate_agent_id(request.agent_id)
     except HTTPException:
         raise
@@ -291,7 +292,7 @@ async def list_jobs(
     status: Optional[str] = None,
     project_id: Optional[str] = None,
     queue_id: Optional[str] = None,
-    limit: int = 50,
+    limit: int = DEFAULT_JOB_LIST_LIMIT,
     include_deleted: bool = False,
     service: JobQueueService = Depends(get_job_queue_service),
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
@@ -329,7 +330,7 @@ async def list_jobs(
         statuses = status_list
     
     # Clamp limit
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, MAX_JOB_LIST_LIMIT))
     
     # Validate: queue_id requires project_id
     if queue_id and not project_id:

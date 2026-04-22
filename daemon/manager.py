@@ -56,6 +56,7 @@ from .cancellation import (
 )
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor, CompactionContext
+from .constants import WORKER_POOL_SIZE
 
 # Worker pool imports (lazy import to avoid circular dependency)
 from typing import TYPE_CHECKING
@@ -538,7 +539,7 @@ class InstanceManager:
 
     def setup_worker_pool(
         self,
-        num_workers: int = 4,
+        num_workers: int = WORKER_POOL_SIZE,
     ) -> None:
         """Set up the worker pool for message processing.
         

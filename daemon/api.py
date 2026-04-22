@@ -96,35 +96,17 @@ from .registry import get_registry
 from .cancellation import CancellationReason
 from . import __version__
 
+# Re-export validate_agent_id from utils for backward compatibility
+from .utils import validate_agent_id as validate_agent_id, parse_utc_datetime
 
-def validate_agent_id(agent_id: str) -> tuple[str, Path]:
-    """Validate agent_id exists and return agent_id with path.
-    
-    This is the preferred function for validating agent references.
-    
-    Args:
-        agent_id: The agent identifier to validate.
-        
-    Returns:
-        Tuple of (agent_id, resolved_absolute_path).
-        
-    Raises:
-        HTTPException: If agent is invalid or not found.
-    """
-    registry = get_registry()
-    
-    # Check agent exists
-    metadata = registry.get(agent_id)
-    if metadata is None:
-        raise HTTPException(
-            status_code=404,
-            detail=ErrorResponse(
-                code=ErrorCodes.INVALID_REQUEST,
-                message=f"Agent not found: {agent_id}"
-            ).model_dump()
-        )
-    
-    return agent_id, metadata.path
+from .constants import (
+    DEFAULT_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    SSE_TIMEOUT_S,
+    SSE_PING_INTERVAL,
+    SSE_QUEUE_MAXSIZE,
+    MAX_SCHEDULE_EXECUTION_LIMIT,
+)
 
 
 async def _reject_scheduler_lifecycle(source_id: str) -> None:
@@ -741,15 +723,15 @@ async def create_instance(instance_create: InstanceCreate):
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
         children=instance_meta.get("children", []),
-        created_at=datetime.fromisoformat(instance_meta["created_at"]).replace(tzinfo=timezone.utc) if isinstance(instance_meta["created_at"], str) else instance_meta["created_at"],
-        updated_at=datetime.fromisoformat(instance_meta["updated_at"]).replace(tzinfo=timezone.utc) if instance_meta.get("updated_at") and isinstance(instance_meta["updated_at"], str) else instance_meta.get("updated_at"),
+        created_at=parse_utc_datetime(instance_meta["created_at"]),
+        updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
     )
 
 
 # 3. GET /instances - List instances
 @api_router.get("/instances", response_model=InstanceListResponse)
 async def list_instances(
-    limit: int = 20,
+    limit: int = DEFAULT_PAGE_LIMIT,
     offset: int = 0
 ):
     """List instances with pagination.
@@ -759,7 +741,7 @@ async def list_instances(
         offset: Number of instances to skip (default: 0, min: 0).
     """
     # Input validation
-    limit = max(1, min(limit, 100))  # Clamp to 1-100
+    limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
     
     instances_data, total = manager.list_instances(limit=limit, offset=offset)
@@ -773,8 +755,8 @@ async def list_instances(
             parent_id=inst.get("parent_id"),
             children=inst.get("children", []),
             title=inst.get("title"),
-            created_at=datetime.fromisoformat(inst["created_at"]).replace(tzinfo=timezone.utc) if isinstance(inst["created_at"], str) else inst["created_at"],
-            updated_at=datetime.fromisoformat(inst["updated_at"]).replace(tzinfo=timezone.utc) if inst.get("updated_at") and isinstance(inst["updated_at"], str) else inst.get("updated_at"),
+            created_at=parse_utc_datetime(inst["created_at"]),
+            updated_at=parse_utc_datetime(inst.get("updated_at")),
         ))
     
     has_more = (offset + limit) < total
@@ -811,8 +793,8 @@ async def get_instance(instance_id: str):
         parent_id=instance_meta.get("parent_id"),
         children=instance_meta.get("children", []),
         title=instance_meta.get("title"),
-        created_at=datetime.fromisoformat(instance_meta["created_at"]) if isinstance(instance_meta["created_at"], str) else instance_meta["created_at"],
-        updated_at=datetime.fromisoformat(instance_meta["updated_at"]) if instance_meta.get("updated_at") and isinstance(instance_meta["updated_at"], str) else instance_meta.get("updated_at"),
+        created_at=parse_utc_datetime(instance_meta["created_at"]),
+        updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
     )
 
 
@@ -979,7 +961,7 @@ async def stream_events(instance_id: str, request: Request):
         }
         
         # 2. Create a queue for this connection
-        queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
         await live_hub.add_connection(instance_id, queue)
         
         try:
@@ -992,7 +974,7 @@ async def stream_events(instance_id: str, request: Request):
                     break
                 
                 try:
-                    event = await asyncio.wait_for(queue.get(), timeout=30)
+                    event = await asyncio.wait_for(queue.get(), timeout=SSE_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     yield {"event": "keepalive", "data": "{}"}
                     continue
@@ -1005,7 +987,7 @@ async def stream_events(instance_id: str, request: Request):
         finally:
             await live_hub.remove_connection(instance_id, queue)
     
-    return EventSourceResponse(event_generator(), ping=30)
+    return EventSourceResponse(event_generator(), ping=SSE_PING_INTERVAL)
 
 
 # ==================== Source Management Endpoints ====================
@@ -1026,8 +1008,8 @@ async def list_sources():
             enabled=src.enabled,
             status=SourceStatus(src.status),
             error_message=src.error_message,
-            created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
-            updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else src.updated_at,
+            created_at=parse_utc_datetime(src.created_at),
+            updated_at=parse_utc_datetime(src.updated_at),
         ))
     return SourceListResponse(sources=sources)
 
@@ -1114,8 +1096,8 @@ async def create_source(source_create: SourceCreate):
         enabled=source.enabled,
         status=SourceStatus(source.status),
         error_message=source.error_message,
-        created_at=datetime.fromisoformat(source.created_at).replace(tzinfo=timezone.utc) if isinstance(source.created_at, str) else source.created_at,
-        updated_at=datetime.fromisoformat(source.updated_at).replace(tzinfo=timezone.utc) if source.updated_at and isinstance(source.updated_at, str) else None,
+        created_at=parse_utc_datetime(source.created_at),
+        updated_at=parse_utc_datetime(source.updated_at),
     )
 
 
@@ -1182,8 +1164,8 @@ async def get_source(source_id: str):
         enabled=source.enabled,
         status=SourceStatus(source.status),
         error_message=source.error_message,
-        created_at=datetime.fromisoformat(source.created_at).replace(tzinfo=timezone.utc),
-        updated_at=datetime.fromisoformat(source.updated_at).replace(tzinfo=timezone.utc) if source.updated_at and isinstance(source.updated_at, str) else None,
+        created_at=parse_utc_datetime(source.created_at),
+        updated_at=parse_utc_datetime(source.updated_at),
     )
 
 
@@ -1255,8 +1237,8 @@ async def update_source(source_id: str, source_update: SourceUpdate):
         enabled=updated.enabled,
         status=SourceStatus(updated.status),
         error_message=updated.error_message,
-        created_at=datetime.fromisoformat(updated.created_at).replace(tzinfo=timezone.utc),
-        updated_at=datetime.fromisoformat(updated.updated_at).replace(tzinfo=timezone.utc),
+        created_at=parse_utc_datetime(updated.created_at),
+        updated_at=parse_utc_datetime(updated.updated_at),
     )
 
 
@@ -1451,8 +1433,8 @@ async def list_mappings(source_id: str):
             agent_id=m.agent_id,
             agent_dir=m.agent_dir,
             metadata=m.mapping_metadata,
-            last_message_at=datetime.fromisoformat(m.last_message_at).replace(tzinfo=timezone.utc) if m.last_message_at and isinstance(m.last_message_at, str) else m.last_message_at,
-            created_at=datetime.fromisoformat(m.created_at).replace(tzinfo=timezone.utc) if isinstance(m.created_at, str) else m.created_at,
+            last_message_at=parse_utc_datetime(m.last_message_at),
+            created_at=parse_utc_datetime(m.created_at),
         ))
     return InstanceMappingListResponse(mappings=mappings)
 
@@ -1544,8 +1526,8 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate):
         agent_id=saved.agent_id,
         agent_dir=saved.agent_dir,
         metadata=saved.mapping_metadata,
-        last_message_at=datetime.fromisoformat(saved.last_message_at).replace(tzinfo=timezone.utc) if saved.last_message_at and isinstance(saved.last_message_at, str) else saved.last_message_at,
-        created_at=datetime.fromisoformat(saved.created_at).replace(tzinfo=timezone.utc),
+        last_message_at=parse_utc_datetime(saved.last_message_at),
+        created_at=parse_utc_datetime(saved.created_at),
     )
 
 
@@ -1598,8 +1580,8 @@ async def list_schedules():
                 name=src.name,
                 config=src.config,
                 status=SourceStatus(src.status),
-                created_at=datetime.fromisoformat(src.created_at).replace(tzinfo=timezone.utc) if isinstance(src.created_at, str) else src.created_at,
-                updated_at=datetime.fromisoformat(src.updated_at).replace(tzinfo=timezone.utc) if src.updated_at and isinstance(src.updated_at, str) else None,
+                created_at=parse_utc_datetime(src.created_at),
+                updated_at=parse_utc_datetime(src.updated_at),
                 next_run_at=next_run_at,
             ))
     return ScheduleListResponse(schedules=schedules)
@@ -1726,8 +1708,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate):
         name=updated.name,
         config=updated.config,
         status=SourceStatus(updated.status),
-        created_at=datetime.fromisoformat(updated.created_at).replace(tzinfo=timezone.utc) if isinstance(updated.created_at, str) else updated.created_at,
-        updated_at=datetime.fromisoformat(updated.updated_at).replace(tzinfo=timezone.utc) if updated.updated_at and isinstance(updated.updated_at, str) else None,
+        created_at=parse_utc_datetime(updated.created_at),
+        updated_at=parse_utc_datetime(updated.updated_at),
         last_run_at=None,
         next_run_at=next_run_at,
     )
@@ -1898,7 +1880,7 @@ async def stop_schedule(schedule_id: str):
 @api_router.get("/schedules/{schedule_id}/executions", response_model=ScheduleExecutionListResponse)
 async def get_schedule_executions(
     schedule_id: str,
-    limit: int = 100,
+    limit: int = DEFAULT_PAGE_LIMIT * 5,  # 100
     offset: int = 0
 ):
     """Get execution history for a scheduled job.
@@ -1929,7 +1911,7 @@ async def get_schedule_executions(
         )
     
     # Input validation
-    limit = max(1, min(limit, 1000))  # Clamp to 1-1000
+    limit = max(1, min(limit, MAX_SCHEDULE_EXECUTION_LIMIT))  # Clamp to 1-MAX_SCHEDULE_EXECUTION_LIMIT
     offset = max(0, offset)  # Ensure non-negative
     
     # Get executions from repository
@@ -1949,11 +1931,11 @@ async def get_schedule_executions(
         executions.append(ScheduleExecutionInfo(
             execution_id=exec_data.execution_id,
             schedule_id=exec_data.schedule_id,
-            triggered_at=datetime.fromisoformat(exec_data.triggered_at).replace(tzinfo=timezone.utc) if isinstance(exec_data.triggered_at, str) else exec_data.triggered_at,
+            triggered_at=parse_utc_datetime(exec_data.triggered_at),
             instance_id=exec_data.instance_id,
             status=exec_data.status,
             error_message=exec_data.error_message,
-            completed_at=datetime.fromisoformat(exec_data.completed_at).replace(tzinfo=timezone.utc) if exec_data.completed_at and isinstance(exec_data.completed_at, str) else exec_data.completed_at,
+            completed_at=parse_utc_datetime(exec_data.completed_at),
         ))
     
     return ScheduleExecutionListResponse(

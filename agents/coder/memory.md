@@ -20,3 +20,5 @@
 - IDOR protection returns 404 (never 403) to prevent information leakage
 - Frontend components use signals throughout for reactive state management
 - Queue sidebar is a separate component with input/output bindings for loose coupling
+
+- Phase 1 refactoring plan read. Key constraint: use `from daemon.models import ...` NOT `from daemon.models.common import ...` for validate_agent_id (common module doesn't exist yet until Phase 2). Plan has detailed task breakdown for constants, utils, and validate_agent_id relocation.

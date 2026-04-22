@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from daemon.services.dead_letter_service import DeadLetterService, DLQItemNotFoundError
 from daemon.repositories.job_queue.models import DeadLetterItem as DLQModel
+from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT, MAX_SCHEDULE_EXECUTION_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +249,7 @@ async def list_dlq(
     project_id: str,
     queue_id: Optional[str] = None,
     reason: Optional[str] = None,
-    limit: int = 50,
+    limit: int = DEFAULT_JOB_LIST_LIMIT,
     offset: int = 0,
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> DLQListResponse:
@@ -264,7 +265,7 @@ async def list_dlq(
         200 with list of DLQ items and total count
     """
     # Clamp limit
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, MAX_JOB_LIST_LIMIT))
     offset = max(0, offset)
     
     # List DLQ items - service returns (items, total) where total is count BEFORE pagination
@@ -294,7 +295,7 @@ async def replay_all_dlq(
     project_id: str,
     queue_id: Optional[str] = None,
     reason: Optional[str] = None,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=DEFAULT_JOB_LIST_LIMIT * 2, ge=1, le=MAX_SCHEDULE_EXECUTION_LIMIT),
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> DLQBulkReplayResponse:
     """Replay dead letter queue items for a project.

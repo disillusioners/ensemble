@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
+from daemon.constants import MAX_ERROR_LEN
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
@@ -17,9 +18,6 @@ if TYPE_CHECKING:
     from daemon.repositories.event.repository import EventRepository
 
 logger = logging.getLogger(__name__)
-
-# Max length for error messages in logs/database (prevents HTML flooding)
-MAX_ERROR_LEN = 500
 
 
 def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:

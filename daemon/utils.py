@@ -4,6 +4,13 @@ import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import TypeVar, Callable, Optional
+
+from fastapi import HTTPException
+
+from daemon.models import ErrorCodes, ErrorResponse
+from daemon.registry import get_registry
 
 # Pattern for parsing <think/> tags
 _THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
@@ -202,3 +209,109 @@ def compute_message_id(instance_id: str, role: str, content: str) -> str:
     key = f"legacy:{content_str[:200]}"
     digest = hashlib.md5(key.encode('utf-8', errors='replace')).hexdigest()[:16]
     return f"legacy-{digest}"
+
+
+# ── DateTime Utilities ──
+
+def parse_utc_datetime(value: str | datetime | None) -> datetime | None:
+    """Parse a datetime string or pass through a datetime object, ensuring UTC.
+    
+    Centralizes the repeated pattern:
+        datetime.fromisoformat(x).replace(tzinfo=timezone.utc) if isinstance(x, str) else x
+    
+    Args:
+        value: ISO format datetime string, datetime object, or None.
+        
+    Returns:
+        datetime object with UTC timezone, or None if input is None.
+        
+    Note:
+        This function intentionally fixes edge cases from the original inline patterns:
+        - None values are returned as None (previously handled inconsistently)
+        - datetime objects pass through unchanged with UTC normalization
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+    return value
+
+
+# ── HTTP Exception Helpers ──
+
+def raise_not_found(detail: str = "Resource not found") -> None:
+    """Raise a 404 HTTPException."""
+    raise HTTPException(status_code=404, detail=detail)
+
+def raise_service_unavailable(detail: str = "Service not initialized") -> None:
+    """Raise a 503 HTTPException."""
+    raise HTTPException(status_code=503, detail=detail)
+
+def raise_bad_request(detail: str = "Bad request") -> None:
+    """Raise a 400 HTTPException."""
+    raise HTTPException(status_code=400, detail=detail)
+
+
+# ── Service Dependency Factory ──
+
+T = TypeVar("T")
+
+def create_service_dependency(service_type: type[T]) -> Callable[[], T]:
+    """Creates get/set functions for FastAPI service injection.
+    
+    Replaces the repeated global+getter+setter pattern in routers:
+        _service: Optional[SomeType] = None
+        def get_service() -> SomeType: ...
+        def set_service(svc: SomeType) -> None: ...
+    
+    Usage:
+        get_my_service = create_service_dependency(MyService)
+        # get_my_service() -> raises 503 if not set
+        # get_my_service.set_service(instance) -> sets the instance
+    """
+    _instance: Optional[T] = None
+
+    def get_service() -> T:
+        nonlocal _instance
+        if _instance is None:
+            raise_service_unavailable(f"{service_type.__name__} not initialized")
+        return _instance
+
+    def set_service(instance: T) -> None:
+        nonlocal _instance
+        _instance = instance
+
+    get_service.set_service = set_service  # type: ignore[attr-defined]
+    return get_service
+
+
+# ── Agent Validation (relocated from daemon.api) ──
+
+def validate_agent_id(agent_id: str) -> tuple[str, Path]:
+    """Validate agent_id exists and return agent_id with path.
+    
+    This is the preferred function for validating agent references.
+    
+    Args:
+        agent_id: The agent identifier to validate.
+        
+    Returns:
+        Tuple of (agent_id, resolved_absolute_path).
+        
+    Raises:
+        HTTPException: If agent is invalid or not found.
+    """
+    registry = get_registry()
+    
+    # Check agent exists
+    metadata = registry.get(agent_id)
+    if metadata is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Agent not found: {agent_id}"
+            ).model_dump()
+        )
+    
+    return agent_id, metadata.path

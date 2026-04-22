@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from daemon.api import validate_agent_id
+from daemon.utils import validate_agent_id
 from daemon.registry import AgentMetadata, AgentRegistry
 
 
@@ -37,7 +37,7 @@ class TestSkillDetectionInErrorMessage:
             MagicMock(id="_mother", system=True),  # System agent - should be excluded
         ]
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
                 validate_agent_id("opencode")
 
@@ -78,7 +78,7 @@ class TestUnknownAgentName:
             MagicMock(id="leader", system=False),
         ]
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
                 validate_agent_id("database")
 
@@ -113,7 +113,7 @@ class TestTypoSuggestion:
             MagicMock(id="leader", system=False),
         ]
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
                 validate_agent_id("code")  # Typo for "coder"
 
@@ -185,7 +185,7 @@ class TestEmptyAgentListEdgeCase:
         mock_registry.find_skill.return_value = []
         mock_registry.list_all.return_value = []  # Empty registry
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
                 validate_agent_id("nonexistent")
 
@@ -214,7 +214,7 @@ class TestValidAgentId:
         mock_registry = MagicMock()
         mock_registry.get.return_value = mock_meta
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             result = validate_agent_id("coder")
 
             assert result == ("coder", mock_path)
@@ -439,7 +439,7 @@ class TestErrorMessageConsistency:
             MagicMock(id="agent2", system=False),
         ]
 
-        with patch("daemon.api.get_registry", return_value=mock_registry):
+        with patch("daemon.utils.get_registry", return_value=mock_registry):
             try:
                 validate_agent_id("some_skill")
             except HTTPException as e:

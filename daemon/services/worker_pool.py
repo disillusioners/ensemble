@@ -9,6 +9,7 @@ import time
 from typing import TYPE_CHECKING
 
 from daemon.cancellation import CancellationReason, OperationCancelledError
+from daemon.constants import MAX_ERROR_LEN
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
@@ -18,9 +19,6 @@ logger = logging.getLogger(__name__)
 
 # Default task timeout: 5 minutes (300 seconds)
 DEFAULT_TASK_TIMEOUT = 300.0
-
-# Max length for error messages in logs/database (prevents HTML flooding)
-MAX_ERROR_LEN = 500
 
 
 def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
