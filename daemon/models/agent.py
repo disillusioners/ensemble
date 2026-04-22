@@ -74,22 +74,4 @@ class AgentCreate(BaseModel):
     )
 
 
-class HealthResponse(BaseModel):
-    """Health check response."""
-
-    status: str = Field(..., description="Service status (always 'healthy')")
-    uptime_seconds: float = Field(..., description="Service uptime in seconds")
-    version: str = Field(..., description="Service version")
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "status": "healthy",
-                "uptime_seconds": 3600.0,
-                "version": "1.0.0"
-            }
-        }
-    )
-
-
-__all__ = ["AgentInfo", "AgentListResponse", "AgentCreate", "HealthResponse"]
+__all__ = ["AgentInfo", "AgentListResponse", "AgentCreate"]

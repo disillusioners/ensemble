@@ -1,8 +1,13 @@
+"""Schedule models for the daemon API."""
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from daemon.models.source import SourceStatus
 
 
 class SchedulerInstanceMode(str, Enum):
@@ -78,7 +83,7 @@ class ScheduleInfo(BaseModel):
     id: str = Field(..., description="Unique schedule identifier (maps to source_id)")
     name: str = Field(..., description="Display name for the schedule")
     config: dict[str, Any] = Field(..., description="Schedule configuration")
-    status: "SourceStatus" = Field(..., description="Current schedule status")
+    status: SourceStatus = Field(..., description="Current schedule status")
     created_at: datetime = Field(..., description="Schedule creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
     last_run_at: datetime | None = Field(default=None, description="Last execution timestamp")
@@ -159,6 +164,3 @@ __all__ = [
     "ScheduleUpdate",
     "ScheduleListResponse",
 ]
-
-# Import SourceStatus for the ScheduleInfo type annotation (circular import workaround)
-from daemon.models.source import SourceStatus

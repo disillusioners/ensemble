@@ -1,4 +1,4 @@
-"""Tests for daemon/models.py."""
+"""Tests for daemon/models package."""
 
 import pytest
 from datetime import datetime

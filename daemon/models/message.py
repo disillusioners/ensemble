@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -12,11 +12,11 @@ class MessageCreate(BaseModel):
     """Request for sending a message to an instance."""
 
     content: str = Field(..., description="Message content to send to the agent")
-    images: Optional[list[str]] = Field(default=None, description="Base64-encoded images (data URI format)")
+    images: list[str] | None = Field(default=None, description="Base64-encoded images (data URI format)")
 
     @field_validator("images")
     @classmethod
-    def validate_images(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+    def validate_images(cls, v: list[str] | None) -> list[str] | None:
         """Validate images: max 3, valid base64 data URI format, max 10MB each.
         
         Also converts empty list to None for clarity.
