@@ -531,8 +531,10 @@ class JobQueueService:
                 project_id, queue_id, job_id
             )
         elif project_id:
-            if fallback_mode == "by_instance" and instance_id:
-                await self._lock_manager.release_by_instance(instance_id)
+            if fallback_mode == "by_instance":
+                if instance_id:
+                    await self._lock_manager.release_by_instance(instance_id)
+                # else: do nothing (matches original Pattern A)
             else:
                 await self._lock_manager.release(project_id, job_id)
     
