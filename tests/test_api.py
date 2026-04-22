@@ -94,9 +94,12 @@ async def mock_manager():
     manager.source_registry = None
     
     # Mock _source_repository for source management tests
+    # All calls use asyncio.to_thread so sync mocks work
     created_sources = {}
+    
     def mock_get_source(source_id):
         return created_sources.get(source_id)
+    
     def mock_create_source(**kwargs):
         source = MagicMock()
         source.source_id = kwargs.get('source_id', 'test')
@@ -110,6 +113,7 @@ async def mock_manager():
         source.updated_at = '2024-01-01T00:00:00'
         created_sources[source.source_id] = source
         return source
+    
     def mock_update_source(**kwargs):
         source = MagicMock()
         source.source_id = kwargs.get('source_id', 'test')
@@ -150,16 +154,19 @@ async def mock_manager():
 @pytest.fixture
 def app_with_mock_manager(mock_manager):
     """Create FastAPI app with mocked manager."""
-    # Patch the global manager
-    with patch.object(api_module, 'manager', mock_manager), \
-         patch.object(api_module, 'start_time', 1000.0):
-        yield mock_manager
+    # Import app and set manager on app.state (Phase 3: routers use request.app.state.manager)
+    from daemon.api import app
+    from unittest.mock import Mock
+    app.state.manager = mock_manager
+    app.state.start_time = 1000.0
+    # Mock credential_manager for source endpoints
+    app.state.credential_manager = Mock()
+    return mock_manager
 
 
 @pytest_asyncio.fixture
 async def client(app_with_mock_manager):
     """Create async test client."""
-    # Import app inside the fixture to ensure patches are applied
     from daemon.api import app
     
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test/api") as ac:

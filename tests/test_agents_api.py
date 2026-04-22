@@ -57,13 +57,16 @@ def temp_agents_dir():
 @pytest_asyncio.fixture
 async def client_with_temp_agents(temp_agents_dir):
     """Create async test client with temporary agents directory."""
-    with patch.object(api_module, 'BASE_DIR', temp_agents_dir.parent), \
-         patch.object(api_module, 'manager', Mock()), \
-         patch.object(api_module, 'start_time', 1000.0):
-        
-        # Re-import app to pick up patched BASE_DIR
-        from daemon.api import app
-        
+    # Import app and agents module
+    from daemon.api import app
+    from daemon.routers import agents as agents_module
+    
+    # Set mock manager on app.state (Phase 3: routers use request.app.state.manager)
+    app.state.manager = Mock()
+    app.state.start_time = 1000.0
+    
+    # Patch agents module BASE_DIR for test agents directory
+    with patch.object(agents_module, 'BASE_DIR', temp_agents_dir.parent):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as ac:
             yield ac, temp_agents_dir
 

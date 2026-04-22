@@ -114,9 +114,11 @@ async def mock_manager():
 @pytest.fixture
 def app_with_mock_manager(mock_manager):
     """Create FastAPI app with mocked manager."""
-    with patch.object(api_module, 'manager', mock_manager), \
-         patch.object(api_module, 'start_time', 1000.0):
-        yield mock_manager
+    # Import app and set manager on app.state (Phase 3: routers use request.app.state.manager)
+    from daemon.api import app
+    app.state.manager = mock_manager
+    app.state.start_time = 1000.0
+    return mock_manager
 
 
 @pytest_asyncio.fixture

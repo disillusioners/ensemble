@@ -1,5 +1,6 @@
 """Webhook Receiver API endpoints."""
 
+import asyncio
 import logging
 import secrets
 from typing import Any
@@ -36,8 +37,8 @@ async def receive_webhook(source_id: str, request: Request) -> dict:
     """
     manager = _get_manager(request)
     
-    # Check source exists
-    source = await manager._source_repository.get_source_config(source_id)
+    # Check source exists (use asyncio.to_thread like other routers)
+    source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
             status_code=404,
