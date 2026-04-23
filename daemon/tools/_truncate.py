@@ -31,6 +31,7 @@ def truncate_output(
     max_chars: int = DEFAULT_MAX_CHARS,
     max_lines: int = DEFAULT_MAX_LINES,
     tool_name: str = "tool",
+    offset_indexed: bool = False,
 ) -> TruncationResult:
     """Truncate output with pagination metadata.
 
@@ -39,6 +40,8 @@ def truncate_output(
         max_chars: Maximum character count before truncation.
         max_lines: Maximum line count before truncation.
         tool_name: Name of the tool for pagination hints.
+        offset_indexed: If True, offset starts at 0; if False, offset starts at 1.
+            Used to calculate correct next offset in pagination hint.
 
     Returns:
         TruncationResult with truncated content and pagination info.
@@ -102,7 +105,7 @@ def truncate_output(
         truncated=True,
         total_items=total_lines,
         shown_items=shown_items,
-        pagination_hint=_build_hint(tool_name, total_lines, shown_items),
+        pagination_hint=_build_hint(tool_name, total_lines, shown_items, offset_indexed),
         truncation_type=truncation_type,
     )
 
@@ -147,14 +150,31 @@ def truncate_dict_result(
     }
 
 
-def _build_hint(tool_name: str, total: int, shown: int) -> str:
-    """Build pagination hint message."""
+def _build_hint(
+    tool_name: str,
+    total: int,
+    shown: int,
+    offset_indexed: bool = False,
+) -> str:
+    """Build pagination hint message.
+    
+    Args:
+        tool_name: Name of the tool for pagination hints.
+        total: Total number of items.
+        shown: Number of items shown.
+        offset_indexed: If True, offset starts at 0; if False, offset starts at 1.
+    """
+    # Calculate next offset based on indexing
+    # For 0-indexed (offset starts at 0): next_offset = shown
+    # For 1-indexed (offset starts at 1): next_offset = shown + 1 (to skip shown items)
+    next_offset = shown + 1 if offset_indexed else shown
+    
     hint_lines = [
         "---",
         f"⚠️ **Results truncated**: Showing {shown} of {total} items.",
         "",
         "**To see more, use paging parameters:**",
-        f"- `{tool_name}(..., offset={shown})` - Continue from where you left off",
+        f"- `{tool_name}(..., offset={next_offset})` - Continue from where you left off",
         f"- `{tool_name}(..., limit=N)` - Adjust page size",
     ]
     

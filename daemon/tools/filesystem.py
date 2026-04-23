@@ -116,6 +116,7 @@ def list_directory(
             tool_name="list_directory",
             max_chars=6000,
             max_lines=150,
+            offset_indexed=False,  # 0-indexed offset
         )
         
         if result.truncated:
@@ -183,11 +184,30 @@ def read_file(
         header = f"File: {file_path} ({total_lines} lines total)\n{'-' * 40}\n"
         formatted_content = header + "\n".join(result)
         
-        # Apply final truncation for safety
-        trunc_result = truncate_output(formatted_content, tool_name="read_file")
-        
-        if trunc_result.truncated:
-            return trunc_result.content + trunc_result.pagination_hint
+        # Check if truncation needed (character limit for safety)
+        if len(formatted_content) > 6000:
+            # Find a good truncation point at line boundary
+            truncated_lines = []
+            char_count = 0
+            for line in result:
+                if char_count + len(line) + 1 > 6000:
+                    break
+                truncated_lines.append(line)
+                char_count += len(line) + 1
+            
+            shown_lines = len(truncated_lines)
+            end_line = offset + shown_lines - 1
+            next_offset = offset + shown_lines
+            
+            # Build pagination hint
+            pagination_hint = (
+                f"\n---\n"
+                f"Showing lines {offset} to {end_line} of {total_lines}. "
+                f"Use offset={next_offset} for more."
+            )
+            
+            truncated_content = header + "\n".join(truncated_lines)
+            return truncated_content + pagination_hint
         
         return formatted_content
         
@@ -262,12 +282,25 @@ def glob_files(
         if not result:
             return f"No files matching pattern: {pattern}"
         
-        # Apply truncation
         content = "\n".join(result)
-        trunc_result = truncate_output(content, tool_name="glob_files", max_chars=6000, max_lines=100)
         
-        if trunc_result.truncated:
-            return trunc_result.content + trunc_result.pagination_hint
+        # Check if truncation needed
+        if len(content) > 6000 or len(result) > 100:
+            # Truncate at line boundary
+            truncated_lines = result[:100]
+            shown = len(truncated_lines)
+            total = len(files)
+            next_offset = offset + limit
+            
+            # Build pagination hint
+            pagination_hint = (
+                f"\n---\n"
+                f"Showing results {offset + 1} to {offset + shown} of {total}. "
+                f"Use offset={next_offset} for next page."
+            )
+            
+            return "\n".join(truncated_lines) + pagination_hint
+        
         return content
         
     except Exception as e:
@@ -397,10 +430,24 @@ def grep_files(
             return f"No matches found for: {pattern}"
         
         content = "\n".join(matches)
-        trunc_result = truncate_output(content, tool_name="grep_files", max_chars=6000, max_lines=100)
         
-        if trunc_result.truncated:
-            return trunc_result.content + trunc_result.pagination_hint
+        # Check if truncation needed
+        if len(content) > 6000 or len(matches) > 100:
+            # Truncate at line boundary
+            truncated_matches = matches[:100]
+            shown = len(truncated_matches)
+            total = len(matches)
+            next_offset = offset + limit
+            
+            # Build pagination hint
+            pagination_hint = (
+                f"\n---\n"
+                f"Showing results {offset + 1} to {offset + shown} of {total}. "
+                f"Use offset={next_offset} for next page."
+            )
+            
+            return "\n".join(truncated_matches) + pagination_hint
+        
         return content
         
     except re.error as e:
