@@ -71,6 +71,7 @@ class TitleGenerationService:
             "api_key": self._config.llm.api_key,
             "model": self._config.llm.model_title,
             "temperature": 0.3,  # Lower temperature for more focused titles
+            "default_headers": {"x-proxy-app": "ensemble"},
         }
         # Remove model_vision if present (title generation doesn't need vision)
         llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}

@@ -8,9 +8,6 @@ from typing import TYPE_CHECKING
 from ..cancellation import CancellationReason
 from ..request_registry import ActiveRequestRegistry
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +53,7 @@ class CancellationService:
 
     def cancel_instance_requests(self, instance_id: str, reason: CancellationReason) -> int:
         """Cancel all active requests for an instance. Returns count of cancelled."""
-        message_ids = list(self._request_registry._by_instance.get(instance_id, set()))
+        message_ids = self._request_registry.get_active_for_instance(instance_id)
         count = 0
         for msg_id in message_ids:
             if self.cancel(msg_id, reason):

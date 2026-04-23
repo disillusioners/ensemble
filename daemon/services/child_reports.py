@@ -123,7 +123,7 @@ class ChildReportsService:
             messages = []
         
         if not messages:
-            return f"{prefix}, bellow is the response: No activity recorded."
+            return f"{prefix}, below is the response: No activity recorded."
         
         # Build conversation summary for the LLM
         conversation_text = []
@@ -137,7 +137,7 @@ class ChildReportsService:
                 conversation_text.append(f"{role}: {content}")
         
         if not conversation_text:
-            return f"{prefix}, bellow is the response: No messages to summarize."
+            return f"{prefix}, below is the response: No messages to summarize."
         
         conversation = "\n".join(conversation_text)
         
@@ -183,11 +183,11 @@ Provide a concise summary:"""
                 summary = " ".join(text_parts)
             else:
                 summary = str(content) if content else ""
-            return f"{prefix}, bellow is the response: {summary}"
+            return f"{prefix}, below is the response: {summary}"
         except Exception as e:
             logger.warning(f"Failed to summarize instance {instance_id}: {e}")
             # Fallback: count messages and provide basic summary
-            return f"{prefix}, bellow is the response: Completed {len(messages)} message(s)."
+            return f"{prefix}, below is the response: Completed {len(messages)} message(s)."
 
     async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str) -> bool:
         """Check if completion report should be sent (idempotency checks).
@@ -488,7 +488,7 @@ Provide a concise summary:"""
                     break
         
         if last_assistant_content:
-            return f"{prefix}, bellow is the response:\n{last_assistant_content}"
+            return f"{prefix}, below is the response:\n{last_assistant_content}"
         return None
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
