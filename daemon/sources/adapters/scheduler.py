@@ -46,7 +46,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         execution_callback: Callable | None = None,
-        on_complete_callback: Callable[[str, bool | None, None]] = None,
+        on_complete_callback: Callable[[str, bool], None] | None = None,
         job_queue_service: "JobQueueService" | None = None,
         source_repo: "SourceRepositoryType" | None = None,
         instance_repo: "SQLModelInstanceRepository" | None = None,
