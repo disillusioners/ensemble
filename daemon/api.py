@@ -258,9 +258,27 @@ async def lifespan(app: FastAPI):
     from daemon.routers.dlq import set_dead_letter_service
     set_dead_letter_service(dead_letter_service)
     
+    # Also set for jobs_crud.py which has its own dependency instance
+    from daemon.routers.jobs_crud import get_dead_letter_svc
+    get_dead_letter_svc.set_service(dead_letter_service)
+    
     # Store DLQ repository for router injection
     from daemon.repositories.job_queue.dead_letter_repository import set_dead_letter_repository
     set_dead_letter_repository(dlq_repository)
+    
+    # Set JobQueueService for jobs router injection
+    from daemon.routers.jobs import set_job_queue_service
+    set_job_queue_service(job_queue_service)
+    
+    # Set project repository for projects router injection
+    from daemon.routers.projects import set_project_repository
+    set_project_repository(manager._project_repository)
+    
+    # Set JobQueueMgmtService for projects and queues routers injection
+    from daemon.routers.projects import set_job_queue_mgmt_service as set_proj_mgmt_service
+    set_proj_mgmt_service(job_queue_mgmt_service)
+    from daemon.routers.queues import set_job_queue_mgmt_service as set_queue_mgmt_service
+    set_queue_mgmt_service(job_queue_mgmt_service)
     
     yield
     
