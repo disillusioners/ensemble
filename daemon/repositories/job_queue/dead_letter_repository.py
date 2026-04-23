@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
@@ -38,7 +38,7 @@ class DeadLetterRepository:
             session.refresh(item)
             return item
 
-    def get(self, dlq_id: str) -> Optional[DeadLetterItem]:
+    def get(self, dlq_id: str) -> DeadLetterItem | None:
         """Get a dead letter item by DLQ ID.
         
         Args:
@@ -50,7 +50,7 @@ class DeadLetterRepository:
         with SQLModelSession(self.engine) as session:
             return session.get(DeadLetterItem, dlq_id)
 
-    def get_by_job_id(self, job_id: str) -> Optional[DeadLetterItem]:
+    def get_by_job_id(self, job_id: str) -> DeadLetterItem | None:
         """Get a dead letter item by original job ID.
         
         Args:
@@ -65,10 +65,10 @@ class DeadLetterRepository:
 
     def list(
         self,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
-        reason: Optional[str] = None,
-        min_age_hours: Optional[int] = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
+        reason: str | None = None,
+        min_age_hours: int | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[DeadLetterItem], int]:
@@ -152,8 +152,8 @@ class DeadLetterRepository:
     def cleanup_by_age(
         self,
         max_age_hours: int,
-        reason: Optional[str] = None,
-        project_id: Optional[str] = None,
+        reason: str | None = None,
+        project_id: str | None = None,
     ) -> int:
         """Delete dead letter items older than max_age_hours.
         
@@ -182,8 +182,8 @@ class DeadLetterRepository:
 
     def count(
         self,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
     ) -> int:
         """Count dead letter items with optional filters.
         
@@ -206,7 +206,7 @@ class DeadLetterRepository:
 
 
 # Module-level singleton for dependency injection
-_repo: Optional[DeadLetterRepository] = None
+_repo: DeadLetterRepository | None = None
 
 
 def get_dead_letter_repository() -> DeadLetterRepository:

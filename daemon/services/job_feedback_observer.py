@@ -14,7 +14,7 @@ Key behaviors:
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
@@ -54,7 +54,7 @@ class JobFeedbackObserver:
         lock_repo: LockRepository,
         project_repo: SQLModelProjectRepository,
         instance_manager,
-        config: Optional["JobSystemConfig"] = None,
+        config: "JobSystemConfig" | None = None,
     ) -> None:
         """Initialize the JobFeedbackObserver.
 

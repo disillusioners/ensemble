@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ _STATUS_TERMINATED = "terminated"
 
 # State transition table: (from_state, to_state) -> transition_name
 # Using string literals directly to avoid circular imports
-TRANSITIONS: Dict[Tuple[Optional[str], str], str] = {
+TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (None, _STATUS_PENDING): "create",
     (_STATUS_PENDING, _STATUS_PROCESSING): "start",
     (_STATUS_PENDING, _STATUS_CANCELLED): "cancel",
@@ -37,7 +37,7 @@ TRANSITIONS: Dict[Tuple[Optional[str], str], str] = {
 class InvalidTransitionError(Exception):
     """Raised when an invalid state transition is attempted."""
 
-    def __init__(self, job_id: str, from_status: Optional[str], to_status: str) -> None:
+    def __init__(self, job_id: str, from_status: str | None, to_status: str) -> None:
         self.job_id = job_id
         self.from_status = from_status
         self.to_status = to_status
@@ -49,7 +49,7 @@ class InvalidTransitionError(Exception):
 class JobStateMachine:
     """Formal state machine for job lifecycle transitions."""
 
-    def can_transition(self, from_status: Optional[str], to_status: str) -> bool:
+    def can_transition(self, from_status: str | None, to_status: str) -> bool:
         """Check if a transition is valid.
 
         Args:
@@ -62,8 +62,8 @@ class JobStateMachine:
         return (from_status, to_status) in TRANSITIONS
 
     def get_transition_name(
-        self, from_status: Optional[str], to_status: str
-    ) -> Optional[str]:
+        self, from_status: str | None, to_status: str
+    ) -> str | None:
         """Get the name of a transition.
 
         Args:
@@ -76,7 +76,7 @@ class JobStateMachine:
         return TRANSITIONS.get((from_status, to_status))
 
     def get_valid_transitions(
-        self, from_status: Optional[str]
+        self, from_status: str | None
     ) -> List[tuple[str, str]]:
         """Get all valid target states from a given state.
 
@@ -93,7 +93,7 @@ class JobStateMachine:
         ]
 
     def validate_transition(
-        self, from_status: Optional[str], to_status: str
+        self, from_status: str | None, to_status: str
     ) -> None:
         """Validate transition, raising InvalidTransitionError if invalid.
 

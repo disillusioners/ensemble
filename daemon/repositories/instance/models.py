@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
@@ -49,8 +49,8 @@ class Instance(SQLModel, table=True):
     instance_id: str = Field(primary_key=True)
     agent_id: str = Field(index=True)
     agent_dir: str = Field(index=True)
-    agent_name: Optional[str] = Field(default=None, index=True)
-    parent_id: Optional[str] = Field(default=None, index=True)
+    agent_name: str | None = Field(default=None, index=True)
+    parent_id: str | None = Field(default=None, index=True)
     status: str = Field(default=InstanceStatus.IDLE.value, index=True)
     
     instance_metadata: dict[str, Any] = Field(
@@ -65,13 +65,13 @@ class Instance(SQLModel, table=True):
     # Optimistic locking version
     version: int = Field(default=1)
     # For watchdog timeout detection
-    last_activity_at: Optional[datetime] = Field(default=None)
+    last_activity_at: datetime | None = Field(default=None)
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     
     @property
-    def title(self) -> Optional[str]:
+    def title(self) -> str | None:
         """Extract title from instance_metadata."""
         return self.instance_metadata.get("title") if self.instance_metadata else None
     

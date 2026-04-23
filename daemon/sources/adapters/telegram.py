@@ -9,7 +9,7 @@ import logging
 import re
 import secrets
 from collections import OrderedDict
-from typing import Any, Optional
+from typing import Any
 
 import aiohttp
 
@@ -43,7 +43,7 @@ class TelegramAdapter(MessageSourceAdapter):
     """
     
     def __init__(self, config: SourceConfig, on_message, 
-                 rate_limit: Optional[RateLimit] = None):
+                 rate_limit: RateLimit | None = None):
         super().__init__(config, on_message)
         
         # Extract Telegram-specific config
@@ -57,10 +57,10 @@ class TelegramAdapter(MessageSourceAdapter):
         self._polling_timeout = config.config.get("polling_timeout", POLLING_TIMEOUT)
         
         # State
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._polling_task: Optional[asyncio.Task] = None
+        self._session: aiohttp.ClientSession | None = None
+        self._polling_task: asyncio.Task | None = None
         self._last_update_id: int = 0
-        self._bot_info: Optional[dict] = None
+        self._bot_info: dict | None = None
         
         # Rate limiting (Telegram: 30 msg/sec to same chat)
         rate = rate_limit or DEFAULT_RATE_LIMITS.get("telegram", RateLimit(30, 30))
@@ -80,7 +80,7 @@ class TelegramAdapter(MessageSourceAdapter):
         self._typing_tasks: dict[str, asyncio.Task] = {}
     
     @property
-    def bot_username(self) -> Optional[str]:
+    def bot_username(self) -> str | None:
         """Get the bot's username if available."""
         if self._bot_info:
             return self._bot_info.get("username")

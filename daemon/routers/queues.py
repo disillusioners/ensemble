@@ -1,7 +1,6 @@
 """Job Queue Management API endpoints."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -22,7 +21,7 @@ router = APIRouter(prefix="/projects/{project_id}/queues", tags=["queues"])
 
 # Dependency to get JobQueueMgmtService
 # This will be set up in daemon/api.py during app initialization
-_job_queue_mgmt_service: Optional[JobQueueMgmtService] = None
+_job_queue_mgmt_service: JobQueueMgmtService | None = None
 
 
 def get_mgmt_service() -> JobQueueMgmtService:

@@ -5,7 +5,7 @@ import logging
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .base import (
     IncomingMessage,
@@ -36,7 +36,7 @@ class SourceRegistry:
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
     
-    def __init__(self, source_repo, manager, job_queue_service: Optional["JobQueueService"] = None, instance_repo=None):
+    def __init__(self, source_repo, manager, job_queue_service: "JobQueueService" | None = None, instance_repo=None):
         """Initialize the source registry.
         
         Args:
@@ -113,7 +113,7 @@ class SourceRegistry:
         except Exception as e:
             logger.warning(f"Error stopping adapter {source_id} during unregister: {e}")
     
-    def get(self, source_id: str) -> Optional[MessageSourceAdapter]:
+    def get(self, source_id: str) -> MessageSourceAdapter | None:
         """Get an adapter by source_id.
         
         Args:
@@ -277,8 +277,8 @@ class SourceRegistry:
                 execution_id: str,
                 schedule_id: str,
                 status: str,
-                instance_id: Optional[str] = None,
-                error_message: Optional[str] = None,
+                instance_id: str | None = None,
+                error_message: str | None = None,
             ):
                 """Thread-safe wrapper for execution callback."""
                 try:
@@ -301,8 +301,8 @@ class SourceRegistry:
                 execution_id: str,
                 schedule_id: str,
                 status: str,
-                instance_id: Optional[str] = None,
-                error_message: Optional[str] = None,
+                instance_id: str | None = None,
+                error_message: str | None = None,
             ):
                 """Sync callback - run in thread pool to avoid blocking."""
                 loop = asyncio.get_running_loop()

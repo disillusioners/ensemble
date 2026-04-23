@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
@@ -66,14 +66,14 @@ class Project(SQLModel, table=True):
     project_type: str = Field(default="general")
     status: str = Field(default=ProjectStatus.ACTIVE.value)
     
-    main_directory: Optional[str] = None
+    main_directory: str | None = None
     
     related_directories: list[str] = Field(
         default_factory=list,
         sa_column=Column(JSON)
     )
     
-    description: Optional[str] = None
+    description: str | None = None
     
     job_queue_paused: bool = Field(default=False, description="Whether job queue is paused for this project")
     
@@ -88,8 +88,8 @@ class Project(SQLModel, table=True):
         sa_column=Column(JSON)
     )
     
-    creator_instance_id: Optional[str] = None
-    creator_agent_id: Optional[str] = None
+    creator_instance_id: str | None = None
+    creator_agent_id: str | None = None
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())

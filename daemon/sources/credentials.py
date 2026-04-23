@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +21,14 @@ class CredentialManager:
     Requires SOURCE_CREDENTIAL_KEY environment variable or encryption_key parameter.
     """
     
-    def __init__(self, encryption_key: Optional[bytes] = None):
+    def __init__(self, encryption_key: bytes | None = None):
         """Initialize credential manager.
         
         Args:
             encryption_key: Optional encryption key. If not provided,
                           reads from SOURCE_CREDENTIAL_KEY env var.
         """
-        self._fernet: Optional[Fernet] = None
+        self._fernet: Fernet | None = None
         
         if CRYPTO_AVAILABLE:
             key = encryption_key or os.environ.get("SOURCE_CREDENTIAL_KEY")

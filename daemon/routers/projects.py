@@ -1,7 +1,6 @@
 """Project Queue API endpoints."""
 
 import asyncio
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
@@ -14,7 +13,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 # Dependency to get SQLModelProjectRepository
 # This will be set up in daemon/api.py during app initialization
-_project_repo: Optional[SQLModelProjectRepository] = None
+_project_repo: SQLModelProjectRepository | None = None
 
 
 def get_project_repository() -> SQLModelProjectRepository:
@@ -41,7 +40,7 @@ def set_project_repository(repo: SQLModelProjectRepository) -> None:
 
 
 # Dependency to get JobQueueMgmtService
-_job_queue_mgmt_service: Optional[JobQueueMgmtService] = None
+_job_queue_mgmt_service: JobQueueMgmtService | None = None
 
 
 def get_queue_mgmt_service() -> JobQueueMgmtService:

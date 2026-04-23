@@ -1,39 +1,47 @@
-# Phase 4: InstanceManager Decomposition Experience
+# Phase 4 Manager Decomposition — Key Learnings
 
-## What Was Done
+## Date: 2026-04-23
+
+## What We Did
 Decomposed the 2985-line `InstanceManager` god class into 7 focused services using a facade pattern.
 
-## New Service Files (daemon/services/)
-- `instance_lifecycle.py` (495 lines) — spawn, terminate, instance state
-- `instance_messaging.py` (1009 lines) — message handling, processing
-- `child_reports.py` (624 lines) — completion reports, parent notification
-- `error_reporting.py` (292 lines) — error reporting
-- `cancellation.py` (111 lines) — request cancellation
-- `title_generation.py` (129 lines) — title generation
-- `event_publisher.py` (73 lines) — lifecycle events
+## Key Learnings
 
-## Key Architecture Decision
-Services access manager state through `self._manager.*` using `@property` getters rather than constructor injection. This makes the facade transparent to test mocks — when tests mock `manager._instance_repository`, services see the mock through the manager reference.
+### 1. Service State Access Pattern (CRITICAL)
+When tests override `manager._instance_repository = mock_repo` after construction, services that captured the repository in their `__init__` get a stale reference. 
 
-## Lessons Learned
+**Solution**: Services should access state through `self._manager._instance_repository` (via the facade) instead of storing their own copy. This way test mocks work correctly.
 
-1. **God class decomposition is extremely risky** — The initial implementation broke 18+ tests due to subtle behavioral differences.
+### 2. Facade Size Reality
+The plan estimated ~600 lines for the facade, but reality is ~1473 lines because:
+- `__init__` is ~200 lines (creates all services + internal state)
+- Each delegation method has a docstring (~5-10 lines each)
+- Compaction logic stayed inline (~120 lines)
+- Module-level functions (~100 lines)
+- Inner classes (ActivityCallbackHandler, CancellationCallbackHandler) (~130 lines)
+- Worker pool setup/teardown (~100 lines)
+- Source management methods (~100 lines)
+- Shutdown/cleanup logic (~100 lines)
 
-2. **Mock transparency requires proxy pattern** — Constructor injection of repositories/services breaks tests that mock `manager._repo`. Using `self._manager._repo` through properties preserves mock compatibility.
+### 3. Test Modifications Are Sometimes Necessary
+For a "no logic changes" refactoring, some test modifications are unavoidable:
+- Tests that mock internal attributes (e.g., `_event_bus`) need updating when the target changes (e.g., `_events_service`)
+- Tests that call moved utility functions need import path updates
+- These are NOT logic changes — they're structural alignment
 
-3. **"Inline fallback" methods are code smells** — The first fix session added `_spawn_instance_inline()` and `_terminate_instance_inline()` as fallbacks. These are anti-patterns that should be removed in favor of proper delegation.
+### 4. Fallback Code Smells
+Fix sessions tend to add "fallback" or "inline" methods when tests fail. This is wrong — the correct fix is ensuring services are always properly initialized. Watch for `hasattr(self, '_service')` patterns — they indicate incomplete initialization.
 
-4. **The facade is still 1656 lines** — larger than the plan's ~600 estimate. This is because: init is ~200 lines, many delegation wrappers, some methods weren't fully extracted. A future cleanup pass could reduce this.
+### 5. Incremental Extraction Order Matters
+Leaf services (no dependencies) should be extracted first:
+1. EventPublisher, TitleGeneration (leaf)
+2. Cancellation, ErrorReporting (mid)
+3. ChildReports (mid)
+4. InstanceMessaging (complex, depends on many)
+5. InstanceLifecycle (depends on Cancellation)
 
-5. **parse_think_tags with list content** — When moving `_process_message_with_tracking`, the code that handles "list content" (where message content is a list of dicts) must be preserved exactly. The list→string conversion logic was fragile.
-
-6. **Review caught a critical NameError** — `clear_all_instances()` in `instance_lifecycle.py` referenced `instance_repository` instead of `self._manager._instance_repository`. This would have crashed at runtime.
-
-7. **worker_pool.py changes** — The session also extracted a `_notify_parent_of_failure()` helper in worker_pool.py. This was appropriate cleanup, not scope creep.
-
-## Test Results
-- 2827 passed, 27 skipped, 0 failed (excluding integration tests)
-- Integration test failures are all pre-existing (need real DB/network)
-- 1 test file modified (mock target update from daemon.manager.logger → daemon.services.instance_messaging.logger)
-
-Commit: 0060d31e
+### 6. Fuzzy Matching Relocation
+Moving utility functions to `utils.py` requires a re-export in the original module for backward compatibility:
+```python
+from daemon.utils import find_near_instance as find_near_instance  # noqa: F401
+```

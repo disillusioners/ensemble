@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import func, update
 from sqlalchemy.engine import Engine
@@ -35,7 +35,7 @@ class JobQueueRepository:
         concurrency_limit: int = 1,
         is_system: bool = False,
         is_paused: bool = False,
-        description: Optional[str] = None,
+        description: str | None = None,
     ) -> JobQueue:
         """Create a new job queue.
         
@@ -77,7 +77,7 @@ class JobQueueRepository:
     # READ
     # --------------------------------------------------------
 
-    def get(self, queue_id: str) -> Optional[JobQueue]:
+    def get(self, queue_id: str) -> JobQueue | None:
         """Get a queue by ID.
         
         Args:
@@ -94,7 +94,7 @@ class JobQueueRepository:
         self,
         project_id: str,
         queue_name: str,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Get a queue by project ID and name (case-insensitive).
         
         Args:
@@ -153,7 +153,7 @@ class JobQueueRepository:
         self,
         queue_id: str,
         **updates: Any,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Update a queue's fields.
         
         Args:
@@ -245,7 +245,7 @@ class JobQueueRepository:
         self,
         from_queue_id: str,
         to_queue_id: str,
-        target_statuses: Optional[list[str]] = None,
+        target_statuses: list[str | None] = None,
     ) -> int:
         """Atomically reassign jobs from one queue to another.
         

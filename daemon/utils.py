@@ -5,7 +5,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeVar, Callable, Optional, Any
+from typing import TypeVar, Callable, Any
 
 from fastapi import HTTPException
 
@@ -260,7 +260,7 @@ def create_service_dependency(service_type: type[T]) -> Callable[[], T]:
     """Creates get/set functions for FastAPI service injection.
     
     Replaces the repeated global+getter+setter pattern in routers:
-        _service: Optional[SomeType] = None
+        _service: SomeType | None = None
         def get_service() -> SomeType: ...
         def set_service(svc: SomeType) -> None: ...
     
@@ -269,7 +269,7 @@ def create_service_dependency(service_type: type[T]) -> Callable[[], T]:
         # get_my_service() -> raises 503 if not set
         # get_my_service.set_service(instance) -> sets the instance
     """
-    _instance: Optional[T] = None
+    _instance: T | None = None
 
     def get_service() -> T:
         nonlocal _instance

@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel
 from sqlalchemy import CheckConstraint, Column, Index, UniqueConstraint
@@ -64,8 +64,8 @@ class JobQueue(SQLModel, table=True):
     concurrency_limit: int = Field(default=1, ge=1, le=20)
     is_system: bool = Field(default=False)
     is_paused: bool = Field(default=False)
-    description: Optional[str] = None
-    default_max_retries: Optional[int] = Field(default=None)
+    description: str | None = None
+    default_max_retries: int | None = Field(default=None)
     
     # Timestamps
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -115,8 +115,8 @@ class JobItem(SQLModel, table=True):
     source: str = Field(default="api")  # "api", "telegram", "scheduler", "webhook"
 
     # Project queuing (None = skip queue, execute immediately)
-    project_id: Optional[str] = Field(default=None)
-    queue_id: Optional[str] = Field(default=None, foreign_key="job_queues.queue_id")
+    project_id: str | None = Field(default=None)
+    queue_id: str | None = Field(default=None, foreign_key="job_queues.queue_id")
 
     # Scheduling
     priority: int = Field(default=5, ge=1, le=10)  # 1=lowest, 10=highest
@@ -124,13 +124,13 @@ class JobItem(SQLModel, table=True):
 
     # Timing
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
+    started_at: str | None = None
+    completed_at: str | None = None
 
     # Result (filled on completion)
-    instance_id: Optional[str] = Field(default=None)
-    error_message: Optional[str] = None
-    result_summary: Optional[str] = None
+    instance_id: str | None = Field(default=None)
+    error_message: str | None = None
+    result_summary: str | None = None
 
     # Metadata (avoiding SQLAlchemy's reserved 'metadata' attribute)
     job_metadata: dict[str, Any] = Field(
@@ -139,17 +139,17 @@ class JobItem(SQLModel, table=True):
     )
 
     # Cancellation
-    cancelled_at: Optional[str] = None
+    cancelled_at: str | None = None
 
     # Soft delete
-    deleted_at: Optional[str] = None
+    deleted_at: str | None = None
 
     # Retry handling
     retry_count: int = Field(default=0, ge=0)
-    max_retries: Optional[int] = Field(default=None)
-    idempotency_key: Optional[str] = Field(default=None, max_length=255)
-    failed_at: Optional[str] = None
-    next_retry_at: Optional[str] = None
+    max_retries: int | None = Field(default=None)
+    idempotency_key: str | None = Field(default=None, max_length=255)
+    failed_at: str | None = None
+    next_retry_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -201,7 +201,7 @@ class JobLock(SQLModel, table=True):
     project_id: str = Field(index=True)
     queue_id: str = Field(index=True)
     job_id: str = Field(index=True)
-    instance_id: Optional[str] = Field(default=None, index=True)
+    instance_id: str | None = Field(default=None, index=True)
     acquired_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -246,7 +246,7 @@ class DeadLetterItem(SQLModel, table=True):
     reason: str  # "MAX_RETRIES", "MANUAL", "CIRCUIT_BREAKER", etc.
     
     # Optional metadata storage
-    metadata_json: Optional[dict[str, Any]] = Field(
+    metadata_json: dict[str, Any | None] = Field(
         default=None,
         sa_column=Column("metadata", JSON, nullable=True)
     )

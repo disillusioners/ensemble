@@ -9,7 +9,7 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from .base import OutgoingMessage
 
@@ -31,7 +31,7 @@ class ResponseDispatcher:
     
     def __init__(
         self,
-        registry: Optional["SourceRegistry"] = None,
+        registry: "SourceRegistry" | None = None,
         subscriber_id: str = "response_dispatcher"
     ) -> None:
         """Initialize the response dispatcher.
@@ -40,7 +40,7 @@ class ResponseDispatcher:
             registry: SourceRegistry to get adapters from.
             subscriber_id: Unique identifier for this dispatcher instance.
         """
-        self._registry: Optional["SourceRegistry"] = registry
+        self._registry: "SourceRegistry" | None = registry
         self._subscriber_id = subscriber_id
         
         self._running: bool = False
@@ -86,8 +86,8 @@ class ResponseDispatcher:
         source: str,
         content: str,
         message_type: str = "text",
-        metadata: Optional[dict] = None,
-        reply_to_id: Optional[str] = None,
+        metadata: dict | None = None,
+        reply_to_id: str | None = None,
     ) -> None:
         """Dispatch a completed message to the appropriate external source.
         

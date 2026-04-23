@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from sqlmodel import Session as SQLModelSession
 
@@ -89,7 +89,7 @@ class JobRetryEngine:
     def get_max_retries(
         self,
         job: JobItem,
-        queue: "Optional[JobQueueRepository]" = None,
+        queue: "JobQueueRepository | None" = None,
         config: JobSystemConfig = None,
     ) -> int:
         """Get effective max retries using fallback chain.
@@ -130,7 +130,7 @@ class JobRetryEngine:
     def should_retry(
         self,
         job: JobItem,
-        queue: "Optional[JobQueueRepository]" = None,
+        queue: "JobQueueRepository | None" = None,
         config: JobSystemConfig = None,
     ) -> bool:
         """Determine if a job should be retried.
@@ -166,9 +166,9 @@ class JobRetryEngine:
     def maybe_retry(
         self,
         job_id: str,
-        queue: "Optional[JobQueueRepository]" = None,
+        queue: "JobQueueRepository | None" = None,
         config: JobSystemConfig = None,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """Attempt to retry a failed job atomically.
         
         This method executes in a single SQLite session/transaction:
@@ -262,7 +262,7 @@ class JobRetryEngine:
 
 
 # Module-level singleton for dependency injection
-_engine: Optional[JobRetryEngine] = None
+_engine: JobRetryEngine | None = None
 
 
 def get_retry_engine() -> JobRetryEngine:

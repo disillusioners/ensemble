@@ -17,7 +17,7 @@ Error events are persisted to DB:
 import asyncio
 import logging
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from daemon.repositories.event.models import EventKind
 
@@ -67,7 +67,7 @@ class EventBus:
         self._sync_lock = threading.Lock()
 
         # Event loop reference for sync operations
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # -------------------------------------------------------------------------
     # Checkpoint Event Method (replaces all streaming events)
@@ -162,8 +162,8 @@ class EventBus:
         self,
         instance_id: str,
         kind: EventKind | str,
-        data: Optional[dict[str, Any]] = None,
-        message_id: Optional[str] = None,
+        data: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> None:
         """Create an error event: persist to DB and notify listeners.
 
@@ -199,7 +199,7 @@ class EventBus:
     async def create_error_event(
         self,
         instance_id: str,
-        error: Optional[dict[str, Any]] = None,
+        error: dict[str, Any] | None = None,
     ) -> None:
         """Create a generic error lifecycle event."""
         await self.create_event(
@@ -292,7 +292,7 @@ class EventBus:
     def subscribe_all(
         self,
         subscriber_id: str,
-        maxsize: Optional[int] = None,
+        maxsize: int | None = None,
     ) -> asyncio.Queue:
         """Subscribe to ALL events.
 

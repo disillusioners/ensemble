@@ -2,7 +2,6 @@
 
 import logging
 import threading
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,7 @@ class TimeoutMonitor:
         self._source = source
         self._timeout = timeout_seconds
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._fired = False
     
     @property

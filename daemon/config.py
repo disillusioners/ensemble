@@ -3,7 +3,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import yaml
 from pydantic import Field, ConfigDict, model_validator
@@ -38,8 +38,8 @@ class LLMConfig(BaseSettings):
     base_url: str = Field(default="https://api.openai.com/v1")
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
-    model_title: Optional[str] = Field(default=None, description="Model for title generation (falls back to model)")
-    model_vision: Optional[str] = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
+    model_title: str | None = Field(default=None, description="Model for title generation (falls back to model)")
+    model_vision: str | None = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
     
@@ -94,7 +94,7 @@ class QueueConfig(BaseSettings):
     # Development helper: discard all queued messages on startup
     # Note: This field is handled specially in load_config to ensure env var
     # QUEUE_DISCARD_ON_STARTUP takes highest priority over YAML config.
-    discard_on_startup: Optional[bool] = None
+    discard_on_startup: bool | None = None
 
     # LLM retry configuration — per error category
     # Transient errors (500/502/503/429): fail fast, more retries fit in time budget
@@ -181,7 +181,7 @@ class JobSystemConfig(BaseSettings):
     event_dispatch_enabled: bool = Field(default=True, description="Enable event-based job dispatch")
     observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
-    job_retry_scheduler_enabled: Optional[bool] = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
+    job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
 
 class Config(BaseSettings):
@@ -200,7 +200,7 @@ class Config(BaseSettings):
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
 
 
-def load_config(config_path: Optional[str] = None) -> Config:
+def load_config(config_path: str | None = None) -> Config:
     """
     Load configuration from YAML file with environment variable substitution.
 
@@ -295,6 +295,6 @@ def load_config(config_path: Optional[str] = None) -> Config:
 
 
 # Convenience function for getting the config
-def get_config(config_path: Optional[str] = None) -> Config:
+def get_config(config_path: str | None = None) -> Config:
     """Get the configuration, loading it if not already loaded."""
     return load_config(config_path)

@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
@@ -50,7 +50,7 @@ class JobProcessor:
         project_repo: SQLModelProjectRepository,
         queue_repo: JobQueueRepository,
         poll_interval: float = 30.0,
-        dispatch_bus: Optional["DispatchEventBus"] = None,
+        dispatch_bus: "DispatchEventBus" | None = None,
         event_dispatch_enabled: bool = True,
     ):
         """Initialize the JobProcessor.
@@ -70,7 +70,7 @@ class JobProcessor:
         self._queue_repo = queue_repo
         self._poll_interval = poll_interval
         self._running = False
-        self._job: Optional[asyncio.Task] = None
+        self._job: asyncio.Task | None = None
         self._dispatch_bus = dispatch_bus
         self._event_dispatch_enabled = event_dispatch_enabled
         self._jobs_dispatched_immediately = 0

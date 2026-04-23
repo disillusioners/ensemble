@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from daemon.repositories.job_queue.models import JobLock, JobLockInfo
 

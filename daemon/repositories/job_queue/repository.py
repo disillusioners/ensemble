@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, select as sql_select
 from sqlalchemy.engine import Engine
@@ -36,11 +36,11 @@ class JobRepository:
         agent_dir: str,
         message: str,
         source: str = "api",
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
         priority: int = 5,
-        job_metadata: Optional[dict[str, Any]] = None,
-        queue_id: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
+        job_metadata: dict[str, Any | None] = None,
+        queue_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> JobItem:
         """Create a new job queue item.
         
@@ -82,7 +82,7 @@ class JobRepository:
     # READ
     # --------------------------------------------------------
 
-    def get(self, job_id: str) -> Optional[JobItem]:
+    def get(self, job_id: str) -> JobItem | None:
         """Get a job by ID.
         
         Args:
@@ -95,7 +95,7 @@ class JobRepository:
             job = db_session.get(JobItem, job_id)
             return job
 
-    def get_by_instance(self, instance_id: str) -> Optional[JobItem]:
+    def get_by_instance(self, instance_id: str) -> JobItem | None:
         """Get a job by instance ID.
         
         Args:
@@ -111,7 +111,7 @@ class JobRepository:
             job = db_session.exec(stmt).first()
             return job
 
-    def find_by_idempotency_key(self, idempotency_key: str) -> Optional[JobItem]:
+    def find_by_idempotency_key(self, idempotency_key: str) -> JobItem | None:
         """Find a job by its idempotency key.
         
         Used for idempotent enqueue: before creating a new job, check if one
@@ -136,9 +136,9 @@ class JobRepository:
 
     def list(
         self,
-        statuses: Optional[list[str]] = None,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
+        statuses: list[str | None] = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
         include_deleted: bool = False,
@@ -263,7 +263,7 @@ class JobRepository:
     def list_by_queue(
         self,
         queue_id: str,
-        statuses: Optional[list[str]] = None,
+        statuses: list[str | None] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[JobItem], int]:
@@ -309,10 +309,10 @@ class JobRepository:
     def atomic_transition(
         self,
         job_id: str,
-        from_status: Optional[str],
+        from_status: str | None,
         to_status: str,
         **extra_updates: Any,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """
         Atomically transition a job's status within a single session.
 
@@ -371,7 +371,7 @@ class JobRepository:
     # UPDATE
     # --------------------------------------------------------
 
-    def update(self, job_id: str, **updates) -> Optional[JobItem]:
+    def update(self, job_id: str, **updates) -> JobItem | None:
         """Update a job's fields.
         
         Args:
@@ -402,7 +402,7 @@ class JobRepository:
         self,
         job_id: str,
         instance_id: str,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """Mark a job as processing (started).
         
         Can only be called on PENDING jobs.
@@ -435,7 +435,7 @@ class JobRepository:
         self,
         job_id: str,
         instance_id: str,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """Start a job atomically (PENDING -> PROCESSING).
         
         Note: No deleted_at IS NULL check needed here — defense is at the query level above
@@ -453,8 +453,8 @@ class JobRepository:
     def complete_job(
         self,
         job_id: str,
-        result_summary: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        result_summary: str | None = None,
+    ) -> JobItem | None:
         """Complete a job (PROCESSING -> COMPLETED)."""
         now = datetime.utcnow().isoformat()
         return self.atomic_transition(
@@ -469,7 +469,7 @@ class JobRepository:
         self,
         job_id: str,
         error_message: str,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """Fail a job (PROCESSING -> FAILED)."""
         now = datetime.utcnow().isoformat()
         return self.atomic_transition(
@@ -480,7 +480,7 @@ class JobRepository:
             error_message=error_message,
         )
 
-    def cancel_job(self, job_id: str) -> Optional[JobItem]:
+    def cancel_job(self, job_id: str) -> JobItem | None:
         """Cancel a job. Works for both PENDING and PROCESSING states."""
         job = self.get(job_id)
         if job is None:
@@ -511,7 +511,7 @@ class JobRepository:
         self,
         job_id: str,
         error_message: str,
-    ) -> Optional[JobItem]:
+    ) -> JobItem | None:
         """Terminate a job (PROCESSING -> TERMINATED). No retry triggered."""
         now = datetime.utcnow().isoformat()
         return self.atomic_transition(
@@ -526,7 +526,7 @@ class JobRepository:
     # DELETE
     # --------------------------------------------------------
 
-    def soft_delete(self, job_id: str) -> Optional[JobItem]:
+    def soft_delete(self, job_id: str) -> JobItem | None:
         """Soft-delete a job by setting deleted_at timestamp.
         
         Idempotent - if already deleted, returns the job as-is.
@@ -548,7 +548,7 @@ class JobRepository:
             db_session.refresh(job)
             return job
 
-    def restore(self, job_id: str) -> Optional[JobItem]:
+    def restore(self, job_id: str) -> JobItem | None:
         """Restore a soft-deleted job by clearing deleted_at.
         
         Args:

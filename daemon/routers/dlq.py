@@ -1,7 +1,6 @@
 """Dead Letter Queue API endpoints."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -17,7 +16,7 @@ router = APIRouter(prefix="/projects/{project_id}/dlq", tags=["dlq"])
 
 # Dependency to get DeadLetterService
 # This will be set up in daemon/api.py during app initialization
-_dead_letter_service: Optional[DeadLetterService] = None
+_dead_letter_service: DeadLetterService | None = None
 
 
 def get_dead_letter_service() -> DeadLetterService:
@@ -247,8 +246,8 @@ def _dlq_to_response(dlq_item: DLQModel) -> DLQItemResponse:
 )
 async def list_dlq(
     project_id: str,
-    queue_id: Optional[str] = None,
-    reason: Optional[str] = None,
+    queue_id: str | None = None,
+    reason: str | None = None,
     limit: int = DEFAULT_JOB_LIST_LIMIT,
     offset: int = 0,
     service: DeadLetterService = Depends(get_dead_letter_service),
@@ -293,8 +292,8 @@ async def list_dlq(
 )
 async def replay_all_dlq(
     project_id: str,
-    queue_id: Optional[str] = None,
-    reason: Optional[str] = None,
+    queue_id: str | None = None,
+    reason: str | None = None,
     limit: int = Query(default=DEFAULT_JOB_LIST_LIMIT * 2, ge=1, le=MAX_SCHEDULE_EXECUTION_LIMIT),
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> DLQBulkReplayResponse:
@@ -575,7 +574,7 @@ async def delete_dlq_item(
 async def cleanup_dlq(
     project_id: str,
     max_age_days: int = 30,
-    reason: Optional[str] = None,
+    reason: str | None = None,
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> DLQCleanupResponse:
     """Bulk cleanup of DLQ items.

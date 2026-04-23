@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable, Tuple
+from typing import Callable, Awaitable, Tuple
 from enum import Enum
 
 
@@ -22,7 +22,7 @@ class IncomingMessage:
     source_id: str              # Which source adapter this came from
     metadata: dict = field(default_factory=dict)
     message_type: str = "text"  # "text", "image", "command"
-    reply_to_id: Optional[str] = None
+    reply_to_id: str | None = None
 
 
 @dataclass
@@ -33,7 +33,7 @@ class OutgoingMessage:
     source_id: str
     metadata: dict = field(default_factory=dict)
     message_type: str = "text"
-    reply_to_id: Optional[str] = None
+    reply_to_id: str | None = None
 
 
 @dataclass
@@ -62,7 +62,7 @@ class MessageSourceAdapter(ABC):
         self.config = config
         self._on_message = on_message
         self._status = SourceStatus.STOPPED
-        self._error: Optional[str] = None
+        self._error: str | None = None
     
     @property
     def source_id(self) -> str:
@@ -77,7 +77,7 @@ class MessageSourceAdapter(ABC):
         return self._status
     
     @property
-    def error(self) -> Optional[str]:
+    def error(self) -> str | None:
         return self._error
     
     @abstractmethod

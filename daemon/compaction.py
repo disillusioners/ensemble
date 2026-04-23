@@ -20,7 +20,6 @@ Compaction Strategies:
 4. Emergency Truncation: When even preserved groups exceed threshold
 """
 
-from typing import Optional
 
 import asyncio
 import copy
@@ -76,7 +75,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 DEFAULT_CONTEXT_LIMIT = 180000
 
 
-def get_model_context_limit(model_name: str, config: Optional[object] = None) -> int:
+def get_model_context_limit(model_name: str, config: object | None = None) -> int:
     """Get the context window limit for a given model name.
     
     Uses fuzzy matching against MODEL_CONTEXT_LIMITS registry.
@@ -134,7 +133,7 @@ class CompactionContext:
     model_name: str
     config: CompactionConfig
     llm_config: dict
-    last_compacted_at: Optional[str] = None
+    last_compacted_at: str | None = None
 
 
 @dataclass
@@ -161,8 +160,8 @@ class CompactionResult:
     messages_before: int
     messages_after: int
     compaction_type: str  # "summarization" | "chunked_summarization" | "truncation" | "emergency_truncation"
-    summarization_error: Optional[str] = None
-    compacted_at: Optional[str] = None
+    summarization_error: str | None = None
+    compacted_at: str | None = None
 
 
 @dataclass

@@ -3,7 +3,7 @@
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Callable
+from typing import Callable
 from enum import Enum
 
 
@@ -33,8 +33,8 @@ class CancellationToken:
     Thread-safe and can be used in both sync and async contexts.
     """
     _cancelled: threading.Event = field(default_factory=threading.Event)
-    _reason: Optional[CancellationReason] = field(default=None, init=False)
-    _cancelled_at: Optional[float] = field(default=None, init=False)
+    _reason: CancellationReason | None = field(default=None, init=False)
+    _cancelled_at: float | None = field(default=None, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     
     @property
@@ -43,13 +43,13 @@ class CancellationToken:
         return self._cancelled.is_set()
     
     @property
-    def reason(self) -> Optional[CancellationReason]:
+    def reason(self) -> CancellationReason | None:
         """Get the cancellation reason, if any."""
         with self._lock:
             return self._reason
     
     @property
-    def cancelled_at(self) -> Optional[float]:
+    def cancelled_at(self) -> float | None:
         """Get the monotonic timestamp when cancellation was requested."""
         with self._lock:
             return self._cancelled_at
@@ -69,7 +69,7 @@ class CancellationToken:
         """Async version of check for use in async code."""
         self.check()
     
-    def wait_for_cancellation(self, timeout: Optional[float] = None) -> bool:
+    def wait_for_cancellation(self, timeout: float | None = None) -> bool:
         """Block until cancelled or timeout.
         
         Returns:

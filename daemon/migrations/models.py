@@ -1,7 +1,6 @@
 """Database migration models."""
 
 from datetime import datetime
-from typing import Optional
 
 from sqlmodel import Field, SQLModel
 
@@ -29,11 +28,11 @@ class SchemaMigration(SQLModel, table=True):
     applied_at: str = Field(
         description="ISO 8601 timestamp when applied"
     )
-    execution_time_ms: Optional[int] = Field(
+    execution_time_ms: int | None = Field(
         default=None,
         description="Execution duration in ms"
     )
-    checksum: Optional[str] = Field(
+    checksum: str | None = Field(
         default=None,
         description="SHA-256 hash of migration content"
     )

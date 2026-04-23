@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import json
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Index
 from sqlmodel import SQLModel, Field
@@ -39,40 +39,40 @@ class Task(SQLModel, table=True):
     )
 
     # Primary key (INTEGER PRIMARY KEY AUTOINCREMENT for SQLite)
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
 
     # Task identification
     task_type: str = Field(default=TaskType.PROCESS_MESSAGE.value)
     instance_id: str = Field(index=True)
-    message_id: Optional[str] = Field(default=None, index=True)
+    message_id: str | None = Field(default=None, index=True)
 
     # Status
     status: str = Field(default=TaskStatus.PENDING.value, index=True)
 
     # Worker assignment
-    worker_id: Optional[str] = Field(default=None, index=True)
+    worker_id: str | None = Field(default=None, index=True)
 
     # Retry tracking
     retry_count: int = Field(default=0)
-    next_retry_at: Optional[str] = Field(default=None)
+    next_retry_at: str | None = Field(default=None)
 
     # Cancellation
     cancel_requested: bool = Field(default=False)
-    cancel_requested_at: Optional[str] = Field(default=None)
+    cancel_requested_at: str | None = Field(default=None)
 
     # Retry guard (atomic flag to prevent double-retry)
     retry_scheduled: bool = Field(default=False)
 
     # Result storage (TEXT column storing JSON)
-    result: Optional[str] = Field(default=None)
+    result: str | None = Field(default=None)
 
     # Error storage
-    error: Optional[str] = Field(default=None)
+    error: str | None = Field(default=None)
 
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    started_at: Optional[datetime] = Field(default=None)
-    completed_at: Optional[datetime] = Field(default=None)
+    started_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

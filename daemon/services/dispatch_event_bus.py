@@ -6,7 +6,6 @@ immediately, replacing the pure polling approach with event-driven wakeup.
 
 import asyncio
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +27,8 @@ class DispatchEventBus:
     
     def __init__(self):
         self._events: dict[str, asyncio.Event] = {}
-        self._global_event: Optional[asyncio.Event] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._global_event: asyncio.Event | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
     
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Store the event loop reference for thread-safe notification."""
@@ -47,7 +46,7 @@ class DispatchEventBus:
             self._global_event = asyncio.Event()
         return self._global_event
     
-    def notify_new_job(self, project_id: Optional[str]) -> None:
+    def notify_new_job(self, project_id: str | None) -> None:
         """Signal that a new job is available for a project.
         
         Can be called from any thread. Uses call_soon_threadsafe for
@@ -77,7 +76,7 @@ class DispatchEventBus:
         except RuntimeError:
             logger.debug("DispatchEventBus: event loop closed, skipping notification")
     
-    async def wait_for_job(self, project_id: Optional[str], timeout: float) -> bool:
+    async def wait_for_job(self, project_id: str | None, timeout: float) -> bool:
         """Wait for a new job event for a project.
         
         Args:

@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChun
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_core.runnables import RunnableLambda
-from typing import Any, Mapping, Optional, cast
+from typing import Any, Mapping, cast
 import asyncio
 import logging
 import openai
@@ -117,7 +117,7 @@ class ThinkingChatOpenAI(ChatOpenAI):
             or chunk.get("chunk", {}).get("choices", [])
         )
 
-        usage_metadata: Optional[UsageMetadata] = (
+        usage_metadata: UsageMetadata | None = (
             _create_usage_metadata(token_usage, chunk.get("service_tier"))
             if token_usage
             else None
@@ -174,7 +174,7 @@ class SessionState(MessagesState):
     """
     # Compaction dedup: ISO timestamp of last successful compaction
     # Stored/retrieved via graph.aupdate_state() and state.values["compacted_at"]
-    compacted_at: Optional[str] = None
+    compacted_at: str | None = None
 
 
 def should_continue(state: MessagesState) -> str:

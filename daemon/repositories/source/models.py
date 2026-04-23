@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
@@ -41,10 +41,10 @@ class SourceConfig(SQLModel, table=True):
         sa_column=Column(JSON)
     )
     
-    credentials: Optional[str] = None
+    credentials: str | None = None
     enabled: bool = Field(default=True)
     status: str = Field(default=SourceStatus.STOPPED.value)
-    error_message: Optional[str] = None
+    error_message: str | None = None
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -81,7 +81,7 @@ class InstanceMapping(SQLModel, table=True):
         sa_column=Column("mapping_metadata", JSON)
     )
     
-    last_message_at: Optional[str] = None
+    last_message_at: str | None = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,10 +123,10 @@ class ScheduleExecution(SQLModel, table=True):
     execution_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     schedule_id: str = Field(foreign_key="source_configs.source_id", index=True)
     triggered_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    instance_id: Optional[str] = Field(default=None, index=True)
+    instance_id: str | None = Field(default=None, index=True)
     status: str = Field(default="triggered")  # 'triggered', 'completed', 'failed'
-    error_message: Optional[str] = None
-    completed_at: Optional[str] = None
+    error_message: str | None = None
+    completed_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

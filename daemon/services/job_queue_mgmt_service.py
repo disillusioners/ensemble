@@ -7,7 +7,7 @@ with IDOR protection and validation.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
@@ -37,7 +37,7 @@ class JobQueueMgmtService:
         self,
         queue_repo: JobQueueRepository,
         job_repo: JobRepository,
-        dispatch_bus: Optional["DispatchEventBus"] = None,
+        dispatch_bus: "DispatchEventBus" | None = None,
     ):
         """Initialize the JobQueueMgmtService.
         
@@ -165,7 +165,7 @@ class JobQueueMgmtService:
         self,
         project_id: str,
         queue_id: str,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any | None]:
         """Get a queue by ID with actual job counts.
         
         Args:
@@ -197,7 +197,7 @@ class JobQueueMgmtService:
         self,
         project_id: str,
         queue_id: str,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Get a queue by ID with IDOR protection.
         
         Args:
@@ -249,7 +249,7 @@ class JobQueueMgmtService:
         project_id: str,
         queue_id: str,
         **updates: Any,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Update a queue's fields with validation.
         
         Args:
@@ -372,7 +372,7 @@ class JobQueueMgmtService:
         self,
         project_id: str,
         queue_id: str,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Resume a paused queue.
         
         Notifies the dispatch bus to wake up the job processor after resume.
@@ -396,7 +396,7 @@ class JobQueueMgmtService:
         self,
         project_id: str,
         queue_id: str,
-    ) -> Optional[JobQueue]:
+    ) -> JobQueue | None:
         """Pause a queue.
         
         Args:

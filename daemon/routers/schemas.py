@@ -1,7 +1,7 @@
 """Pydantic schemas for Router APIs."""
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -14,12 +14,12 @@ class JobCreateRequest(BaseModel):
     
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     message: str = Field(..., description="Job message/content")
-    project_id: Optional[str] = Field(default=None, description="Optional project ID for job serialization")
-    queue_id: Optional[str] = Field(default=None, description="Optional queue ID to assign job to a specific queue")
+    project_id: str | None = Field(default=None, description="Optional project ID for job serialization")
+    queue_id: str | None = Field(default=None, description="Optional queue ID to assign job to a specific queue")
     priority: int = Field(default=5, ge=1, le=10, description="Job priority (1-10, default 5)")
     source: str = Field(default="api", description="Source of the job")
-    metadata: Optional[dict[str, Any]] = Field(default=None, description="Optional metadata dictionary")
-    idempotency_key: Optional[str] = Field(default=None, max_length=255, description="Optional idempotency key for deduplication")
+    metadata: dict[str, Any] | None = Field(default=None, description="Optional metadata dictionary")
+    idempotency_key: str | None = Field(default=None, max_length=255, description="Optional idempotency key for deduplication")
     
     @field_validator("priority")
     @classmethod
@@ -50,25 +50,25 @@ class JobResponse(BaseModel):
     priority: int = Field(..., description="Job priority (1-10)")
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     agent_dir: str = Field(..., description="Path to the agent directory")
-    project_id: Optional[str] = Field(default=None, description="Project ID if job is serialized")
-    queue_id: Optional[str] = Field(default=None, description="Queue ID this job is assigned to")
-    instance_id: Optional[str] = Field(default=None, description="Instance ID if job is processing/processed")
+    project_id: str | None = Field(default=None, description="Project ID if job is serialized")
+    queue_id: str | None = Field(default=None, description="Queue ID this job is assigned to")
+    instance_id: str | None = Field(default=None, description="Instance ID if job is processing/processed")
     created_at: str = Field(..., description="Job creation timestamp")
-    started_at: Optional[str] = Field(default=None, description="Job start timestamp")
-    completed_at: Optional[str] = Field(default=None, description="Job completion timestamp")
-    result_summary: Optional[str] = Field(default=None, description="Summary of job result")
-    error_message: Optional[str] = Field(default=None, description="Error message if job failed")
-    position: Optional[int] = Field(default=None, description="Queue position if job is pending")
-    message: Optional[str] = Field(default=None, description="Status message")
-    source: Optional[str] = Field(default=None, description="Source of the job (api, telegram, scheduler)")
-    job_metadata: Optional[dict[str, Any]] = Field(default=None, description="Job metadata dictionary")
-    cancelled_at: Optional[str] = Field(default=None, description="Timestamp when job was cancelled")
-    idempotency_key: Optional[str] = Field(default=None, description="Idempotency key for deduplication")
+    started_at: str | None = Field(default=None, description="Job start timestamp")
+    completed_at: str | None = Field(default=None, description="Job completion timestamp")
+    result_summary: str | None = Field(default=None, description="Summary of job result")
+    error_message: str | None = Field(default=None, description="Error message if job failed")
+    position: int | None = Field(default=None, description="Queue position if job is pending")
+    message: str | None = Field(default=None, description="Status message")
+    source: str | None = Field(default=None, description="Source of the job (api, telegram, scheduler)")
+    job_metadata: dict[str, Any] | None = Field(default=None, description="Job metadata dictionary")
+    cancelled_at: str | None = Field(default=None, description="Timestamp when job was cancelled")
+    idempotency_key: str | None = Field(default=None, description="Idempotency key for deduplication")
     # Dead Letter Queue fields (populated when status is dead_letter)
-    dlq_reason: Optional[str] = Field(default=None, description="Reason for moving to DLQ (MAX_RETRIES, MANUAL, etc.)")
-    retry_count: Optional[int] = Field(default=None, description="Number of retries attempted before moving to DLQ")
-    moved_to_dlq_at: Optional[str] = Field(default=None, description="Timestamp when job was moved to DLQ")
-    deleted_at: Optional[str] = Field(default=None, description="Timestamp when job was soft-deleted")
+    dlq_reason: str | None = Field(default=None, description="Reason for moving to DLQ (MAX_RETRIES, MANUAL, etc.)")
+    retry_count: int | None = Field(default=None, description="Number of retries attempted before moving to DLQ")
+    moved_to_dlq_at: str | None = Field(default=None, description="Timestamp when job was moved to DLQ")
+    deleted_at: str | None = Field(default=None, description="Timestamp when job was soft-deleted")
     
     model_config = {
         "json_schema_extra": {
@@ -173,7 +173,7 @@ class JobQueueResponse(BaseModel):
     concurrency_limit: int = Field(..., description="Maximum concurrent jobs")
     is_system: bool = Field(..., description="Whether this is a system queue")
     is_paused: bool = Field(..., description="Whether the queue is paused")
-    description: Optional[str] = Field(default=None, description="Queue description")
+    description: str | None = Field(default=None, description="Queue description")
     created_at: str = Field(..., description="Queue creation timestamp")
     updated_at: str = Field(..., description="Queue last update timestamp")
     active_jobs: int = Field(default=0, description="Number of currently active jobs")
@@ -236,7 +236,7 @@ class JobQueueCreateRequest(BaseModel):
     queue_name: str = Field(..., min_length=1, max_length=100, description="Queue name")
     queue_type: str = Field(default="fifo", description="Queue type: 'fifo' or 'parallel'")
     concurrency_limit: int = Field(default=1, ge=1, le=20, description="Max concurrent jobs")
-    description: Optional[str] = Field(default=None, max_length=500, description="Queue description")
+    description: str | None = Field(default=None, max_length=500, description="Queue description")
     
     @field_validator("queue_type")
     @classmethod
@@ -277,22 +277,22 @@ class JobQueueCreateRequest(BaseModel):
 class JobQueueUpdateRequest(BaseModel):
     """Request body for updating a job queue."""
     
-    queue_name: Optional[str] = Field(default=None, min_length=1, max_length=100, description="New queue name")
-    queue_type: Optional[str] = Field(default=None, description="Queue type: 'fifo' or 'parallel'")
-    concurrency_limit: Optional[int] = Field(default=None, ge=1, le=20, description="New concurrency limit")
-    is_paused: Optional[bool] = Field(default=None, description="Pause/unpause the queue")
-    description: Optional[str] = Field(default=None, max_length=500, description="New description")
+    queue_name: str | None = Field(default=None, min_length=1, max_length=100, description="New queue name")
+    queue_type: str | None = Field(default=None, description="Queue type: 'fifo' or 'parallel'")
+    concurrency_limit: int | None = Field(default=None, ge=1, le=20, description="New concurrency limit")
+    is_paused: bool | None = Field(default=None, description="Pause/unpause the queue")
+    description: str | None = Field(default=None, max_length=500, description="New description")
     
     @field_validator("queue_type")
     @classmethod
-    def validate_queue_type(cls, v: Optional[str]) -> Optional[str]:
+    def validate_queue_type(cls, v: str | None) -> str | None:
         if v is not None and v not in ("fifo", "parallel"):
             raise ValueError("queue_type must be 'fifo' or 'parallel'")
         return v
     
     @field_validator("queue_name")
     @classmethod
-    def validate_queue_name(cls, v: Optional[str]) -> Optional[str]:
+    def validate_queue_name(cls, v: str | None) -> str | None:
         if v is not None:
             v = v.strip()
             if not v:
@@ -348,16 +348,16 @@ class ProjectResponse(BaseModel):
     name: str = Field(..., description="Project name")
     project_type: str = Field(..., description="Project type")
     status: str = Field(..., description="Project status (active, paused, completed, archived)")
-    main_directory: Optional[str] = Field(default=None, description="Main directory path")
+    main_directory: str | None = Field(default=None, description="Main directory path")
     related_directories: list[str] = Field(default_factory=list, description="Related directory paths")
-    description: Optional[str] = Field(default=None, description="Project description")
+    description: str | None = Field(default=None, description="Project description")
     job_queue_paused: bool = Field(default=False, description="Whether job queue is paused")
     tags: list[str] = Field(default_factory=list, description="Project tags")
     shortnames: list[str] = Field(default_factory=list, description="Project shortnames")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Project metadata")
     relationships: dict[str, list[str]] = Field(default_factory=dict, description="Project relationships")
-    creator_instance_id: Optional[str] = Field(default=None, description="Creator instance ID")
-    creator_agent_id: Optional[str] = Field(default=None, description="Creator agent ID")
+    creator_instance_id: str | None = Field(default=None, description="Creator instance ID")
+    creator_agent_id: str | None = Field(default=None, description="Creator agent ID")
     created_at: str = Field(..., description="Project creation timestamp")
     updated_at: str = Field(..., description="Project update timestamp")
     
@@ -433,8 +433,8 @@ class ProjectCreateRequest(BaseModel):
     
     name: str = Field(..., min_length=1, max_length=200, description="Project name (unique)")
     project_type: str = Field(default="general", description="Project type")
-    main_directory: Optional[str] = Field(default=None, description="Main directory path")
-    description: Optional[str] = Field(default=None, max_length=1000, description="Project description")
+    main_directory: str | None = Field(default=None, description="Main directory path")
+    description: str | None = Field(default=None, max_length=1000, description="Project description")
     tags: list[str] = Field(default_factory=list, description="Project tags")
     
     model_config = {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, List
 
 from daemon.repositories.job_queue import DeadLetterItem, JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
@@ -274,9 +274,9 @@ class DeadLetterService:
     
     def list_dlq(
         self,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
-        reason: Optional[str] = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
+        reason: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[List[DeadLetterItem], int]:
@@ -300,7 +300,7 @@ class DeadLetterService:
             offset=offset,
         )
     
-    def get_dlq(self, dlq_id: str) -> Optional[DeadLetterItem]:
+    def get_dlq(self, dlq_id: str) -> DeadLetterItem | None:
         """Get a dead letter item by DLQ ID.
         
         Args:
@@ -311,7 +311,7 @@ class DeadLetterService:
         """
         return self._dlq_repo.get(dlq_id)
     
-    def get_dlq_by_job_id(self, job_id: str) -> Optional[DeadLetterItem]:
+    def get_dlq_by_job_id(self, job_id: str) -> DeadLetterItem | None:
         """Get a dead letter item by original job ID.
         
         Args:
@@ -336,8 +336,8 @@ class DeadLetterService:
     def cleanup_dlq(
         self,
         max_age_days: int,
-        reason: Optional[str] = None,
-        project_id: Optional[str] = None,
+        reason: str | None = None,
+        project_id: str | None = None,
     ) -> int:
         """Delete dead letter items older than max_age_days.
         
@@ -357,8 +357,8 @@ class DeadLetterService:
     
     def count_dlq(
         self,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
     ) -> int:
         """Count dead letter queue items with optional filters.
         
@@ -376,7 +376,7 @@ class DeadLetterService:
 
 
 # Module-level singleton for dependency injection
-_service: Optional[DeadLetterService] = None
+_service: DeadLetterService | None = None
 
 
 def get_dead_letter_service() -> DeadLetterService:

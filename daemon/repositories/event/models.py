@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlalchemy import Index
 from sqlmodel import SQLModel, Field
@@ -32,19 +31,19 @@ class Event(SQLModel, table=True):
     )
 
     # Primary key (INTEGER PRIMARY KEY AUTOINCREMENT for SQLite)
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
 
     # Instance reference
     instance_id: str = Field(index=True)
 
     # Message reference (for correlating events with messages)
-    message_id: Optional[str] = Field(default=None, index=True)
+    message_id: str | None = Field(default=None, index=True)
 
     # Event type
     kind: str = Field(default=EventKind.MESSAGE_RECEIVED.value)
 
     # Event data (TEXT column storing JSON)
-    data: Optional[str] = Field(default=None)
+    data: str | None = Field(default=None)
 
     # Timestamp
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

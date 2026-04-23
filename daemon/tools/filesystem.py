@@ -4,7 +4,6 @@ import os
 import tempfile
 from pathlib import Path
 from langchain_core.tools import tool
-from typing import Optional
 
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output

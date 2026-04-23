@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional, Callable, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from daemon.repositories.task.models import TaskStatus
 
@@ -72,7 +72,7 @@ class StaleTaskRecovery:
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._on_task_permanently_failed = on_task_permanently_failed  # NEW
     
     def start(self) -> None:

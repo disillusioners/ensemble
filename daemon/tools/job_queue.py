@@ -1,6 +1,6 @@
 """Job queue management tools for LangGraph agents."""
 
-from typing import Annotated, Optional, Any, TYPE_CHECKING
+from typing import Annotated, Any, TYPE_CHECKING
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field

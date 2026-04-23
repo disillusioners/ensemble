@@ -3,7 +3,7 @@
 import asyncio
 import signal
 from langchain_core.tools import tool
-from typing import Optional, Union, List
+from typing import List
 
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_output
@@ -38,10 +38,10 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
 @register_tool_category("bash")
 @tool
 async def bash(
-    command: Union[str, List[str]],
-    timeout: Optional[int] = 1800,
-    workdir: Optional[str] = None,
-    input: Optional[str] = None,
+    command: str | List[str],
+    timeout: int | None = 1800,
+    workdir: str | None = None,
+    input: str | None = None,
 ) -> str:
     """Execute a bash command and return the output. Use tool_help("bash") for details."""
     try:

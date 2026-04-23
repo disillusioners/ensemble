@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import delete as sql_delete, insert
 from sqlalchemy.engine import Engine
@@ -32,9 +32,9 @@ class SQLModelSourceRepository:
         source_type: str,
         name: str,
         config: dict[str, Any],
-        credentials: Optional[str] = None,
+        credentials: str | None = None,
         enabled: bool = True,
-        source_id: Optional[str] = None,
+        source_id: str | None = None,
     ) -> SourceConfig:
         """Create a new source configuration."""
         with Session(self.engine) as session:
@@ -64,11 +64,11 @@ class SQLModelSourceRepository:
     def update_source_config(
         self,
         source_id: str,
-        source_type: Optional[str] = None,
-        name: Optional[str] = None,
-        config: Optional[dict[str, Any]] = None,
-        credentials: Optional[str] = None,
-        enabled: Optional[bool] = None,
+        source_type: str | None = None,
+        name: str | None = None,
+        config: dict[str, Any | None] = None,
+        credentials: str | None = None,
+        enabled: bool | None = None,
     ) -> SourceConfig | None:
         """Update a source configuration."""
         with Session(self.engine) as session:
@@ -138,8 +138,8 @@ class SQLModelSourceRepository:
 
     def list_source_configs(
         self,
-        enabled: Optional[bool] = None,
-        status: Optional[str] = None,
+        enabled: bool | None = None,
+        status: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[SourceConfig]:
@@ -159,7 +159,7 @@ class SQLModelSourceRepository:
         self,
         source_id: str,
         status: str,
-        error_message: Optional[str] = None,
+        error_message: str | None = None,
     ) -> SourceConfig | None:
         """Update the status of a source configuration."""
         with Session(self.engine) as session:
@@ -224,8 +224,8 @@ class SQLModelSourceRepository:
         agent_instance_id: str,
         agent_id: str,
         agent_dir: str,
-        metadata: Optional[dict[str, Any]] = None,
-        mapping_id: Optional[str] = None,
+        metadata: dict[str, Any | None] = None,
+        mapping_id: str | None = None,
     ) -> InstanceMapping:
         """Create or update an instance mapping."""
         with Session(self.engine) as session:
@@ -460,8 +460,8 @@ class SQLModelSourceRepository:
     def record_execution_start(
         self,
         schedule_id: str,
-        instance_id: Optional[str] = None,
-        execution_id: Optional[str] = None,
+        instance_id: str | None = None,
+        execution_id: str | None = None,
     ) -> ScheduleExecution:
         """Record a new execution with status 'triggered'.
         
@@ -492,8 +492,8 @@ class SQLModelSourceRepository:
         self,
         execution_id: str,
         status: str = "completed",
-        error_message: Optional[str] = None,
-    ) -> Optional[ScheduleExecution]:
+        error_message: str | None = None,
+    ) -> ScheduleExecution | None:
         """Update execution status to completed or failed."""
         with Session(self.engine) as session:
             execution = session.get(ScheduleExecution, execution_id)
@@ -528,7 +528,7 @@ class SQLModelSourceRepository:
             )
             return list(session.exec(stmt))
 
-    def get_latest_execution(self, schedule_id: str) -> Optional[ScheduleExecution]:
+    def get_latest_execution(self, schedule_id: str) -> ScheduleExecution | None:
         """Get the most recent execution for a schedule."""
         with Session(self.engine) as session:
             stmt = (

@@ -5,7 +5,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
 
 from .cancellation import CancellationTokenSource, CancellationReason
 
@@ -19,8 +18,8 @@ class ActiveRequest:
     instance_id: str
     cancellation_source: CancellationTokenSource
     started_at: datetime
-    task: Optional[asyncio.Task] = None
-    thread_id: Optional[int] = None
+    task: asyncio.Task | None = None
+    thread_id: int | None = None
 
 
 class ActiveRequestRegistry:
@@ -39,7 +38,7 @@ class ActiveRequestRegistry:
         self,
         message_id: str,
         instance_id: str,
-        task: Optional[asyncio.Task] = None
+        task: asyncio.Task | None = None
     ) -> CancellationTokenSource:
         """Register a new active request.
         
@@ -110,7 +109,7 @@ class ActiveRequestRegistry:
         with self._lock:
             return list(self._by_instance.get(instance_id, set()))
     
-    def get_request(self, message_id: str) -> Optional[ActiveRequest]:
+    def get_request(self, message_id: str) -> ActiveRequest | None:
         """Get request info by message ID."""
         with self._lock:
             return self._requests.get(message_id)

@@ -8,7 +8,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
@@ -46,14 +46,14 @@ class MessageQueue(SQLModel, table=True):
     instance_id: str = Field(index=True)
     content: str
     type: str = Field(default=MessageType.AGENT.value)  # human/agent/system/completion_report/error_report
-    source: Optional[str] = Field(default=None)  # Nullable source
-    root_source: Optional[str] = Field(default=None)  # Root cause source
+    source: str | None = Field(default=None)  # Nullable source
+    root_source: str | None = Field(default=None)  # Root cause source
     status: str = Field(default=MessageStatus.READY.value, index=True)
     priority: int = Field(default=1)
     retry_count: int = Field(default=0)
     max_retries: int = Field(default=5)
-    error_message: Optional[str] = Field(default=None)
-    last_error: Optional[str] = Field(default=None)  # Last error message
+    error_message: str | None = Field(default=None)
+    last_error: str | None = Field(default=None)  # Last error message
     
     # Use 'message_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     message_metadata: dict[str, Any] = Field(
@@ -62,13 +62,13 @@ class MessageQueue(SQLModel, table=True):
     )
     
     enqueued_at: datetime = Field(default_factory=datetime.utcnow)
-    processing_started_at: Optional[datetime] = Field(default=None)
-    last_activity_at: Optional[datetime] = Field(default=None)
-    completed_at: Optional[datetime] = Field(default=None)
-    next_retry_at: Optional[datetime] = Field(default=None)
+    processing_started_at: datetime | None = Field(default=None)
+    last_activity_at: datetime | None = Field(default=None)
+    completed_at: datetime | None = Field(default=None)
+    next_retry_at: datetime | None = Field(default=None)
     
     # FK to task table
-    processing_task_id: Optional[str] = Field(default=None, index=True)
+    processing_task_id: str | None = Field(default=None, index=True)
     
     # Images for multimodal messages (base64 data URIs)
     images: list[str] | None = Field(

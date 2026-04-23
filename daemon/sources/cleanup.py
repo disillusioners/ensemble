@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +19,7 @@ class SourceCleanup:
         self._source_repo = source_repo
         self._interval = interval_hours * 3600
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
     
     def start(self) -> None:
         """Start the cleanup loop."""

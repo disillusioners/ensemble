@@ -11,7 +11,7 @@ import enum
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -54,7 +54,7 @@ class JobQueueService:
         repository: JobRepository,
         lock_manager: JobLockManager,
         queue_repo: JobQueueRepository,
-        instance_manager: Optional["InstanceManager"] = None,
+        instance_manager: "InstanceManager" | None = None,
     ):
         """Initialize the JobQueueService.
         
@@ -69,10 +69,10 @@ class JobQueueService:
         self._queue_repo = queue_repo
         self._instance_manager = instance_manager
         self._retry_engine = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._dispatch_bus: Optional["DispatchEventBus"] = None  # Dispatch event bus for job notifications
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._dispatch_bus: "DispatchEventBus" | None = None  # Dispatch event bus for job notifications
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
-        self._project_repo: Optional[Any] = None  # Project repository for pause state checks
+        self._project_repo: Any | None = None  # Project repository for pause state checks
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -130,11 +130,11 @@ class JobQueueService:
         agent_id: str,
         message: str,
         source: str = "api",
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
         priority: int = 5,
-        metadata: Optional[dict[str, Any]] = None,
-        queue_id: Optional[str] = None,
-        idempotency_key: Optional[str] = None,
+        metadata: dict[str, Any] | None = None,
+        queue_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
         
@@ -258,7 +258,7 @@ class JobQueueService:
         
         return job
     
-    async def get_job(self, job_id: str) -> Optional[JobItem]:
+    async def get_job(self, job_id: str) -> JobItem | None:
         """Get job by ID.
         
         Args:
@@ -269,7 +269,7 @@ class JobQueueService:
         """
         return await asyncio.to_thread(self._repository.get, job_id)
     
-    async def get_job_by_instance(self, instance_id: str) -> Optional[JobItem]:
+    async def get_job_by_instance(self, instance_id: str) -> JobItem | None:
         """Get job by instance ID.
         
         Args:
@@ -280,7 +280,7 @@ class JobQueueService:
         """
         return await asyncio.to_thread(self._repository.get_by_instance, instance_id)
     
-    def get_job_by_instance_sync(self, instance_id: str) -> Optional[JobItem]:
+    def get_job_by_instance_sync(self, instance_id: str) -> JobItem | None:
         """Get job by instance ID (synchronous version).
         
         For use from synchronous callers like terminate_instance().
@@ -293,7 +293,7 @@ class JobQueueService:
         """
         return self._repository.get_by_instance(instance_id)
     
-    async def update_job(self, job_id: str, **updates) -> Optional[JobItem]:
+    async def update_job(self, job_id: str, **updates) -> JobItem | None:
         """Update job fields.
         
         Args:
@@ -417,7 +417,7 @@ class JobQueueService:
         terminal_statuses = {"completed", "error", "terminated", "failed"}
         return meta.status not in terminal_statuses
     
-    async def retry_job(self, job_id: str) -> Optional[JobItem]:
+    async def retry_job(self, job_id: str) -> JobItem | None:
         """Retry a failed job by creating a new job with the same parameters.
         
         Creates a new job with the same parameters and starts it immediately
@@ -453,7 +453,7 @@ class JobQueueService:
         
         return new_job
     
-    async def soft_delete_job(self, job_id: str) -> Optional[JobItem]:
+    async def soft_delete_job(self, job_id: str) -> JobItem | None:
         """Soft-delete a job by setting deleted_at timestamp.
         
         Args:
@@ -464,7 +464,7 @@ class JobQueueService:
         """
         return await asyncio.to_thread(self._repository.soft_delete, job_id)
     
-    async def restore_job(self, job_id: str) -> Optional[JobItem]:
+    async def restore_job(self, job_id: str) -> JobItem | None:
         """Restore a soft-deleted job.
         
         Args:
@@ -477,9 +477,9 @@ class JobQueueService:
     
     async def list_jobs(
         self,
-        statuses: Optional[list[str]] = None,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
+        statuses: list[str] | None = None,
+        project_id: str | None = None,
+        queue_id: str | None = None,
         limit: int = 50,
         include_deleted: bool = False,
     ) -> list[JobItem]:
@@ -624,7 +624,7 @@ class JobQueueService:
         except ValueError:
             return False
     
-    async def _complete_job(self, job: JobItem, result_summary: Optional[str]) -> None:
+    async def _complete_job(self, job: JobItem, result_summary: str | None) -> None:
         """Mark a job as completed and release its lock.
         
         Args:
@@ -664,9 +664,9 @@ class JobQueueService:
     
     async def _get_next_job(
         self,
-        project_id: Optional[str] = None,
-        queue_id: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        project_id: str | None = None,
+        queue_id: str | None = None,
+    ) -> JobItem | None:
         """Get the next pending job for a queue or project.
         
         Args:
@@ -694,9 +694,9 @@ class JobQueueService:
     
     async def _get_queue_position(
         self,
-        job_id: Optional[str],
+        job_id: str | None,
         project_id: str,
-        queue_id: Optional[str] = None,
+        queue_id: str | None = None,
     ) -> int:
         """Get the queue position for a job in its queue.
         
@@ -733,7 +733,7 @@ class JobQueueService:
 
     # ========== JobProcessor Helper Methods ==========
     
-    async def get_next_pending_job(self) -> Optional[JobItem]:
+    async def get_next_pending_job(self) -> JobItem | None:
         """Get the next pending job (highest priority, oldest first).
         
         Returns the first pending job from all projects, ordered by
@@ -745,7 +745,7 @@ class JobQueueService:
         pending = await asyncio.to_thread(self._repository.list_all_pending)
         return pending[0] if pending else None
     
-    async def start_job(self, job_id: str) -> Optional[JobItem]:
+    async def start_job(self, job_id: str) -> JobItem | None:
         """Mark job as processing and acquire lock.
         
         C1 Fix: Acquires the lock FIRST, then transitions the job atomically.
@@ -843,9 +843,9 @@ class JobQueueService:
         self,
         job_id: str,
         demand_state: DemandState = DemandState.COMPLETED,
-        error: Optional[str] = None,
-        result_summary: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        error: str | None = None,
+        result_summary: str | None = None,
+    ) -> JobItem | None:
         """Mark job as completed/failed/terminated and release lock.
         
         Args:
@@ -905,9 +905,9 @@ class JobQueueService:
         self,
         job_id: str,
         demand_state: DemandState,
-        error: Optional[str] = None,
-        result_summary: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        error: str | None = None,
+        result_summary: str | None = None,
+    ) -> JobItem | None:
         """Mark job as completed/failed/terminated and release lock (synchronous version).
         
         W6 Fix: Uses asyncio.run_coroutine_threadsafe() to properly release
@@ -990,8 +990,8 @@ class JobQueueService:
     async def trigger_next_job(
         self,
         project_id: str,
-        queue_id: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        queue_id: str | None = None,
+    ) -> JobItem | None:
         """Trigger the next pending job for a queue or project.
         
         Called after a job completes to process any waiting jobs
@@ -1025,8 +1025,8 @@ class JobQueueService:
     def trigger_next_job_sync(
         self,
         project_id: str,
-        queue_id: Optional[str] = None,
-    ) -> Optional[JobItem]:
+        queue_id: str | None = None,
+    ) -> JobItem | None:
         """Trigger the next pending job for a queue or project (synchronous version).
         
         NOTE: This method has limitations with the new async-only lock manager.

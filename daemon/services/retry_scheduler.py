@@ -7,7 +7,7 @@ import fcntl
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -17,8 +17,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Module-level lock state
-_scheduler_lock_file: Optional[int] = None
-_scheduler_lock_path: Optional[Path] = None
+_scheduler_lock_file: int | None = None
+_scheduler_lock_path: Path | None = None
 
 
 def _acquire_scheduler_lock(lock_dir: Path) -> bool:
@@ -92,8 +92,8 @@ class RetryScheduler:
         retry_engine: "JobRetryEngine",
         queue_service: "JobQueueService",
         poll_interval: float = 60.0,
-        lock_dir: Optional[Path] = None,
-        dispatch_bus: Optional["DispatchEventBus"] = None,
+        lock_dir: Path | None = None,
+        dispatch_bus: "DispatchEventBus" | None = None,
     ):
         """Initialize RetryScheduler.
         
@@ -109,7 +109,7 @@ class RetryScheduler:
         self._poll_interval = poll_interval
         self._lock_dir = lock_dir or Path("./data")
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._dispatch_bus = dispatch_bus
     
     async def start(self) -> None:

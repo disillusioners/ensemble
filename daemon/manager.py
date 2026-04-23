@@ -8,7 +8,7 @@ import time
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any
 
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.callbacks import BaseCallbackHandler

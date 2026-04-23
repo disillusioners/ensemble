@@ -1,7 +1,6 @@
 """Job Queue CRUD API endpoints."""
 
 import logging
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -39,11 +38,11 @@ TERMINAL_STATUSES = {
 
 def _job_to_response(
     job,
-    position: Optional[int] = None,
-    message: Optional[str] = None,
-    dlq_reason: Optional[str] = None,
-    retry_count: Optional[int] = None,
-    moved_to_dlq_at: Optional[str] = None,
+    position: int | None = None,
+    message: str | None = None,
+    dlq_reason: str | None = None,
+    retry_count: int | None = None,
+    moved_to_dlq_at: str | None = None,
 ) -> JobResponse:
     """Convert JobItem to JobResponse."""
     return JobResponse(
@@ -235,9 +234,9 @@ async def get_job(
     response_model=JobListResponse,
 )
 async def list_jobs(
-    status: Optional[str] = None,
-    project_id: Optional[str] = None,
-    queue_id: Optional[str] = None,
+    status: str | None = None,
+    project_id: str | None = None,
+    queue_id: str | None = None,
     limit: int = DEFAULT_JOB_LIST_LIMIT,
     include_deleted: bool = False,
     service: JobQueueService = Depends(get_job_queue_service),

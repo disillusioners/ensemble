@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Optional
 
 logger = logging.getLogger("daemon.queue")
 
@@ -40,10 +39,10 @@ class QueuedMessage:
     retry_count: int = 0
     metadata: dict = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    processing_started_at: Optional[datetime] = None
-    last_activity_at: Optional[datetime] = None
+    processing_started_at: datetime | None = None
+    last_activity_at: datetime | None = None
     status: str = "ready"
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 @dataclass
@@ -51,4 +50,4 @@ class QueueStats:
     """Queue statistics."""
     pending_count: int
     processing_count: int
-    oldest_message_age_seconds: Optional[float]
+    oldest_message_age_seconds: float | None

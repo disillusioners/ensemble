@@ -4,7 +4,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Optional, Callable, Awaitable
+from typing import TYPE_CHECKING, Callable, Awaitable
 from zoneinfo import ZoneInfo
 from croniter import croniter
 from croniter import CroniterBadCronError
@@ -45,11 +45,11 @@ class SchedulerAdapter(MessageSourceAdapter):
         self,
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
-        execution_callback: Optional[Callable] = None,
-        on_complete_callback: Optional[Callable[[str, bool], None]] = None,
-        job_queue_service: Optional["JobQueueService"] = None,
-        source_repo: Optional["SourceRepositoryType"] = None,
-        instance_repo: Optional["SQLModelInstanceRepository"] = None,
+        execution_callback: Callable | None = None,
+        on_complete_callback: Callable[[str, bool | None, None]] = None,
+        job_queue_service: "JobQueueService" | None = None,
+        source_repo: "SourceRepositoryType" | None = None,
+        instance_repo: "SQLModelInstanceRepository" | None = None,
     ):
         """Initialize the scheduler adapter.
         
@@ -86,13 +86,13 @@ class SchedulerAdapter(MessageSourceAdapter):
             self._instance_mode = SchedulerInstanceMode(instance_mode_str)
         
         # Schedule configuration
-        self._schedule_type: Optional[str] = None
-        self._cron_expression: Optional[str] = None
-        self._interval_seconds: Optional[int] = None
-        self._run_at: Optional[datetime] = None
+        self._schedule_type: str | None = None
+        self._cron_expression: str | None = None
+        self._interval_seconds: int | None = None
+        self._run_at: datetime | None = None
         
         # Message configuration
-        self._agent: Optional[str] = scheduler_config.get("agent")
+        self._agent: str | None = scheduler_config.get("agent")
         self._message_content: str = scheduler_config.get("message", "")
         
         # Timezone configuration
@@ -106,10 +106,10 @@ class SchedulerAdapter(MessageSourceAdapter):
         # Concurrency control
         self._max_concurrent: int = scheduler_config.get("max_concurrent", 1)
         self._running_executions: int = 0
-        self._execution_semaphore: Optional[asyncio.Semaphore] = None
+        self._execution_semaphore: asyncio.Semaphore | None = None
         
         # Task queue routing configuration (Tasks 5.1 & 5.3)
-        self._project_id: Optional[str] = scheduler_config.get("project_id")
+        self._project_id: str | None = scheduler_config.get("project_id")
         priority_raw = scheduler_config.get("priority", 5)
         self._priority: int = self._validate_priority(priority_raw)
         
@@ -123,7 +123,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._parse_schedule_config(scheduler_config)
         
         # Internal state
-        self._scheduler_task: Optional[asyncio.Task] = None
+        self._scheduler_task: asyncio.Task | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
         self._is_one_time_executed: bool = False
         
@@ -446,7 +446,7 @@ class SchedulerAdapter(MessageSourceAdapter):
         
         logger.info(f"Scheduler loop ended: {self.source_id}")
     
-    def _get_next_trigger_time(self) -> Optional[datetime]:
+    def _get_next_trigger_time(self) -> datetime | None:
         """Calculate next trigger time based on schedule type.
         
         Returns:
