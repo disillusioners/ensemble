@@ -210,7 +210,7 @@ class ErrorReportingService:
                                 MessageStatus.PROCESSING.value,
                                 MessageStatus.RETRYING.value,
                             ]))
-                        ).one()
+                        ).scalar_one()
                         
                         if parent_pending == 0:
                             # No pending messages, parent is truly complete

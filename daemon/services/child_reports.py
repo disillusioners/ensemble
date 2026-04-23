@@ -220,7 +220,7 @@ Provide a concise summary:"""
                 MessageStatus.PROCESSING.value,  # Include - excluded by ID instead
                 MessageStatus.RETRYING.value,
             ]))
-        ).one()
+        ).scalar_one()
         
         if pending_count > 0:
             logger.debug(
@@ -376,8 +376,7 @@ Provide a concise summary:"""
                     MessageStatus.PROCESSING.value,
                     MessageStatus.RETRYING.value,
                 ]))
-            ).one()
-            parent_pending = parent_pending[0] if isinstance(parent_pending, tuple) else parent_pending
+            ).scalar_one()
             
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
