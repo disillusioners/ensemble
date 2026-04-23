@@ -91,7 +91,7 @@ class ErrorReportingService:
             message_id: Optional message ID that triggered the error.
         """
         from sqlalchemy import func, select
-        from ..repositories.instance.models import get_agent_name
+        from ..repositories.instance.repository import get_agent_name
         
         try:
             # Step 1: Dedup check - prevent duplicate error reports

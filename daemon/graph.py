@@ -23,6 +23,7 @@ from .llm_error_classifier import (
     TIMEOUT_EXCEPTIONS,
     TRANSIENT_EXCEPTIONS,
     TransientAPIError,
+    _truncate_error,
 )
 from .response_validation import LLMResponseValidationError
 
@@ -374,10 +375,10 @@ def create_agent_node(
             transient = retry_config.get('transient_attempts', 'N/A') if retry_config else 'N/A'
             timeout = retry_config.get('timeout_attempts', 'N/A') if retry_config else 'N/A'
             category = 'timeout' if isinstance(e, TIMEOUT_EXCEPTIONS) else 'transient' if isinstance(e, TRANSIENT_EXCEPTIONS) else 'non-retryable'
-            logger.error(f"[LLM] All retries exhausted ({category}, transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {e}")
+            logger.error(f"[LLM] All retries exhausted ({category}, transient_attempts={transient}, timeout_attempts={timeout}): {type(e).__name__}: {_truncate_error(e)}")
             raise
         except Exception as e:
-            logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {e}")
+            logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {_truncate_error(e)}")
             raise
         
         tool_info = ''
