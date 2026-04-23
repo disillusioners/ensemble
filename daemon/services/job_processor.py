@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
+    from daemon.manager import InstanceManager
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
-from daemon.manager import InstanceManager
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 

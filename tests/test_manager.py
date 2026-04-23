@@ -864,7 +864,7 @@ class TestProgressiveMessageDelivery:
              patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_agent_message), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
              patch('daemon.manager.create_instance_tools', return_value=[]), \
-             patch('daemon.manager.logger') as mock_logger:
+             patch('daemon.services.instance_messaging.logger') as mock_logger:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository

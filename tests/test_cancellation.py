@@ -102,38 +102,24 @@ class TestManagerCancelInstanceRequests:
     
     def test_cancel_instance_requests_returns_count(self):
         """Verify cancel_instance_requests returns the count of cancelled."""
-        from unittest.mock import Mock, patch, MagicMock
+        from unittest.mock import Mock
         from daemon.cancellation import CancellationReason
+        from daemon.manager import InstanceManager
         
-        # Mock the request_registry
-        with patch('daemon.manager.ActiveRequestRegistry') as mock_registry_class:
-            mock_registry = Mock()
-            mock_registry_class.return_value = mock_registry
-            
-            # Simulate 2 active requests for the instance
-            mock_registry._by_instance = {"instance-1": {"msg-1", "msg-2"}}
-            
-            # cancel returns True for each
-            mock_registry.cancel.return_value = True
-            
-            # Import manager after patching
-            from daemon.manager import InstanceManager
-            
-            # Create manager with mocked components
-            manager = InstanceManager.__new__(InstanceManager)
-            manager._request_registry = mock_registry
-            
-            result = manager.cancel_instance_requests(
-                "instance-1", 
-                CancellationReason.USER_STOPPED
-            )
-            
-            # Should have cancelled 2 requests
-            assert result == 2
-            # Verify cancel was called twice with the right reason
-            assert mock_registry.cancel.call_count == 2
-            mock_registry.cancel.assert_any_call("msg-1", CancellationReason.USER_STOPPED)
-            mock_registry.cancel.assert_any_call("msg-2", CancellationReason.USER_STOPPED)
+        # Create manager with basic attributes
+        manager = InstanceManager.__new__(InstanceManager)
+        
+        # Mock the cancellation service
+        mock_cancellation_service = Mock()
+        mock_cancellation_service.cancel_instance_requests.return_value = 2
+        manager._cancellation_service = mock_cancellation_service
+        
+        result = manager.cancel_instance_requests("instance-1", CancellationReason.USER_STOPPED)
+        
+        assert result == 2
+        mock_cancellation_service.cancel_instance_requests.assert_called_once_with(
+            "instance-1", CancellationReason.USER_STOPPED
+        )
 
 
 # =============================================================================

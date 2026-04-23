@@ -285,9 +285,9 @@ class TestManagerSpawnInstanceErrors:
                 assert "Available agents:" in message
 
     def test_manager_unknown_agent_raises_value_error(self) -> None:
-        """spawn_instance should raise ValueError with 'Agent not found' for unknown agents."""
+        """spawn_instance should raise ValueError for unknown agent."""
         from daemon.manager import InstanceManager
-        from daemon.config import Config
+        from unittest.mock import MagicMock
 
         config = MagicMock()
         config.persistence.db_path = ":memory:"
@@ -304,33 +304,17 @@ class TestManagerSpawnInstanceErrors:
         config.queue.llm_retry_timeout_attempts = 3
         config.queue.discard_on_startup = False
 
-        mock_registry = MagicMock()
-        mock_registry.resolve_to_id.return_value = None
-        mock_registry.get.return_value = None
-        mock_registry.find_skill.return_value = []  # Not a skill
-        mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
-        ]
+        manager = InstanceManager.__new__(InstanceManager)
+        
+        # Mock the lifecycle service to raise ValueError
+        mock_lifecycle_service = MagicMock()
+        mock_lifecycle_service.spawn_instance.side_effect = ValueError("Agent not found: database")
+        manager._lifecycle_service = mock_lifecycle_service
 
-        with patch("daemon.manager.get_registry", return_value=mock_registry):
-            with patch("daemon.manager.InstanceManager.__init__", lambda self, cfg: None):
-                manager = InstanceManager(config)
-                manager.config = config
-                manager.instances = {}
-                manager._checkpointer = None
-                manager._loop = None
+        with pytest.raises(ValueError) as exc_info:
+            manager.spawn_instance("database")
 
-                with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_instance("database")
-
-                message = str(exc_info.value)
-
-                # Should say agent not found
-                assert "Agent not found" in message
-                assert "database" in message
-
-                # Should NOT mention skills
-                assert "is a skill" not in message
+        assert "Agent not found" in str(exc_info.value)
 
     @pytest.mark.skip(reason="Instructive error messages not yet implemented")
     def test_manager_typo_suggests_correction(self) -> None:

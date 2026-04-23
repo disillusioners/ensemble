@@ -344,6 +344,70 @@ def validate_instance_mode(
     return {"instance_mode": resolved_mode}
 
 
+# ── Fuzzy String Matching ──
+
+def edit_distance(s1: str, s2: str) -> int:
+    """Calculate Levenshtein edit distance between two strings.
+    
+    Args:
+        s1: First string.
+        s2: Second string.
+        
+    Returns:
+        The minimum number of edit operations (insertions, deletions, substitutions)
+        needed to transform s1 into s2.
+    """
+    if len(s1) < len(s2):
+        return edit_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # cost is 0 if characters match, 1 otherwise
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def find_near_instance(instance_id: str, instances: list, max_distance: int = 2) -> str | None:
+    """Find a near-matching instance ID from recent instances using edit distance.
+    
+    Searches through instances using edit distance to find a close match.
+    Matching is case-insensitive.
+    
+    Args:
+        instance_id: The instance ID to find a near match for.
+        instances: List of instance objects with instance_id attribute.
+        max_distance: Maximum edit distance threshold (default: 2).
+        
+    Returns:
+        The near-matching instance_id if found, None otherwise.
+    """
+    # Normalize input for case-insensitive comparison
+    normalized_input = instance_id.lower()
+    
+    for instance in instances:
+        # Skip if length difference exceeds threshold (quick filter)
+        stored_id = instance.instance_id
+        if abs(len(stored_id) - len(instance_id)) > max_distance:
+            continue
+        
+        # Case-insensitive edit distance
+        distance = edit_distance(normalized_input, stored_id.lower())
+        if distance <= max_distance:
+            return stored_id
+    
+    return None
+
+
 # ── Agent Validation (relocated from daemon.api) ──
 
 def validate_agent_id(agent_id: str) -> tuple[str, Path]:

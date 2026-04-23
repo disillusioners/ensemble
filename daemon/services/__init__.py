@@ -8,7 +8,17 @@ from daemon.services.task_processor import TaskProcessor, BaseProcessor
 from daemon.services.stale_task_recovery import StaleTaskRecovery
 from daemon.services.job_retry_engine import JobRetryEngine
 
+# Instance manager service classes
+from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.services.instance_messaging import InstanceMessagingService
+from daemon.services.child_reports import ChildReportsService
+from daemon.services.error_reporting import ErrorReportingService
+from daemon.services.cancellation import CancellationService
+from daemon.services.title_generation import TitleGenerationService
+from daemon.services.event_publisher import EventPublisherService
+
 __all__ = [
+    # Worker pool services
     "JobLockManager",
     "JobQueueService",
     "MainLoopBridge",
@@ -18,4 +28,12 @@ __all__ = [
     "BaseProcessor",
     "StaleTaskRecovery",
     "JobRetryEngine",
+    # Instance manager services
+    "InstanceLifecycleService",
+    "InstanceMessagingService",
+    "ChildReportsService",
+    "ErrorReportingService",
+    "CancellationService",
+    "TitleGenerationService",
+    "EventPublisherService",
 ]

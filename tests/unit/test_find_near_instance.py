@@ -3,82 +3,56 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+from daemon.utils import edit_distance
+
 
 class TestEditDistance:
-    """Tests for the _edit_distance helper method."""
+    """Tests for the edit_distance utility function."""
 
     def test_edit_distance_identical(self):
         """Test that identical strings have distance 0."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
-        assert m._edit_distance("abc", "abc") == 0
-        assert m._edit_distance("instance-123", "instance-123") == 0
-        assert m._edit_distance("", "") == 0
+        assert edit_distance("abc", "abc") == 0
+        assert edit_distance("instance-123", "instance-123") == 0
+        assert edit_distance("", "") == 0
 
     def test_edit_distance_one_substitution(self):
         """Test distance with one character substitution."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
-        assert m._edit_distance("abc", "abd") == 1
-        assert m._edit_distance("abc", "abx") == 1
-        assert m._edit_distance("hello", "hxllo") == 1
+        assert edit_distance("abc", "abd") == 1
+        assert edit_distance("abc", "abx") == 1
+        assert edit_distance("hello", "hxllo") == 1
 
     def test_edit_distance_one_deletion(self):
         """Test distance with one character deletion."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
-        assert m._edit_distance("abc", "ab") == 1
-        assert m._edit_distance("hello", "hell") == 1
-        assert m._edit_distance("instance", "istance") == 1
+        assert edit_distance("abc", "ab") == 1
+        assert edit_distance("hello", "hell") == 1
+        assert edit_distance("instance", "istance") == 1
 
     def test_edit_distance_one_insertion(self):
         """Test distance with one character insertion."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
-        assert m._edit_distance("ab", "abc") == 1
-        assert m._edit_distance("hell", "hello") == 1
-        assert m._edit_distance("abc", "zabc") == 1
+        assert edit_distance("ab", "abc") == 1
+        assert edit_distance("hell", "hello") == 1
+        assert edit_distance("abc", "zabc") == 1
 
     def test_edit_distance_multiple_changes(self):
         """Test distance with multiple character changes."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
-        assert m._edit_distance("abc", "xyz") == 3
-        assert m._edit_distance("hello", "world") == 4
-        assert m._edit_distance("abc123", "xyz456") == 6
+        assert edit_distance("abc", "xyz") == 3
+        assert edit_distance("hello", "world") == 4
+        assert edit_distance("abc123", "xyz456") == 6
 
     def test_edit_distance_case_insensitive(self):
         """Test that edit distance is case sensitive (caller handles lowercasing)."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
         # The function itself is case-sensitive
-        assert m._edit_distance("ABC", "abc") == 3
-        assert m._edit_distance("Hello", "hello") == 1
+        assert edit_distance("ABC", "abc") == 3
+        assert edit_distance("Hello", "hello") == 1
 
     def test_edit_distance_uuid_pattern(self):
         """Test distance with typical UUID-like patterns."""
-        from daemon.manager import InstanceManager
-        
-        m = InstanceManager.__new__(InstanceManager)
-        
         # UUID-like: one char different
-        assert m._edit_distance("abc-123-def", "abc-123-deg") == 1
+        assert edit_distance("abc-123-def", "abc-123-deg") == 1
         # UUID-like: 'h' replaces 'f' = 1 substitution
-        assert m._edit_distance("abc-123-def", "abc-123-deh") == 1
+        assert edit_distance("abc-123-def", "abc-123-deh") == 1
         # UUID-like: one char missing (delete 'e' or insert 'e') = 1 operation
-        assert m._edit_distance("abc-123-def", "abc-123-df") == 1
+        assert edit_distance("abc-123-def", "abc-123-df") == 1
 
 
 class TestFindNearInstance:

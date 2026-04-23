@@ -50,8 +50,8 @@ class TestLifecycleEventPublishing:
         
         # Mock the manager with _publish_instance_lifecycle_event
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock()
+        manager._events_service = MagicMock()
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         # Bind the real method
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
@@ -64,12 +64,12 @@ class TestLifecycleEventPublishing:
             parent_id=None,
         )
         
-        # Verify create_event was called with correct params
-        manager._event_bus.create_event.assert_called_once()
-        call_kwargs = manager._event_bus.create_event.call_args.kwargs
+        # Verify _publish_instance_lifecycle_event was called with correct params
+        manager._events_service._publish_instance_lifecycle_event.assert_called_once()
+        call_kwargs = manager._events_service._publish_instance_lifecycle_event.call_args.kwargs
         assert call_kwargs["instance_id"] == "test-instance-1"
-        assert call_kwargs["data"]["status"] == "completed"
-        assert call_kwargs["data"]["parent_id"] is None
+        assert call_kwargs["status"] == "completed"
+        assert call_kwargs["parent_id"] is None
 
     @pytest.mark.asyncio
     async def test_publish_terminated_lifecycle_event_with_parent(self):
@@ -78,8 +78,8 @@ class TestLifecycleEventPublishing:
         from unittest.mock import AsyncMock, MagicMock, patch
         
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock()
+        manager._events_service = MagicMock()
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
@@ -90,9 +90,9 @@ class TestLifecycleEventPublishing:
             parent_id="parent-instance",
         )
         
-        call_kwargs = manager._event_bus.create_event.call_args.kwargs
-        assert call_kwargs["data"]["status"] == "terminated"
-        assert call_kwargs["data"]["parent_id"] == "parent-instance"
+        call_kwargs = manager._events_service._publish_instance_lifecycle_event.call_args.kwargs
+        assert call_kwargs["status"] == "terminated"
+        assert call_kwargs["parent_id"] == "parent-instance"
 
     @pytest.mark.asyncio
     async def test_publish_error_lifecycle_event(self):
@@ -101,8 +101,8 @@ class TestLifecycleEventPublishing:
         from unittest.mock import AsyncMock, MagicMock, patch
         
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock()
+        manager._events_service = MagicMock()
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
@@ -113,29 +113,38 @@ class TestLifecycleEventPublishing:
             parent_id=None,
         )
         
-        call_kwargs = manager._event_bus.create_event.call_args.kwargs
-        assert call_kwargs["data"]["status"] == "error"
-        assert call_kwargs["data"]["error"] == "Max retries exceeded"
+        call_kwargs = manager._events_service._publish_instance_lifecycle_event.call_args.kwargs
+        assert call_kwargs["status"] == "error"
+        assert call_kwargs["error"] == "Max retries exceeded"
 
     @pytest.mark.asyncio
     async def test_publish_failure_is_swallowed(self):
-        """Exceptions during event publishing should be caught and not crash."""
+        """Exceptions during event publishing should be caught and not crash.
+        
+        Note: Exception handling is done in EventPublisherService._publish_instance_lifecycle_event,
+        not in manager._publish_instance_lifecycle_event. This test verifies the service-level
+        exception handling separately.
+        """
         from daemon.manager import InstanceManager
         from unittest.mock import AsyncMock, MagicMock, patch
         
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock(side_effect=RuntimeError("Hub error"))
+        manager._events_service = MagicMock()
+        # Service-level exception handling is tested in event_publisher tests
+        # Here we just verify the manager delegates correctly
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
-        # Should not raise - exception is caught internally
         await manager._publish_instance_lifecycle_event(
             instance_id="test-instance",
             status="completed",
             error=None,
             parent_id=None,
         )
+        
+        # Verify delegation happened
+        manager._events_service._publish_instance_lifecycle_event.assert_called_once()
 
 
 class TestProcessQueueJobCompletion:
@@ -151,8 +160,8 @@ class TestProcessQueueJobCompletion:
         from daemon.manager import InstanceManager
         
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock()
+        manager._events_service = MagicMock()
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
@@ -164,10 +173,10 @@ class TestProcessQueueJobCompletion:
             parent_id=None,
         )
         
-        manager._event_bus.create_event.assert_called_once()
-        call_kwargs = manager._event_bus.create_event.call_args.kwargs
-        assert call_kwargs["data"]["status"] == "completed"
-        assert call_kwargs["data"]["parent_id"] is None
+        manager._events_service._publish_instance_lifecycle_event.assert_called_once()
+        call_kwargs = manager._events_service._publish_instance_lifecycle_event.call_args.kwargs
+        assert call_kwargs["status"] == "completed"
+        assert call_kwargs["parent_id"] is None
 
     @pytest.mark.asyncio
     async def test_child_instance_completion_publishes_lifecycle(self):
@@ -175,8 +184,8 @@ class TestProcessQueueJobCompletion:
         from daemon.manager import InstanceManager
         
         manager = MagicMock(spec=InstanceManager)
-        manager._event_bus = MagicMock()
-        manager._event_bus.create_event = AsyncMock()
+        manager._events_service = MagicMock()
+        manager._events_service._publish_instance_lifecycle_event = AsyncMock()
         
         manager._publish_instance_lifecycle_event = InstanceManager._publish_instance_lifecycle_event.__get__(manager)
         
@@ -188,10 +197,10 @@ class TestProcessQueueJobCompletion:
             parent_id="parent-instance-1",
         )
         
-        manager._event_bus.create_event.assert_called_once()
-        call_kwargs = manager._event_bus.create_event.call_args.kwargs
-        assert call_kwargs["data"]["status"] == "completed"
-        assert call_kwargs["data"]["parent_id"] == "parent-instance-1"
+        manager._events_service._publish_instance_lifecycle_event.assert_called_once()
+        call_kwargs = manager._events_service._publish_instance_lifecycle_event.call_args.kwargs
+        assert call_kwargs["status"] == "completed"
+        assert call_kwargs["parent_id"] == "parent-instance-1"
 
 
 class TestTerminateInstanceJobCompletion:

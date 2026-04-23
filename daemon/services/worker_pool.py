@@ -194,6 +194,43 @@ class Worker(threading.Thread):
         finally:
             monitor.stop()
     
+    def _notify_parent_of_failure(
+        self,
+        instance_id: str,
+        error: str,
+        error_type: str,
+        message_id: str | None,
+    ) -> None:
+        """Notify parent instance of permanent failure via MainLoopBridge.
+        
+        Args:
+            instance_id: The child instance ID that failed.
+            error: Error message describing what went wrong.
+            error_type: Category of error (e.g., "max_retries_exceeded", "cancelled").
+            message_id: Optional message ID associated with the failure.
+        """
+        # Check if task_processor has _manager with _send_error_report method
+        # Use try/except for hasattr to handle mocks that raise AttributeError
+        try:
+            manager = self._task_processor._manager
+        except AttributeError:
+            manager = None
+        
+        if manager is not None and hasattr(manager, '_send_error_report'):
+            from daemon.services.main_loop_bridge import MainLoopBridge
+            logger.info(
+                f"Worker {self.worker_id}: notifying parent of failure "
+                f"(instance={instance_id[:8]}..., type={error_type})"
+            )
+            MainLoopBridge.run_async_no_wait(
+                manager._send_error_report(
+                    instance_id=instance_id,
+                    error=error,
+                    error_type=error_type,
+                    message_id=message_id,
+                )
+            )
+
     def _handle_cancellation(
         self, task: "Task", reason: "CancellationReason"
     ) -> None:
@@ -225,21 +262,12 @@ class Worker(threading.Thread):
                     f"after {self._max_retries} retries"
                 )
                 # Notify parent that child failed permanently
-                # Use fire-and-forget from worker thread via MainLoopBridge
-                if hasattr(self._task_processor._manager, '_send_error_report'):
-                    from daemon.services.main_loop_bridge import MainLoopBridge
-                    logger.info(
-                        f"Worker {self.worker_id}: notifying parent of permanent failure "
-                        f"(instance={task.instance_id[:8]}..., type=max_retries_exceeded)"
-                    )
-                    MainLoopBridge.run_async_no_wait(
-                        self._task_processor._manager._send_error_report(
-                            instance_id=task.instance_id,
-                            error=f"Task cancelled after {self._max_retries} retries",
-                            error_type="max_retries_exceeded",
-                            message_id=task.message_id,
-                        )
-                    )
+                self._notify_parent_of_failure(
+                    instance_id=task.instance_id,
+                    error=f"Task cancelled after {self._max_retries} retries",
+                    error_type="max_retries_exceeded",
+                    message_id=task.message_id,
+                )
         else:
             # Non-timeout cancellation (shutdown, user request, etc.)
             self._task_processor._task_repo.cancel_task(
@@ -247,20 +275,12 @@ class Worker(threading.Thread):
             )
             self._tasks_failed += 1
             # Notify parent that child was cancelled
-            if hasattr(self._task_processor._manager, '_send_error_report'):
-                from daemon.services.main_loop_bridge import MainLoopBridge
-                logger.info(
-                    f"Worker {self.worker_id}: notifying parent of cancellation "
-                    f"(instance={task.instance_id[:8]}..., reason={reason.value})"
-                )
-                MainLoopBridge.run_async_no_wait(
-                    self._task_processor._manager._send_error_report(
-                        instance_id=task.instance_id,
-                        error=f"Task cancelled: {reason.value}",
-                        error_type="cancelled",
-                        message_id=task.message_id,
-                    )
-                )
+            self._notify_parent_of_failure(
+                instance_id=task.instance_id,
+                error=f"Task cancelled: {reason.value}",
+                error_type="cancelled",
+                message_id=task.message_id,
+            )
     
     def _handle_task_failure(self, task: "Task", error: str) -> None:
         """Handle task failure — schedule retry or permanent fail."""
