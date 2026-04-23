@@ -77,13 +77,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Error report severity classification
-CRITICAL_ERROR_TYPES = frozenset({"max_retries_exceeded", "circuit_breaker_open"})
-RECOVERABLE_ERROR_TYPES = frozenset({"watchdog_timeout", "circuit_breaker_open"})
-
-# UUID validation pattern (compiled once at module level)
-_UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
-
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
     """Build multimodal content array for messages with optional images.
@@ -1418,7 +1411,7 @@ class InstanceManager:
             logger.debug("Shutdown already in progress, skipping")
             return
         
-        self._cancellation_service._shutting_down = True
+        self._shutting_down = True
         logger.info("Starting graceful shutdown...")
         
         steps = [
