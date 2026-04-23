@@ -167,7 +167,7 @@ def _build_hint(
     # Calculate next offset based on indexing
     # For 0-indexed (offset starts at 0): next_offset = shown
     # For 1-indexed (offset starts at 1): next_offset = shown + 1 (to skip shown items)
-    next_offset = shown + 1 if offset_indexed else shown
+    next_offset = shown if offset_indexed else shown + 1
     
     hint_lines = [
         "---",

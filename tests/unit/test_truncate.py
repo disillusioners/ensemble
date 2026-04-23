@@ -69,11 +69,21 @@ class TestTruncateOutput:
         assert result.truncation_type == "both"
 
     def test_pagination_hint_shows_offset(self):
-        """Pagination hint includes correct next offset."""
+        """Pagination hint includes correct next offset for 1-indexed tools."""
         lines = [f"line{i}" for i in range(200)]
         content = "\n".join(lines)
         result = truncate_output(content, max_chars=10000, max_lines=50)
         
+        # offset_indexed=False (default) = 1-indexed, so next_offset = shown + 1
+        assert "offset=51" in result.pagination_hint
+
+    def test_pagination_hint_offset_indexed(self):
+        """Pagination hint for 0-indexed tools (offset_indexed=True)."""
+        lines = [f"line{i}" for i in range(200)]
+        content = "\n".join(lines)
+        result = truncate_output(content, max_chars=10000, max_lines=50, offset_indexed=True)
+        
+        # offset_indexed=True = 0-indexed, so next_offset = shown
         assert "offset=50" in result.pagination_hint
 
     def test_tool_name_in_hint(self):

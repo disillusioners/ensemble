@@ -116,7 +116,7 @@ def list_directory(
             tool_name="list_directory",
             max_chars=6000,
             max_lines=150,
-            offset_indexed=False,  # 0-indexed offset
+            offset_indexed=False,  # 1-indexed offset (for consistency with other tools)
         )
         
         if result.truncated:
@@ -209,6 +209,11 @@ def read_file(
             truncated_content = header + "\n".join(truncated_lines)
             return truncated_content + pagination_hint
         
+        # Add hint when content fits char limit but lines exceed limit
+        end_line = offset + len(selected_lines) - 1
+        if total_lines > end_line:
+            return formatted_content + f"\n\n---\nShowing lines {offset} to {end_line} of {total_lines}. Use offset={end_line + 1} for more."
+        
         return formatted_content
         
     except UnicodeDecodeError:
@@ -285,9 +290,9 @@ def glob_files(
         content = "\n".join(result)
         
         # Check if truncation needed
-        if len(content) > 6000 or len(result) > 100:
+        if len(content) > 6000 or len(result) > limit:
             # Truncate at line boundary
-            truncated_lines = result[:100]
+            truncated_lines = result[:limit]
             shown = len(truncated_lines)
             total = len(files)
             next_offset = offset + limit
@@ -432,9 +437,9 @@ def grep_files(
         content = "\n".join(matches)
         
         # Check if truncation needed
-        if len(content) > 6000 or len(matches) > 100:
+        if len(content) > 6000 or len(matches) > limit:
             # Truncate at line boundary
-            truncated_matches = matches[:100]
+            truncated_matches = matches[:limit]
             shown = len(truncated_matches)
             total = len(matches)
             next_offset = offset + limit
