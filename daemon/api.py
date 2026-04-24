@@ -120,7 +120,14 @@ async def lifespan(app: FastAPI):
     
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager._engine)
-    
+
+    # Create watcher repository for job lifecycle subscriptions
+    from daemon.repositories.job_queue.watcher_models import JobWatcher
+    from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
+    JobWatcher.metadata.create_all(manager._engine)
+    watcher_repo = JobWatcherRepository(engine=manager._engine)
+    manager._watcher_repo = watcher_repo  # Store on manager for tools access
+
     # Create job queue management service for auto-provisioning
     job_queue_mgmt_service = JobQueueMgmtService(
         queue_repo=queue_repo,
@@ -146,6 +153,7 @@ async def lifespan(app: FastAPI):
     )
     job_queue_service.set_event_loop(asyncio.get_running_loop())
     job_queue_service.set_config(config.job_system)
+    job_queue_service.set_watcher_repo(watcher_repo)
     job_queue_service.set_dispatch_bus(dispatch_event_bus)
     
     # Wire retry engine into JobQueueService
@@ -189,17 +197,27 @@ async def lifespan(app: FastAPI):
         job_repository=job_repository,
         lock_repository=lock_repo,
         instance_repository=instance_repo,
+        job_queue_service=job_queue_service,  # For notify_watchers on Path 7
     )
     recovery_stats = await job_recovery.recover_on_startup()
     logger.info(f"Job recovery: {recovery_stats}")
+
+    # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
+    reconciled = await job_queue_service.reconcile_terminal_watches()
+    if reconciled > 0:
+        logger.info(f"Reconciled {reconciled} terminal job watches")
     
     # Initialize DeadLetterService and set on retry engine
     dlq_repository = DeadLetterRepository(engine=manager._engine)
     dead_letter_service = DeadLetterService(
         job_repository=job_repository,
         dlq_repository=dlq_repository,
+        job_queue_service=job_queue_service,  # For watcher notifications
+        loop=asyncio.get_running_loop(),        # For async bridge
     )
     retry_engine._dlq_service = dead_letter_service
+    retry_engine._job_queue_service = job_queue_service  # Wire for Path 6 notifications
+    retry_engine._loop = asyncio.get_running_loop()       # Wire event loop
     
     # Initialize and start JobFeedbackObserver
     job_feedback_observer = JobFeedbackObserver(

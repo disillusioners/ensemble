@@ -301,6 +301,15 @@ class InstanceLifecycleService:
             if meta is None:
                 return False
 
+        # 3.5. Clean up job watches for this instance
+        if hasattr(self._manager, '_watcher_repo') and self._manager._watcher_repo:
+            try:
+                removed = self._manager._watcher_repo.remove_all_watches_for_instance(instance_id)
+                if removed > 0:
+                    logger.info(f"Removed {removed} job watch(es) for terminated instance {instance_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup watches for instance {instance_id[:8]}...: {e}")
+
         # 5. Update DB status to terminated using repository
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
             self._manager._instance_repository.update_status(instance_id, "terminated")
