@@ -12,6 +12,71 @@ from unittest.mock import MagicMock
 from daemon.registry import AgentMetadata
 
 
+@pytest.fixture(autouse=True, scope="function")
+def patch_normalize_project_id(request):
+    """Patch normalize_project_id to read SYSTEM_DEFAULT_PROJECT_ID dynamically.
+    
+    Only applies to tests in the integration directory.
+    The function imports SYSTEM_DEFAULT_PROJECT_ID at import time, so patching
+    the module attribute doesn't affect the already-captured reference.
+    This fixture patches the function itself to read the constant dynamically.
+    
+    We need to patch in ALL modules that import normalize_project_id because
+    Python's `from module import name` creates a local binding.
+    """
+    import sys
+    
+    # Only apply to tests in the integration directory
+    integration_dir = Path(__file__).parent
+    test_path = str(request.fspath)
+    
+    if str(integration_dir) not in test_path:
+        return  # Skip for non-integration tests
+    
+    import daemon.services.project_normalizer as normalizer_module
+    import daemon.routers.schemas as schemas_module
+    import daemon.routers.jobs_crud as jobs_crud_module
+    import daemon.services.job_queue_service as job_queue_service_module
+    from daemon import constants
+    
+    # Save the original functions
+    original_normalize = normalizer_module.normalize_project_id
+    
+    def patched_normalize(project_id: str | None) -> str:
+        """Patched version that reads SYSTEM_DEFAULT_PROJECT_ID dynamically."""
+        if constants.SYSTEM_DEFAULT_PROJECT_ID is None:
+            raise RuntimeError(
+                "normalize_project_id() called before system default project was initialized"
+            )
+        
+        if project_id is None:
+            return constants.SYSTEM_DEFAULT_PROJECT_ID
+        
+        normalized = project_id.strip()
+        if normalized == "":
+            return constants.SYSTEM_DEFAULT_PROJECT_ID
+        
+        lower = normalized.lower()
+        if lower in ("null", "none"):
+            return constants.SYSTEM_DEFAULT_PROJECT_ID
+        
+        return project_id
+    
+    # Patch the function in ALL importing modules
+    normalizer_module.normalize_project_id = patched_normalize
+    schemas_module.normalize_project_id = patched_normalize
+    jobs_crud_module.normalize_project_id = patched_normalize
+    job_queue_service_module.normalize_project_id = patched_normalize
+    
+    yield
+    
+    # Restore originals
+    normalizer_module.normalize_project_id = original_normalize
+    schemas_module.normalize_project_id = original_normalize
+    jobs_crud_module.normalize_project_id = original_normalize
+    job_queue_service_module.normalize_project_id = original_normalize
+
+
 @pytest.fixture
 def integration_config(tmp_path):
     """Load real configuration from config.yaml (uses .env) with temp database paths."""

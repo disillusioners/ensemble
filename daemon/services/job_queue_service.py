@@ -22,6 +22,7 @@ from daemon.repositories.job_queue import JobRepository, JobQueueRepository, Job
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
+from daemon.services.project_normalizer import normalize_project_id
 from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -253,6 +254,9 @@ class JobQueueService:
         Raises:
             ValueError: If project_id is set but system_fifo_queue doesn't exist.
         """
+        # Canonical normalization: ensures ALL callers get system_default_project for None/empty
+        project_id = normalize_project_id(project_id)
+
         # Idempotency check: if idempotency_key provided, check for existing job
         if idempotency_key:
             existing = await asyncio.to_thread(

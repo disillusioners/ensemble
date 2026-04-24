@@ -34,6 +34,7 @@ from .project import create_project_tools
 from .job_queue import create_job_tools
 from .help import create_help_tool
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
+from daemon.services.project_normalizer import normalize_project_id
 
 
 def resolve_tool_filter(
@@ -315,6 +316,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             # Auto-inherit project_id from parent if not explicitly provided
             if project_id is None:
                 project_id = _get_instance_project_id(manager, current_instance_id)
+                project_id = normalize_project_id(project_id)
             
             new_instance_id = manager.spawn_instance(
                 agent_id=agent_id,

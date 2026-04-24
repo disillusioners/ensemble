@@ -16,6 +16,7 @@ from ..registry import get_registry
 from ..repositories.instance.models import Instance, InstanceStatus
 from .cancellation import CancellationService
 from .event_publisher import EventPublisherService
+from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -101,9 +102,9 @@ class InstanceLifecycleService:
             ValueError: If max_instances or max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
-        # Normalize project_id: accept "null" string (from LLM JSON) as None
-        if project_id is not None and str(project_id).lower() in ("null", "none", ""):
-            project_id = None
+        # Normalize project_id: accept "null"/"none"/""/None as system default
+        if project_id is not None:
+            project_id = normalize_project_id(project_id)
 
         # Resolve agent
         registry = get_registry()

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
+from daemon.services.project_normalizer import normalize_project_id
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from daemon.utils import create_service_dependency, validate_agent_id
@@ -119,13 +120,16 @@ async def create_job(
             detail={"error": "Invalid agent", "message": str(e)}
         )
     
+    # Normalize project_id for defense-in-depth consistency
+    normalized_project_id = normalize_project_id(request.project_id)
+
     # Enqueue the job (service.enqueue handles idempotency check internally)
     try:
         job = await service.enqueue(
             agent_id=resolved_agent_id,
             message=request.message,
             source=request.source,
-            project_id=request.project_id,
+            project_id=normalized_project_id,
             priority=request.priority,
             metadata=request.metadata,
             queue_id=request.queue_id,

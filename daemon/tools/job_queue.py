@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
+from daemon.services.project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -252,11 +253,12 @@ def create_job_tools(
             # Override source if using default "api" and called by an agent
             if source == "api" and caller_agent_id:
                 source = f"agent:{caller_agent_id}"
+            normalized_project_id = normalize_project_id(project_id)
             job_item = await job_service.enqueue(
                 agent_id=agent_id,
                 message=message,
                 source=source,
-                project_id=project_id,
+                project_id=normalized_project_id,
                 priority=priority,
                 metadata=metadata,
                 queue_id=queue_id,
