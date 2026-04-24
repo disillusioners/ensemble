@@ -26,6 +26,7 @@ class DispatchEventBus:
     
     def __init__(self):
         self._events: dict[str, asyncio.Event] = {}
+        self._global_event: asyncio.Event = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
     
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -58,6 +59,7 @@ class DispatchEventBus:
         def _set_events():
             event = self._get_or_create_event(project_id)
             event.set()
+            self._global_event.set()
             logger.debug(f"DispatchEventBus: notified project {project_id}")
         
         try:
@@ -79,11 +81,14 @@ class DispatchEventBus:
             True if event was set (new job available), False if timed out
             or if project_id is None (graceful degradation).
         """
-        # Graceful degradation: project_id=None means no event to wait on,
-        # so we fall back to simple timeout-based polling.
+        # Graceful degradation: project_id=None means wait on global event.
         if project_id is None:
-            await asyncio.sleep(timeout)
-            return False
+            try:
+                await asyncio.wait_for(self._global_event.wait(), timeout=timeout)
+                self._global_event.clear()
+                return True
+            except asyncio.TimeoutError:
+                return False
         
         event = self._get_or_create_event(project_id)
         try:
@@ -103,6 +108,7 @@ class DispatchEventBus:
         def _set_all():
             for event in self._events.values():
                 event.set()
+            self._global_event.set()
             logger.debug(f"DispatchEventBus: notified all {len(self._events)} projects")
         
         try:

@@ -110,7 +110,8 @@ class DeadLetterService:
             raise JobNotInFailedStateError(job_id, job.status)
         
         # Ensure project_id is normalized (defense-in-depth)
-        assert job.project_id is not None, "DeadLetterService.move_to_dlq requires normalized project_id"
+        if job.project_id is None:
+            raise ValueError("project_id must be normalized before DLQ insert. This indicates a normalization gap.")
         
         # Create DLQ item from job data
         dlq_item = DeadLetterItem(
@@ -184,7 +185,8 @@ class DeadLetterService:
                 raise JobNotInFailedStateError(job_id, job.status)
             
             # Ensure project_id is normalized (defense-in-depth)
-            assert job.project_id is not None, "DeadLetterService.move_to_dlq_standalone requires normalized project_id"
+            if job.project_id is None:
+                raise ValueError("project_id must be normalized before DLQ standalone insert. This indicates a normalization gap.")
             
             # Create DLQ item from job data
             dlq_item = DeadLetterItem(

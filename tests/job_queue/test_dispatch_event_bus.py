@@ -305,7 +305,7 @@ class TestDispatchEventBusEdgeCases:
 
     @pytest.mark.asyncio
     async def test_mixed_project_and_global(self, event_bus, event_loop):
-        """Test that project-specific notifications work while global degrades to polling."""
+        """Test that project notifications also set the global event."""
         event_bus.set_event_loop(event_loop)
         
         # Create project event
@@ -318,9 +318,12 @@ class TestDispatchEventBusEdgeCases:
         # Project event should be set
         assert event_bus._events["project-1"].is_set()
         
-        # Wait on global should return False (polling degradation - no global event exists)
+        # Global event should also be set (restored behavior)
+        assert event_bus._global_event.is_set()
+        
+        # Wait on global should return True (event was set)
         result_global = await event_bus.wait_for_job(None, timeout=0.1)
-        assert result_global is False
+        assert result_global is True
         
         # Wait on project should return True (event was set)
         result_project = await event_bus.wait_for_job("project-1", timeout=0.1)

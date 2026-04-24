@@ -97,8 +97,8 @@ WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e'
   AND queue_id IS NULL;
 
 -- Verification queries (informational only - counts remaining NULL project_ids):
--- SELECT COUNT(*) FROM job_queue_items WHERE project_id IS NULL;
--- SELECT COUNT(*) FROM dead_letter_items WHERE project_id IS NULL OR project_id = '';
+SELECT COUNT(*) FROM job_queue_items WHERE project_id IS NULL;
+SELECT COUNT(*) FROM dead_letter_items WHERE project_id IS NULL OR project_id = '';
 
 -- DOWN
 
