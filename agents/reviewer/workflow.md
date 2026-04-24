@@ -86,7 +86,7 @@ For auto-detected or explicitly requested Deep-Review:
 ### 3. Execute Review Plan
 
 #### Deep-Review execution (when triggered)
-- Spawn single `review-deep` session with `--agent council`
+- Spawn single `review-deep` session with `--council`
 - Pack ALL context into one comprehensive prompt:
   - What is being reviewed and why Deep-Review triggered
   - Specific concerns and focus areas
@@ -101,7 +101,7 @@ For auto-detected or explicitly requested Deep-Review:
 opencode_skill init-session myapp review-deep /path/to/project
 opencode_skill --sync myapp review-deep "Deep-Review of [target].
 Triggers: [categories]. Focus: [concerns].
-Provide thorough analysis." --agent council
+Provide thorough analysis." --council
 ```
 
 #### SMALL scope (1 session)

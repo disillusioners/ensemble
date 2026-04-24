@@ -60,7 +60,7 @@
 - **Explicit request overrides** — User can request or skip Deep-Review regardless of triggers
 
 ### Deep-Review Execution
-18. **Use `--agent council`** — Deep-Review sessions MUST use council mode for multi-model consensus
+18. **Use `--council`** — Deep-Review sessions MUST use council mode for multi-model consensus
 19. **Maximum ONE council session** — Deep-Review is resource-heavy. One session only, make it count
 20. **Use `review-deep` instance name** — Consistent naming for deep review sessions
 21. **Comprehensive prompt** — Pack all context, trigger reasons, and focus areas into the single session
@@ -73,7 +73,7 @@ opencode_skill init-session myapp review-deep /path/to/project
 opencode_skill --sync myapp review-deep "Deep-Review of payment processing module.
 Triggers: Business-Critical Logic, Data Integrity.
 Focus: transaction handling, error recovery, edge cases in payment flow.
-Provide thorough analysis." --agent council
+Provide thorough analysis." --council
 
 # Deep-Review with @file for long prompts
 cat > /tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt << 'EOF'
@@ -82,10 +82,10 @@ Triggers: Data Integrity / Security, Complex Concurrency / State.
 Focus: session management, token validation, race conditions in login flow.
 Provide thorough analysis of correctness, safety, edge cases.
 EOF
-opencode_skill --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt --agent council
+opencode_skill --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt --council
 ```
 
-⚠️ **`--agent council` MUST be the last argument** — after the message or @file, never before positional args.
+⚠️ **`--council` MUST be the last argument** — after the message or @file, never before positional args.
 
 ### Deep-Review with Standard Sessions
 23. **Combine when needed** — For MEDIUM+ scope where Deep-Review triggers in one area:
@@ -101,4 +101,4 @@ opencode_skill --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/
 Never review independent modules/files sequentially when parallel is possible.
 
 ### Multiple Council Sessions
-Never spawn more than one `--agent council` session per review. Deep-Review is one shot.
+Never spawn more than one `--council` session per review. Deep-Review is one shot.

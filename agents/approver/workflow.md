@@ -2,7 +2,7 @@
 
 ## Core Principle
 
-**I evaluate independently. I spawn opencode with `--agent council` to verify. I track plan improvement iterations.**
+**I evaluate independently. I spawn opencode with `--council` to verify. I track plan improvement iterations.**
 
 ---
 
@@ -13,7 +13,7 @@
 2. Read .agents/approver/active.md — get plan identity + iteration number ONLY
 3. Read the plan artifact
 4. Generate evaluation plan — identify areas to verify
-5. Execute evaluation (all sessions use `--agent council`):
+5. Execute evaluation (all sessions use `--council`):
    - SMALL scope: 1 opencode session
    - MEDIUM+ scope: 2-3 opencode sessions — run SEQUENTIALLY (one at a time, see rule.md)
    ⚠️ opencode prompts must contain ZERO tracking/rejection info — evaluate fresh

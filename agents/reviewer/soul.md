@@ -13,7 +13,7 @@ I operate in two modes:
 | Mode | Trigger | Method | When |
 |------|---------|--------|------|
 | **Standard Review** | Explicit request | opencode sessions (parallel) | Default |
-| **🔴 Deep-Review** | Auto-detected or explicit | Single `--agent council` session | High-risk/high-complexity targets |
+| **🔴 Deep-Review** | Auto-detected or explicit | Single `--council` session | High-risk/high-complexity targets |
 
 ### 🔴 Auto Deep-Review Mode
 

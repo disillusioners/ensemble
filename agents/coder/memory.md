@@ -22,3 +22,5 @@
 - Queue sidebar is a separate component with input/output bindings for loose coupling
 
 - Phase 1 refactoring plan read. Key constraint: use `from daemon.models import ...` NOT `from daemon.models.common import ...` for validate_agent_id (common module doesn't exist yet until Phase 2). Plan has detailed task breakdown for constants, utils, and validate_agent_id relocation.
+
+- Comprehensive agents-ensemble architecture investigation completed. Key findings documented in 2026-04-23-architecture-report.md memory. Tool system uses CATEGORY_MODULES registry with 9 categories. Job queue has 7-state lifecycle with lock-first pattern. Agent system uses markdown files (meta.json, soul.md, rule.md, skill.md, etc.). Three event buses exist but agents cannot subscribe to events directly.
