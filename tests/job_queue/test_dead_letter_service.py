@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session as SQLModelSession
 
-from daemon.repositories.job_queue import JobRepository, DeadLetterRepository
+from daemon.repositories.job_queue import JobRepository, DeadLetterRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus, DeadLetterItem
 from daemon.services.dead_letter_service import (
     DeadLetterService,
@@ -24,7 +24,7 @@ from daemon.services.job_state_machine import InvalidTransitionError
 @pytest.fixture
 def engine():
     """Create in-memory SQLite engine for testing.
-    
+
     Uses StaticPool to reuse the same connection across threads.
     """
     engine = create_engine(
@@ -50,14 +50,30 @@ def dlq_repository(engine):
 
 
 @pytest.fixture
+def queue_repository(engine):
+    """Create JobQueueRepository with test engine."""
+    return JobQueueRepository(engine)
+
+
+@pytest.fixture
 def dead_letter_service(job_repository, dlq_repository):
     """Create DeadLetterService with test repositories."""
     return DeadLetterService(job_repository, dlq_repository)
 
 
 @pytest.fixture
-def failed_job(engine, job_repository):
+def failed_job(engine, job_repository, queue_repository):
     """Create a job in FAILED state for testing."""
+    # Try to get existing queue or create new one
+    queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+    if queue is None:
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
     job = job_repository.create(
         agent_id="test-agent",
         agent_dir="/agents/test-agent",
@@ -66,6 +82,7 @@ def failed_job(engine, job_repository):
         project_id="test-project",
         priority=5,
         job_metadata={"test": True},
+        queue_id=queue.queue_id,
     )
     # Transition to PROCESSING then FAILED
     job_repository.atomic_transition(
@@ -85,8 +102,18 @@ def failed_job(engine, job_repository):
     return job
 
 
-def create_failed_job(engine, job_repository, message="Test job", retry_count=0):
-    """Helper to create a FAILED job."""
+def create_failed_job(engine, job_repository, queue_repository, message="Test job", retry_count=0):
+    """Helper to create a FAILED job with a queue."""
+    # Try to get existing queue or create new one
+    queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+    if queue is None:
+        queue = queue_repository.create(
+            project_id="test-project",
+            queue_name="system_fifo_queue",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
     job = job_repository.create(
         agent_id="test-agent",
         agent_dir="/agents/test-agent",
@@ -95,6 +122,7 @@ def create_failed_job(engine, job_repository, message="Test job", retry_count=0)
         project_id="test-project",
         priority=5,
         job_metadata={"test": True},
+        queue_id=queue.queue_id,
     )
     job_repository.atomic_transition(
         job.job_id,
@@ -281,10 +309,10 @@ class TestMoveToDLQStandalone:
         updated_job = job_repository.get(job.job_id)
         assert updated_job.status == JobStatus.PROCESSING.value
 
-    def test_move_to_dlq_standalone_atomicity(self, engine, job_repository, dlq_repository, dead_letter_service):
+    def test_move_to_dlq_standalone_atomicity(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test atomicity: either both job transition AND DLQ creation happen, or neither."""
         # Create a new failed job for this test
-        job = create_failed_job(engine, job_repository, "Atomicity test job")
+        job = create_failed_job(engine, job_repository, queue_repository, "Atomicity test job")
         
         # Count before
         initial_dlq_count = dlq_repository.count()
@@ -363,10 +391,10 @@ class TestReplayFromDLQ:
             dead_letter_service.replay_from_dlq(dlq_id="nonexistent-dlq-id")
         assert exc_info.value.dlq_id == "nonexistent-dlq-id"
 
-    def test_replay_from_dlq_atomicity_success(self, engine, job_repository, dlq_repository, dead_letter_service):
+    def test_replay_from_dlq_atomicity_success(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test atomicity on success: job transitions to PENDING AND DLQ item is deleted."""
         # Setup: create and move job to DLQ
-        job = create_failed_job(engine, job_repository, "Atomicity replay test")
+        job = create_failed_job(engine, job_repository, queue_repository, "Atomicity replay test")
         dlq_item = dead_letter_service.move_to_dlq_standalone(
             job_id=job.job_id,
             reason="MAX_RETRIES",
@@ -391,10 +419,10 @@ class TestReplayFromDLQ:
         dlq_item_db = dlq_repository.get(dlq_id)
         assert dlq_item_db is None
 
-    def test_replay_from_dlq_resets_retry_fields(self, engine, job_repository, dead_letter_service):
+    def test_replay_from_dlq_resets_retry_fields(self, engine, job_repository, queue_repository, dead_letter_service):
         """Test that replay_from_dlq resets retry-related fields."""
         # Create job and move to DLQ
-        job = create_failed_job(engine, job_repository, "Retry reset test", retry_count=3)
+        job = create_failed_job(engine, job_repository, queue_repository, "Retry reset test", retry_count=3)
         
         # Manually set retry count on job (simulating a job that had retries)
         with SQLModelSession(engine) as session:
@@ -418,10 +446,10 @@ class TestReplayFromDLQ:
         assert replayed_job.failed_at is None
         assert replayed_job.error_message is None
 
-    def test_replay_from_dlq_job_not_in_dead_letter_state(self, engine, job_repository, dlq_repository, dead_letter_service):
+    def test_replay_from_dlq_job_not_in_dead_letter_state(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test replay raises error if job is not in dead_letter state."""
         # Create job and move to DLQ
-        job = create_failed_job(engine, job_repository, "Wrong state test")
+        job = create_failed_job(engine, job_repository, queue_repository, "Wrong state test")
         dlq_item = dead_letter_service.move_to_dlq_standalone(
             job_id=job.job_id,
             reason="MAX_RETRIES",
@@ -450,11 +478,11 @@ class TestListDLQ:
         assert items == []
         assert total == 0
 
-    def test_list_dlq_all_items(self, engine, job_repository, dead_letter_service):
+    def test_list_dlq_all_items(self, engine, job_repository, queue_repository, dead_letter_service):
         """Test listing all DLQ items."""
         # Move multiple jobs to DLQ
         for i in range(3):
-            job = create_failed_job(engine, job_repository, f"List test job {i}")
+            job = create_failed_job(engine, job_repository, queue_repository, f"List test job {i}")
             dead_letter_service.move_to_dlq_standalone(job_id=job.job_id, reason="MAX_RETRIES")
         
         items, total = dead_letter_service.list_dlq()
@@ -473,16 +501,21 @@ class TestListDLQ:
         for item in items:
             assert item.project_id == "test-project"
 
-    def test_list_dlq_with_queue_filter(self, engine, job_repository, dead_letter_service, failed_job):
+    def test_list_dlq_with_queue_filter(self, engine, job_repository, queue_repository, dead_letter_service):
         """Test listing DLQ items filtered by queue_id."""
+        # Create a failed job with a known queue
+        job = create_failed_job(engine, job_repository, queue_repository, "Queue filter test")
         # Move the failed job to DLQ
-        dead_letter_service.move_to_dlq_standalone(job_id=failed_job.job_id, reason="MAX_RETRIES")
+        dead_letter_service.move_to_dlq_standalone(job_id=job.job_id, reason="MAX_RETRIES")
         
-        items, total = dead_letter_service.list_dlq(queue_id="")
+        # Get the queue_id for filtering
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        
+        items, total = dead_letter_service.list_dlq(queue_id=queue.queue_id)
         
         # Should return items with matching queue_id
         for item in items:
-            assert item.queue_id == ""
+            assert item.queue_id == queue.queue_id
 
     def test_list_dlq_with_reason_filter(self, engine, job_repository, dead_letter_service, failed_job):
         """Test listing DLQ items filtered by reason."""
@@ -808,7 +841,7 @@ class TestCleanupDLQ:
 class TestMoveToDLQConcurrency:
     """Tests for C3: TOCTOU race condition handling in move_to_dlq()."""
 
-    def test_move_to_dlq_with_lock_prevents_double_move(self, engine, job_repository, dead_letter_service, failed_job):
+    def test_move_to_dlq_with_lock_prevents_double_move(self, engine, job_repository, queue_repository, dead_letter_service, failed_job):
         """Test that pessimistic locking prevents double move to DLQ.
         
         This tests that when using move_to_dlq() with a shared session,
@@ -833,7 +866,7 @@ class TestMoveToDLQConcurrency:
         assert updated_job.status == "dead_letter"
         
         # Create a new failed job and verify the lock pattern works
-        job2 = create_failed_job(engine, job_repository, "Second job")
+        job2 = create_failed_job(engine, job_repository, queue_repository, "Second job")
         with SQLModelSession(engine) as session:
             dlq_item2 = dead_letter_service.move_to_dlq(
                 session=session,
@@ -849,7 +882,7 @@ class TestMoveToDLQConcurrency:
 class TestListDLQPagination:
     """Tests for C4: Total count in paginated results is correct."""
 
-    def test_list_dlq_returns_total_before_pagination(self, engine, job_repository, dead_letter_service):
+    def test_list_dlq_returns_total_before_pagination(self, engine, job_repository, queue_repository, dead_letter_service):
         """Test that list_dlq returns total count BEFORE pagination, not after.
         
         This tests the fix for C4 where the router was returning len(items)
@@ -857,7 +890,7 @@ class TestListDLQPagination:
         """
         # Create 10 DLQ items
         for i in range(10):
-            job = create_failed_job(engine, job_repository, f"Pagination test job {i}")
+            job = create_failed_job(engine, job_repository, queue_repository, f"Pagination test job {i}")
             dead_letter_service.move_to_dlq_standalone(
                 job_id=job.job_id,
                 reason="MAX_RETRIES",
@@ -891,18 +924,18 @@ class TestListDLQPagination:
         assert total4 == 10, f"Expected total=10 on page 4, got {total4}"
         assert len(items_page4) == 1, f"Expected 1 item on page 4, got {len(items_page4)}"
 
-    def test_list_dlq_total_respects_filters(self, engine, job_repository, dead_letter_service):
+    def test_list_dlq_total_respects_filters(self, engine, job_repository, queue_repository, dead_letter_service):
         """Test that total count respects filters, not just pagination."""
         # Create DLQ items with different reasons
         for i in range(5):
-            job = create_failed_job(engine, job_repository, f"MAX_RETRIES job {i}")
+            job = create_failed_job(engine, job_repository, queue_repository, f"MAX_RETRIES job {i}")
             dead_letter_service.move_to_dlq_standalone(
                 job_id=job.job_id,
                 reason="MAX_RETRIES",
             )
         
         for i in range(3):
-            job = create_failed_job(engine, job_repository, f"MANUAL job {i}")
+            job = create_failed_job(engine, job_repository, queue_repository, f"MANUAL job {i}")
             dead_letter_service.move_to_dlq_standalone(
                 job_id=job.job_id,
                 reason="MANUAL",
@@ -922,10 +955,10 @@ class TestListDLQPagination:
 class TestDeadLetterServiceIntegration:
     """Integration tests for DeadLetterService workflow."""
 
-    def test_full_dlq_lifecycle(self, engine, job_repository, dlq_repository, dead_letter_service):
+    def test_full_dlq_lifecycle(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test complete lifecycle: create job -> fail -> move to DLQ -> replay."""
         # Create and fail a job
-        job = create_failed_job(engine, job_repository, "Lifecycle test job")
+        job = create_failed_job(engine, job_repository, queue_repository, "Lifecycle test job")
         
         # Verify job is FAILED
         assert job_repository.get(job.job_id).status == JobStatus.FAILED.value
@@ -951,12 +984,12 @@ class TestDeadLetterServiceIntegration:
         # Verify DLQ count is back to 0
         assert dlq_repository.count() == 0
 
-    def test_multiple_jobs_dlq_management(self, engine, job_repository, dlq_repository, dead_letter_service):
+    def test_multiple_jobs_dlq_management(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test managing multiple jobs in DLQ."""
         # Create and fail multiple jobs
         job_ids = []
         for i in range(3):
-            job = create_failed_job(engine, job_repository, f"Multi job {i}")
+            job = create_failed_job(engine, job_repository, queue_repository, f"Multi job {i}")
             job_ids.append(job.job_id)
         
         # Move all to DLQ

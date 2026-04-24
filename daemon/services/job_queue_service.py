@@ -256,6 +256,7 @@ class JobQueueService:
         """
         # Canonical normalization: ensures ALL callers get system_default_project for None/empty
         project_id = normalize_project_id(project_id)
+        assert project_id is not None, "enqueue() project_id is None after normalization — this should never happen"
 
         # Idempotency check: if idempotency_key provided, check for existing job
         if idempotency_key:

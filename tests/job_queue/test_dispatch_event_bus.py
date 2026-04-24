@@ -87,22 +87,18 @@ class TestDispatchEventBusNotifyAndWait:
 
     @pytest.mark.asyncio
     async def test_global_event_for_none_project_id(self, event_bus, event_loop):
-        """Test that notify_new_job(None) sets global event."""
+        """Test that wait_for_job(None) degrades to polling when no global event exists."""
         event_bus.set_event_loop(event_loop)
         
-        # Get global event reference
-        global_event = event_bus._get_global_event()
+        # Without _global_event, wait_for_job(None) should degrade to polling
+        # It should sleep for the timeout duration and return False
+        result = await event_bus.wait_for_job(None, timeout=0.1)
         
-        # Notify with None (global)
+        # Should return False after sleeping (no event to wait on)
+        assert result is False
+        
+        # Notify with None should log and return early (no event to set)
         event_bus.notify_new_job(None)
-        
-        # Give time for notification to be processed
-        await asyncio.sleep(0.01)
-        
-        # Wait on global event should return True
-        result = await event_bus.wait_for_job(None, timeout=0.5)
-        
-        assert result is True
 
     @pytest.mark.asyncio
     async def test_auto_clear_after_wait(self, event_bus, event_loop):
@@ -139,8 +135,6 @@ class TestDispatchEventBusNotifyAll:
         event_bus._get_or_create_event("project-1")
         event_bus._get_or_create_event("project-2")
         event_bus._get_or_create_event("project-3")
-        # Create global event first so notify_all will set it
-        event_bus._get_global_event()
         
         # Call notify_all
         event_bus.notify_all()
@@ -152,10 +146,6 @@ class TestDispatchEventBusNotifyAll:
         assert event_bus._events["project-1"].is_set()
         assert event_bus._events["project-2"].is_set()
         assert event_bus._events["project-3"].is_set()
-        
-        # Global event should also be set (since we created it first)
-        assert event_bus._global_event is not None
-        assert event_bus._global_event.is_set()
 
     @pytest.mark.asyncio
     async def test_notify_all_with_no_projects(self, event_bus, event_loop):
@@ -251,8 +241,6 @@ class TestDispatchEventBusThreadSafety:
         
         # Both project event and global event should be set
         assert event_bus._events["project-1"].is_set()
-        assert event_bus._global_event is not None
-        assert event_bus._global_event.is_set()
 
 
 class TestDispatchEventBusNoLoopGraceful:
@@ -269,7 +257,6 @@ class TestDispatchEventBusNoLoopGraceful:
         
         # No events should be created (since loop is not set)
         assert "project-1" not in event_bus._events
-        assert event_bus._global_event is None
 
     def test_no_loop_notify_returns_quickly(self, event_bus):
         """Test that notify returns quickly when no loop is set."""
@@ -318,7 +305,7 @@ class TestDispatchEventBusEdgeCases:
 
     @pytest.mark.asyncio
     async def test_mixed_project_and_global(self, event_bus, event_loop):
-        """Test that project-specific and global events work together."""
+        """Test that project-specific notifications work while global degrades to polling."""
         event_bus.set_event_loop(event_loop)
         
         # Create project event
@@ -328,15 +315,14 @@ class TestDispatchEventBusEdgeCases:
         event_bus.notify_new_job("project-1")
         await asyncio.sleep(0.01)
         
-        # Both should be set
+        # Project event should be set
         assert event_bus._events["project-1"].is_set()
-        assert event_bus._global_event.is_set()
         
-        # Wait on global should return True
+        # Wait on global should return False (polling degradation - no global event exists)
         result_global = await event_bus.wait_for_job(None, timeout=0.1)
-        assert result_global is True
+        assert result_global is False
         
-        # Wait on project should still return True (if not cleared yet)
+        # Wait on project should return True (event was set)
         result_project = await event_bus.wait_for_job("project-1", timeout=0.1)
         assert result_project is True
 

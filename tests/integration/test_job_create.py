@@ -346,3 +346,178 @@ class TestCreateJobWithExplicitProjectId:
         job = job_repository.get(job_id)
         assert job is not None
         assert job.project_id == explicit_project_id
+
+
+# =============================================================================
+# Task 3.8 Tests: Orphan jobs get assigned to system project with queue_id
+# =============================================================================
+
+class TestOrphanJobAssignedToSystemProject:
+    """Tests for Task 3.8: Orphan job (null project_id) goes to system project.
+    
+    When a job is created without a project_id, it should:
+    1. Get project_id = SYSTEM_DEFAULT_PROJECT_ID (normalization)
+    2. Get queue_id = system FIFO queue (auto-assignment via queue provisioning)
+    """
+
+    def test_orphan_job_gets_system_project_id(
+        self,
+        client,
+        job_repository,
+        system_default_project_id,
+    ):
+        """POST /jobs with project_id=None results in DB row with system default project_id."""
+        response = client.post(
+            "/jobs",
+            json={
+                "agent_id": "coder",
+                "message": "Orphan job test",
+                "project_id": None,
+            },
+        )
+        
+        assert response.status_code == 201, f"Expected 201, got {response.status_code}: {response.json()}"
+        
+        job_id = response.json()["job_id"]
+        job = job_repository.get(job_id)
+        
+        assert job is not None, f"Job {job_id} not found in DB"
+        assert job.project_id == system_default_project_id, (
+            f"Orphan job has project_id={job.project_id}, expected {system_default_project_id}"
+        )
+
+    def test_orphan_job_gets_queue_id(
+        self,
+        client,
+        job_repository,
+        queue_repository,
+        system_default_project_id,
+    ):
+        """POST /jobs with project_id=None results in DB row with queue_id assigned.
+        
+        Phase 3 requirement: After normalization, the job should be assigned to
+        the system FIFO queue so it can be processed by workers.
+        The queue_id is the UUID assigned when the system queue was provisioned.
+        """
+        # Get the actual system FIFO queue to know the expected queue_id
+        system_fifo_queue = queue_repository.get_by_name(system_default_project_id, "system_fifo_queue")
+        assert system_fifo_queue is not None, "System FIFO queue not found"
+        system_fifo_queue_id = system_fifo_queue.queue_id
+        
+        response = client.post(
+            "/jobs",
+            json={
+                "agent_id": "coder",
+                "message": "Orphan job queue assignment test",
+                "project_id": None,
+            },
+        )
+        
+        assert response.status_code == 201, f"Expected 201, got {response.status_code}: {response.json()}"
+        
+        job_id = response.json()["job_id"]
+        job = job_repository.get(job_id)
+        
+        assert job is not None, f"Job {job_id} not found in DB"
+        assert job.queue_id is not None, (
+            f"Orphan job has NULL queue_id (not assigned to system FIFO queue)"
+        )
+        assert job.queue_id == system_fifo_queue_id, (
+            f"Orphan job has queue_id={job.queue_id}, expected {system_fifo_queue_id}"
+        )
+
+    def test_orphan_job_missing_project_id_field_also_gets_queue_id(
+        self,
+        client,
+        job_repository,
+        queue_repository,
+        system_default_project_id,
+    ):
+        """POST /jobs without project_id field results in queue_id assignment.
+        
+        Omitting the project_id field entirely should behave the same as
+        passing null — both get normalized to system default with queue assigned.
+        """
+        # Get the actual system FIFO queue
+        system_fifo_queue = queue_repository.get_by_name(system_default_project_id, "system_fifo_queue")
+        assert system_fifo_queue is not None
+        system_fifo_queue_id = system_fifo_queue.queue_id
+        
+        response = client.post(
+            "/jobs",
+            json={
+                "agent_id": "coder",
+                "message": "Missing project_id field test",
+            },
+        )
+        
+        assert response.status_code == 201, f"Expected 201, got {response.status_code}: {response.json()}"
+        
+        job_id = response.json()["job_id"]
+        job = job_repository.get(job_id)
+        
+        assert job is not None
+        assert job.project_id == system_default_project_id
+        assert job.queue_id is not None
+        assert job.queue_id == system_fifo_queue_id
+
+    def test_orphan_job_queue_id_responds_to_response(
+        self,
+        client,
+        queue_repository,
+        system_default_project_id,
+    ):
+        """POST /jobs response includes the queue_id for orphan jobs."""
+        # Get the actual system FIFO queue
+        system_fifo_queue = queue_repository.get_by_name(system_default_project_id, "system_fifo_queue")
+        assert system_fifo_queue is not None
+        system_fifo_queue_id = system_fifo_queue.queue_id
+        
+        response = client.post(
+            "/jobs",
+            json={
+                "agent_id": "coder",
+                "message": "Response queue_id test",
+                "project_id": None,
+            },
+        )
+        
+        assert response.status_code == 201
+        data = response.json()
+        
+        assert "queue_id" in data, "Response should include queue_id"
+        assert data["queue_id"] == system_fifo_queue_id, (
+            f"Response queue_id={data['queue_id']}, expected {system_fifo_queue_id}"
+        )
+
+    def test_multiple_orphan_jobs_all_get_queue_id(
+        self,
+        client,
+        job_repository,
+        queue_repository,
+        system_default_project_id,
+    ):
+        """Multiple orphan jobs all get the system FIFO queue assigned."""
+        # Get the actual system FIFO queue
+        system_fifo_queue = queue_repository.get_by_name(system_default_project_id, "system_fifo_queue")
+        assert system_fifo_queue is not None
+        system_fifo_queue_id = system_fifo_queue.queue_id
+        
+        job_ids = []
+        for i in range(3):
+            response = client.post(
+                "/jobs",
+                json={
+                    "agent_id": "coder",
+                    "message": f"Orphan job {i}",
+                    "project_id": None,
+                },
+            )
+            assert response.status_code == 201
+            job_ids.append(response.json()["job_id"])
+        
+        for job_id in job_ids:
+            job = job_repository.get(job_id)
+            assert job is not None
+            assert job.project_id == system_default_project_id
+            assert job.queue_id == system_fifo_queue_id

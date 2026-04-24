@@ -250,16 +250,16 @@ class JobProcessor:
                                 proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                             )
                     continue
-                
+
                 job = pending[0]
-                
+
                 # Try to start the job (acquires per-queue lock internally)
                 try:
                     started_job = await self._queue_service.start_job(job.job_id)
                     if started_job is None:
                         # Lock acquisition failed or job was cancelled
                         continue
-                    
+
                     # Spawn instance for this job
                     try:
                         instance_id = self._instance_manager.spawn_instance(
@@ -273,7 +273,7 @@ class JobProcessor:
                             job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
                         continue
-                    
+
                     # Send the job message to the instance
                     try:
                         await self._instance_manager.enqueue_message(
@@ -287,7 +287,7 @@ class JobProcessor:
                             job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
                         continue
-                    
+
                     logger.info(
                         f"Job {job.job_id} queued for instance {instance_id} "
                         f"on queue {queue.queue_name}"
@@ -300,36 +300,9 @@ class JobProcessor:
                         )
                     except Exception:
                         pass
-        
-        # C5: Fallback - handle any orphaned jobs without project_id (defensive)
-        # These shouldn't exist in normal flow since project_id is required,
-        # but this prevents permanent orphaning of any edge-case jobs
-        orphan_pending = await asyncio.to_thread(
-            self._queue_service._repository.list_all_pending
-        )
-        orphan_pending = [j for j in orphan_pending if j.project_id is None]
-        if orphan_pending:
-            job = orphan_pending[0]
-            try:
-                started_job = await self._queue_service.start_job(job.job_id)
-                if started_job:
-                    instance_id = self._instance_manager.spawn_instance(
-                        agent_id=job.agent_id,
-                        instance_id=started_job.instance_id,
-                        project_id=job.project_id,
-                    )
-                    await self._instance_manager.enqueue_message(
-                        instance_id=instance_id,
-                        message=job.message,
-                        source=job.source,
-                    )
-                    logger.info(f"Orphan job {job.job_id} queued for instance {instance_id}")
-            except Exception as e:
-                logger.error(f"Failed to process orphan job {job.job_id}: {e}")
-                try:
-                    await self._queue_service.complete_job(job.job_id, demand_state=DemandState.FAILED, error=str(e))
-                except Exception:
-                    pass
+
+        # C5 orphan fallback removed (Phase 2): All jobs now have normalized project_id,
+        # so there are no longer any orphan jobs without project_id to handle.
 
 
 # Backward compatibility alias

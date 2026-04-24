@@ -19,6 +19,26 @@ from daemon.repositories.job_queue.models import JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
+from daemon import constants
+from daemon.services import project_normalizer
+
+# Test system project ID (must match conftest.py in job_queue)
+TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+@pytest.fixture(autouse=True)
+def setup_system_default_project():
+    """Set SYSTEM_DEFAULT_PROJECT_ID for tests that call enqueue() which normalizes project_id."""
+    original_in_constants = constants.SYSTEM_DEFAULT_PROJECT_ID
+    original_in_normalizer = project_normalizer.SYSTEM_DEFAULT_PROJECT_ID
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+
+    yield
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = original_in_constants
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = original_in_normalizer
 
 
 @pytest.fixture
@@ -92,6 +112,14 @@ def integration_queue_repository(integration_engine):
             concurrency_limit=1,
             is_system=True,
         )
+    # Add queue for the system default project (used when normalize_project_id() converts None)
+    repo.create(
+        project_id=TEST_SYSTEM_PROJECT_ID,
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
     return repo
 
 
@@ -150,7 +178,7 @@ class TestIntegrationBasicWorkflow:
     async def test_enqueue_without_project_skips_queue(
         self, integration_service
     ):
-        """Test that jobs without project_id are created as PENDING."""
+        """Test that jobs without project_id are normalized to system project and work correctly."""
         job = await integration_service.enqueue(
             agent_id="coder",
             message="No project job",
@@ -159,6 +187,8 @@ class TestIntegrationBasicWorkflow:
             priority=5
         )
         
+        # After Phase 2 normalization: project_id=None is normalized to SYSTEM_DEFAULT_PROJECT_ID
+        assert job.project_id == TEST_SYSTEM_PROJECT_ID
         # Jobs are now always PENDING - JobProcessor handles starting
         assert job.status == JobStatus.PENDING.value
         assert job.instance_id is None

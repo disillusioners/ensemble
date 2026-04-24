@@ -860,8 +860,11 @@ class TestJobQueueServiceQueueAwareEnqueue:
     async def test_enqueue_no_project_no_queue(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Test enqueue without project_id results in queue_id=None."""
-        # No queue repository setup needed - job without project
+        """Test enqueue without project_id normalizes to system project and assigns system queue."""
+        # After Phase 2 normalization: project_id=None is normalized to SYSTEM_DEFAULT_PROJECT_ID
+        # System queue for the system project is pre-provisioned in job_queue_service fixture
+        from tests.job_queue.conftest import TEST_SYSTEM_PROJECT_ID
+        
         job_data = {
             "agent_id": "coder",
             "message": "Test job without project",
@@ -873,8 +876,10 @@ class TestJobQueueServiceQueueAwareEnqueue:
 
         result = await job_queue_service.enqueue(**job_data)
 
-        assert result.project_id is None
-        assert result.queue_id is None
+        # Normalization: None project_id becomes SYSTEM_DEFAULT_PROJECT_ID
+        assert result.project_id == TEST_SYSTEM_PROJECT_ID
+        # System queue is assigned (pre-provisioned in fixture)
+        assert result.queue_id is not None
         assert result.status == JobStatus.PENDING.value
 
     @pytest.mark.asyncio

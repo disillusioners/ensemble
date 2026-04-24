@@ -21,13 +21,11 @@ class DispatchEventBus:
     
     Attributes:
         _events: Dict mapping project_id to asyncio.Event.
-        _global_event: Event for jobs without project_id.
         _loop: Reference to the running event loop.
     """
     
     def __init__(self):
         self._events: dict[str, asyncio.Event] = {}
-        self._global_event: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
     
     def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -40,12 +38,6 @@ class DispatchEventBus:
             self._events[project_id] = asyncio.Event()
         return self._events[project_id]
     
-    def _get_global_event(self) -> asyncio.Event:
-        """Get or create the global event (for jobs without project_id)."""
-        if self._global_event is None:
-            self._global_event = asyncio.Event()
-        return self._global_event
-    
     def notify_new_job(self, project_id: str | None) -> None:
         """Signal that a new job is available for a project.
         
@@ -53,20 +45,20 @@ class DispatchEventBus:
         thread-safe event setting if called from a non-async context.
         
         Args:
-            project_id: The project ID that has a new job. None for global jobs.
+            project_id: The project ID that has a new job.
         """
+        if project_id is None:
+            logger.debug("DispatchEventBus: no project_id, skipping notification")
+            return
+        
         if self._loop is None:
             logger.debug("DispatchEventBus: no event loop set, skipping notification")
             return
         
         def _set_events():
-            if project_id is not None:
-                event = self._get_or_create_event(project_id)
-                event.set()
-                logger.debug(f"DispatchEventBus: notified project {project_id}")
-            # Always set global event too for catch-all wakeup
-            global_event = self._get_global_event()
-            global_event.set()
+            event = self._get_or_create_event(project_id)
+            event.set()
+            logger.debug(f"DispatchEventBus: notified project {project_id}")
         
         try:
             if self._loop.is_running():
@@ -80,17 +72,20 @@ class DispatchEventBus:
         """Wait for a new job event for a project.
         
         Args:
-            project_id: The project ID to wait for. None waits on global event.
+            project_id: The project ID to wait for.
             timeout: Maximum seconds to wait.
             
         Returns:
-            True if event was set (new job available), False if timed out.
+            True if event was set (new job available), False if timed out
+            or if project_id is None (graceful degradation).
         """
-        if project_id is not None:
-            event = self._get_or_create_event(project_id)
-        else:
-            event = self._get_global_event()
+        # Graceful degradation: project_id=None means no event to wait on,
+        # so we fall back to simple timeout-based polling.
+        if project_id is None:
+            await asyncio.sleep(timeout)
+            return False
         
+        event = self._get_or_create_event(project_id)
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
             # Auto-clear after wakeup
@@ -106,10 +101,8 @@ class DispatchEventBus:
             return
         
         def _set_all():
-            for project_id, event in self._events.items():
+            for event in self._events.values():
                 event.set()
-            if self._global_event is not None:
-                self._global_event.set()
             logger.debug(f"DispatchEventBus: notified all {len(self._events)} projects")
         
         try:

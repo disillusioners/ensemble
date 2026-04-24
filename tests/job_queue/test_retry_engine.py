@@ -113,6 +113,8 @@ def create_job_in_session(engine, **kwargs) -> JobItem:
         "status": JobStatus.PENDING.value,
         "priority": 5,
         "retry_count": 0,
+        "project_id": "test-project",  # Required for move_to_dlq
+        "queue_id": "queue-123",  # Required for move_to_dlq
     }
     defaults.update(kwargs)
     

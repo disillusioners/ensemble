@@ -17,6 +17,9 @@ import pytest
 from daemon.services.job_queue_service import JobQueueService
 from daemon.repositories.job_queue.models import JobItem, JobStatus
 
+# Test system project ID (must match conftest.py in job_queue)
+TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
 
 def make_mock_job(
     job_id: str = "test-job-1",
@@ -72,6 +75,49 @@ def make_mock_registry(agent_id: str = "coder", agent_path: str = "/agents/coder
     return registry
 
 
+def make_mock_queue(queue_id: str = "system-fifo-queue-id") -> MagicMock:
+    """Create a mock queue for the system project.
+    
+    Args:
+        queue_id: Queue ID to return.
+        
+    Returns:
+        Mock queue object.
+    """
+    mock_queue = MagicMock()
+    mock_queue.queue_id = queue_id
+    mock_queue.project_id = TEST_SYSTEM_PROJECT_ID
+    mock_queue.queue_name = "system_fifo_queue"
+    return mock_queue
+
+
+def create_queue_repo_with_system_queue():
+    """Create a mock queue repository that returns a system queue.
+    
+    Returns:
+        Mock JobQueueRepository with system queue for system project and test-project.
+    """
+    repo = MagicMock()
+    mock_queue = make_mock_queue()
+    
+    # Create additional mock queue for test-project
+    test_project_queue = MagicMock()
+    test_project_queue.queue_id = "test-project-queue-id"
+    test_project_queue.project_id = "test-project"
+    test_project_queue.queue_name = "system_fifo_queue"
+    
+    # Return system queue for the system project, test-project queue for test-project, None for other projects
+    def get_by_name_side_effect(project_id: str, queue_name: str):
+        if project_id == TEST_SYSTEM_PROJECT_ID and queue_name == "system_fifo_queue":
+            return mock_queue
+        if project_id == "test-project" and queue_name == "system_fifo_queue":
+            return test_project_queue
+        return None
+    repo.get_by_name = MagicMock(side_effect=get_by_name_side_effect)
+    repo.get = MagicMock(return_value=None)
+    return repo
+
+
 class TestIdempotentEnqueue:
     """Tests for idempotent enqueue behavior in JobQueueService."""
 
@@ -90,11 +136,8 @@ class TestIdempotentEnqueue:
 
     @pytest.fixture
     def mock_queue_repo(self) -> MagicMock:
-        """Create mock JobQueueRepository."""
-        repo = MagicMock()
-        repo.get_by_name = MagicMock(return_value=None)
-        repo.get = MagicMock(return_value=None)
-        return repo
+        """Create mock JobQueueRepository with system queue for system project."""
+        return create_queue_repo_with_system_queue()
 
     @pytest.fixture
     def mock_dispatch_bus(self) -> MagicMock:
@@ -469,11 +512,8 @@ class TestIdempotentEnqueueEdgeCases:
 
     @pytest.fixture
     def mock_queue_repo(self) -> MagicMock:
-        """Create mock JobQueueRepository."""
-        repo = MagicMock()
-        repo.get_by_name = MagicMock(return_value=None)
-        repo.get = MagicMock(return_value=None)
-        return repo
+        """Create mock JobQueueRepository with system queue for system project."""
+        return create_queue_repo_with_system_queue()
 
     @pytest.fixture
     def service(
@@ -565,11 +605,8 @@ class TestIdempotentEnqueueTTL:
 
     @pytest.fixture
     def mock_queue_repo(self) -> MagicMock:
-        """Create mock JobQueueRepository."""
-        repo = MagicMock()
-        repo.get_by_name = MagicMock(return_value=None)
-        repo.get = MagicMock(return_value=None)
-        return repo
+        """Create mock JobQueueRepository with system queue for system project."""
+        return create_queue_repo_with_system_queue()
 
     @pytest.fixture
     def service(

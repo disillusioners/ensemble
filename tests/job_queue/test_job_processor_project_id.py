@@ -5,7 +5,7 @@ so that spawned agents receive project context automatically.
 
 Tests cover:
 1. Main job processing path with valid project_id
-2. Orphan job fallback path with project_id=None
+2. Orphan job fallback path with project_id=system_default (after normalization)
 3. spawn_instance accepts project_id kwarg
 4. Jobs without project_id still work (no regression)
 5. Edge cases: project_id is None or a valid UUID string
@@ -21,6 +21,7 @@ from daemon.repositories.job_queue.models import JobStatus
 
 # Sample UUID for testing
 SAMPLE_PROJECT_UUID = "83da04de-a410-4fb5-9e92-251a99d28a52"
+TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 
 
 class MockProject:
@@ -164,18 +165,20 @@ class TestProjectIdAutoInjection:
         assert call_kwargs.get("instance_id") == "instance-123"
 
     @pytest.mark.asyncio
-    async def test_orphan_fallback_spawns_with_none_project_id(
+    async def test_no_orphan_jobs_after_normalization(
         self,
         mock_queue_service,
         mock_instance_manager,
         mock_project_repo,
         mock_queue_repo,
     ):
-        """Test that orphan job fallback path passes project_id=None to spawn_instance.
+        """Test that orphan fallback path no longer exists after Phase 2 normalization.
         
-        Orphan jobs (those without project_id) should still be processed but
-        spawn_instance should receive project_id=None so no project context
-        is injected.
+        After Phase 2 normalization: jobs with project_id=None are normalized to
+        SYSTEM_DEFAULT_PROJECT_ID at enqueue time. The JobProcessor no longer
+        has an orphan fallback path because all jobs have valid project_ids.
+        
+        This test verifies that the orphan fallback code has been removed.
         """
         # Create processor with mocked dependencies
         processor = JobProcessor(
@@ -186,33 +189,19 @@ class TestProjectIdAutoInjection:
             poll_interval=0.1,
         )
 
-        # Setup: orphan job with project_id=None
-        # Note: orphan_pending comes from list_all_pending, filtered for project_id=None
-        orphan_job = MockJob("orphan-job", project_id=None, queue_id="queue-1")
-        orphan_job.project_id = None  # Explicitly set to None
-
-        # No regular jobs (all projects/queues return empty)
+        # Setup: No regular jobs (all projects/queues return empty)
         mock_project_repo.list_projects.return_value = []
         mock_queue_repo.list_by_project.return_value = []
         mock_queue_service._repository.list_pending_by_queue.return_value = []
+        
+        # No orphan jobs - list_all_pending returns empty
+        mock_queue_service._repository.list_all_pending.return_value = []
 
-        # Orphan jobs come from list_all_pending
-        mock_queue_service._repository.list_all_pending.return_value = [orphan_job]
-        mock_queue_service.start_job = AsyncMock(
-            return_value=create_started_job("orphan-job", None)
-        )
-        mock_instance_manager.enqueue_message = AsyncMock()
-
-        # Execute
+        # Execute - should complete without calling spawn_instance
         await processor._process_next_job()
 
-        # Verify spawn_instance was called with project_id=None
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
-        assert call_kwargs.get("project_id") is None, (
-            f"Expected project_id=None for orphan job, "
-            f"got project_id={call_kwargs.get('project_id')}"
-        )
+        # Verify spawn_instance was NOT called (orphan fallback was removed)
+        mock_instance_manager.spawn_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_spawn_instance_accepts_project_id_kwarg(
@@ -397,17 +386,19 @@ class TestProjectIdAutoInjection:
         )
 
     @pytest.mark.asyncio
-    async def test_both_paths_receive_correct_project_id(
+    async def test_main_path_receives_correct_project_id(
         self,
         mock_queue_service,
         mock_instance_manager,
         mock_project_repo,
         mock_queue_repo,
     ):
-        """Test that both main path and orphan path receive correct project_id values.
+        """Test that main path receives correct project_id value.
         
-        This test verifies the change in commit 1d65cc0 is correctly passing
-        job.project_id to both spawn_instance calls.
+        This test verifies that the JobProcessor correctly passes job.project_id
+        to spawn_instance for regular jobs.
+        
+        After Phase 2 normalization, all jobs have valid project_ids (no orphans).
         """
         # Create processor with mocked dependencies
         processor = JobProcessor(
@@ -418,31 +409,26 @@ class TestProjectIdAutoInjection:
             poll_interval=0.1,
         )
 
-        # Setup: one normal job and one orphan
+        # Setup: one normal job
         project = MockProject("normal-project", job_queue_paused=False)
         queue = MockQueue("queue-1", "normal-project", is_paused=False)
         normal_job = MockJob("normal-job", project_id="normal-project", queue_id="queue-1")
-        orphan_job = MockJob("orphan-job", project_id=None, queue_id="queue-1")
-        orphan_job.project_id = None
 
         # First iteration: process normal job
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [normal_job]
-        mock_queue_service._repository.list_all_pending.return_value = []  # No orphans in first pass
+        mock_queue_service._repository.list_all_pending.return_value = []  # No orphan path
         mock_queue_service.start_job = AsyncMock(
-            side_effect=[
-                create_started_job("normal-job", "normal-project"),
-                create_started_job("orphan-job", None),
-            ]
+            return_value=create_started_job("normal-job", "normal-project"),
         )
         mock_instance_manager.enqueue_message = AsyncMock()
         mock_instance_manager.spawn_instance.reset_mock()
 
-        # Execute first pass
+        # Execute
         await processor._process_next_job()
 
-        # Verify normal job spawned with project_id
+        # Verify normal job spawned with correct project_id
         assert mock_instance_manager.spawn_instance.call_count == 1
         call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
         assert call_kwargs.get("project_id") == "normal-project"

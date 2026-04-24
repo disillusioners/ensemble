@@ -258,7 +258,7 @@ class JobRetryEngine:
                 
                 return None
     
-    def find_retryable_jobs(self, project_id: str = None) -> list[JobItem]:
+    def find_retryable_jobs(self, project_id: str | None = None) -> list[JobItem]:
         """Find FAILED jobs ready for retry (next_retry_at <= now).
         
         IMPORTANT: Only returns jobs that are genuinely FAILED with a clear

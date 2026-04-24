@@ -12,6 +12,33 @@ from daemon.repositories.job_queue.models import JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services import project_normalizer
+from daemon import constants
+
+# ── Shared Test Constants ────────────────────────────────────────────────────────
+
+TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+# ── Autouse Fixtures ─────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def setup_system_default_project():
+    """Set SYSTEM_DEFAULT_PROJECT_ID for tests that call enqueue() which normalizes project_id.
+
+    The normalize_project_id() function imports SYSTEM_DEFAULT_PROJECT_ID at module level
+    in project_normalizer.py, so we must update both bindings.
+    """
+    original_in_constants = constants.SYSTEM_DEFAULT_PROJECT_ID
+    original_in_normalizer = project_normalizer.SYSTEM_DEFAULT_PROJECT_ID
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+
+    yield
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = original_in_constants
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = original_in_normalizer
 
 
 @pytest.fixture
@@ -95,6 +122,14 @@ def queue_repository_with_system_queues(engine):
     )
     repo.create(
         project_id="project-2",
+        queue_name="system_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+    )
+    # Also set up for the test system project ID (used when normalize_project_id() is called with None)
+    repo.create(
+        project_id=TEST_SYSTEM_PROJECT_ID,
         queue_name="system_fifo_queue",
         queue_type="fifo",
         concurrency_limit=1,

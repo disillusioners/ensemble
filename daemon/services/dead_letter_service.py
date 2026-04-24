@@ -109,6 +109,9 @@ class DeadLetterService:
         if job.status != "failed":
             raise JobNotInFailedStateError(job_id, job.status)
         
+        # Ensure project_id is normalized (defense-in-depth)
+        assert job.project_id is not None, "DeadLetterService.move_to_dlq requires normalized project_id"
+        
         # Create DLQ item from job data
         dlq_item = DeadLetterItem(
             job_id=job.job_id,
@@ -116,8 +119,8 @@ class DeadLetterService:
             agent_dir=job.agent_dir,
             message=job.message,
             source=job.source,
-            project_id=job.project_id or "",
-            queue_id=job.queue_id or "",
+            project_id=job.project_id,
+            queue_id=job.queue_id,
             priority=job.priority,
             error_message=job.error_message or "",
             retry_count=job.retry_count,
@@ -180,6 +183,9 @@ class DeadLetterService:
             if job.status != "failed":
                 raise JobNotInFailedStateError(job_id, job.status)
             
+            # Ensure project_id is normalized (defense-in-depth)
+            assert job.project_id is not None, "DeadLetterService.move_to_dlq_standalone requires normalized project_id"
+            
             # Create DLQ item from job data
             dlq_item = DeadLetterItem(
                 job_id=job.job_id,
@@ -187,8 +193,8 @@ class DeadLetterService:
                 agent_dir=job.agent_dir,
                 message=job.message,
                 source=job.source,
-                project_id=job.project_id or "",
-                queue_id=job.queue_id or "",
+                project_id=job.project_id,
+                queue_id=job.queue_id,
                 priority=job.priority,
                 error_message=job.error_message or "",
                 retry_count=job.retry_count,

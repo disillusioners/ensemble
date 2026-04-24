@@ -178,6 +178,7 @@ class RetryScheduler:
             return
         
         # Get unique project_ids
+        # [R3] Post-migration: project_id is never None, this branch is unreachable
         project_ids = set(job.project_id for job in retryable_jobs if job.project_id)
         
         logger.info(f"Found {len(retryable_jobs)} retryable jobs in {len(project_ids)} projects")
