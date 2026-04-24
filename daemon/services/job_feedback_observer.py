@@ -257,6 +257,8 @@ class JobFeedbackObserver:
                     f"Observer: completed job {job.job_id[:8]}... "
                     f"for instance {instance_id[:8]}..."
                 )
+                # Notify watchers after successful transition
+                await self._job_queue_service.notify_watchers(job.job_id, "completed")
 
             elif status == "error":
                 # Use atomic_transition for PROCESSING -> FAILED with error
@@ -271,6 +273,8 @@ class JobFeedbackObserver:
                     f"Observer: failed job {job.job_id[:8]}... "
                     f"for instance {instance_id[:8]}... error: {error_message}"
                 )
+                # Notify watchers after successful transition
+                await self._job_queue_service.notify_watchers(job.job_id, "failed", error_message)
             else:
                 # Unknown status - skip silently
                 logger.warning(

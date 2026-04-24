@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, List
@@ -54,15 +55,21 @@ class DeadLetterService:
         self,
         job_repository: JobRepository,
         dlq_repository: DeadLetterRepository,
+        job_queue_service: Any = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         """Initialize the DeadLetterService.
         
         Args:
             job_repository: Repository for job persistence.
             dlq_repository: Repository for DLQ item persistence.
+            job_queue_service: Optional JobQueueService for watcher notifications.
+            loop: Optional event loop for async notifications.
         """
         self._job_repo = job_repository
         self._dlq_repo = dlq_repository
+        self._job_queue_service = job_queue_service
+        self._loop = loop
     
     def move_to_dlq(
         self,
@@ -200,6 +207,13 @@ class DeadLetterService:
                 # Commit both operations atomically
                 session.commit()
                 session.refresh(dlq_item)
+                
+                # Notify watchers after successful commit
+                if self._job_queue_service and self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._job_queue_service.notify_watchers(job_id, "dead_letter", job.error_message),
+                        self._loop,
+                    )
                 
                 return dlq_item
             except IntegrityError:

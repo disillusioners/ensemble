@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -73,6 +74,7 @@ class JobQueueService:
         self._dispatch_bus: "DispatchEventBus" | None = None  # Dispatch event bus for job notifications
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
         self._project_repo: Any | None = None  # Project repository for pause state checks
+        self._watcher_repo: Any | None = None  # Repository for job watchers
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -122,6 +124,90 @@ class JobQueueService:
         """
         if hasattr(config, 'idempotency_key_ttl_hours'):
             self._idempotency_key_ttl_hours = config.idempotency_key_ttl_hours
+    
+    def set_watcher_repo(self, watcher_repo: Any) -> None:
+        """Set the watcher repository for job event notifications.
+        
+        Args:
+            watcher_repo: The JobWatcherRepository instance.
+        """
+        self._watcher_repo = watcher_repo
+    
+    async def notify_watchers(self, job_id: str, status: str, error: str | None = None) -> int:
+        """Notify ALL watchers for a job. Called from EVERY terminal path.
+        
+        Returns number of watchers notified.
+        Safe to call even if no watchers exist (returns 0).
+        If watching instance is not running, message queues in DB for later delivery.
+        """
+        if self._watcher_repo is None:
+            return 0
+        
+        try:
+            watchers = self._watcher_repo.get_watchers_for_job(job_id)
+            if not watchers:
+                return 0
+            
+            # Get job for notification details
+            job = await asyncio.to_thread(self._repository.get, job_id)
+            if job is None:
+                return 0
+            
+            notified = 0
+            for watcher in watchers:
+                if status not in watcher.watch_events:
+                    continue
+                
+                notification = (
+                    f"[JOB_EVENT] Job {job_id[:8]}... reached status '{status}'.\n"
+                    f"Agent: {job.agent_id}\n"
+                    f"Result: {job.result_summary or 'N/A'}\n"
+                    f"Error: {error or 'None'}\n"
+                    f"\n"
+                    f"```json\n"
+                    f"{json.dumps({
+                        'job_id': job_id,
+                        'status': status,
+                        'agent_id': job.agent_id,
+                        'result': job.result_summary or '',
+                        'error': error,
+                        'timestamp': datetime.utcnow().isoformat()
+                    }, ensure_ascii=False)}\n"
+                    f"```"
+                )
+                
+                await self._instance_manager.enqueue_message(
+                    instance_id=watcher.instance_id,
+                    message=notification,
+                    source=f"internal_agent:job_event:{job_id}:{status}",
+                )
+                notified += 1
+            
+            # Cleanup: terminal states are final, no need to keep watches
+            self._watcher_repo.remove_all_watches_for_job(job_id)
+            return notified
+            
+        except Exception as e:
+            logger.warning(f"Failed to notify watchers for job {job_id[:8]}...: {e}")
+            return 0
+    
+    async def reconcile_terminal_watches(self) -> int:
+        """Scan for watches where job is already terminal. Notify and cleanup."""
+        if self._watcher_repo is None:
+            return 0
+        
+        terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+        
+        all_watches = self._watcher_repo.get_all_active_watches()
+        reconciled = 0
+        
+        for watch in all_watches:
+            job = await asyncio.to_thread(self._repository.get, watch.job_id)
+            if job and job.status in terminal_states:
+                await self.notify_watchers(watch.job_id, job.status, job.error_message)
+                reconciled += 1
+        
+        return reconciled
     
     # ========== Public API ==========
     
@@ -337,6 +423,8 @@ class JobQueueService:
                     from_status=JobStatus.PENDING.value,
                     to_status=JobStatus.CANCELLED.value,
                 )
+                # Notify watchers after successful transition
+                await self.notify_watchers(job.job_id, "cancelled")
                 return True
             except InvalidTransitionError:
                 return False
@@ -393,6 +481,8 @@ class JobQueueService:
                 except InvalidTransitionError:
                     return False
             
+            # Notify watchers after successful transition
+            await self.notify_watchers(job.job_id, "cancelled")
             return True
         
         # Terminal or non-cancellable states
@@ -874,9 +964,12 @@ class JobQueueService:
         try:
             if demand_state == DemandState.COMPLETED:
                 summary = result_summary or "Job completed successfully"
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     self._repository.complete_job, job_id, result_summary=summary
                 )
+                # Notify watchers after successful transition
+                await self.notify_watchers(job_id, "completed")
+                return result
             elif demand_state == DemandState.FAILED:
                 failed_job = await asyncio.to_thread(
                     self._repository.fail_job, job_id, error_message=error or "Unknown error"
@@ -891,12 +984,18 @@ class JobQueueService:
                     except Exception as e:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
                 
+                # Notify watchers if job is still FAILED (retry didn't succeed)
+                if failed_job is not None:
+                    await self.notify_watchers(job_id, "failed", error)
                 return failed_job
             elif demand_state == DemandState.TERMINATED:
                 # TERMINATED state does not trigger retry
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     self._repository.terminate_job, job_id, error_message=error or "Terminated"
                 )
+                # Notify watchers after successful transition
+                await self.notify_watchers(job_id, "terminated", error)
+                return result
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None
@@ -966,7 +1065,14 @@ class JobQueueService:
         # Mark job based on demand_state
         try:
             if demand_state == DemandState.COMPLETED:
-                return self._repository.complete_job(job_id, result_summary=result_summary)
+                result = self._repository.complete_job(job_id, result_summary=result_summary)
+                # Notify watchers after successful transition
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.notify_watchers(job_id, "completed"),
+                        self._loop,
+                    )
+                return result
             elif demand_state == DemandState.FAILED:
                 failed_job = self._repository.fail_job(job_id, error_message=error or "Unknown error")
                 
@@ -979,10 +1085,24 @@ class JobQueueService:
                     except Exception as e:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
                 
+                # Notify watchers if job is still FAILED (retry didn't succeed)
+                if failed_job is not None:
+                    if self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.notify_watchers(job_id, "failed", error),
+                            self._loop,
+                        )
                 return failed_job
             elif demand_state == DemandState.TERMINATED:
                 # TERMINATED state does not trigger retry
-                return self._repository.terminate_job(job_id, error_message=error or "Terminated")
+                result = self._repository.terminate_job(job_id, error_message=error or "Terminated")
+                # Notify watchers after successful transition
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.notify_watchers(job_id, "terminated", error),
+                        self._loop,
+                    )
+                return result
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
             return None

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session as SQLModelSession
 
@@ -41,6 +42,8 @@ class JobRetryEngine:
         queue_repo: JobQueueRepository,
         dlq_service: DeadLetterService,
         config: JobSystemConfig,
+        job_queue_service: Any = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ):
         """Initialize the JobRetryEngine.
         
@@ -49,11 +52,15 @@ class JobRetryEngine:
             queue_repo: Repository for queue metadata.
             dlq_service: Service for dead letter queue operations.
             config: Job system configuration.
+            job_queue_service: Optional JobQueueService for watcher notifications.
+            loop: Optional event loop for async notifications.
         """
         self._job_repo = job_repo
         self._queue_repo = queue_repo
         self._dlq_service = dlq_service
         self._config = config
+        self._job_queue_service = job_queue_service
+        self._loop = loop
     
     def calculate_backoff(self, retry_count: int, config: JobSystemConfig = None) -> float:
         """Calculate backoff delay in seconds using exponential backoff + jitter.
@@ -235,6 +242,13 @@ class JobRetryEngine:
                     self._dlq_service.move_to_dlq(session, job_id, reason="MAX_RETRIES")
                     session.commit()
                     logger.info(f"Job {job_id} moved to DLQ after {job.retry_count} retries")
+                    
+                    # Notify watchers after successful DLQ commit
+                    if self._job_queue_service and self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self._job_queue_service.notify_watchers(job_id, "dead_letter", job.error_message),
+                            self._loop,
+                        )
                 except Exception as e:
                     session.rollback()
                     logger.error(

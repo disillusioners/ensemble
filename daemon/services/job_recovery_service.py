@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_state_machine import InvalidTransitionError
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from daemon.repositories.job_queue.lock_repository import LockRepository
     from daemon.repositories.job_queue.models import JobItem
     from daemon.repositories.job_queue.repository import JobRepository
+    from daemon.services.job_queue_service import JobQueueService
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class JobRecoveryService:
         job_repository: "JobRepository",
         lock_repository: "LockRepository",
         instance_repository: "SQLModelInstanceRepository",
+        job_queue_service: "JobQueueService | None" = None,
     ) -> None:
         """Initialize the recovery service.
         
@@ -58,10 +60,12 @@ class JobRecoveryService:
             job_repository: Repository for job operations.
             lock_repository: Repository for lock operations.
             instance_repository: Repository for instance operations.
+            job_queue_service: Optional JobQueueService for watcher notifications.
         """
         self._job_repository = job_repository
         self._lock_repository = lock_repository
         self._instance_repository = instance_repository
+        self._job_queue_service = job_queue_service
 
     def _is_instance_alive(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates the instance is still alive.
@@ -178,6 +182,11 @@ class JobRecoveryService:
                 error_message=error_message,
             )
             stats["recovered"] += 1
+            
+            # Notify watchers after successful transition
+            if self._job_queue_service is not None:
+                await self._job_queue_service.notify_watchers(job.job_id, "failed", error_message)
+            
             return True
         except InvalidTransitionError:
             # Job was already transitioned by another actor — this is expected
