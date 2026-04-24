@@ -18,6 +18,8 @@ CATEGORY_DOC = """\
 Create, list, and manage jobs and job queues.
 """
 
+TERMINAL_STATES = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+
 # Full documentation strings for each tool
 _FULL_DOCS = {
     "job_create": """Submit a new job to the queue.
@@ -260,6 +262,9 @@ def create_job_tools(
             )
             # Register watch if requested (job is PENDING here, no race with observer)
             if watch and watcher_repo is not None and current_instance_id:
+                count = watcher_repo.count_watches_for_instance(current_instance_id)
+                if count >= 50:
+                    return {"error": "Maximum watch limit (50) reached for this instance", "job_id": job_item.job_id, "status": job_item.status}
                 watcher_repo.add_watch(job_item.job_id, current_instance_id)
             return job_item.to_dict()
         except ValueError as e:
@@ -506,8 +511,9 @@ def create_job_tools(
                 return f"Error: Maximum watch limit (50) reached for this instance"
 
             # Terminal state check — includes dead_letter
-            terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
-            if job.status in terminal_states:
+            if job.status in TERMINAL_STATES:
+                # Register watch first, then notify (notify_watchers sends notification AND removes the watch — terminal states are final)
+                watcher_repo.add_watch(job_id, current_instance_id, events)
                 # Register watch first, then notify (notify_watchers sends + cleans up)
                 watcher_repo.add_watch(job_id, current_instance_id, events)
                 await job_service.notify_watchers(job_id, job.status, job.error_message)
@@ -586,7 +592,6 @@ def create_job_tools(
             if count + len(job_ids) > 50:
                 return f"Error: Would exceed maximum watch limit (50). Currently watching {count}, trying to add {len(job_ids)}."
 
-            terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
             watched = []
             already_terminal = []
 
@@ -595,7 +600,9 @@ def create_job_tools(
                 if not job:
                     continue
 
-                if job.status in terminal_states:
+                if job.status in TERMINAL_STATES:
+                    # Register watch first, then notify (notify_watchers sends notification AND removes the watch — terminal states are final)
+                    watcher_repo.add_watch(jid, current_instance_id, events)
                     # Register watch first, then notify (notify_watchers sends + cleans up)
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     await job_service.notify_watchers(jid, job.status, job.error_message)

@@ -115,9 +115,9 @@ My primary workflow: receive, dispatch, monitor, react, report.
       ├─────────────────────────────────────────────┤
       │ DEAD_LETTER                                 │
       │   → Record as critical failure              │
-      │   → Report immediately to parent             │
-      │   → If recoverable → job_retry()             │
-      │   → Else → Phase 5                           │
+      │   → Report as critical failure to parent    │
+      │   → Parent decides dlq_replay() if needed   │
+      │   → Phase 5                                 │
       └─────────────────────────────────────────────┘
 3. Repeat until all jobs reach terminal state
 4. Proceed to Phase 5

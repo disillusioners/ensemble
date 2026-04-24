@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import delete as sql_delete, func, select as sql_select
+from sqlalchemy import delete as sql_delete, func
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
