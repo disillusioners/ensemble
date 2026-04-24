@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.manager import InstanceManager
 
-from daemon.services.job_queue_service import JobQueueService
+from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
@@ -219,7 +219,7 @@ class JobProcessor:
                                         f"Failed to recover orphan job {proc_job.job_id[:8]}...: {e}"
                                     )
                                     await self._queue_service.complete_job(
-                                        proc_job.job_id, success=False, error=str(e)
+                                        proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                                     )
                                     continue
                         # No instance_id: this is a genuine orphan (shouldn't happen
@@ -247,7 +247,7 @@ class JobProcessor:
                         except Exception as e:
                             logger.error(f"Failed to resume orphan job {proc_job.job_id[:8]}...: {e}")
                             await self._queue_service.complete_job(
-                                proc_job.job_id, success=False, error=str(e)
+                                proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                             )
                     continue
                 
@@ -270,7 +270,7 @@ class JobProcessor:
                     except Exception as e:
                         logger.error(f"Failed to spawn instance for job {job.job_id}: {e}")
                         await self._queue_service.complete_job(
-                            job.job_id, success=False, error=str(e)
+                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
                         continue
                     
@@ -284,7 +284,7 @@ class JobProcessor:
                     except Exception as e:
                         logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
                         await self._queue_service.complete_job(
-                            job.job_id, success=False, error=str(e)
+                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
                         continue
                     
@@ -296,7 +296,7 @@ class JobProcessor:
                     logger.exception(f"Failed to process job {job.job_id}: {e}")
                     try:
                         await self._queue_service.complete_job(
-                            job.job_id, success=False, error=str(e)
+                            job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
                     except Exception:
                         pass
@@ -327,7 +327,7 @@ class JobProcessor:
             except Exception as e:
                 logger.error(f"Failed to process orphan job {job.job_id}: {e}")
                 try:
-                    await self._queue_service.complete_job(job.job_id, success=False, error=str(e))
+                    await self._queue_service.complete_job(job.job_id, demand_state=DemandState.FAILED, error=str(e))
                 except Exception:
                     pass
 

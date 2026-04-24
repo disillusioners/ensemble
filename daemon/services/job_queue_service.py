@@ -140,7 +140,7 @@ class JobQueueService:
         Safe to call even if no watchers exist (returns 0).
         If watching instance is not running, message queues in DB for later delivery.
         """
-        if self._watcher_repo is None:
+        if self._watcher_repo is None or self._instance_manager is None:
             return 0
         
         try:

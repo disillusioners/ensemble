@@ -508,7 +508,8 @@ def create_job_tools(
             # Terminal state check — includes dead_letter
             terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
             if job.status in terminal_states:
-                # Job already terminal — send immediate notification
+                # Register watch first, then notify (notify_watchers sends + cleans up)
+                watcher_repo.add_watch(job_id, current_instance_id, events)
                 await job_service.notify_watchers(job_id, job.status, job.error_message)
                 return f"Job {job_id[:8]}... is already {job.status}. Immediate notification sent."
 
@@ -595,7 +596,8 @@ def create_job_tools(
                     continue
 
                 if job.status in terminal_states:
-                    # Already terminal — send immediate notification
+                    # Register watch first, then notify (notify_watchers sends + cleans up)
+                    watcher_repo.add_watch(jid, current_instance_id, events)
                     await job_service.notify_watchers(jid, job.status, job.error_message)
                     already_terminal.append(jid)
                 else:

@@ -60,6 +60,7 @@ class TestDoubleEventDelivery:
         mock_job = create_mock_job(job_id="dup-job", status="processing", instance_id="dup-instance")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
 
         # Set up job repo mock - first call succeeds
         mock_job_repo = MagicMock(spec=JobRepository)
@@ -115,6 +116,7 @@ class TestDoubleEventDelivery:
         mock_job = create_mock_job(job_id="dup-err-job", status="processing", instance_id="dup-err-instance")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
 
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.return_value = mock_job

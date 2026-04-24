@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import delete as sql_delete, select as sql_select
+from sqlalchemy import delete as sql_delete, func, select as sql_select
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
@@ -159,8 +159,10 @@ class JobWatcherRepository:
             Number of watches for this instance.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobWatcher).where(JobWatcher.instance_id == instance_id)
-            return len(list(db_session.exec(stmt).all()))
+            stmt = select(func.count()).select_from(JobWatcher).where(
+                JobWatcher.instance_id == instance_id
+            )
+            return db_session.exec(stmt).one()
 
     def get_all_active_watches(self) -> list[JobWatcher]:
         """Get all watches (for reconciliation scan).

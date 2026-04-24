@@ -10,6 +10,7 @@ import pytest
 
 from daemon.services.job_processor import JobProcessor
 from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.services.job_queue_service import DemandState
 
 
 class MockProject:
@@ -459,7 +460,7 @@ class TestJobProcessorErrorHandling:
 
         mock_queue_service.complete_job.assert_called_once()
         call_args = mock_queue_service.complete_job.call_args
-        assert call_args[1]["success"] is False
+        assert call_args[1]["demand_state"] == DemandState.FAILED
 
     @pytest.mark.asyncio
     async def test_handles_enqueue_message_failure(
@@ -484,7 +485,7 @@ class TestJobProcessorErrorHandling:
 
         mock_queue_service.complete_job.assert_called_once()
         call_args = mock_queue_service.complete_job.call_args
-        assert call_args[1]["success"] is False
+        assert call_args[1]["demand_state"] == DemandState.FAILED
 
 
 class TestOrphanJobRecovery:
@@ -580,7 +581,7 @@ class TestOrphanJobRecovery:
         # Should have marked the job as failed
         mock_queue_service.complete_job.assert_called_once()
         call_kwargs = mock_queue_service.complete_job.call_args[1]
-        assert call_kwargs["success"] is False
+        assert call_kwargs["demand_state"] == DemandState.FAILED
         assert "Max instances reached" in call_kwargs["error"]
 
     @pytest.mark.asyncio

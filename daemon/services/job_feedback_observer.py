@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.project.repository import SQLModelProjectRepository
+from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -345,7 +346,7 @@ class JobFeedbackObserver:
                 except Exception as e:
                     logger.error(f"Observer: failed to spawn instance for job {started_job.job_id[:8]}...: {e}")
                     await self._job_queue_service.complete_job(
-                        started_job.job_id, success=False, error=str(e)
+                        started_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                     )
                     return
 
@@ -359,7 +360,7 @@ class JobFeedbackObserver:
                 except Exception as e:
                     logger.error(f"Observer: failed to enqueue message for job {started_job.job_id[:8]}...: {e}")
                     await self._job_queue_service.complete_job(
-                        started_job.job_id, success=False, error=str(e)
+                        started_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                     )
                     return
 

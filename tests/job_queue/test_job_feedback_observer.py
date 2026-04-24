@@ -90,6 +90,7 @@ class TestObserverCompletesJob:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 1
@@ -131,6 +132,7 @@ class TestObserverFailsJob:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 1
@@ -325,6 +327,7 @@ class TestObserverLockRelease:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 2  # Released 2 locks
@@ -400,6 +403,7 @@ class TestObserverExceptionHandling:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.side_effect = Exception("Lock release failed")
@@ -513,6 +517,7 @@ class TestObserverDefaultErrorMessage:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 1
@@ -651,6 +656,7 @@ class TestObserverStartStop:
         mock_job_queue_service.get_job_by_instance = AsyncMock(
             side_effect=[mock_job_1, mock_job_2]
         )
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         
         observer = JobFeedbackObserver(
             event_bus=mock_event_bus,
@@ -743,6 +749,7 @@ class TestObserverLifecycleResilience:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
             job_id="job-123",
@@ -787,6 +794,7 @@ class TestObserverLifecycleResilience:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
@@ -827,6 +835,7 @@ class TestObserverLifecycleResilience:
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
