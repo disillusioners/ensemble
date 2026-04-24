@@ -10,15 +10,15 @@ from daemon.tools._tool_registry import CATEGORY_MODULES
 class TestJobQueueToolRegistration:
     """Tests for tool registration."""
 
-    def test_create_job_tools_returns_12_tools(self):
-        """Verify create_job_tools returns exactly 12 tools."""
+    def test_create_job_tools_returns_16_tools(self):
+        """Verify create_job_tools returns exactly 16 tools."""
         job_service = AsyncMock()
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
 
         tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
 
-        assert len(tools) == 12
+        assert len(tools) == 16
 
     def test_each_tool_has_job_category(self):
         """Verify each tool has _tool_category == 'job' attribute."""
