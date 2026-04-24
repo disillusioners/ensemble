@@ -154,6 +154,44 @@ Args:
 
 Returns:
     Confirmation message.""",
+
+    "watch_job": """Watch a job for lifecycle events.
+
+If the job is already in a terminal state (completed, failed, cancelled, terminated, dead_letter),
+an immediate notification is sent. Otherwise, you will receive a message when the job reaches a terminal state.
+
+Args:
+    job_id: The job ID to watch. Required.
+    events: Specific terminal states to watch for. Optional.
+        Default: all terminal states ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+
+Returns:
+    Confirmation message or error.""",
+
+    "unwatch_job": """Stop watching a job for lifecycle events.
+
+Args:
+    job_id: The job ID to stop watching. Required.
+
+Returns:
+    Confirmation message.""",
+
+    "list_watched_jobs": """List all jobs the current instance is watching.
+
+Returns:
+    List of watched jobs with their event filters.""",
+
+    "watch_jobs": """Watch multiple jobs for lifecycle events. Bulk version of watch_job.
+
+Jobs already in terminal states will trigger immediate notifications.
+
+Args:
+    job_ids: List of job IDs to watch. Required.
+    events: Specific terminal states to watch for. Optional.
+        Default: all terminal states
+
+Returns:
+    Summary of watches registered and immediate notifications sent.""",
 }
 
 
@@ -163,6 +201,7 @@ def create_job_tools(
     dead_letter_service: "DeadLetterService",
     current_instance_id: str = "",
     agent_id: str = "",
+    watcher_repo=None,  # NEW: JobWatcherRepository | None
 ):
     """Create job queue management tools with injected services.
     
@@ -172,6 +211,7 @@ def create_job_tools(
         dead_letter_service: DeadLetterService instance for DLQ operations.
         current_instance_id: The current instance ID.
         agent_id: The current agent ID.
+        watcher_repo: JobWatcherRepository instance for watch functionality. Optional.
     
     Returns:
         List of tool functions for job queue management.
@@ -188,6 +228,7 @@ def create_job_tools(
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")]
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")]
         source: Annotated[str, Field(default="api", description="Source identifier")]
+        watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")]
 
     @register_tool_category("job")
     @tool(args_schema=JobCreateInput)
@@ -200,6 +241,7 @@ def create_job_tools(
         idempotency_key: Annotated[str | None, Field(default=None, description="Deduplication key")] = None,
         metadata: Annotated[dict[str, Any] | None, Field(default=None, description="Custom key-value metadata")] = None,
         source: Annotated[str, Field(default="api", description="Source identifier")] = "api",
+        watch: Annotated[bool, Field(default=False, description="Watch the job for lifecycle events")] = False,
     ) -> dict:
         """Submit a new job to the queue. Use tool_help("job_create") for details."""
         try:
@@ -216,6 +258,9 @@ def create_job_tools(
                 queue_id=queue_id,
                 idempotency_key=idempotency_key,
             )
+            # Register watch if requested (job is PENDING here, no race with observer)
+            if watch and watcher_repo is not None and current_instance_id:
+                watcher_repo.add_watch(job_item.job_id, current_instance_id)
             return job_item.to_dict()
         except ValueError as e:
             return {"error": str(e)}
@@ -435,8 +480,141 @@ def create_job_tools(
             return f"ERROR: Failed to replay DLQ entry {dlq_id}: {str(e)}"
     dlq_replay._full_doc_ = _FULL_DOCS["dlq_replay"]
 
+    @register_tool_category("job")
+    @tool
+    async def watch_job(
+        job_id: Annotated[str, Field(description="The job ID to watch")],
+        events: Annotated[list[str] | None, Field(default=None, description="Specific events to watch for (default: all terminal states)")] = None,
+    ) -> str:
+        """Watch a job for lifecycle events. If the job is already in a terminal state, immediate notification is sent.
+
+        Use tool_help("watch_job") for details."""
+        try:
+            if watcher_repo is None:
+                return "Error: Watch functionality not available"
+            if not current_instance_id:
+                return "Error: No instance context"
+
+            # Check if job exists and its current status
+            job = await job_service.get_job(job_id)
+            if not job:
+                return f"Error: Job {job_id} not found"
+
+            # Enforce max 50 watches per instance
+            count = watcher_repo.count_watches_for_instance(current_instance_id)
+            if count >= 50:
+                return f"Error: Maximum watch limit (50) reached for this instance"
+
+            # Terminal state check — includes dead_letter
+            terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+            if job.status in terminal_states:
+                # Job already terminal — send immediate notification
+                await job_service.notify_watchers(job_id, job.status, job.error_message)
+                return f"Job {job_id[:8]}... is already {job.status}. Immediate notification sent."
+
+            # Register watch
+            watcher_repo.add_watch(job_id, current_instance_id, events)
+            return f"Watch registered for job {job_id[:8]}... Will notify on terminal state changes."
+        except Exception as e:
+            return f"Error watching job: {str(e)}"
+    watch_job._full_doc_ = _FULL_DOCS["watch_job"]
+
+    @register_tool_category("job")
+    @tool
+    async def unwatch_job(
+        job_id: Annotated[str, Field(description="The job ID to stop watching")],
+    ) -> str:
+        """Stop watching a job for lifecycle events.
+
+        Use tool_help("unwatch_job") for details."""
+        try:
+            if watcher_repo is None:
+                return "Error: Watch functionality not available"
+            if not current_instance_id:
+                return "Error: No instance context"
+
+            removed = watcher_repo.remove_watch(job_id, current_instance_id)
+            if removed:
+                return f"Stopped watching job {job_id[:8]}..."
+            return f"Not watching job {job_id[:8]}..."
+        except Exception as e:
+            return f"Error unwatching job: {str(e)}"
+    unwatch_job._full_doc_ = _FULL_DOCS["unwatch_job"]
+
+    @register_tool_category("job")
+    @tool
+    async def list_watched_jobs() -> str:
+        """List all jobs the current instance is watching.
+
+        Use tool_help("list_watched_jobs") for details."""
+        try:
+            if watcher_repo is None:
+                return "Error: Watch functionality not available"
+            if not current_instance_id:
+                return "Error: No instance context"
+
+            watches = watcher_repo.get_watches_for_instance(current_instance_id)
+            if not watches:
+                return "No watched jobs."
+
+            result_lines = [f"Watching {len(watches)} job(s):"]
+            for w in watches:
+                result_lines.append(f"  - {w.job_id[:8]}... (events: {', '.join(w.watch_events)})")
+            return "\n".join(result_lines)
+        except Exception as e:
+            return f"Error listing watched jobs: {str(e)}"
+    list_watched_jobs._full_doc_ = _FULL_DOCS["list_watched_jobs"]
+
+    @register_tool_category("job")
+    @tool
+    async def watch_jobs(
+        job_ids: Annotated[list[str], Field(description="List of job IDs to watch")],
+        events: Annotated[list[str] | None, Field(default=None, description="Specific events to watch for (default: all terminal states)")] = None,
+    ) -> str:
+        """Watch multiple jobs for lifecycle events. Bulk version of watch_job.
+
+        Use tool_help("watch_jobs") for details."""
+        try:
+            if watcher_repo is None:
+                return "Error: Watch functionality not available"
+            if not current_instance_id:
+                return "Error: No instance context"
+
+            # Enforce max 50 watches per instance
+            count = watcher_repo.count_watches_for_instance(current_instance_id)
+            if count + len(job_ids) > 50:
+                return f"Error: Would exceed maximum watch limit (50). Currently watching {count}, trying to add {len(job_ids)}."
+
+            terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+            watched = []
+            already_terminal = []
+
+            for jid in job_ids:
+                job = await job_service.get_job(jid)
+                if not job:
+                    continue
+
+                if job.status in terminal_states:
+                    # Already terminal — send immediate notification
+                    await job_service.notify_watchers(jid, job.status, job.error_message)
+                    already_terminal.append(jid)
+                else:
+                    watcher_repo.add_watch(jid, current_instance_id, events)
+                    watched.append(jid)
+
+            parts = []
+            if watched:
+                parts.append(f"Registered watches for {len(watched)} job(s).")
+            if already_terminal:
+                parts.append(f"{len(already_terminal)} job(s) already terminal — immediate notification sent.")
+            return " ".join(parts) if parts else "No valid jobs found."
+        except Exception as e:
+            return f"Error watching jobs: {str(e)}"
+    watch_jobs._full_doc_ = _FULL_DOCS["watch_jobs"]
+
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
         job_delete, job_restore, queue_list, queue_create,
         queue_update, dlq_list, dlq_replay,
+        watch_job, unwatch_job, list_watched_jobs, watch_jobs,
     ]

@@ -237,12 +237,17 @@ def create_job_tools_if_available(manager, current_instance_id: str, agent_id: s
     dead_letter_service = getattr(manager, '_dead_letter_service', None)
     if queue_mgmt_service is None or dead_letter_service is None:
         return []
+
+    # Get watcher_repo from manager (may be None)
+    watcher_repo = getattr(manager, '_watcher_repo', None)
+
     return create_job_tools(
         job_service=job_service,
         queue_mgmt_service=queue_mgmt_service,
         dead_letter_service=dead_letter_service,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
+        watcher_repo=watcher_repo,
     )
 
 
