@@ -168,4 +168,27 @@ export class HomeComponent implements OnInit, OnDestroy {
       }
     });
   }
+
+  protected onQuickCreateInstance(agent: Agent): void {
+    this.isLoading.set(true);
+    const agentPath = `./agents/${agent.id}`;
+    
+    this.api.createInstance(agentPath).subscribe({
+      next: (instance) => {
+        this.instances.update(prev => [instance, ...prev]);
+        this.router.navigate(['/instances', instance.instance_id]);
+      },
+      error: (err) => {
+        console.error('Failed to create instance:', err);
+        alert(`Failed to create instance: ${err}`);
+        this.isLoading.set(false);
+      }
+    });
+  }
+
+  protected onViewInstances(): void {
+    if (this.instances().length > 0) {
+      this.router.navigate(['/instances', this.instances()[0].instance_id]);
+    }
+  }
 }

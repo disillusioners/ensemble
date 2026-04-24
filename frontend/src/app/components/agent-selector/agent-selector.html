@@ -9,10 +9,10 @@
   </div>
 
   <!-- Mother Agent - Special System Button -->
-  <div class="mb-6">
+  <div class="mb-6 flex gap-4">
     <button
       (click)="onStartMother()"
-      class="w-full p-4 rounded-2xl border-2 border-dashed border-accent-violet/50 bg-gradient-to-r from-accent-violet/10 to-accent-cyan/10
+      class="flex-1 p-4 rounded-2xl border-2 border-dashed border-accent-violet/50 bg-gradient-to-r from-accent-violet/10 to-accent-cyan/10
              hover:border-accent-violet hover:from-accent-violet/20 hover:to-accent-cyan/20 transition-all duration-300
              flex items-center gap-4 group"
     >
@@ -31,6 +31,20 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
       </svg>
     </button>
+    
+    @if (hasInstances) {
+      <button
+        (click)="onViewInstances()"
+        class="px-6 py-4 rounded-2xl border-2 border-dark-600 bg-dark-800/50
+               hover:border-accent-cyan hover:bg-dark-800 transition-all duration-300
+               flex items-center gap-3 text-dark-300 hover:text-accent-cyan"
+      >
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+        </svg>
+        <span class="font-display font-medium">View Instances</span>
+      </button>
+    }
   </div>
 
   <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
@@ -58,23 +72,28 @@
         <!-- Selection indicator -->
         @if (selectedAgent?.id === agent.id) {
           <div 
-            class="absolute top-3 right-3 w-3 h-3 rounded-full animate-pulse-subtle" 
+            class="absolute top-3 left-3 w-3 h-3 rounded-full animate-pulse-subtle" 
             [style.background-color]="getAgentColor(agent)"
           ></div>
         }
 
-        <!-- Delete button -->
-        <button
-          (click)="onDeleteAgent(agent, $event)"
-          class="absolute bottom-3 right-3 p-1.5 rounded-lg bg-dark-900/80 text-dark-500 
-                 opacity-0 group-hover:opacity-100 transition-opacity
-                 hover:bg-accent-rose/20 hover:text-accent-rose delete-btn"
-          title="Delete agent"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
+        <!-- Quick create button - appears when card is selected -->
+        @if (selectedAgent?.id === agent.id) {
+          <button
+            (click)="onQuickCreate(agent, $event)"
+            class="absolute bottom-3 right-3 px-3 py-1.5 rounded-lg text-sm font-medium
+                   flex items-center gap-1.5 transition-all duration-200 create-btn"
+            [style.background-color]="getAgentColor(agent)"
+            [style.color]="'#fff'"
+            [title]="'Start new chat with ' + agent.name"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Start</span>
+          </button>
+        }
       </button>
     }
     
@@ -90,39 +109,6 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
       </svg>
       <span class="font-display font-medium">Add New Agent</span>
-    </button>
-  </div>
-
-  <div class="flex justify-center gap-4">
-    @if (hasInstances) {
-      <button
-        (click)="onContinueInstance('latest')"
-        class="px-6 py-4 rounded-xl font-display font-semibold text-lg
-               bg-dark-700 text-dark-200 border border-dark-600
-               hover:bg-dark-600 hover:border-dark-500 transition-all duration-300"
-      >
-        Continue Instance
-      </button>
-    }
-    <button
-      (click)="onCreateInstance()"
-      [disabled]="!selectedAgent || isLoading"
-      [class.start-button]="selectedAgent"
-      [class.disabled]="!selectedAgent || isLoading"
-      [style.background-color]="selectedAgent ? activeColor() : null"
-      [style.box-shadow]="selectedAgent ? '0 10px 40px -10px ' + activeColor() + '50' : null"
-    >
-      @if (isLoading) {
-        <span class="flex items-center gap-2">
-          <svg class="animate-spin h-5 w-5" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-          </svg>
-          Creating Instance...
-        </span>
-      } @else {
-        Start New Chat
-      }
     </button>
   </div>
 </div>

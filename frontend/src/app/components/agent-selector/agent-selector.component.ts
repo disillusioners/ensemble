@@ -25,6 +25,8 @@ export class AgentSelectorComponent {
   @Output() addAgent = new EventEmitter<AgentCreate>();
   @Output() deleteAgent = new EventEmitter<string>();
   @Output() startMother = new EventEmitter<void>();
+  @Output() quickCreateInstance = new EventEmitter<Agent>();
+  @Output() viewInstances = new EventEmitter<void>();
 
   protected readonly colorMap: Record<string, string> = {
     'accent-amber': '#f59e0b',
@@ -68,6 +70,15 @@ export class AgentSelectorComponent {
 
   protected onStartMother(): void {
     this.startMother.emit();
+  }
+
+  protected onQuickCreate(agent: Agent, event: Event): void {
+    event.stopPropagation();
+    this.quickCreateInstance.emit(agent);
+  }
+
+  protected onViewInstances(): void {
+    this.viewInstances.emit();
   }
 
   protected onDeleteAgent(agent: Agent, event: Event): void {
