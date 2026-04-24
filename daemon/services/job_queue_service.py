@@ -571,6 +571,7 @@ class JobQueueService:
         statuses: list[str] | None = None,
         project_id: str | None = None,
         queue_id: str | None = None,
+        offset: int = 0,
         limit: int = 50,
         include_deleted: bool = False,
     ) -> list[JobItem]:
@@ -580,6 +581,7 @@ class JobQueueService:
             statuses: Optional list of status filters.
             project_id: Optional project ID filter.
             queue_id: Optional queue ID filter.
+            offset: Number of jobs to skip.
             limit: Maximum number of jobs to return.
             include_deleted: Whether to include soft-deleted jobs.
             
@@ -591,6 +593,7 @@ class JobQueueService:
             statuses=statuses,
             project_id=project_id,
             queue_id=queue_id,
+            offset=offset,
             limit=limit,
             include_deleted=include_deleted,
         )

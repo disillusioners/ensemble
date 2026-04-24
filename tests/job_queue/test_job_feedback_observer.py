@@ -8,7 +8,7 @@ without relying on the full async event loop to avoid timing issues.
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, ANY
 
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.models import JobItem
@@ -119,6 +119,7 @@ class TestObserverCompletesJob:
             job_id="job-123",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
+            completed_at=ANY,
         )
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
 
@@ -161,6 +162,7 @@ class TestObserverFailsJob:
             job_id="job-123",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.FAILED.value,
+            completed_at=ANY,
             error_message="Something went wrong",
         )
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
@@ -546,6 +548,7 @@ class TestObserverDefaultErrorMessage:
             job_id="job-123",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.FAILED.value,
+            completed_at=ANY,
             error_message="Unknown error",
         )
 
@@ -696,11 +699,13 @@ class TestObserverStartStop:
             job_id="job-1",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
+            completed_at=ANY,
         )
         mock_job_repo.atomic_transition.assert_any_call(
             job_id="job-2",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
+            completed_at=ANY,
         )
 
 

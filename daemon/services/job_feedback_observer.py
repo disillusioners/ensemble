@@ -12,6 +12,7 @@ Key behaviors:
 - Provides health monitoring with periodic logging
 """
 import asyncio
+from datetime import datetime
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -246,6 +247,7 @@ class JobFeedbackObserver:
             return
 
         # Map status to action using atomic transition
+        now = datetime.utcnow().isoformat()
         try:
             if status == "completed":
                 # Use atomic_transition for PROCESSING -> COMPLETED
@@ -253,6 +255,7 @@ class JobFeedbackObserver:
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.COMPLETED.value,
+                    completed_at=now,
                 )
                 logger.info(
                     f"Observer: completed job {job.job_id[:8]}... "
@@ -268,6 +271,7 @@ class JobFeedbackObserver:
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.FAILED.value,
+                    completed_at=now,
                     error_message=error_message,
                 )
                 logger.info(
