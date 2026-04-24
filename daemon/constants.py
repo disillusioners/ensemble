@@ -4,6 +4,8 @@ All magic numbers in the codebase are consolidated here for discoverability
 and maintainability. Constants are organized by category.
 """
 
+# ── Projects ────────────────────────────────────────────────────────────────────
+
 # ── API Limits ──────────────────────────────────────────────────────────────────
 DEFAULT_PAGE_LIMIT: int = 20  # Default pagination limit for instance/message listing
 DEFAULT_JOB_LIST_LIMIT: int = 50  # Default limit for job listing
@@ -78,3 +80,7 @@ SUMMARIZATION_CHUNK_THRESHOLD: float = 0.60  # Chunk threshold for summarization
 
 # ── Health & Monitoring ───────────────────────────────────────────────────────────
 OBSERVER_HEALTH_CHECK_INTERVAL_S: int = 300  # Observer health check interval (5 min)
+
+# ── System Default Project ───────────────────────────────────────────────────────
+SYSTEM_DEFAULT_PROJECT_NAME = "__system_default__"
+SYSTEM_DEFAULT_PROJECT_ID: str | None = None  # Set at startup by ensure_system_default_project()

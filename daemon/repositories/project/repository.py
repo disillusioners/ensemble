@@ -12,6 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
 from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
 
 class SQLModelProjectRepository:
@@ -155,6 +156,38 @@ class SQLModelProjectRepository:
                 select(Project).where(Project.name == name)
             ).first()
             return self._enrich_project(session, project)
+
+    def ensure_system_default_project(self) -> str:
+        """Get or create the system default project (idempotent).
+
+        Returns:
+            The project_id of the system default project.
+        """
+        # Check if exists
+        existing = self.get_by_name(SYSTEM_DEFAULT_PROJECT_NAME)
+        if existing:
+            return existing.project_id
+
+        # Create with deterministic UUID for consistency across restarts
+        project_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, SYSTEM_DEFAULT_PROJECT_NAME))
+        now = datetime.now(timezone.utc).isoformat()
+
+        with Session(self.engine) as session:
+            project = Project(
+                project_id=project_id,
+                name=SYSTEM_DEFAULT_PROJECT_NAME,
+                project_type="system",
+                status=ProjectStatus.ACTIVE.value,
+                description="System default project for jobs without an explicit project",
+                project_metadata={"is_system": True},
+                relationships={},
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(project)
+            session.commit()
+
+        return project_id
 
     def get_by_shortname(self, shortname: str) -> Project | None:
         """Get a project by shortname."""

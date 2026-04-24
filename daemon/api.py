@@ -64,6 +64,7 @@ from daemon import __version__
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
+import daemon.constants
 
 # Determine the base path (use working directory for production)
 # PyInstaller runs from INSTALL_DIR where frontend/dist is expected
@@ -233,6 +234,17 @@ async def lifespan(app: FastAPI):
     )
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
+    
+    # Bootstrap system default project (Phase 1 of system_default_project feature)
+    # This ensures the system project exists and has its queues provisioned
+    # before any other services start using it. Must run BEFORE JobProcessor.start().
+    try:
+        system_project_id = manager._project_repository.ensure_system_default_project()
+        constants.SYSTEM_DEFAULT_PROJECT_ID = system_project_id
+        await job_queue_mgmt_service.auto_provision_system_queues(system_project_id)
+        logger.info(f"System default project bootstrapped: {system_project_id}")
+    except Exception as e:
+        logger.warning(f"Failed to bootstrap system default project: {e}")
     
     # Initialize and start JobProcessor
     job_processor = JobProcessor(
