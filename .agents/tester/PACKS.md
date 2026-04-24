@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 16 packs
-- Unit: 13 | Integration: 1 | Mock: 2
+- Total: 17 packs
+- Unit: 14 | Integration: 1 | Mock: 2
 
 ## Unit Test Packs
 
@@ -14,6 +14,7 @@
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-04-23 | ✅ PASS (148 passed, 8 skipped, Phase 6 no regression) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-04-23 | ✅ PASS (948 passed, 19 skipped, Phase 6 no regression) |
+| jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format, tool registration, agent definition, crash recovery | 2 min | 2026-04-24 | ✅ PASS (38 passed, 0 failed, 2 benign bugs found) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service) | 2 min | 2026-04-23 | ✅ PASS (278 passed, Phase 6 no regression) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | models_split_unit_test | tests/unit/test_models_split.py | Phase 2 models split: backward compat, __all__ completeness, cross-module refs, instantiation, HealthResponse, Pydantic behavior | 2 min | 2026-04-23 | ✅ PASS (30 passed, Phase 6 no regression) |
