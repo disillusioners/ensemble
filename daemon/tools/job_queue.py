@@ -512,8 +512,6 @@ def create_job_tools(
 
             # Terminal state check — includes dead_letter
             if job.status in TERMINAL_STATES:
-                # Register watch first, then notify (notify_watchers sends notification AND removes the watch — terminal states are final)
-                watcher_repo.add_watch(job_id, current_instance_id, events)
                 # Register watch first, then notify (notify_watchers sends + cleans up)
                 watcher_repo.add_watch(job_id, current_instance_id, events)
                 await job_service.notify_watchers(job_id, job.status, job.error_message)
@@ -601,8 +599,6 @@ def create_job_tools(
                     continue
 
                 if job.status in TERMINAL_STATES:
-                    # Register watch first, then notify (notify_watchers sends notification AND removes the watch — terminal states are final)
-                    watcher_repo.add_watch(jid, current_instance_id, events)
                     # Register watch first, then notify (notify_watchers sends + cleans up)
                     watcher_repo.add_watch(jid, current_instance_id, events)
                     await job_service.notify_watchers(jid, job.status, job.error_message)
