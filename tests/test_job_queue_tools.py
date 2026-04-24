@@ -5,6 +5,28 @@ from unittest.mock import AsyncMock, MagicMock
 
 from daemon.tools.job_queue import create_job_tools
 from daemon.tools._tool_registry import CATEGORY_MODULES
+from daemon import constants
+from daemon.services import project_normalizer
+
+# Test constant for system default project ID
+TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+# ── Autouse Fixtures ─────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def setup_system_default_project():
+    """Set SYSTEM_DEFAULT_PROJECT_ID for tests that call normalize_project_id()."""
+    original_in_constants = constants.SYSTEM_DEFAULT_PROJECT_ID
+    original_in_normalizer = project_normalizer.SYSTEM_DEFAULT_PROJECT_ID
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
+
+    yield
+
+    constants.SYSTEM_DEFAULT_PROJECT_ID = original_in_constants
+    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = original_in_normalizer
 
 
 class TestJobQueueToolRegistration:
