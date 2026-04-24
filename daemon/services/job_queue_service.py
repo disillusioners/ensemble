@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
+from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.registry import get_registry
@@ -196,7 +197,7 @@ class JobQueueService:
         if self._watcher_repo is None:
             return 0
         
-        terminal_states = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+        terminal_states = set(ALL_TERMINAL_STATES)
         
         all_watches = self._watcher_repo.get_all_active_watches()
         reconciled = 0

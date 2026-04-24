@@ -7,18 +7,20 @@ from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
+from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
+    from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 
 CATEGORY_NAME = "Job Queue"
 CATEGORY_DOC = """\
 Create, list, and manage jobs and job queues.
 """
 
-TERMINAL_STATES = {"completed", "failed", "cancelled", "terminated", "dead_letter"}
+TERMINAL_STATES = set(ALL_TERMINAL_STATES)
 
 # Full documentation strings for each tool
 _FULL_DOCS = {
@@ -203,7 +205,7 @@ def create_job_tools(
     dead_letter_service: "DeadLetterService",
     current_instance_id: str = "",
     agent_id: str = "",
-    watcher_repo=None,  # NEW: JobWatcherRepository | None
+    watcher_repo: "JobWatcherRepository | None" = None,
 ):
     """Create job queue management tools with injected services.
     

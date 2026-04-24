@@ -8,7 +8,7 @@ from sqlalchemy import delete as sql_delete, func
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
-from .watcher_models import JobWatcher
+from .watcher_models import JobWatcher, ALL_TERMINAL_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class JobWatcherRepository:
         Returns:
             The created or updated JobWatcher.
         """
-        default_events = ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+        default_events = list(ALL_TERMINAL_STATES)
         events = watch_events or default_events
 
         with SQLModelSession(self.engine) as db_session:

@@ -9,6 +9,8 @@ from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
+ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+
 
 class JobWatcher(SQLModel, table=True):
     """Job watcher - subscribes to job lifecycle events.
@@ -37,7 +39,7 @@ class JobWatcher(SQLModel, table=True):
     # JSON list of terminal states to watch for
     # Default includes ALL terminal states including dead_letter
     watch_events: list[str] = Field(
-        default_factory=lambda: ["completed", "failed", "cancelled", "terminated", "dead_letter"],
+        default_factory=lambda: list(ALL_TERMINAL_STATES),
         sa_column=Column(JSON)
     )
 
