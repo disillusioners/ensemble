@@ -6,6 +6,6 @@
   "color": "accent-blue",
   "version": "1.0.0",
   "tools": {
-    "allow": ["job", "instance", "self", "help", "time", "project"]
+    "allow": ["job", "help", "self", "time", "project"]
   }
 }

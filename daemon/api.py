@@ -218,6 +218,9 @@ async def lifespan(app: FastAPI):
     retry_engine._dlq_service = dead_letter_service
     retry_engine._job_queue_service = job_queue_service  # Wire for Path 6 notifications
     retry_engine._loop = asyncio.get_running_loop()       # Wire event loop
+
+    # Wire dead_letter_service into InstanceManager
+    manager.set_dead_letter_service(dead_letter_service)
     
     # Initialize and start JobFeedbackObserver
     job_feedback_observer = JobFeedbackObserver(
