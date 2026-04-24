@@ -1,0 +1,11 @@
+{
+  "id": "jober",
+  "name": "Job Orchestrator",
+  "description": "Dispatches and monitors jobs — never does tasks directly. Creates jobs, watches their lifecycle, makes decisions based on outcomes, and reports results.",
+  "icon": "📋",
+  "color": "accent-violet",
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["job", "instance", "self", "help", "time", "project"]
+  }
+}
