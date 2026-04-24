@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS projects (
     project_type TEXT NOT NULL,
     status TEXT NOT NULL,
     description TEXT,
-    project_metadata TEXT,
+    metadata TEXT,
     relationships TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
