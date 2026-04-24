@@ -21,8 +21,9 @@ INSERT OR IGNORE INTO projects (
     project_type,
     status,
     description,
-    project_metadata,
+    metadata,
     relationships,
+    job_queue_paused,
     created_at,
     updated_at
 ) VALUES (
@@ -33,8 +34,9 @@ INSERT OR IGNORE INTO projects (
     'System default project for jobs without an explicit project',
     '{"is_system": true}',
     '{}',
-    strftime('%Y-%m-%dT%H:%M:%S', 'now'),
-    strftime('%Y-%m-%dT%H:%M:%S', 'now')
+    0,
+    datetime('now'),
+    datetime('now')
 );
 
 -- STEP 2: Ensure system FIFO queue exists for the system default project
@@ -46,9 +48,10 @@ INSERT OR IGNORE INTO job_queues (
     queue_name_lower,
     queue_type,
     concurrency_limit,
-    is_paused,
     is_system,
+    is_paused,
     description,
+    default_max_retries,
     created_at,
     updated_at
 ) VALUES (
@@ -58,11 +61,12 @@ INSERT OR IGNORE INTO job_queues (
     'system_fifo_queue',
     'fifo',
     1,
-    0,
     1,
+    0,
     'System FIFO queue - default, one job at a time',
-    strftime('%Y-%m-%dT%H:%M:%S', 'now'),
-    strftime('%Y-%m-%dT%H:%M:%S', 'now')
+    NULL,
+    datetime('now'),
+    datetime('now')
 );
 
 -- STEP 3: Backfill job_queue_items with NULL project_id
@@ -85,14 +89,21 @@ WHERE project_id IS NULL OR project_id = '';
 
 -- STEP 6: Assign queue_id to orphaned jobs (system default project but NULL queue_id)
 -- These jobs were created after Phase 2 normalization added project_id but before queue assignment
+-- Use COALESCE to find the existing queue_id if it exists, or the migration's default queue_id
 UPDATE job_queue_items
-SET queue_id = 'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+SET queue_id = COALESCE(
+    (SELECT queue_id FROM job_queues WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e' AND queue_name_lower = 'system_fifo_queue'),
+    'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+)
 WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e'
   AND queue_id IS NULL;
 
 -- STEP 7: Assign queue_id to orphaned dead_letter_items
 UPDATE dead_letter_items
-SET queue_id = 'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+SET queue_id = COALESCE(
+    (SELECT queue_id FROM job_queues WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e' AND queue_name_lower = 'system_fifo_queue'),
+    'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+)
 WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e'
   AND queue_id IS NULL;
 
@@ -108,9 +119,15 @@ SELECT COUNT(*) FROM dead_letter_items WHERE project_id IS NULL OR project_id = 
 UPDATE job_queue_items
 SET queue_id = NULL
 WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e'
-  AND queue_id = 'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e';
+  AND queue_id = COALESCE(
+    (SELECT queue_id FROM job_queues WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e' AND queue_name_lower = 'system_fifo_queue'),
+    'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+  );
 
 UPDATE dead_letter_items
 SET queue_id = NULL
 WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e'
-  AND queue_id = 'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e';
+  AND queue_id = COALESCE(
+    (SELECT queue_id FROM job_queues WHERE project_id = '71931ae0-0f25-5fbf-853b-2a78cc978d7e' AND queue_name_lower = 'system_fifo_queue'),
+    'sys-fifo-71931ae0-0f25-5fbf-853b-2a78cc978d7e'
+  );
