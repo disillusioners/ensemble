@@ -27,7 +27,15 @@ class JobCreateRequest(BaseModel):
         if not 1 <= v <= 10:
             raise ValueError("Priority must be between 1 and 10")
         return v
-    
+
+    @field_validator("project_id", mode="before")
+    @classmethod
+    def normalize_project_id_field(cls, v):
+        if v is None or (isinstance(v, str) and v.strip() == ""):
+            from daemon.services.project_normalizer import normalize_project_id
+            return normalize_project_id(v)
+        return v
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -360,6 +368,7 @@ class ProjectResponse(BaseModel):
     creator_agent_id: str | None = Field(default=None, description="Creator agent ID")
     created_at: str = Field(..., description="Project creation timestamp")
     updated_at: str = Field(..., description="Project update timestamp")
+    is_system: bool = Field(default=False, description="Whether this is a system-reserved project")
     
     model_config = {
         "json_schema_extra": {
@@ -379,7 +388,8 @@ class ProjectResponse(BaseModel):
                 "creator_instance_id": "session-uuid",
                 "creator_agent_id": "coder",
                 "created_at": "2025-03-15T10:00:00",
-                "updated_at": "2025-03-15T10:00:00"
+                "updated_at": "2025-03-15T10:00:00",
+                "is_system": False
             }
         }
     }
@@ -403,7 +413,8 @@ class ProjectListResponse(BaseModel):
                         "job_queue_paused": False,
                         "tags": ["python"],
                         "created_at": "2025-03-15T10:00:00",
-                        "updated_at": "2025-03-15T10:00:00"
+                        "updated_at": "2025-03-15T10:00:00",
+                        "is_system": False
                     }
                 ],
                 "total": 1

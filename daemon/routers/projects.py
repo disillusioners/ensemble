@@ -4,6 +4,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
+from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
 from .schemas import ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest
@@ -85,6 +86,7 @@ def _project_to_response(project) -> ProjectResponse:
         creator_agent_id=project.creator_agent_id,
         created_at=project.created_at,
         updated_at=project.updated_at,
+        is_system=(project.name == SYSTEM_DEFAULT_PROJECT_NAME),
     )
 
 
@@ -188,14 +190,21 @@ async def get_project(
     response_model=ProjectListResponse,
 )
 async def list_projects(
+    exclude_system: bool = False,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectListResponse:
     """List all projects.
+    
+    Query params:
+        exclude_system: If True, excludes the system default project from results (default: False)
     
     Returns:
         200 with list of projects
     """
     projects = await asyncio.to_thread(repo.list_projects)
+    
+    if exclude_system:
+        projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
     return ProjectListResponse(
         projects=[_project_to_response(p) for p in projects],
@@ -210,10 +219,14 @@ async def list_projects(
     include_in_schema=False,
 )
 async def list_projects_trailing(
+    exclude_system: bool = False,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectListResponse:
     """List all projects (trailing slash variant)."""
     projects = await asyncio.to_thread(repo.list_projects)
+    
+    if exclude_system:
+        projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
     return ProjectListResponse(
         projects=[_project_to_response(p) for p in projects],
