@@ -2,7 +2,7 @@
 
 ## Primary
 - `opencode_skill` — for spawning opencode sessions to verify plan claims
-  - **⚠️ ALWAYS append `--council` to every prompt** — see `rule.md` for examples
+   **`--council` is a flag — place it before positional arguments**
 
 ## Secondary (quick checks only)
 - `Read` — single file reads

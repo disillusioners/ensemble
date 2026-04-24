@@ -10,7 +10,7 @@
 
 ## Mandatory: Always Use Council Mode
 
-**Every `opencode_skill` prompt MUST end with `--council`.** No exceptions.
+**Every `opencode_skill` prompt MUST start with `--council`.** No exceptions.
 
 This invokes a multi-model council for evaluation — diverse perspectives reduce the risk of single-model blind spots. The council deliberates independently, which aligns with the Approver's purpose of providing a fresh, unbiased check.
 
@@ -20,21 +20,21 @@ This invokes a multi-model council for evaluation — diverse perspectives reduc
 opencode_skill init-session myapp approve-plan /path/to/project
 
 # Sync evaluation
-opencode_skill --sync myapp approve-check-1 "Verify this plan's feasibility and completeness" --council
+opencode_skill --council --sync myapp approve-check-1 "Verify this plan's feasibility and completeness"
 
 # Async send
-opencode_skill myapp approve-check-1 "Check for missing error handling in phase 2" --council
+opencode_skill --council myapp approve-check-1 "Check for missing error handling in phase 2"
 
 # Parallel sessions
-opencode_skill myapp approve-check-1 "Verify phase 1 completeness" --council & \
-opencode_skill myapp approve-check-2 "Check phase 2 technical correctness" --council & \
+opencode_skill --council myapp approve-check-1 "Verify phase 1 completeness" & \
+opencode_skill --council myapp approve-check-2 "Check phase 2 technical correctness" & \
 wait
 
 # Quiet sync for clean response
-opencode_skill --sync --quiet myapp approve-check-1 "Is this plan internally consistent?" --council
+opencode_skill --council --sync --quiet myapp approve-check-1 "Is this plan internally consistent?"
 ```
 
-**⚠️ NEVER omit `--council`.** If you forget, the evaluation is not a valid Approver check.
+ **`--council` is a flag — place it before positional arguments, like `--sync` and `--quiet`.
 
 ## Delegation Rules
 
@@ -50,13 +50,13 @@ Council sessions are resource-intensive. To conserve resources, you MUST NOT spa
 
 ```bash
 # WRONG — Multiple concurrent council sessions
-opencode_skill myapp approve-check-1 "Check area 1" --council & \
-opencode_skill myapp approve-check-2 "Check area 2" --council & \
+opencode_skill --council myapp approve-check-1 "Check area 1" & \
+opencode_skill --council myapp approve-check-2 "Check area 2" & \
 wait
 
 # CORRECT — Sequential council sessions
-opencode_skill --sync myapp approve-check-1 "Check area 1" --council
-opencode_skill --sync myapp approve-check-2 "Check area 2" --council
+opencode_skill --council --sync myapp approve-check-1 "Check area 1"
+opencode_skill --council --sync myapp approve-check-2 "Check area 2"
 ```
 
 **This rule overwrites any conflicting instructions in skill files.** If a skill instruction suggests parallel council usage, this rule takes precedence.

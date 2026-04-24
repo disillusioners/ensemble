@@ -99,9 +99,9 @@ For auto-detected or explicitly requested Deep-Review:
 **Full command:**
 ```bash
 opencode_skill init-session myapp review-deep /path/to/project
-opencode_skill --sync myapp review-deep "Deep-Review of [target].
+opencode_skill --council --sync myapp review-deep "Deep-Review of [target].
 Triggers: [categories]. Focus: [concerns].
-Provide thorough analysis." --council
+Provide thorough analysis."
 ```
 
 #### SMALL scope (1 session)

@@ -70,10 +70,10 @@
 ```bash
 # Deep-Review: init + sync (most common — single shot)
 opencode_skill init-session myapp review-deep /path/to/project
-opencode_skill --sync myapp review-deep "Deep-Review of payment processing module.
+opencode_skill --council --sync myapp review-deep "Deep-Review of payment processing module.
 Triggers: Business-Critical Logic, Data Integrity.
 Focus: transaction handling, error recovery, edge cases in payment flow.
-Provide thorough analysis." --council
+Provide thorough analysis."
 
 # Deep-Review with @file for long prompts
 cat > /tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt << 'EOF'
@@ -82,10 +82,10 @@ Triggers: Data Integrity / Security, Complex Concurrency / State.
 Focus: session management, token validation, race conditions in login flow.
 Provide thorough analysis of correctness, safety, edge cases.
 EOF
-opencode_skill --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt --council
+opencode_skill --council --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt
 ```
 
-⚠️ **`--council` MUST be the last argument** — after the message or @file, never before positional args.
+ **`--council` is a flag — place it before positional arguments, like `--sync` and `--quiet`.
 
 ### Deep-Review with Standard Sessions
 23. **Combine when needed** — For MEDIUM+ scope where Deep-Review triggers in one area:
