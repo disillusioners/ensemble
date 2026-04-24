@@ -3,7 +3,7 @@
   "name": "Approver",
   "description": "Independent second-pass reviewer that double-checks plans and decisions with fresh eyes, minimal context bias",
   "icon": "✅",
-  "color": "accent-green",
+  "color": "accent-emerald",
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help"]
   }

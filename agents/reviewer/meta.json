@@ -3,7 +3,7 @@
   "name": "Reviewer",
   "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
   "icon": "🔍",
-  "color": "accent-purple",
+  "color": "accent-rose",
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help"]
   }
