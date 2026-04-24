@@ -23,6 +23,14 @@ $accent-blue: #3b82f6;
 
 .agent-selector {
   animation: fadeIn 0.3s ease-out;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.header-section {
+  text-align: center;
+  margin-bottom: 0.5rem;
 }
 
 @keyframes fadeIn {
@@ -542,6 +550,14 @@ button {
 
 .z-50 {
   z-index: 50;
+}
+
+.z-10 {
+  z-index: 10;
+}
+
+.relative {
+  position: relative;
 }
 
 // Transitions
