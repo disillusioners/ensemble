@@ -93,6 +93,7 @@ async def mock_manager():
     mock_repo.list_schedule_executions = Mock(return_value=[])
     mock_repo.record_execution_start = Mock()
     mock_repo.record_execution_complete = Mock()
+    mock_repo.get_latest_execution = Mock(return_value=None)
     manager._source_repository = mock_repo
     
     # Mock source_registry

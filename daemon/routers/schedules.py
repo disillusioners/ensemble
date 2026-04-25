@@ -56,7 +56,16 @@ async def list_schedules(request: Request):
                     next_run_at = adapter._get_next_trigger_time()
                 except Exception:
                     pass
-            
+
+            # Get last_run_at from latest execution record
+            last_run_at = None
+            try:
+                latest_execution = manager._source_repository.get_latest_execution(src.source_id)
+                if latest_execution:
+                    last_run_at = parse_utc_datetime(latest_execution.triggered_at)
+            except Exception:
+                pass
+
             schedules.append(ScheduleInfo(
                 id=src.source_id,
                 name=src.name,
@@ -64,6 +73,7 @@ async def list_schedules(request: Request):
                 status=SourceStatus(src.status),
                 created_at=parse_utc_datetime(src.created_at),
                 updated_at=parse_utc_datetime(src.updated_at),
+                last_run_at=last_run_at,
                 next_run_at=next_run_at,
             ))
     return ScheduleListResponse(schedules=schedules)
@@ -138,7 +148,16 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
             next_run_at = adapter._get_next_trigger_time()
         except Exception:
             pass
-    
+
+    # Get last_run_at from latest execution record
+    last_run_at = None
+    try:
+        latest_execution = manager._source_repository.get_latest_execution(schedule_id)
+        if latest_execution:
+            last_run_at = parse_utc_datetime(latest_execution.triggered_at)
+    except Exception:
+        pass
+
     return ScheduleInfo(
         id=updated.source_id,
         name=updated.name,
@@ -146,7 +165,7 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         status=SourceStatus(updated.status),
         created_at=parse_utc_datetime(updated.created_at),
         updated_at=parse_utc_datetime(updated.updated_at),
-        last_run_at=None,
+        last_run_at=last_run_at,
         next_run_at=next_run_at,
     )
 
