@@ -456,24 +456,33 @@ class JobQueueService:
             
             if instance_alive:
                 # Terminate the instance (cascades to children, cancels requests,
-                # releases locks, marks job FAILED)
+                # releases locks, marks job as TERMINATED)
                 await self._instance_manager.terminate_instance(instance_id)
                 
-                # terminate_instance() marks job as FAILED.
+                # terminate_instance() marks job as TERMINATED (or FAILED if already done).
                 # For cancellation, we want CANCELLED status.
-                # Attempt FAILED → CANCELLED transition.
+                # Re-fetch job to get actual current status, then transition to CANCELLED.
+                current_job = await asyncio.to_thread(self._repository.get, job.job_id)
+                if current_job is None:
+                    return False
+                
+                current_status = current_job.status
+                
+                # Map various intermediate states to what we expect for cancellation
+                # TERMINATED -> CANCELLED is valid (user wants final "cancelled" status)
+                # FAILED -> CANCELLED is valid (cancel_after_fail)
+                # If already CANCELLED, that's fine too (idempotent)
                 try:
                     await asyncio.to_thread(
                         self._repository.atomic_transition,
                         job_id=job.job_id,
-                        from_status=JobStatus.FAILED.value,
+                        from_status=current_status,
                         to_status=JobStatus.CANCELLED.value,
                     )
                 except InvalidTransitionError:
-                    # Job may have already transitioned (e.g., was already FAILED
-                    # and then completed the transition) — that's fine
+                    # Job may have already transitioned to another terminal state
                     logger.warning(
-                        f"Could not transition job {job.job_id} from FAILED to CANCELLED; "
+                        f"Could not transition job {job.job_id} from {current_status} to CANCELLED; "
                         "may already be terminal"
                     )
             else:

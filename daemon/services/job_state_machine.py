@@ -31,6 +31,8 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
     (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",
     (_STATUS_DEAD_LETTER, _STATUS_PENDING): "replay",
+    # Allow cancelling terminated jobs (user cancellation should override termination)
+    (_STATUS_TERMINATED, _STATUS_CANCELLED): "cancel_after_terminate",
 }
 
 
