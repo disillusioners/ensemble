@@ -196,22 +196,22 @@ class TestJoberWatchIntegration:
 
     @pytest.mark.asyncio
     async def test_path4_terminate(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
-        """Path 4: terminate_instance() → TERMINATED notification."""
+        """Path 4: terminate_instance() → CANCELLED notification (simplified, no TERMINATED state)."""
         watcher_repo.add_watch(mock_job_item.job_id, "watcher-instance-1")
-        mock_job_item.status = "terminated"
+        mock_job_item.status = "cancelled"
 
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
         job_queue_service._repository.terminate_job = MagicMock(return_value=mock_job_item)
 
         await job_queue_service.complete_job(
             mock_job_item.job_id,
-            demand_state=DemandState.TERMINATED,
-            error="Terminated by user"
+            demand_state=DemandState.CANCELLED,
+            error="Cancelled by user"
         )
 
         instance_manager.enqueue_message.assert_called()
         call_args = instance_manager.enqueue_message.call_args
-        assert "terminated" in call_args[1]["message"]
+        assert "cancelled" in call_args[1]["message"]
 
     @pytest.mark.asyncio
     async def test_path5_dead_letter_standalone(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
@@ -541,7 +541,7 @@ class TestJobWatcherRepository:
         watch = watcher_repo.add_watch("job-123", "instance-456")
         assert watch.job_id == "job-123"
         assert watch.instance_id == "instance-456"
-        assert watch.watch_events == ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+        assert watch.watch_events == ["completed", "failed", "cancelled", "dead_letter"]
 
     def test_add_watch_with_custom_events(self, watcher_repo):
         """Add watch with custom event list."""

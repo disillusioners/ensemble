@@ -512,12 +512,12 @@ class JobRepository:
         job_id: str,
         error_message: str,
     ) -> JobItem | None:
-        """Terminate a job (PROCESSING -> TERMINATED). No retry triggered."""
+        """Terminate a job (PROCESSING -> CANCELLED). No retry triggered."""
         now = datetime.utcnow().isoformat()
         return self.atomic_transition(
             job_id,
             from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.TERMINATED.value,
+            to_status=JobStatus.CANCELLED.value,
             completed_at=now,
             error_message=error_message,
         )

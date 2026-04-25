@@ -284,7 +284,7 @@ class TestCancelAlreadyTerminalJob:
 
     @pytest.mark.asyncio
     async def test_cancel_failed_job(self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager):
-        """FAILED job -> returns False."""
+        """FAILED job -> transitions to CANCELLED (stops retries)."""
         from daemon.services.job_queue_service import JobQueueService
 
         # Setup: failed job
@@ -302,8 +302,15 @@ class TestCancelAlreadyTerminalJob:
         # Cancel
         result = await service.cancel_job("job-failed")
 
-        # Verify: cancellation failed
-        assert result is False
+        # Verify: cancellation succeeded
+        assert result is True
+        
+        # Verify: transition to CANCELLED
+        mock_repository.atomic_transition.assert_called_once_with(
+            job_id="job-failed",
+            from_status="failed",
+            to_status="cancelled",
+        )
 
     @pytest.mark.asyncio
     async def test_cancel_cancelled_job(self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager):
@@ -442,7 +449,7 @@ class TestCancelProcessingWithAliveInstanceCascade:
     async def test_cancel_cascade_full_flow(
         self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager
     ):
-        """Full cascade: PROCESSING -> terminate -> FAILED -> CANCELLED."""
+        """Full cascade: PROCESSING -> terminate -> CANCELLED (simplified)."""
         from daemon.services.job_queue_service import JobQueueService
 
         # Setup: processing job with alive instance
@@ -469,16 +476,13 @@ class TestCancelProcessingWithAliveInstanceCascade:
             "instance-alive": mock_instance_meta
         })
 
-        # Mock terminate_instance to simulate the cascade:
-        # terminate_instance() internally calls complete_job_sync which
-        # transitions PROCESSING -> FAILED before returning
+        # Mock terminate_instance: it now marks job as CANCELLED directly
+        # via complete_job_sync(job_id, DemandState.CANCELLED, ...)
         async def mock_terminate(instance_id: str) -> bool:
-            # Simulate what real terminate_instance does:
-            # it marks the job as FAILED via complete_job_sync
             mock_repository.atomic_transition(
                 job_id="job-cascade",
                 from_status="processing",
-                to_status="failed",
+                to_status="cancelled",
             )
             return True
 
@@ -493,14 +497,8 @@ class TestCancelProcessingWithAliveInstanceCascade:
         # Verify: terminate_instance was called
         mock_instance_manager.terminate_instance.assert_called_once_with("instance-alive")
 
-        # Verify: terminate_instance marks job as FAILED
-        # (the service then tries FAILED -> CANCELLED)
-        # Verify specific transitions in the cascade
+        # Verify: terminate_instance marks job as CANCELLED directly
         calls = mock_repository.atomic_transition.call_args_list
-        assert any(
-            c.kwargs.get("to_status") == "failed" or (len(c.args) > 2 and c.args[2] == "failed")
-            for c in calls
-        ), "Expected transition to 'failed' status"
         assert any(
             c.kwargs.get("to_status") == "cancelled" or (len(c.args) > 2 and c.args[2] == "cancelled")
             for c in calls

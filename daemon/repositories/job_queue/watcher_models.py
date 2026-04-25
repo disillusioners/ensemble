@@ -9,7 +9,7 @@ from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
-ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "dead_letter"]
 
 
 class JobWatcher(SQLModel, table=True):

@@ -15,8 +15,6 @@ _STATUS_FAILED = "failed"
 _STATUS_CANCELLED = "cancelled"
 _STATUS_DEAD_LETTER = "dead_letter"
 
-_STATUS_TERMINATED = "terminated"
-
 # State transition table: (from_state, to_state) -> transition_name
 # Using string literals directly to avoid circular imports
 TRANSITIONS: Dict[Tuple[str | None, str], str] = {
@@ -25,14 +23,11 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (_STATUS_PENDING, _STATUS_CANCELLED): "cancel",
     (_STATUS_PROCESSING, _STATUS_COMPLETED): "complete",
     (_STATUS_PROCESSING, _STATUS_FAILED): "fail",
-    (_STATUS_PROCESSING, _STATUS_TERMINATED): "terminate",
     (_STATUS_PROCESSING, _STATUS_CANCELLED): "abort",
     (_STATUS_FAILED, _STATUS_PENDING): "retry",
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
     (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",
     (_STATUS_DEAD_LETTER, _STATUS_PENDING): "replay",
-    # Allow cancelling terminated jobs (user cancellation should override termination)
-    (_STATUS_TERMINATED, _STATUS_CANCELLED): "cancel_after_terminate",
 }
 
 

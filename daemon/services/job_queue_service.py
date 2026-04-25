@@ -32,12 +32,11 @@ class DemandState(enum.Enum):
     """Job demand state for completion.
     
     Used by complete_job/complete_job_sync to specify the terminal state.
-    Unlike success:bool, this enum explicitly distinguishes FAILED (retry)
-    from TERMINATED (no retry).
+    CANCELLED does not trigger retry (unlike FAILED).
     """
     COMPLETED = "completed"   # Successful completion, no retry
     FAILED = "failed"        # Failed with error, may trigger retry
-    TERMINATED = "terminated" # Externally terminated, no retry
+    CANCELLED = "cancelled"  # Cancelled, no retry
 
 
 class JobQueueService:
@@ -399,11 +398,13 @@ class JobQueueService:
         return await asyncio.to_thread(self._repository.update, job_id, **updates)
     
     async def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job. Works for both PENDING and PROCESSING states.
+        """Cancel a job. Works for PENDING, PROCESSING, and FAILED states.
         
         For PROCESSING jobs with an alive instance, this cascades termination
         to the instance (cancelling active requests, terminating children,
         releasing locks) before marking the job as CANCELLED.
+        
+        For FAILED jobs, this stops any pending retries.
         
         Args:
             job_id: Job identifier.
@@ -456,37 +457,13 @@ class JobQueueService:
             
             if instance_alive:
                 # Terminate the instance (cascades to children, cancels requests,
-                # releases locks, marks job as TERMINATED)
+                # releases locks, marks job as CANCELLED via DemandState.CANCELLED)
                 await self._instance_manager.terminate_instance(instance_id)
-                
-                # terminate_instance() marks job as TERMINATED (or FAILED if already done).
-                # For cancellation, we want CANCELLED status.
-                # Re-fetch job to get actual current status, then transition to CANCELLED.
-                current_job = await asyncio.to_thread(self._repository.get, job.job_id)
-                if current_job is None:
-                    return False
-                
-                current_status = current_job.status
-                
-                # Map various intermediate states to what we expect for cancellation
-                # TERMINATED -> CANCELLED is valid (user wants final "cancelled" status)
-                # FAILED -> CANCELLED is valid (cancel_after_fail)
-                # If already CANCELLED, that's fine too (idempotent)
-                try:
-                    await asyncio.to_thread(
-                        self._repository.atomic_transition,
-                        job_id=job.job_id,
-                        from_status=current_status,
-                        to_status=JobStatus.CANCELLED.value,
-                    )
-                except InvalidTransitionError:
-                    # Job may have already transitioned to another terminal state
-                    logger.warning(
-                        f"Could not transition job {job.job_id} from {current_status} to CANCELLED; "
-                        "may already be terminal"
-                    )
+                # Job is now CANCELLED by instance_lifecycle, notify watchers
+                await self.notify_watchers(job.job_id, "cancelled")
+                return True
             else:
-                # Instance already dead or never created — transition directly
+                # Instance already dead or never created — transition directly to CANCELLED
                 try:
                     await asyncio.to_thread(
                         self._repository.atomic_transition,
@@ -496,10 +473,23 @@ class JobQueueService:
                     )
                 except InvalidTransitionError:
                     return False
-            
-            # Notify watchers after successful transition
-            await self.notify_watchers(job.job_id, "cancelled")
-            return True
+                await self.notify_watchers(job.job_id, "cancelled")
+                return True
+        
+        elif job.status == JobStatus.FAILED.value:
+            # FAILED: transition to CANCELLED to stop retries
+            try:
+                await asyncio.to_thread(
+                    self._repository.atomic_transition,
+                    job_id=job.job_id,
+                    from_status=JobStatus.FAILED.value,
+                    to_status=JobStatus.CANCELLED.value,
+                )
+                # Notify watchers after successful transition
+                await self.notify_watchers(job.job_id, "cancelled")
+                return True
+            except InvalidTransitionError:
+                return False
         
         # Terminal or non-cancellable states
         return False
@@ -955,12 +945,12 @@ class JobQueueService:
         error: str | None = None,
         result_summary: str | None = None,
     ) -> JobItem | None:
-        """Mark job as completed/failed/terminated and release lock.
+        """Mark job as completed/failed/cancelled and release lock.
         
         Args:
             job_id: The job ID to complete.
-            demand_state: Terminal state (COMPLETED, FAILED, or TERMINATED).
-            error: Error message if demand_state is FAILED or TERMINATED.
+            demand_state: Terminal state (COMPLETED, FAILED, or CANCELLED).
+            error: Error message if demand_state is FAILED or CANCELLED.
             result_summary: Optional summary text for completed jobs.
             
         Returns:
@@ -1007,13 +997,13 @@ class JobQueueService:
                 if failed_job is not None:
                     await self.notify_watchers(job_id, "failed", error)
                 return failed_job
-            elif demand_state == DemandState.TERMINATED:
-                # TERMINATED state does not trigger retry
+            elif demand_state == DemandState.CANCELLED:
+                # CANCELLED state does not trigger retry
                 result = await asyncio.to_thread(
-                    self._repository.terminate_job, job_id, error_message=error or "Terminated"
+                    self._repository.terminate_job, job_id, error_message=error or "Cancelled"
                 )
                 # Notify watchers after successful transition
-                await self.notify_watchers(job_id, "terminated", error)
+                await self.notify_watchers(job_id, "cancelled", error)
                 return result
         except (ValueError, InvalidTransitionError):
             # Job state changed (already completed/cancelled)
@@ -1026,7 +1016,7 @@ class JobQueueService:
         error: str | None = None,
         result_summary: str | None = None,
     ) -> JobItem | None:
-        """Mark job as completed/failed/terminated and release lock (synchronous version).
+        """Mark job as completed/failed/cancelled and release lock (synchronous version).
         
         W6 Fix: Uses asyncio.run_coroutine_threadsafe() to properly release
         per-queue locks from synchronous context by scheduling the async
@@ -1034,8 +1024,8 @@ class JobQueueService:
         
         Args:
             job_id: The job ID to complete.
-            demand_state: Terminal state (COMPLETED, FAILED, or TERMINATED).
-            error: Error message if demand_state is FAILED or TERMINATED.
+            demand_state: Terminal state (COMPLETED, FAILED, or CANCELLED).
+            error: Error message if demand_state is FAILED or CANCELLED.
             result_summary: Optional summary of the job result (for COMPLETED).
             
         Returns:
@@ -1112,13 +1102,13 @@ class JobQueueService:
                             self._loop,
                         )
                 return failed_job
-            elif demand_state == DemandState.TERMINATED:
-                # TERMINATED state does not trigger retry
-                result = self._repository.terminate_job(job_id, error_message=error or "Terminated")
+            elif demand_state == DemandState.CANCELLED:
+                # CANCELLED state does not trigger retry
+                result = self._repository.terminate_job(job_id, error_message=error or "Cancelled")
                 # Notify watchers after successful transition
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self.notify_watchers(job_id, "terminated", error),
+                        self.notify_watchers(job_id, "cancelled", error),
                         self._loop,
                     )
                 return result

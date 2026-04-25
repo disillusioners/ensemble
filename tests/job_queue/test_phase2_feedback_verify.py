@@ -431,7 +431,7 @@ class TestCancellationIntegration:
 
     @pytest.mark.asyncio
     async def test_terminate_after_observer_failed_is_noop(self):
-        """Terminate attempted after observer already failed job should fail gracefully."""
+        """Terminate attempted after observer already failed job should transition to CANCELLED."""
         from daemon.services.job_queue_service import JobQueueService
 
         # Simulate: observer already failed the job
@@ -457,7 +457,13 @@ class TestCancellationIntegration:
             instance_manager=mock_instance_manager,
         )
 
-        # Cancel should return False because job already failed
+        # Cancel should succeed (stops retries on failed job)
         result = await service.cancel_job("fail-race-job")
 
-        assert result is False
+        assert result is True
+        # Verify transition from FAILED to CANCELLED
+        mock_repo.atomic_transition.assert_called_once_with(
+            job_id="fail-race-job",
+            from_status="failed",
+            to_status="cancelled",
+        )

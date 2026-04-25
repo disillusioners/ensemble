@@ -61,11 +61,6 @@ class TestStateMachineCanTransition:
         sm = JobStateMachine()
         assert sm.can_transition("dead_letter", "pending") is True
 
-    def test_can_transition_terminated_to_cancelled(self):
-        """Test TERMINATED -> CANCELLED is valid (cancel after terminate)."""
-        sm = JobStateMachine()
-        assert sm.can_transition("terminated", "cancelled") is True
-
 
 class TestStateMachineInvalidTransitions:
     """Tests for invalid transitions returning False."""
@@ -164,19 +159,6 @@ class TestStateMachineGetTransitionName:
         sm = JobStateMachine()
         assert sm.get_transition_name("dead_letter", "pending") == "replay"
 
-    def test_get_transition_name_cancel_after_terminate(self):
-        """Test get_transition_name for cancel_after_terminate."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("terminated", "cancelled") == "cancel_after_terminate"
-
-    def test_get_valid_transitions_from_terminated(self):
-        """Test valid transitions from TERMINATED state."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("terminated")
-        targets = {target for target, name in result}
-        assert "cancelled" in targets  # cancel_after_terminate
-        assert len(result) == 1
-
     def test_get_transition_name_invalid_returns_none(self):
         """Test get_transition_name returns None for invalid transition."""
         sm = JobStateMachine()
@@ -209,9 +191,8 @@ class TestStateMachineGetValidTransitions:
         targets = {target for target, name in result}
         assert "completed" in targets   # complete
         assert "failed" in targets      # fail
-        assert "terminated" in targets # terminate
         assert "cancelled" in targets  # abort
-        assert len(result) == 4
+        assert len(result) == 3
 
     def test_get_valid_transitions_from_failed(self):
         """Test valid transitions from FAILED state."""
@@ -310,9 +291,9 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_twelve_entries(self):
-        """Test TRANSITIONS dict has 12 entries (added TERMINATED -> CANCELLED for cancel_after_terminate)."""
-        assert len(TRANSITIONS) == 12
+    def test_transitions_has_ten_entries(self):
+        """Test TRANSITIONS dict has 10 entries (simplified - no TERMINATED state)."""
+        assert len(TRANSITIONS) == 10
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""

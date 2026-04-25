@@ -206,17 +206,17 @@ class TestProcessQueueJobCompletion:
 class TestTerminateInstanceJobCompletion:
     """Tests for job completion on instance termination."""
 
-    def test_terminate_marks_processing_job_failed(self):
-        """Terminating instance with PROCESSING job marks job as FAILED."""
+    def test_terminate_marks_processing_job_cancelled(self):
+        """Terminating instance with PROCESSING job marks job as CANCELLED."""
         # Create a mock JobQueueService
         mock_service = MagicMock()
         mock_job = make_mock_job(status="processing")
         mock_service.get_job_by_instance_sync.return_value = mock_job
-        mock_service.complete_job_sync.return_value = MagicMock(status="terminated")
+        mock_service.complete_job_sync.return_value = MagicMock(status="cancelled")
         mock_service.trigger_next_job_sync.return_value = None
         mock_service.release_locks_by_instance_sync.return_value = ["test-project"]
         
-        # Simulate the terminate path (lines 2127-2151 of manager.py)
+        # Simulate the terminate path
         instance_id = "test-instance-1"
         
         # Step 1: Release locks
@@ -227,9 +227,9 @@ class TestTerminateInstanceJobCompletion:
         assert job is not None
         assert job.status == "processing"
         
-        # Step 3: Mark terminated (no retry)
+        # Step 3: Mark cancelled (no retry)
         mock_service.complete_job_sync(
-            job.job_id, DemandState.TERMINATED, error="Instance terminated", result_summary=None
+            job.job_id, DemandState.CANCELLED, error="Instance terminated", result_summary=None
         )
         
         # Step 4: Trigger next
@@ -239,7 +239,7 @@ class TestTerminateInstanceJobCompletion:
         # Verify all calls
         mock_service.release_locks_by_instance_sync.assert_called_once_with(instance_id)
         mock_service.complete_job_sync.assert_called_once_with(
-            "test-job-1", DemandState.TERMINATED, error="Instance terminated", result_summary=None
+            "test-job-1", DemandState.CANCELLED, error="Instance terminated", result_summary=None
         )
         mock_service.trigger_next_job_sync.assert_called_once_with("test-project")
 
@@ -255,7 +255,7 @@ class TestTerminateInstanceJobCompletion:
         job = mock_service.get_job_by_instance_sync(instance_id)
         
         if job is not None and job.status == "processing":
-            mock_service.complete_job_sync(job.job_id, DemandState.TERMINATED, error="Instance terminated")
+            mock_service.complete_job_sync(job.job_id, DemandState.CANCELLED, error="Instance terminated")
         
         # complete_job_sync should NOT be called
         mock_service.complete_job_sync.assert_not_called()
@@ -272,9 +272,9 @@ class TestTerminateInstanceJobCompletion:
         released = mock_service.release_locks_by_instance_sync(instance_id)
         job = mock_service.get_job_by_instance_sync(instance_id)
         
-        # Only marks terminated if status is "processing"
+        # Only marks cancelled if status is "processing"
         if job is not None and job.status == "processing":
-            mock_service.complete_job_sync(job.job_id, DemandState.TERMINATED, error="Instance terminated")
+            mock_service.complete_job_sync(job.job_id, DemandState.CANCELLED, error="Instance terminated")
         
         # Should not be called because job is already completed
         mock_service.complete_job_sync.assert_not_called()
@@ -285,7 +285,7 @@ class TestConcurrentCompletionSafety:
 
     @pytest.mark.asyncio
     async def test_concurrent_completion_is_idempotent(self):
-        """Both success and terminate racing to complete same job should not raise errors."""
+        """Both success and cancel racing to complete same job should not raise errors."""
         mock_service = AsyncMock()
         mock_job = make_mock_job()
         
@@ -301,8 +301,8 @@ class TestConcurrentCompletionSafety:
         results = await asyncio.gather(
             # Path 1: Success callback from _process_queue
             mock_service.complete_job("test-job-1", DemandState.COMPLETED, error=None, result_summary="Done"),
-            # Path 2: Terminate callback from terminate_instance
-            mock_service.complete_job("test-job-1", DemandState.TERMINATED, error="Instance terminated"),
+            # Path 2: Cancel callback from terminate_instance
+            mock_service.complete_job("test-job-1", DemandState.CANCELLED, error="Instance cancelled"),
         )
         
         # First one should succeed, second should be None
@@ -327,7 +327,7 @@ class TestConcurrentCompletionSafety:
         # But the lock manager should handle double-release gracefully
         await asyncio.gather(
             mock_service.complete_job("test-job-1", DemandState.COMPLETED, error=None, result_summary="OK"),
-            mock_service.complete_job("test-job-1", DemandState.TERMINATED, error="Terminated"),
+            mock_service.complete_job("test-job-1", DemandState.CANCELLED, error="Cancelled"),
         )
         
         # Verify complete_job was called twice (both paths attempt it)

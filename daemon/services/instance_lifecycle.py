@@ -327,14 +327,14 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
 
-        # 7. Mark any associated job as terminated (no retry)
+        # 7. Mark any associated job as cancelled (no retry)
         if self._job_queue_service is not None:
             try:
                 job = self._job_queue_service.get_job_by_instance_sync(instance_id)
                 if job is not None and job.status == "processing":
                     from .job_queue_service import DemandState
                     self._job_queue_service.complete_job_sync(
-                        job.job_id, DemandState.TERMINATED, error="Instance terminated",
+                        job.job_id, DemandState.CANCELLED, error="Instance terminated",
                         result_summary=None,
                     )
                     # Trigger next pending job for this project
