@@ -1363,22 +1363,23 @@ class InstanceManager:
         """Get the source registry for adapter management."""
         return self.source_registry
 
-    def find_near_instance(self, instance_id: str, max_distance: int = 7) -> str | None:
-        """Find a near-matching instance ID from recent instances.
-        
-        Searches through the most recent 50 instances using edit distance to find a close match.
-        Matching is case-insensitive.
-        
+    def find_near_instance(self, instance_id: str, max_distance: int = 7) -> list[str]:
+        """Find all near-matching instance IDs from recent instances.
+
+        Searches through the most recent 50 instances using edit distance to find all close matches.
+        Matching is case-insensitive. Results are sorted by edit distance (closest first).
+
         Args:
             instance_id: The instance ID to find a near match for.
             max_distance: Maximum edit distance threshold (default: 7).
-            
+
         Returns:
-            The near-matching instance_id if found, None otherwise.
+            List of all near-matching instance_ids sorted by edit distance (closest first),
+            or empty list if no matches found.
         """
         # Get recent instances from repository (ordered by recency)
         instances, _ = self._instance_repository.list(limit=50, offset=0)
-        
+
         return find_near_instance(instance_id, instances, max_distance)
 
     def cleanup(self) -> None:

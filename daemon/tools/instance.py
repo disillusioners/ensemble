@@ -152,38 +152,47 @@ def _is_null_workdir(value: str | None) -> bool:
 def _resolve_instance_id(
     manager: "InstanceManager",
     instance_id: str,
-    operation: str,
 ) -> str:
     """Resolve instance_id with fuzzy matching fallback.
 
     First tries exact match. On KeyError, attempts fuzzy matching with
-    max_distance=7. Returns the original instance_id if found, otherwise
-    raises ValueError with helpful error message.
+    max_distance=7 to find all near matches. Raises ValueError with
+    helpful error message including suggestions if available.
 
     Args:
         manager: The InstanceManager instance.
         instance_id: The instance ID to resolve.
-        operation: The operation name for error messages (e.g., "send message to").
 
     Returns:
-        The resolved instance_id (original if found, or corrected via fuzzy match).
+        The instance_id if found exactly.
 
     Raises:
-        ValueError: If instance not found and no close match exists.
+        ValueError: If instance not found, with suggestion if near match(es) exist.
     """
+    # Input validation
+    if not instance_id:
+        raise ValueError("ERROR: instance_id cannot be empty")
+
     try:
         # First try exact match - this is the fast path
         manager.get_instance(instance_id)
         return instance_id
     except KeyError:
         # Exact match failed - try fuzzy matching
-        near_match = manager.find_near_instance(instance_id, max_distance=7)
-        if near_match:
-            raise ValueError(
-                f"ERROR: instance '{instance_id}' not found. "
-                f"Did you mean '{near_match}'? "
-                f"Please retry with the corrected instance_id."
-            )
+        near_matches = manager.find_near_instance(instance_id, max_distance=7)
+        if near_matches:
+            if len(near_matches) == 1:
+                raise ValueError(
+                    f"ERROR: instance '{instance_id}' not found. "
+                    f"Did you mean '{near_matches[0]}'? Please retry with the corrected instance_id."
+                )
+            else:
+                # Multiple matches — list all candidates
+                candidates = "', '".join(near_matches)
+                raise ValueError(
+                    f"ERROR: instance '{instance_id}' not found. Multiple similar instances found: "
+                    f"'{candidates}'. Please retry with the correct instance_id."
+                )
         else:
             raise ValueError(
                 f"ERROR: instance '{instance_id}' not found and no similar instance found. "
@@ -405,7 +414,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id, "send message to")
+            _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return str(e)
 
@@ -467,14 +476,13 @@ Returns:
     
     @register_tool_category("instance")
     @tool
-    async def terminate_instance(instance_id: str) -> bool:
+    async def terminate_instance(instance_id: str) -> dict:
         """Terminate an instance. Use with caution. Use tool_help("terminate_instance") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id, "terminate")
+            _resolve_instance_id(manager, instance_id)
         except ValueError as e:
-            logger.error(str(e))
-            return False
+            return {"error": str(e), "terminated": False}
         return await manager.terminate_instance(instance_id)
     
     terminate_instance._full_doc_ = """Terminate an instance. Use with caution.
@@ -505,7 +513,7 @@ Returns:
         """Get information about a specific instance. Use tool_help("get_instance_info") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id, "get info for")
+            _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return {"error": str(e)}
         return manager.get_instance_info(instance_id)

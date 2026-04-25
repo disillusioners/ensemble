@@ -377,35 +377,40 @@ def edit_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def find_near_instance(instance_id: str, instances: list, max_distance: int = 7) -> str | None:
-    """Find a near-matching instance ID from recent instances using edit distance.
-    
-    Searches through instances using edit distance to find a close match.
-    Matching is case-insensitive.
-    
+def find_near_instance(instance_id: str, instances: list, max_distance: int = 7) -> list[str]:
+    """Find all near-matching instance IDs from a list of instances using edit distance.
+
+    Searches through instances using edit distance to find all close matches.
+    Matching is case-insensitive. Results are sorted by edit distance (closest first).
+
     Args:
         instance_id: The instance ID to find a near match for.
         instances: List of instance objects with instance_id attribute.
         max_distance: Maximum edit distance threshold (default: 7).
-        
+
     Returns:
-        The near-matching instance_id if found, None otherwise.
+        List of all near-matching instance_ids sorted by edit distance (closest first),
+        or empty list if no matches found.
     """
     # Normalize input for case-insensitive comparison
     normalized_input = instance_id.lower()
-    
+
+    matches: list[tuple[str, int]] = []  # (instance_id, distance)
+
     for instance in instances:
         # Skip if length difference exceeds threshold (quick filter)
         stored_id = instance.instance_id
         if abs(len(stored_id) - len(instance_id)) > max_distance:
             continue
-        
+
         # Case-insensitive edit distance
         distance = edit_distance(normalized_input, stored_id.lower())
         if distance <= max_distance:
-            return stored_id
-    
-    return None
+            matches.append((stored_id, distance))
+
+    # Sort by distance (closest first) and return just the IDs
+    matches.sort(key=lambda x: x[1])
+    return [stored_id for stored_id, _ in matches]
 
 
 # ── Agent Validation (relocated from daemon.api) ──
