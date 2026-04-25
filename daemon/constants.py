@@ -84,3 +84,14 @@ OBSERVER_HEALTH_CHECK_INTERVAL_S: int = 300  # Observer health check interval (5
 # ── System Default Project ───────────────────────────────────────────────────────
 SYSTEM_DEFAULT_PROJECT_NAME = "__system_default__"
 SYSTEM_DEFAULT_PROJECT_ID: str | None = None  # Set at startup by ensure_system_default_project()
+
+# ============================================================
+# Scheduler
+# ============================================================
+SCHEDULER_SEMAPHORE_TIMEOUT_S = 1.0        # Scheduled trigger semaphore timeout (raised from 0.1s)
+SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S = 10.0  # Manual trigger semaphore timeout
+SCHEDULER_GRACE_PERIOD_S = 30.0             # Grace period for running executions on stop
+SCHEDULER_ERROR_RETRY_S = 5.0               # Brief pause before retry on errors
+SCHEDULER_DRAIN_CHECK_S = 0.5               # Polling interval for drain check
+SCHEDULER_DEFAULT_MAX_CONCURRENT = 1         # Default max concurrent executions
+SCHEDULER_DEFAULT_PRIORITY = 5              # Default execution priority

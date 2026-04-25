@@ -12,3 +12,10 @@
 - "Add", "Implement", "Build" feature → likely SMALL
 - "Migrate", "Redesign", "Integrate" across modules → likely BIG
 - "Rebuild", "Create from scratch", "Platform" → likely HUGE
+
+- Schedule Feature Review & Improvement - BIG scope task
+- Project: agents-ensemble (83da04de-a410-4fb5-9e92-251a99d28a52)
+- Branch: feature/schedule-review-improve
+- 15 issues identified across 4 priorities
+- Phase plan: Fix bugs → Harden reliability → Test coverage → Clean up
+- Status: Git setup in progress, then Planning workflow

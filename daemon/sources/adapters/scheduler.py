@@ -18,6 +18,15 @@ from ..base import (
 )
 from daemon.models import SchedulerInstanceMode, InstanceStatus
 from daemon.registry import get_registry
+from daemon.constants import (
+    SCHEDULER_SEMAPHORE_TIMEOUT_S,
+    SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S,
+    SCHEDULER_GRACE_PERIOD_S,
+    SCHEDULER_ERROR_RETRY_S,
+    SCHEDULER_DRAIN_CHECK_S,
+    SCHEDULER_DEFAULT_MAX_CONCURRENT,
+    SCHEDULER_DEFAULT_PRIORITY,
+)
 
 if TYPE_CHECKING:
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
@@ -104,13 +113,13 @@ class SchedulerAdapter(MessageSourceAdapter):
             self._timezone = ZoneInfo("UTC")
         
         # Concurrency control
-        self._max_concurrent: int = scheduler_config.get("max_concurrent", 1)
+        self._max_concurrent: int = scheduler_config.get("max_concurrent", SCHEDULER_DEFAULT_MAX_CONCURRENT)
         self._running_executions: int = 0
         self._execution_semaphore: asyncio.Semaphore | None = None
         
         # Task queue routing configuration (Tasks 5.1 & 5.3)
         self._project_id: str | None = scheduler_config.get("project_id")
-        priority_raw = scheduler_config.get("priority", 5)
+        priority_raw = scheduler_config.get("priority", SCHEDULER_DEFAULT_PRIORITY)
         self._priority: int = self._validate_priority(priority_raw)
         
         if self._project_id:
@@ -126,9 +135,6 @@ class SchedulerAdapter(MessageSourceAdapter):
         self._scheduler_task: asyncio.Task | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
         self._is_one_time_executed: bool = False
-        
-        # Response handling
-        self._store_responses: bool = scheduler_config.get("store_responses", False)
         
         logger.info(
             f"SchedulerAdapter initialized: type={self._schedule_type}, "
@@ -285,7 +291,7 @@ class SchedulerAdapter(MessageSourceAdapter):
             try:
                 await asyncio.wait_for(
                     self._wait_for_executions(),
-                    timeout=30.0
+                    timeout=SCHEDULER_GRACE_PERIOD_S
                 )
             except asyncio.TimeoutError:
                 logger.warning(
@@ -299,7 +305,7 @@ class SchedulerAdapter(MessageSourceAdapter):
     async def _wait_for_executions(self) -> None:
         """Wait for all running executions to complete."""
         while self._running_executions > 0:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(SCHEDULER_DRAIN_CHECK_S)
     
     async def send(self, message: OutgoingMessage) -> bool:
         """Handle responses from scheduled tasks (e.g., child agent outputs).
@@ -321,23 +327,9 @@ class SchedulerAdapter(MessageSourceAdapter):
             f"Scheduled task response for {message.external_user_id}: {content_preview}"
         )
         
-        # If configured, store or emit the response for downstream consumers
-        # (e.g., webhook callbacks, storage, etc.)
-        if self._store_responses:
-            await self._store_response(message)
+        # Response is logged for monitoring - _store_response was removed (dead code)
         
         return True
-    
-    async def _store_response(self, message: OutgoingMessage) -> None:
-        """Store response for downstream processing.
-        
-        Args:
-            message: The response message to store
-        """
-        # TODO: Implement response storage (DB, webhook, etc.)
-        # This allows scheduled tasks to produce outputs that can be consumed
-        # by external systems or viewed in the dashboard
-        logger.debug(f"Response storage not yet implemented for {self.source_id}")
     
     async def health_check(self) -> bool:
         """Check if scheduler is healthy.
@@ -442,7 +434,7 @@ class SchedulerAdapter(MessageSourceAdapter):
             except Exception as e:
                 logger.error(f"Scheduler error for {self.source_id}: {e}", exc_info=True)
                 # Brief pause before retry to avoid tight loop on errors
-                await asyncio.sleep(5)
+                await asyncio.sleep(SCHEDULER_ERROR_RETRY_S)
         
         logger.info(f"Scheduler loop ended: {self.source_id}")
     
@@ -570,28 +562,26 @@ Original scheduled task:
         
         return is_active, mapping.agent_instance_id, instance.status
     
-    async def _emit_scheduled_message(self) -> None:
-        """Emit the scheduled message to the message handler.
+    async def _acquire_execution_slot(self, timeout: float, execution_id: str) -> bool:
+        """Try to acquire execution semaphore with timeout.
         
-        If project_id is configured and JobQueueService is available, routes
-        through the job queue. Otherwise, uses immediate execution.
+        Returns True if slot acquired, False if timed out.
+        Logs appropriately in both cases.
         """
-        execution_id = str(uuid.uuid4())
-        
-        # Check concurrency limit with timeout
         if self._execution_semaphore is None:
             logger.error("Scheduler not properly initialized")
-            return
+            return False
         
-        # Try to acquire semaphore with timeout - skip if max concurrent reached
         try:
             await asyncio.wait_for(
                 self._execution_semaphore.acquire(),
-                timeout=0.1  # Short timeout - if can't acquire, skip this trigger
+                timeout=timeout
             )
+            logger.debug(f"Acquired execution slot: {execution_id}")
+            return True
         except asyncio.TimeoutError:
             logger.warning(
-                f"Skipping scheduled execution {execution_id}: max concurrent executions reached "
+                f"Skipping execution {execution_id}: max concurrent executions reached "
                 f"(running={self._running_executions}, max={self._max_concurrent})"
             )
             if self._execution_callback:
@@ -605,6 +595,189 @@ Original scheduled task:
                     )
                 except Exception as e:
                     logger.warning(f"Execution callback error: {e}")
+            return False
+    
+    async def _execute_run(self, execution_id: str, trigger_type: str) -> None:
+        """Shared execution logic for scheduled and manual triggers.
+        
+        Args:
+            execution_id: Unique execution identifier
+            trigger_type: "scheduled" or "manual"
+        
+        Queue routing is ONLY for "scheduled" triggers with project_id configured.
+        Manual triggers always use immediate execution (deliberate design).
+        """
+        self._running_executions += 1
+        logger.debug(f"Starting execution {execution_id}, running={self._running_executions}")
+        
+        try:
+            # Call execution callback with triggered status
+            if self._execution_callback:
+                try:
+                    self._execution_callback(
+                        execution_id=execution_id,
+                        schedule_id=self.source_id,
+                        status="triggered",
+                        instance_id=None,
+                        error_message=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"Execution callback error: {e}")
+            
+            # Determine instance mode and run number
+            run_number: int | None = None
+            if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+                if self._source_repo:
+                    run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
+                    if run_number is None:
+                        run_number = 1
+                else:
+                    run_number = 1
+                logger.info(f"reuse_instance mode: run_number={run_number} for {self.source_id}")
+            
+            # Format message based on session mode
+            if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE and run_number:
+                formatted_message = self._format_continuation_message(self._message_content, run_number)
+            else:
+                formatted_message = self._message_content
+            
+            # Determine force_new_instance flag
+            force_new_instance = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
+            
+            # Build metadata
+            metadata = {
+                "scheduler": {
+                    "execution_id": execution_id,
+                    "trigger_type": trigger_type,
+                    "trigger_time": datetime.now(self._timezone).isoformat(),
+                    "instance_mode": self._instance_mode.value,
+                    "run_number": run_number,
+                },
+                "agent": self._agent,
+                "force_new_instance": force_new_instance,
+            }
+            
+            # Add schedule details to metadata for scheduled triggers
+            if trigger_type == "scheduled":
+                if self._schedule_type == self.SCHEDULE_TYPE_CRON:
+                    metadata["scheduler"]["schedule_type"] = self._schedule_type
+                    metadata["scheduler"]["cron_expression"] = self._cron_expression
+                elif self._schedule_type == self.SCHEDULE_TYPE_INTERVAL:
+                    metadata["scheduler"]["schedule_type"] = self._schedule_type
+                    metadata["scheduler"]["interval_seconds"] = self._interval_seconds
+                elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
+                    metadata["scheduler"]["schedule_type"] = self._schedule_type
+                    metadata["scheduler"]["run_at"] = self._run_at.isoformat()
+            
+            # Route through JobQueueService if project_id configured (scheduled only)
+            if trigger_type == "scheduled" and self._project_id and self._job_queue_service:
+                await self._route_via_job_queue(execution_id, formatted_message, metadata)
+            else:
+                await self._execute_immediate(execution_id, formatted_message, metadata)
+            
+        except Exception as e:
+            logger.error(f"Failed to execute {trigger_type} message: {execution_id}, error={e}", exc_info=True)
+            if self._execution_callback:
+                try:
+                    self._execution_callback(
+                        execution_id=execution_id,
+                        schedule_id=self.source_id,
+                        status="failed",
+                        instance_id=None,
+                        error_message=str(e),
+                    )
+                except Exception as cb_error:
+                    logger.warning(f"Execution callback error: {cb_error}")
+        finally:
+            self._running_executions -= 1
+            logger.debug(f"Execution {execution_id} finished, running={self._running_executions}")
+            if self._execution_semaphore:
+                self._execution_semaphore.release()
+
+    async def _route_via_job_queue(self, execution_id: str, formatted_message: str, metadata: dict) -> None:
+        """Route execution through job queue (scheduled triggers only)."""
+        try:
+            agent_id = self._agent
+            if not agent_id:
+                agent_id = metadata.get("agent")
+            
+            assert agent_id is not None and agent_id != "", "agent_id must be set"
+            registry = get_registry()
+            resolved_agent_id = registry.resolve_to_id(agent_id)
+            if resolved_agent_id:
+                agent_id = resolved_agent_id
+            
+            job_item = await self._job_queue_service.enqueue(
+                agent_id=agent_id,
+                message=formatted_message,
+                source="scheduler",
+                project_id=self._project_id,
+                priority=self._priority,
+                metadata=metadata,
+            )
+            
+            logger.info(
+                f"Scheduled job queued: source={self.source_id}, "
+                f"execution_id={execution_id}, job_id={job_item.job_id}, "
+                f"status={job_item.status}"
+            )
+            
+            if self._execution_callback:
+                try:
+                    self._execution_callback(
+                        execution_id=execution_id,
+                        schedule_id=self.source_id,
+                        status="queued",
+                        instance_id=job_item.instance_id,
+                        error_message=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"Execution callback error: {e}")
+        except Exception as e:
+            logger.error(f"Failed to queue scheduled job: {execution_id}, error={e}", exc_info=True)
+            # Don't call callback here - let _execute_run's outer exception handler
+            # call it to avoid double-callback for the same execution_id
+            raise
+
+    async def _execute_immediate(self, execution_id: str, formatted_message: str, metadata: dict) -> None:
+        """Execute immediately (manual triggers always use this path)."""
+        incoming = IncomingMessage(
+            external_user_id=self.source_id,
+            content=formatted_message,
+            source_id=self.source_id,
+            metadata=metadata,
+            message_type="scheduled",
+        )
+        
+        await self._emit_message(incoming)
+        
+        logger.info(
+            f"Message executed (immediate): source={self.source_id}, "
+            f"execution_id={execution_id}, agent={self._agent}"
+        )
+        
+        if self._execution_callback:
+            try:
+                self._execution_callback(
+                    execution_id=execution_id,
+                    schedule_id=self.source_id,
+                    status="completed",
+                    instance_id=self.source_id,
+                    error_message=None,
+                )
+            except Exception as e:
+                logger.warning(f"Execution callback error: {e}")
+    
+    async def _emit_scheduled_message(self) -> None:
+        """Emit the scheduled message to the message handler.
+        
+        If project_id is configured and JobQueueService is available, routes
+        through the job queue. Otherwise, uses immediate execution.
+        """
+        execution_id = str(uuid.uuid4())
+        
+        # Try to acquire semaphore with timeout
+        if not await self._acquire_execution_slot(SCHEDULER_SEMAPHORE_TIMEOUT_S, execution_id):
             return
         
         # Check if mapped instance is still active (for reuse_instance mode)
@@ -626,232 +799,25 @@ Original scheduled task:
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
-                # Release semaphore before returning
                 if self._execution_semaphore:
                     self._execution_semaphore.release()
                 return
         
-        async def execute():
-            self._running_executions += 1
-            logger.debug(f"Starting execution {execution_id}, running={self._running_executions}")
-            
-            try:
-                # Call execution callback with triggered status
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="triggered",
-                            instance_id=None,
-                            error_message=None,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-                
-                # Determine instance mode and run number (Task 6)
-                run_number: int | None = None
-                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
-                    # Increment run counter for reuse_instance mode
-                    if self._source_repo:
-                        run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
-                        if run_number is None:
-                            logger.warning(
-                                f"Failed to get run counter for {self.source_id}, using 1"
-                            )
-                            run_number = 1
-                    else:
-                        logger.warning(
-                            f"source_repo not available for {self.source_id}, cannot track run counter"
-                        )
-                        run_number = 1
-                    logger.info(
-                        f"reuse_instance mode: run_number={run_number} for {self.source_id}"
-                    )
-                
-                # Format message based on session mode (Task 6)
-                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE and run_number:
-                    formatted_message = self._format_continuation_message(
-                        self._message_content, run_number
-                    )
-                else:
-                    formatted_message = self._message_content
-                
-                # Determine force_new_instance flag (Task 6)
-                force_new_instance = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
-                
-                # Build metadata with instance mode info (Task 6)
-                metadata = {
-                    "scheduler": {
-                        "execution_id": execution_id,
-                        "schedule_type": self._schedule_type,
-                        "trigger_time": datetime.now(self._timezone).isoformat(),
-                        "instance_mode": self._instance_mode.value,
-                        "run_number": run_number,
-                    },
-                    "agent": self._agent,
-                    "force_new_instance": force_new_instance,
-                }
-                
-                # Add schedule details to metadata
-                if self._schedule_type == self.SCHEDULE_TYPE_CRON:
-                    metadata["scheduler"]["cron_expression"] = self._cron_expression
-                elif self._schedule_type == self.SCHEDULE_TYPE_INTERVAL:
-                    metadata["scheduler"]["interval_seconds"] = self._interval_seconds
-                elif self._schedule_type == self.SCHEDULE_TYPE_ONE_TIME:
-                    metadata["scheduler"]["run_at"] = self._run_at.isoformat()
-                
-                # Route through JobQueueService if project_id is configured
-                if self._project_id and self._job_queue_service:
-                    # Route through job queue for per-project serialization
-                    logger.info(
-                        f"Routing scheduled job through queue: source={self.source_id}, "
-                        f"execution_id={execution_id}, project_id={self._project_id}, "
-                        f"priority={self._priority}"
-                    )
-                    
-                    try:
-                        # Get agent_id as primary identifier
-                        agent_id = self._agent
-                        
-                        if not agent_id:
-                            agent_id = metadata.get("agent")
-                        
-                        # Resolve agent_id to canonical form
-                        assert agent_id is not None and agent_id != "", "agent_id must be set"
-                        registry = get_registry()
-                        resolved_agent_id = registry.resolve_to_id(agent_id)
-                        if resolved_agent_id:
-                            agent_id = resolved_agent_id
-                        
-                        job_item = await self._job_queue_service.enqueue(
-                            agent_id=agent_id,
-                            message=formatted_message,
-                            source="scheduler",
-                            project_id=self._project_id,
-                            priority=self._priority,
-                            metadata=metadata,
-                        )
-                        
-                        logger.info(
-                            f"Scheduled job queued: source={self.source_id}, "
-                            f"execution_id={execution_id}, job_id={job_item.job_id}, "
-                            f"status={job_item.status}"
-                        )
-                        
-                        # Call execution callback with queued status
-                        if self._execution_callback:
-                            try:
-                                self._execution_callback(
-                                    execution_id=execution_id,
-                                    schedule_id=self.source_id,
-                                    status="queued",
-                                    instance_id=job_item.instance_id,
-                                    error_message=None,
-                                )
-                            except Exception as e:
-                                logger.warning(f"Execution callback error: {e}")
-                        
-                    except Exception as e:
-                        logger.error(
-                            f"Failed to queue scheduled job: {execution_id}, error={e}",
-                            exc_info=True
-                        )
-                        if self._execution_callback:
-                            try:
-                                self._execution_callback(
-                                    execution_id=execution_id,
-                                    schedule_id=self.source_id,
-                                    status="failed",
-                                    instance_id=None,
-                                    error_message=str(e),
-                                )
-                            except Exception as cb_error:
-                                logger.warning(f"Execution callback error: {cb_error}")
-                else:
-                    # Immediate execution (original behavior)
-                    incoming = IncomingMessage(
-                        external_user_id=self.source_id,  # Use source_id as user identifier
-                        content=formatted_message,
-                        source_id=self.source_id,
-                        metadata=metadata,
-                        message_type="scheduled",
-                    )
-                    
-                    # Emit the message
-                    await self._emit_message(incoming)
-                    
-                    logger.info(
-                        f"Scheduled message executed (immediate): source={self.source_id}, "
-                        f"execution_id={execution_id}, agent={self._agent}"
-                    )
-                    
-                    # Call execution callback with completed status
-                    if self._execution_callback:
-                        try:
-                            self._execution_callback(
-                                execution_id=execution_id,
-                                schedule_id=self.source_id,
-                                status="completed",
-                                instance_id=self.source_id,
-                                error_message=None,
-                            )
-                        except Exception as e:
-                            logger.warning(f"Execution callback error: {e}")
-                
-            except Exception as e:
-                logger.error(
-                    f"Failed to execute scheduled message: {execution_id}, error={e}",
-                    exc_info=True
-                )
-                
-                # Call execution callback with failed status
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="failed",
-                            instance_id=None,
-                            error_message=str(e),
-                        )
-                    except Exception as cb_error:
-                        logger.warning(f"Execution callback error: {cb_error}")
-                
-            finally:
-                self._running_executions -= 1
-                logger.debug(f"Execution {execution_id} finished, running={self._running_executions}")
-                if self._execution_semaphore:
-                    self._execution_semaphore.release()
-        
-        await execute()
+        # Execute the scheduled run
+        await self._execute_run(execution_id, "scheduled")
     
     async def _execute_trigger(self, execution_id: str) -> None:
         """Execute a manual trigger.
         
+        Manual triggers ALWAYS use immediate execution (no job queue).
+        This is a deliberate design for immediate user feedback.
+        
         Args:
             execution_id: Unique ID for this execution
         """
-        if self._execution_semaphore is None:
-            logger.error("Scheduler not properly initialized")
-            return
-        
-        # Wait for semaphore with timeout
-        try:
-            await asyncio.wait_for(
-                self._execution_semaphore.acquire(),
-                timeout=10.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Could not acquire semaphore for manual trigger: {execution_id}")
-            if self._execution_callback:
-                self._execution_callback(
-                    execution_id=execution_id,
-                    schedule_id=self.source_id,
-                    status="failed",
-                    instance_id=None,
-                    error_message="Max concurrent executions reached",
-                )
+        # Try to acquire semaphore with timeout
+        if not await self._acquire_execution_slot(SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S, execution_id):
+            # Callback already called inside _acquire_execution_slot() on timeout
             return
         
         # Check if mapped instance is still active (for reuse_instance mode)
@@ -873,115 +839,9 @@ Original scheduled task:
                         )
                     except Exception as e:
                         logger.warning(f"Execution callback error: {e}")
-                # Release semaphore before returning
                 if self._execution_semaphore:
                     self._execution_semaphore.release()
                 return
         
-        async def execute():
-            self._running_executions += 1
-            logger.debug(f"Manual trigger started: {execution_id}, running={self._running_executions}")
-            
-            try:
-                # Call execution callback with triggered status
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="triggered",
-                            instance_id=None,
-                            error_message=None,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-                
-                # Determine instance mode and run number for manual trigger (Task 6)
-                run_number: int | None = None
-                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
-                    # Increment run counter for reuse_instance mode
-                    if self._source_repo:
-                        run_number = self._source_repo.increment_scheduler_run_counter(self.source_id)
-                        if run_number is None:
-                            run_number = 1
-                    else:
-                        run_number = 1
-                
-                # Format message based on session mode (Task 6)
-                if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE and run_number:
-                    formatted_message = self._format_continuation_message(
-                        self._message_content, run_number
-                    )
-                else:
-                    formatted_message = self._message_content
-                
-                # Determine force_new_instance flag (Task 6)
-                force_new_instance = self._instance_mode == SchedulerInstanceMode.NEW_INSTANCE
-                
-                # Build the incoming message with instance mode metadata
-                metadata = {
-                    "scheduler": {
-                        "execution_id": execution_id,
-                        "trigger_type": "manual",
-                        "trigger_time": datetime.now(self._timezone).isoformat(),
-                        "instance_mode": self._instance_mode.value,
-                        "run_number": run_number,
-                    },
-                    "agent": self._agent,
-                    "force_new_instance": force_new_instance,
-                }
-                
-                incoming = IncomingMessage(
-                    external_user_id=self.source_id,
-                    content=formatted_message,
-                    source_id=self.source_id,
-                    metadata=metadata,
-                    message_type="scheduled",
-                )
-                
-                # Emit the message
-                await self._emit_message(incoming)
-                
-                logger.info(
-                    f"Manual trigger executed: source={self.source_id}, "
-                    f"execution_id={execution_id}, agent={self._agent}"
-                )
-                
-                # Call execution callback with completed status
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="completed",
-                            instance_id=self.source_id,
-                            error_message=None,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-                
-            except Exception as e:
-                logger.error(
-                    f"Failed to execute manual trigger: {execution_id}, error={e}",
-                    exc_info=True
-                )
-                
-                # Call execution callback with failed status
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="failed",
-                            instance_id=None,
-                            error_message=str(e),
-                        )
-                    except Exception as cb_error:
-                        logger.warning(f"Execution callback error: {cb_error}")
-                
-            finally:
-                self._running_executions -= 1
-                logger.debug(f"Manual trigger finished: {execution_id}, running={self._running_executions}")
-                self._execution_semaphore.release()
-        
-        await execute()
+        # Execute the manual trigger (always immediate, no job queue)
+        await self._execute_run(execution_id, "manual")
