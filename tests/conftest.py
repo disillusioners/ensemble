@@ -223,3 +223,29 @@ def clean_env():
     for key, value in original_env.items():
         if key != "ENSEMBLE_CONFIG" and os.environ.get(key) != value:
             os.environ[key] = value
+
+
+# ==================== Scheduler Test Fixtures ====================
+
+
+@pytest.fixture
+def mock_on_message():
+    """Create a mock async callback for message handling."""
+    from unittest.mock import AsyncMock
+    return AsyncMock()
+
+
+@pytest.fixture
+def mock_execution_callback():
+    """Create a mock execution callback."""
+    from unittest.mock import Mock
+    return Mock()
+
+
+@pytest.fixture
+def mock_source_repo():
+    """Create a mock SourceRepository with run counter support."""
+    from unittest.mock import MagicMock
+    repo = MagicMock()
+    repo.increment_scheduler_run_counter = MagicMock(return_value=1)
+    return repo

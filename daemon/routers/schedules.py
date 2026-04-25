@@ -323,7 +323,7 @@ async def stop_schedule(schedule_id: str, request: Request):
         await manager.source_registry.stop_adapter(schedule_id)
         return SourceActionResponse(
             source_id=schedule_id,
-            status=SourceStatus.STOPPED,
+            status=SourceStatus.stopped,
             message=f"Scheduler {schedule_id} stopped successfully"
         )
     except Exception as e:

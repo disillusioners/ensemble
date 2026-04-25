@@ -614,3 +614,443 @@ class TestGetScheduleExecutions:
         # Verify error message is present for failed execution
         failed_data = next(e for e in data["executions"] if e["execution_id"] == "exec-failed")
         assert failed_data["error_message"] == "Task failed: timeout"
+
+
+# ==================== PUT /schedules/{id} Tests ====================
+
+
+class TestUpdateSchedule:
+    """Tests for PUT /api/schedules/{schedule_id} endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_name(self, client, mock_manager):
+        """Test updating schedule name only."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Old Name",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Mock updated source with new name
+        updated_source = create_scheduler_source(
+            "scheduler-1",
+            "New Name",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+
+        # Mock source registry
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put("/schedules/scheduler-1", json={"name": "New Name"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["name"] == "New Name"
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_config_partial_merge(self, client, mock_manager):
+        """Test that partial config updates are merged with existing config."""
+        existing_config = {
+            "schedule": "0 9 * * *",
+            "agent": "./agents/coder",
+            "message": "Daily report",
+            "max_concurrent": 3
+        }
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            existing_config
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Mock updated source with merged config
+        merged_config = {
+            **existing_config,
+            "interval_seconds": 600  # New value
+        }
+        updated_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            merged_config
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+
+        # Mock source registry
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put("/schedules/scheduler-1", json={"config": {"interval_seconds": 600}})
+
+        assert response.status_code == 200
+
+        # Verify update was called with merged config
+        call_kwargs = mock_manager._source_repository.update_source_config.call_args
+        merged_call_config = call_kwargs.kwargs["config"]
+
+        # Should have both original and new values
+        assert "schedule" in merged_call_config
+        assert "agent" in merged_call_config
+        assert "message" in merged_call_config
+        assert merged_call_config["interval_seconds"] == 600
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_instance_mode_valid(self, client, mock_manager):
+        """Test updating schedule with valid instance_mode."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Mock updated source with instance_mode
+        updated_config = {
+            "interval_seconds": 3600,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "instance_mode": "reuse_instance"
+        }
+        updated_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            updated_config
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+
+        # Mock source registry
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put("/schedules/scheduler-1", json={"instance_mode": "reuse_instance"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["config"]["instance_mode"] == "reuse_instance"
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_reuse_instance_max_concurrent_enforced(self, client, mock_manager):
+        """Test that max_concurrent is adjusted to 1 when instance_mode is reuse_instance."""
+        existing_config = {
+            "interval_seconds": 3600,
+            "agent": "./agents/coder",
+            "message": "Test",
+            "max_concurrent": 5
+        }
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            existing_config
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Mock updated source with max_concurrent=1 enforced
+        updated_config = {
+            **existing_config,
+            "max_concurrent": 1,
+            "instance_mode": "reuse_instance"
+        }
+        updated_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            updated_config
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+
+        # Mock source registry
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put("/schedules/scheduler-1", json={"instance_mode": "reuse_instance"})
+
+        assert response.status_code == 200
+
+        # Verify max_concurrent was adjusted to 1
+        call_kwargs = mock_manager._source_repository.update_source_config.call_args
+        merged_call_config = call_kwargs.kwargs["config"]
+        assert merged_call_config["max_concurrent"] == 1
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_not_found(self, client, mock_manager):
+        """Test updating a non-existent schedule returns 404."""
+        mock_manager._source_repository.get_source_config = Mock(return_value=None)
+        
+        response = await client.put("/schedules/nonexistent", json={"name": "New Name"})
+        
+        assert response.status_code == 404
+        data = response.json()
+        assert data["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_non_scheduler_type(self, client, mock_manager):
+        """Test updating a non-scheduler source returns 400."""
+        telegram_source = Mock()
+        telegram_source.source_id = "telegram-1"
+        telegram_source.source_type = "telegram"
+        
+        mock_manager._source_repository.get_source_config = Mock(return_value=telegram_source)
+        
+        response = await client.put("/schedules/telegram-1", json={"name": "New Name"})
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_REQUEST"
+        assert "not a scheduler" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_update_schedule_last_run_at_populated(self, client, mock_manager):
+        """Test that last_run_at is populated from execution history after update."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+
+        # Mock updated source
+        updated_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
+
+        # Mock latest execution
+        latest_execution = create_execution("exec-1", "scheduler-1")
+        latest_execution.triggered_at = "2024-01-15T09:00:00+00:00"
+        mock_manager._source_repository.get_latest_execution = Mock(return_value=latest_execution)
+
+        # Mock source registry
+        mock_registry = Mock()
+        mock_registry.get = Mock(return_value=None)
+        mock_manager.source_registry = mock_registry
+
+        response = await client.put("/schedules/scheduler-1", json={"name": "Updated Name"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["last_run_at"] is not None
+        assert "2024-01-15" in data["last_run_at"]
+
+
+# ==================== POST /schedules/{id}/start Tests ====================
+
+
+class TestStartSchedule:
+    """Tests for POST /api/schedules/{schedule_id}/start endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_start_schedule_success(self, client, mock_manager):
+        """Test successful schedule start."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Create mock adapter with status=running
+        mock_adapter = Mock()
+        mock_adapter.status = "running"
+        
+        # Mock registry
+        mock_registry = Mock()
+        mock_registry.start_adapter = AsyncMock(return_value=True)
+        mock_registry.get = Mock(return_value=mock_adapter)
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/start")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_id"] == "scheduler-1"
+        assert data["status"] == "running"
+        assert "started successfully" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_start_schedule_not_found(self, client, mock_manager):
+        """Test starting a non-existent schedule returns 404."""
+        mock_manager._source_repository.get_source_config = Mock(return_value=None)
+        
+        response = await client.post("/schedules/nonexistent/start")
+        
+        assert response.status_code == 404
+        data = response.json()
+        assert data["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_start_schedule_non_scheduler_type(self, client, mock_manager):
+        """Test starting a non-scheduler source returns 400."""
+        telegram_source = Mock()
+        telegram_source.source_id = "telegram-1"
+        telegram_source.source_type = "telegram"
+        
+        mock_manager._source_repository.get_source_config = Mock(return_value=telegram_source)
+        
+        response = await client.post("/schedules/telegram-1/start")
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_REQUEST"
+        assert "not a scheduler" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_start_schedule_adapter_start_failure(self, client, mock_manager):
+        """Test handling adapter start failure."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Mock registry that raises exception
+        mock_registry = Mock()
+        mock_registry.start_adapter = AsyncMock(side_effect=RuntimeError("Failed to start"))
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/start")
+        
+        assert response.status_code == 500
+        data = response.json()
+        assert data["detail"]["code"] == "INTERNAL_ERROR"
+        assert "Failed to start scheduler" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_start_schedule_idempotent_already_running(self, client, mock_manager):
+        """Test that starting an already running schedule succeeds (idempotent)."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        scheduler_source.status = "running"
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Create mock adapter that's already running
+        mock_adapter = Mock()
+        mock_adapter.status = "running"
+        
+        # Mock registry - start_adapter returns True for idempotent behavior
+        mock_registry = Mock()
+        mock_registry.start_adapter = AsyncMock(return_value=True)
+        mock_registry.get = Mock(return_value=mock_adapter)
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/start")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_id"] == "scheduler-1"
+        assert data["status"] == "running"
+
+
+# ==================== POST /schedules/{id}/stop Tests ====================
+
+
+class TestStopSchedule:
+    """Tests for POST /api/schedules/{schedule_id}/stop endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_success(self, client, mock_manager):
+        """Test successful schedule stop."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        scheduler_source.status = "running"
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Mock registry
+        mock_registry = Mock()
+        mock_registry.stop_adapter = AsyncMock(return_value=True)
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/stop")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_id"] == "scheduler-1"
+        assert data["status"] == "stopped"
+        assert "stopped successfully" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_not_found(self, client, mock_manager):
+        """Test stopping a non-existent schedule returns 404."""
+        mock_manager._source_repository.get_source_config = Mock(return_value=None)
+        
+        response = await client.post("/schedules/nonexistent/stop")
+        
+        assert response.status_code == 404
+        data = response.json()
+        assert data["detail"]["code"] == "SOURCE_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_non_scheduler_type(self, client, mock_manager):
+        """Test stopping a non-scheduler source returns 400."""
+        telegram_source = Mock()
+        telegram_source.source_id = "telegram-1"
+        telegram_source.source_type = "telegram"
+        
+        mock_manager._source_repository.get_source_config = Mock(return_value=telegram_source)
+        
+        response = await client.post("/schedules/telegram-1/stop")
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert data["detail"]["code"] == "INVALID_REQUEST"
+        assert "not a scheduler" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_adapter_stop_failure(self, client, mock_manager):
+        """Test handling adapter stop failure."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        scheduler_source.status = "running"
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Mock registry that raises exception
+        mock_registry = Mock()
+        mock_registry.stop_adapter = AsyncMock(side_effect=RuntimeError("Failed to stop"))
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/stop")
+        
+        assert response.status_code == 500
+        data = response.json()
+        assert data["detail"]["code"] == "INTERNAL_ERROR"
+        assert "Failed to stop scheduler" in data["detail"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_stop_schedule_idempotent_already_stopped(self, client, mock_manager):
+        """Test that stopping an already stopped schedule succeeds (idempotent)."""
+        scheduler_source = create_scheduler_source(
+            "scheduler-1",
+            "Test Schedule",
+            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+        )
+        scheduler_source.status = "stopped"
+        mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
+        
+        # Mock registry - stop_adapter succeeds even if already stopped
+        mock_registry = Mock()
+        mock_registry.stop_adapter = AsyncMock(return_value=True)
+        mock_manager.source_registry = mock_registry
+        
+        response = await client.post("/schedules/scheduler-1/stop")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["source_id"] == "scheduler-1"
+        assert data["status"] == "stopped"
+        assert "stopped successfully" in data["message"]

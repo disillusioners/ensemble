@@ -21,26 +21,6 @@ from daemon.models import SchedulerInstanceMode
 # ==================== Fixtures ====================
 
 
-@pytest.fixture
-def mock_on_message():
-    """Create a mock async callback for message handling."""
-    return AsyncMock()
-
-
-@pytest.fixture
-def mock_execution_callback():
-    """Create a mock execution callback."""
-    return Mock()
-
-
-@pytest.fixture
-def mock_source_repo():
-    """Create a mock SourceRepository with run counter support."""
-    repo = MagicMock()
-    repo.increment_scheduler_run_counter = MagicMock(return_value=1)
-    return repo
-
-
 def make_config(source_id: str, config: dict) -> SourceConfig:
     """Helper to create SourceConfig for scheduler."""
     return SourceConfig(
