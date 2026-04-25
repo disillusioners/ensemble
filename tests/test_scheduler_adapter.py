@@ -724,9 +724,7 @@ class TestSemaphoreTimeout:
         # Verify callback was called with 'skipped' status
         mock_execution_callback.assert_called()
         last_call = mock_execution_callback.call_args
-        assert last_call.kwargs.get("status") == "skipped" or (
-            last_call[1] is not None and last_call[1].get("status") == "skipped"
-        )
+        assert last_call.kwargs.get("status") == "skipped"
         
         # Release our pre-acquired slot
         adapter._execution_semaphore.release()
@@ -783,8 +781,8 @@ class TestSemaphoreTimeout:
         await adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_manual_trigger_uses_longer_timeout(self, mock_on_message, mock_execution_callback):
-        """Test that manual trigger uses longer semaphore timeout."""
+    async def test_acquire_failure_handled_for_manual_trigger(self, mock_on_message, mock_execution_callback):
+        """Test that acquire failure is handled for manual trigger."""
         config = make_config("test-manual-timeout", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
@@ -828,7 +826,7 @@ class TestSemaphoreTimeout:
         # Callback should have been called with 'skipped' status
         mock_execution_callback.assert_called()
         call_args = mock_execution_callback.call_args
-        assert call_args.kwargs.get("status") == "skipped" or call_args[1].get("status") == "skipped"
+        assert call_args.kwargs.get("status") == "skipped"
         
         # Release our pre-acquired slot
         adapter._execution_semaphore.release()
@@ -859,17 +857,14 @@ class TestSemaphoreTimeout:
         # Find the skipped callback
         skipped_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("status") == "skipped" or 
-                (len(call[0]) > 2 and call[0][2] == "skipped"))
+            if call.kwargs.get("status") == "skipped"
         ]
-        
+
         assert len(skipped_calls) > 0, "Expected at least one skipped callback"
         
         # Check error_message includes the expected text
         skipped_call = skipped_calls[0]
         error_msg = skipped_call.kwargs.get("error_message")
-        if error_msg is None and len(skipped_call[0]) > 4:
-            error_msg = skipped_call[0][4]
         
         assert error_msg is not None
         assert "Max concurrent" in error_msg or "reached" in error_msg
@@ -1004,8 +999,7 @@ class TestJobQueueRouting:
         # Verify callback was called with 'failed' status
         failed_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("status") == "failed" or 
-                (len(call[0]) > 2 and call[0][2] == "failed"))
+            if call.kwargs.get("status") == "failed"
         ]
         
         assert len(failed_calls) > 0, "Expected at least one failed callback"
@@ -1169,7 +1163,7 @@ class TestLastRunAtNextRunAt:
     """Tests for last_run_at and next_run_at behavior."""
 
     @pytest.mark.asyncio
-    async def test_last_run_at_populated_from_execution_history(self, mock_on_message, mock_execution_callback):
+    async def test_execution_callback_receives_execution_id(self, mock_on_message, mock_execution_callback):
         """Test that execution callback is called with correct execution_id."""
         config = make_config("test-last-run", {
             "interval_seconds": 3600,
@@ -1187,8 +1181,7 @@ class TestLastRunAtNextRunAt:
         # Verify callback was called with matching execution_id
         matching_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("execution_id") == execution_id or
-                (len(call[0]) > 0 and call[0][0] == execution_id))
+            if call.kwargs.get("execution_id") == execution_id
         ]
         
         assert len(matching_calls) > 0, f"Expected callback with execution_id={execution_id}"
@@ -1282,25 +1275,26 @@ class TestCancelledErrorSemaphoreLeak:
         async def raise_cancelled(*args, **kwargs):
             raise asyncio.CancelledError()
         
-        adapter._emit_message = raise_cancelled
-        
-        # Trigger execution - will fail with CancelledError
         try:
-            await adapter._emit_scheduled_message()
-        except asyncio.CancelledError:
-            pass  # Expected - CancelledError propagates
+            adapter._emit_message = raise_cancelled
+            
+            # Trigger execution - will fail with CancelledError
+            try:
+                await adapter._emit_scheduled_message()
+            except asyncio.CancelledError:
+                pass  # Expected - CancelledError propagates
+            
+            # Give time for async operations
+            await asyncio.sleep(0.2)
+            
+            # Semaphore should be at least released (not stuck at 0)
+            # Note: The semaphore should return to its initial value
+            # Any value other than 0 means it was released (not leaked)
+            assert adapter._execution_semaphore._value >= 1, \
+                f"Semaphore leaked! Value is {adapter._execution_semaphore._value}, should be >= 1"
+        finally:
+            adapter._emit_message = original_emit
         
-        # Give time for async operations
-        await asyncio.sleep(0.2)
-        
-        # Semaphore should be at least released (not stuck at 0)
-        # Note: The semaphore should return to its initial value
-        # Any value other than 0 means it was released (not leaked)
-        assert adapter._execution_semaphore._value >= 1, \
-            f"Semaphore leaked! Value is {adapter._execution_semaphore._value}, should be >= 1"
-        
-        # Restore original
-        adapter._emit_message = original_emit
         await adapter.stop()
 
     @pytest.mark.asyncio
@@ -1330,22 +1324,23 @@ class TestCancelledErrorSemaphoreLeak:
         async def raise_cancelled(*args, **kwargs):
             raise asyncio.CancelledError()
         
-        adapter._execute_run = raise_cancelled
-        
-        # Trigger execution
         try:
-            await adapter._emit_scheduled_message()
-        except asyncio.CancelledError:
-            pass  # Expected - CancelledError propagates
+            adapter._execute_run = raise_cancelled
+            
+            # Trigger execution
+            try:
+                await adapter._emit_scheduled_message()
+            except asyncio.CancelledError:
+                pass  # Expected - CancelledError propagates
+            
+            # Give time for async operations
+            await asyncio.sleep(0.2)
+            
+            # Semaphore should be released
+            assert adapter._execution_semaphore._value == 1, "Semaphore leaked!"
+        finally:
+            adapter._execute_run = original_execute_run
         
-        # Give time for async operations
-        await asyncio.sleep(0.2)
-        
-        # Semaphore should be released
-        assert adapter._execution_semaphore._value == 1, "Semaphore leaked!"
-        
-        # Restore original
-        adapter._execute_run = original_execute_run
         await adapter.stop()
 
     @pytest.mark.asyncio
@@ -1418,8 +1413,7 @@ class TestCancelledErrorSemaphoreLeak:
         # Verify callback was called with 'skipped' status
         skipped_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("status") == "skipped" or 
-                (len(call[0]) > 2 and call[0][2] == "skipped"))
+            if call.kwargs.get("status") == "skipped"
         ]
         assert len(skipped_calls) > 0
         
@@ -1480,10 +1474,9 @@ class TestErrorPaths:
         # Verify callback was called with 'failed' status
         failed_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("status") == "failed" or 
-                (len(call[0]) > 2 and call[0][2] == "failed"))
+            if call.kwargs.get("status") == "failed"
         ]
-        
+
         assert len(failed_calls) > 0, "Expected at least one failed callback"
         
         await adapter.stop()
@@ -1513,17 +1506,14 @@ class TestErrorPaths:
         # Verify callback was called with 'failed' status and correct error
         failed_calls = [
             call for call in mock_execution_callback.call_args_list
-            if (call.kwargs.get("status") == "failed" or 
-                (len(call[0]) > 2 and call[0][2] == "failed"))
+            if call.kwargs.get("status") == "failed"
         ]
-        
+
         assert len(failed_calls) > 0, "Expected at least one failed callback"
         
         # Check error message contains "queue full"
         failed_call = failed_calls[0]
         error_msg = failed_call.kwargs.get("error_message")
-        if error_msg is None and len(failed_call[0]) > 4:
-            error_msg = failed_call[0][4]
         
         assert error_msg is not None
         assert "queue" in error_msg.lower() or "full" in error_msg.lower()

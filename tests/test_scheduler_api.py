@@ -13,6 +13,7 @@ from fastapi import FastAPI
 
 # Import the app and manager directly
 from daemon import api as api_module
+from daemon.models.source import SourceStatus
 
 
 # ==================== Fixtures ====================
@@ -855,9 +856,9 @@ class TestStartSchedule:
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
         
-        # Create mock adapter with status=running
+        # Create mock adapter with status=starting
         mock_adapter = Mock()
-        mock_adapter.status = "running"
+        mock_adapter.status = SourceStatus.starting
         
         # Mock registry
         mock_registry = Mock()
@@ -870,8 +871,11 @@ class TestStartSchedule:
         assert response.status_code == 200
         data = response.json()
         assert data["source_id"] == "scheduler-1"
-        assert data["status"] == "running"
+        assert data["status"] == "starting"
         assert "started successfully" in data["message"]
+
+        # Verify adapter was actually started
+        mock_registry.start_adapter.assert_called_once_with("scheduler-1")
 
     @pytest.mark.asyncio
     async def test_start_schedule_not_found(self, client, mock_manager):
@@ -980,6 +984,9 @@ class TestStopSchedule:
         assert data["source_id"] == "scheduler-1"
         assert data["status"] == "stopped"
         assert "stopped successfully" in data["message"]
+
+        # Verify adapter was actually stopped
+        mock_registry.stop_adapter.assert_called_once_with("scheduler-1")
 
     @pytest.mark.asyncio
     async def test_stop_schedule_not_found(self, client, mock_manager):
