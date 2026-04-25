@@ -124,9 +124,9 @@ install: pyinstaller
 		rm -rf "$(INSTALL_DIR)/daemon"; \
 	fi
 	
-	# Create symlink to agents directory (points to source)
-	@echo "$(YELLOW)Linking agents...$(NC)"
-	ln -sfn $(CURDIR)/agents $(INSTALL_DIR)/agents
+	# Copy agents directory
+	@echo "$(YELLOW)Copying agents...$(NC)"
+	cp -r $(CURDIR)/agents $(INSTALL_DIR)/agents
 	
 	# Copy and modify config.yaml with production port
 	@echo "$(YELLOW)Configuring port $(PROD_PORT)...$(NC)"
@@ -156,7 +156,7 @@ install: pyinstaller
 	@echo "Required files in working directory:"
 	@echo "  - config.yaml"
 	@echo "  - .env"
-	@echo "  - agents/ (symlink)"
+	@echo "  - agents/"
 	@echo "  - frontend/dist/"
 	@echo "  - data/"
 
