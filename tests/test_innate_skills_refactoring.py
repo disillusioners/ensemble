@@ -170,7 +170,7 @@ class TestCacheInvalidation:
         prompt1, tokens1 = load_and_cache_prompt(agent_id, agent_meta.path, cache)
         
         # Find the test-pack skill file
-        skill_file = real_agents_dir / "innate-skills" / "test-pack" / "skill.md"
+        skill_file = real_agents_dir / "_prompt_system" / "innate-skills" / "test-pack" / "skill.md"
         assert skill_file.exists()
         
         original_content = skill_file.read_text()
@@ -224,7 +224,7 @@ class TestEdgeCases:
         (agent_dir / "rule.md").write_text("# Rules\nTest")
         
         # Create the innate-skills dir with only opencode
-        innate_dir = tmp_path / "innate-skills"
+        innate_dir = tmp_path / "_prompt_system" / "innate-skills"
         opencode_dir = innate_dir / "opencode"
         opencode_dir.mkdir(parents=True)
         (opencode_dir / "skill.md").write_text("# OpenCode_Skill\nThis exists.")
@@ -266,7 +266,7 @@ class TestEdgeCases:
         (agent_dir / "meta.json").write_text(json.dumps(meta))
         
         # Create innate skill
-        innate_dir = tmp_path / "innate-skills" / "opencode"
+        innate_dir = tmp_path / "_prompt_system" / "innate-skills" / "opencode"
         innate_dir.mkdir(parents=True)
         (innate_dir / "skill.md").write_text("# From Innate\nInnate content wins.")
         

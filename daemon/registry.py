@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 logger = logging.getLogger(__name__)
 
 # Directories to skip during agent discovery
-SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template", "innate-skills"})
+SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template", "_prompt_system"})
 
 
 class ToolFilter(BaseModel):
@@ -306,7 +306,7 @@ class AgentRegistry:
         if '/' in skill_name or '\\' in skill_name or '..' in skill_name:
             return []
         agents_with_skill = []
-        innate_skill_path = self._agents_dir / "innate-skills" / skill_name / "skill.md"
+        innate_skill_path = self._agents_dir / "_prompt_system" / "innate-skills" / skill_name / "skill.md"
         innate_exists = innate_skill_path.exists()
         for agent_id, metadata in self._agents.items():
             # Check innate-skills registry (via AgentMetadata.innate_skills)

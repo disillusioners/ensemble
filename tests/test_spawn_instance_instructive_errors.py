@@ -179,7 +179,7 @@ class TestPathTraversalProtection:
         agents_dir.mkdir()
 
         # Create centralized innate-skills directory
-        innate_skills_dir = agents_dir / "innate-skills"
+        innate_skills_dir = agents_dir / "_prompt_system" / "innate-skills"
         coding_skill_dir = innate_skills_dir / "coding"
         coding_skill_dir.mkdir(parents=True)
         (coding_skill_dir / "skill.md").write_text("# Coding skill from registry")

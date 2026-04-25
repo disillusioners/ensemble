@@ -267,7 +267,7 @@ class TestLoadAndCachePrompt:
         (agent_dir / "rule.md").write_text("# Rules\nTest rules")
 
         # Create centralized innate-skills directory
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         coding_dir = innate_skills_dir / "coding"
         coding_dir.mkdir(parents=True)
         skill_file = coding_dir / "skill.md"
@@ -360,7 +360,7 @@ class TestLoadAgentSkills:
         agent_dir.mkdir()
 
         # Create centralized innate-skills directory (sibling to agent dir)
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         coding_skill_dir = innate_skills_dir / "coding"
         coding_skill_dir.mkdir(parents=True)
         (coding_skill_dir / "skill.md").write_text("# Coding\nYou are a coding expert.")
@@ -397,7 +397,7 @@ class TestLoadAgentSkills:
         agent_dir.mkdir()
 
         # Create centralized innate-skills directory
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         coding_dir = innate_skills_dir / "coding"
         coding_dir.mkdir(parents=True)
         (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
@@ -420,7 +420,7 @@ class TestLoadAgentSkills:
         agent_dir.mkdir()
 
         # Create centralized innate-skills directory
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         coding_dir = innate_skills_dir / "coding"
         coding_dir.mkdir(parents=True)
         (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
@@ -446,7 +446,7 @@ class TestLoadAgentSkills:
         agent_dir.mkdir()
 
         # Create innate-skills dir but NOT the skill file
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         coding_dir = innate_skills_dir / "coding"
         coding_dir.mkdir(parents=True)
         (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
@@ -488,7 +488,7 @@ class TestLoadAgentSkills:
         agent_dir.mkdir()
 
         # Create centralized innate-skills directory
-        innate_skills_dir = tmp_path / "innate-skills"
+        innate_skills_dir = tmp_path / "_prompt_system" / "innate-skills"
         some_skill_dir = innate_skills_dir / "some-skill"
         some_skill_dir.mkdir(parents=True)
         (some_skill_dir / "skill.md").write_text("# Some Skill\nFrom innate-skills.")

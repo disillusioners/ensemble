@@ -17,7 +17,7 @@ if getattr(sys, 'frozen', False):
     _base_dir = Path(sys.executable).parent
 else:
     _base_dir = Path(__file__).parent.parent
-PROJECT_EXPERIENCE_FILE = _base_dir / "agents" / "project-experience.md"
+PROJECT_EXPERIENCE_FILE = _base_dir / "agents" / "_prompt_system" / "project-experience.md"
 
 
 def _ensure_tool_metadata_populated() -> None:
@@ -188,7 +188,7 @@ def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
 
 def _resolve_innate_skill_paths(agent_dir: Path, meta: dict) -> list[tuple[str, Path]]:
     """Resolve innate skill file paths from meta config."""
-    innate_skills_dir = agent_dir.parent / "innate-skills"
+    innate_skills_dir = agent_dir.parent / "_prompt_system" / "innate-skills"
     return [
         (name, innate_skills_dir / name / "skill.md")
         for name in sorted(set(meta.get("innate_skills", [])))
@@ -199,7 +199,7 @@ def load_agent_skills(agent_dir: Path, meta: dict | None = None) -> dict[str, st
     """Load agent skills from centralized innate-skills or local skills/ directory.
 
     When meta is provided with a non-empty innate_skills list, loads from the
-    centralized agents/innate-skills/ directory. Otherwise falls back to scanning
+    centralized agents/_prompt_system/innate-skills/ directory. Otherwise falls back to scanning
     the agent's own skills/ directory for backward compatibility.
 
     An empty innate_skills array ([]) is treated as absent, triggering legacy mode.
@@ -512,7 +512,7 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         # Innate-skills mode: track centralized skill files
         for skill_name, skill_file in _resolve_innate_skill_paths(agent_dir, meta):
             if skill_file.exists():
-                current_mtimes[f"innate-skills/{skill_name}/skill.md"] = skill_file.stat().st_mtime
+                current_mtimes[f"_prompt_system/innate-skills/{skill_name}/skill.md"] = skill_file.stat().st_mtime
     else:
         # Legacy mode: scan agent's own skills/ directory
         skills_dir = agent_dir / "skills"
