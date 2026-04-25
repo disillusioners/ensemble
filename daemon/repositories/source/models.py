@@ -31,7 +31,7 @@ class SourceStatus(str, enum.Enum):
 class ExecutionStatus(str, enum.Enum):
     """Execution status enum for schedule executions."""
     TRIGGERED = "triggered"
-    RUNNING = "running"
+    RUNNING = "running"  # Reserved for future use
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"

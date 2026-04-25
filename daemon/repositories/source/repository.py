@@ -100,7 +100,7 @@ class SQLModelSourceRepository:
         The counter is stored in the source's config field (_run_counter) so it persists
         even if sessions crash. Initializes to 0 if not present.
 
-        Uses atomic SQL with json_set() to avoid race conditions.
+        Uses atomic SQL with json_set() and RETURNING to avoid race conditions.
 
         Args:
             source_id: The source ID to increment the counter for.
@@ -109,26 +109,19 @@ class SQLModelSourceRepository:
             The new counter value, or None if the source was not found.
         """
         with Session(self.engine) as session:
-            # Atomic update using json_set for _run_counter and updated_at
+            # Atomic update using json_set for _run_counter with COALESCE and RETURNING clause
             update_sql = text("""
                 UPDATE source_configs
                 SET config = json_set(
-                    config,
+                    COALESCE(config, '{}'),
                     '$._run_counter',
                     COALESCE(CAST(json_extract(config, '$._run_counter') AS INTEGER), 0) + 1
                 ),
                 updated_at = :updated_at
                 WHERE source_id = :source_id
+                RETURNING CAST(json_extract(config, '$._run_counter') AS INTEGER) as counter
             """)
-            session.execute(update_sql, {"source_id": source_id, "updated_at": datetime.now(timezone.utc).isoformat()})
-
-            # Select the new counter value
-            select_sql = text("""
-                SELECT CAST(json_extract(config, '$._run_counter') AS INTEGER) as counter
-                FROM source_configs
-                WHERE source_id = :source_id
-            """)
-            result = session.execute(select_sql, {"source_id": source_id}).fetchone()
+            result = session.execute(update_sql, {"source_id": source_id, "updated_at": datetime.now(timezone.utc).isoformat()}).fetchone()
 
             session.commit()
 
@@ -564,7 +557,7 @@ class SQLModelSourceRepository:
                 select(ScheduleExecution)
                 .where(
                     ScheduleExecution.schedule_id == schedule_id,
-                    ScheduleExecution.status == "triggered",
+                    ScheduleExecution.status == ExecutionStatus.TRIGGERED.value,
                 )
                 .order_by(col(ScheduleExecution.triggered_at).desc())
             )
