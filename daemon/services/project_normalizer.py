@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
+import daemon.constants
 
 
 def normalize_project_id(project_id: str | None) -> str:
@@ -19,26 +19,27 @@ def normalize_project_id(project_id: str | None) -> str:
     Raises:
         RuntimeError: If SYSTEM_DEFAULT_PROJECT_ID is None (called before startup).
     """
-    if SYSTEM_DEFAULT_PROJECT_ID is None:
+    system_default_project_id = daemon.constants.SYSTEM_DEFAULT_PROJECT_ID
+    if system_default_project_id is None:
         raise RuntimeError(
             "normalize_project_id() called before system default project was initialized"
         )
 
     # Handle None
     if project_id is None:
-        return SYSTEM_DEFAULT_PROJECT_ID
+        return system_default_project_id
 
     # Normalize and check for empty/whitespace-only
     normalized = project_id.strip()
 
     # Handle empty string
     if normalized == "":
-        return SYSTEM_DEFAULT_PROJECT_ID
+        return system_default_project_id
 
     # Handle null/none string variants (case-insensitive)
     lower = normalized.lower()
     if lower in ("null", "none"):
-        return SYSTEM_DEFAULT_PROJECT_ID
+        return system_default_project_id
 
     # Return the original input (preserving original case, not stripped)
     return project_id

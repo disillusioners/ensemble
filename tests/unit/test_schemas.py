@@ -18,14 +18,12 @@ class TestJobCreateRequestProjectIdNormalization:
     """Tests for JobCreateRequest.project_id field normalization."""
 
     @pytest.fixture(autouse=True)
-    def setup_and_teardown(self, monkeypatch):
+    def setup_and_teardown(self):
         """Set up test value before tests, reset after."""
         original_value = constants.SYSTEM_DEFAULT_PROJECT_ID
         constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_DEFAULT_PROJECT_ID
-        monkeypatch.setattr(project_normalizer, "SYSTEM_DEFAULT_PROJECT_ID", TEST_DEFAULT_PROJECT_ID)
         yield
         constants.SYSTEM_DEFAULT_PROJECT_ID = original_value
-        monkeypatch.setattr(project_normalizer, "SYSTEM_DEFAULT_PROJECT_ID", original_value)
 
     def _make_request(self, **kwargs):
         """Helper to create JobCreateRequest with defaults for required fields."""

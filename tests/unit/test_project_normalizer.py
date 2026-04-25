@@ -14,18 +14,13 @@ TEST_SYSTEM_PROJECT_ID = "test-system-project-id"
 @pytest.fixture(autouse=True)
 def setup_system_project_id():
     """Set up SYSTEM_DEFAULT_PROJECT_ID before each test and reset after."""
-    # Both modules have their own binding of SYSTEM_DEFAULT_PROJECT_ID
-    # due to the import in project_normalizer.py
-    original_in_constants = constants.SYSTEM_DEFAULT_PROJECT_ID
-    original_in_normalizer = project_normalizer.SYSTEM_DEFAULT_PROJECT_ID
-
+    # project_normalizer uses daemon.constants.SYSTEM_DEFAULT_PROJECT_ID via module attribute access
+    original = constants.SYSTEM_DEFAULT_PROJECT_ID
     constants.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
-    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = TEST_SYSTEM_PROJECT_ID
 
     yield
 
-    constants.SYSTEM_DEFAULT_PROJECT_ID = original_in_constants
-    project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = original_in_normalizer
+    constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
 
 # ── Tests ───────────────────────────────────────────────────────────────────────
@@ -81,8 +76,6 @@ class TestNormalizeProjectId:
     def test_raises_when_system_id_not_set(self):
         """With SYSTEM_DEFAULT_PROJECT_ID = None, calling normalize_project_id() raises RuntimeError."""
         # Temporarily set to None to test the error case
-        # Must update both bindings since project_normalizer has its own import
         constants.SYSTEM_DEFAULT_PROJECT_ID = None
-        project_normalizer.SYSTEM_DEFAULT_PROJECT_ID = None
         with pytest.raises(RuntimeError, match="before system default project was initialized"):
             project_normalizer.normalize_project_id("any-project-id")

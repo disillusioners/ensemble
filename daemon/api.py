@@ -64,7 +64,7 @@ from daemon import __version__
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
-import daemon.constants
+from daemon import constants
 
 # Determine the base path (use working directory for production)
 # PyInstaller runs from INSTALL_DIR where frontend/dist is expected
