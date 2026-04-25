@@ -98,7 +98,7 @@ class TestFindNearInstance:
         assert result == "abc-123-def"
 
     def test_find_near_instance_two_chars_wrong(self):
-        """Test matching with two characters wrong (at threshold)."""
+        """Test matching with two characters wrong (well within default threshold)."""
         from daemon.manager import InstanceManager
         
         mock_repo = MagicMock()
@@ -110,12 +110,12 @@ class TestFindNearInstance:
         m = InstanceManager.__new__(InstanceManager)
         m._instance_repository = mock_repo
         
-        # Two characters wrong - still within default threshold of 2
+        # Two characters wrong - well within default threshold of 7
         result = m.find_near_instance("abc-123-deh")
         assert result == "abc-123-def"
 
     def test_find_near_instance_three_chars_wrong(self):
-        """Test that three wrong characters exceeds threshold."""
+        """Test that three wrong characters matches (within default threshold 7)."""
         from daemon.manager import InstanceManager
         
         mock_repo = MagicMock()
@@ -127,9 +127,9 @@ class TestFindNearInstance:
         m = InstanceManager.__new__(InstanceManager)
         m._instance_repository = mock_repo
         
-        # "abc-123-xyz" is 6 chars different from "abc-123-def"
+        # "abc-123-xyz" has edit distance 3 from "abc-123-def", within default threshold of 7
         result = m.find_near_instance("abc-123-xyz")
-        assert result is None
+        assert result == "abc-123-def"
 
     def test_find_near_instance_length_difference(self):
         """Test that large length differences are filtered efficiently."""
@@ -137,15 +137,15 @@ class TestFindNearInstance:
         
         mock_repo = MagicMock()
         mock_repo.list.return_value = (
-            [self._create_mock_instance("abc"), self._create_mock_instance("xyz-very-long-id")],
+            [self._create_mock_instance("abc-very-long-id"), self._create_mock_instance("xyz-very-long-id")],
             2
         )
         
         m = InstanceManager.__new__(InstanceManager)
         m._instance_repository = mock_repo
         
-        # "abc-def" length 7, "abc" length 3, diff=4 > threshold 2
-        result = m.find_near_instance("abc-def")
+        # "abc" (3 chars) vs "abc-very-long-id" (14 chars) - length diff = 11 > threshold 7
+        result = m.find_near_instance("abc")
         assert result is None
 
     def test_find_near_instance_case_insensitive(self):
@@ -232,3 +232,97 @@ class TestFindNearInstance:
         # Should return the first match (newer-id), not second
         result = m.find_near_instance("newer-id")
         assert result == "newer-id"
+
+    def test_find_near_instance_seven_chars_wrong(self):
+        """Test that seven wrong characters exceeds default threshold of 7."""
+        from daemon.manager import InstanceManager
+        
+        mock_repo = MagicMock()
+        mock_repo.list.return_value = (
+            [self._create_mock_instance("abc-123-def")],
+            1
+        )
+        
+        m = InstanceManager.__new__(InstanceManager)
+        m._instance_repository = mock_repo
+        
+        # "xyz-789-uvw" has edit distance 9 from "abc-123-def", exceeds threshold of 7
+        result = m.find_near_instance("xyz-789-uvw")
+        assert result is None
+
+    def test_find_near_instance_at_threshold_seven(self):
+        """Test matching at the default threshold boundary."""
+        from daemon.manager import InstanceManager
+        
+        mock_repo = MagicMock()
+        mock_repo.list.return_value = (
+            [self._create_mock_instance("abc-123-def")],
+            1
+        )
+        
+        m = InstanceManager.__new__(InstanceManager)
+        m._instance_repository = mock_repo
+        
+        # "abc-123-xyz" has edit distance 3 from "abc-123-def", within threshold of 7
+        result = m.find_near_instance("abc-123-xyz")
+        assert result == "abc-123-def"
+
+    def test_find_near_instance_uuid_fix_insertion(self):
+        """Test UUID with insertion (fix vs 01d) within threshold."""
+        from daemon.manager import InstanceManager
+        
+        stored_id = "54509cae-a537-49e6-8268-901db36669b8"
+        mock_repo = MagicMock()
+        mock_repo.list.return_value = (
+            [self._create_mock_instance(stored_id)],
+            1
+        )
+        
+        m = InstanceManager.__new__(InstanceManager)
+        m._instance_repository = mock_repo
+        
+        # "fix" inserted for "01d" = 3 operations (delete 3, insert 3, but net 3)
+        # edit_distance("54509cae-a537-49e6-8268-90fixdb36669b8", stored_id) = 3
+        search_input = "54509cae-a537-49e6-8268-90fixdb36669b8"
+        result = m.find_near_instance(search_input)
+        assert result == stored_id
+
+    def test_find_near_instance_uuid_multiple_differences_within_threshold(self):
+        """Test UUID with multiple differences at threshold boundary."""
+        from daemon.manager import InstanceManager
+        
+        stored_id = "54509cae-a537-49e6-8268-901db36669b8"
+        mock_repo = MagicMock()
+        mock_repo.list.return_value = (
+            [self._create_mock_instance(stored_id)],
+            1
+        )
+        
+        m = InstanceManager.__new__(InstanceManager)
+        m._instance_repository = mock_repo
+        
+        # "11111aaa" vs "54509cae" = 7 substitutions
+        # edit_distance("11111aaa-a537-49e6-8268-901db36669b8", stored_id) = 7
+        search_input = "11111aaa-a537-49e6-8268-901db36669b8"
+        result = m.find_near_instance(search_input)
+        assert result == stored_id
+
+    def test_find_near_instance_uuid_exceeds_threshold(self):
+        """Test UUID with differences exceeding threshold."""
+        from daemon.manager import InstanceManager
+        
+        stored_id = "54509cae-a537-49e6-8268-901db36669b8"
+        mock_repo = MagicMock()
+        mock_repo.list.return_value = (
+            [self._create_mock_instance(stored_id)],
+            1
+        )
+        
+        m = InstanceManager.__new__(InstanceManager)
+        m._instance_repository = mock_repo
+        
+        # "11112222" vs "901db36669b8" = 11 differences
+        # edit_distance("54509cae-a537-49e6-8268-11112222", stored_id) = 11
+        search_input = "54509cae-a537-49e6-8268-11112222"
+        result = m.find_near_instance(search_input)
+        assert result is None

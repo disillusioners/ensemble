@@ -141,12 +141,54 @@ def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | 
 
 def _is_null_workdir(value: str | None) -> bool:
     """Check if workdir value should be treated as null/empty.
-    
+
     Handles various null representations: None, "", "null", "none", "None", etc.
     """
     if value is None:
         return True
     return str(value).strip().lower() in ("", "null", "none")
+
+
+def _resolve_instance_id(
+    manager: "InstanceManager",
+    instance_id: str,
+    operation: str,
+) -> str:
+    """Resolve instance_id with fuzzy matching fallback.
+
+    First tries exact match. On KeyError, attempts fuzzy matching with
+    max_distance=7. Returns the original instance_id if found, otherwise
+    raises ValueError with helpful error message.
+
+    Args:
+        manager: The InstanceManager instance.
+        instance_id: The instance ID to resolve.
+        operation: The operation name for error messages (e.g., "send message to").
+
+    Returns:
+        The resolved instance_id (original if found, or corrected via fuzzy match).
+
+    Raises:
+        ValueError: If instance not found and no close match exists.
+    """
+    try:
+        # First try exact match - this is the fast path
+        manager.get_instance(instance_id)
+        return instance_id
+    except KeyError:
+        # Exact match failed - try fuzzy matching
+        near_match = manager.find_near_instance(instance_id, max_distance=7)
+        if near_match:
+            raise ValueError(
+                f"ERROR: instance '{instance_id}' not found. "
+                f"Did you mean '{near_match}'? "
+                f"Please retry with the corrected instance_id."
+            )
+        else:
+            raise ValueError(
+                f"ERROR: instance '{instance_id}' not found and no similar instance found. "
+                f"Please check the instance ID or spawn a new instance for your task."
+            )
 
 
 def _make_workdir_aware(
@@ -361,21 +403,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     @tool
     async def send_message(instance_id: str, message: str) -> str:
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
-        # Validate instance exists first (with fuzzy matching for typos)
+        # Validate instance exists with fuzzy matching for typos
         try:
-            manager.get_instance(instance_id)
-        except KeyError:
-            # Try to find a near match
-            near_match = manager.find_near_instance(instance_id, max_distance=2)
-            if near_match:
-                return (
-                    f"ERROR: instance not found, are you intent to use following '{near_match}'?\n"
-                    f"If yes, please retry with the corrected instance_id."
-                )
-            else:
-                return (
-                    f"ERROR: '{instance_id}' not found, please re-plan, spawn new instance for your task"
-                )
+            _resolve_instance_id(manager, instance_id, "send message to")
+        except ValueError as e:
+            return str(e)
 
         # Check if instance is terminated
         instance_info = manager.get_instance_info(instance_id)
@@ -437,6 +469,12 @@ Returns:
     @tool
     async def terminate_instance(instance_id: str) -> bool:
         """Terminate an instance. Use with caution. Use tool_help("terminate_instance") for details."""
+        # Validate instance exists with fuzzy matching for typos
+        try:
+            _resolve_instance_id(manager, instance_id, "terminate")
+        except ValueError as e:
+            logger.error(str(e))
+            return False
         return await manager.terminate_instance(instance_id)
     
     terminate_instance._full_doc_ = """Terminate an instance. Use with caution.
@@ -465,6 +503,11 @@ Returns:
     @tool
     def get_instance_info(instance_id: str) -> dict:
         """Get information about a specific instance. Use tool_help("get_instance_info") for details."""
+        # Validate instance exists with fuzzy matching for typos
+        try:
+            _resolve_instance_id(manager, instance_id, "get info for")
+        except ValueError as e:
+            return {"error": str(e)}
         return manager.get_instance_info(instance_id)
     
     get_instance_info._full_doc_ = """Get information about a specific instance.

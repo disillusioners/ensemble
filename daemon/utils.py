@@ -377,7 +377,7 @@ def edit_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def find_near_instance(instance_id: str, instances: list, max_distance: int = 2) -> str | None:
+def find_near_instance(instance_id: str, instances: list, max_distance: int = 7) -> str | None:
     """Find a near-matching instance ID from recent instances using edit distance.
     
     Searches through instances using edit distance to find a close match.
@@ -386,7 +386,7 @@ def find_near_instance(instance_id: str, instances: list, max_distance: int = 2)
     Args:
         instance_id: The instance ID to find a near match for.
         instances: List of instance objects with instance_id attribute.
-        max_distance: Maximum edit distance threshold (default: 2).
+        max_distance: Maximum edit distance threshold (default: 7).
         
     Returns:
         The near-matching instance_id if found, None otherwise.
