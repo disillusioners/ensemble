@@ -294,8 +294,8 @@ class AgentRegistry:
     def find_skill(self, skill_name: str) -> list[str]:
         """Find all agents that have a specific skill.
 
-        Skills are stored at agents/<agent_id>/skills/<skill_name>/skill.md.
-        This method scans the filesystem to find agents with the given skill.
+        Checks both the centralized innate-skills registry (via AgentMetadata.innate_skills)
+        and legacy per-agent skills/ directories (agents/<agent_id>/skills/<skill_name>/skill.md).
 
         Args:
             skill_name: The skill name to search for.

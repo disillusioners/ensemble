@@ -73,19 +73,13 @@ class TestDiscoverAgents:
 
     def test_discover_with_innate_skills(self, temp_agents_dir: Path) -> None:
         """Test that innate_skills are properly loaded from meta.json."""
-        # Create agent with innate_skills
-        agent_dir = temp_agents_dir / "coder"
-        agent_dir.mkdir()
-        meta = {
-            "id": "coder",
-            "name": "Coder",
-            "description": "Test coder",
-            "icon": "🤖",
-            "color": "accent-blue",
-            "innate_skills": ["coding", "reviewing"],
-        }
-        with open(agent_dir / "meta.json", "w") as f:
-            json.dump(meta, f)
+        # Create agent with innate_skills using helper
+        create_agent_meta(
+            temp_agents_dir, "coder",
+            name="Coder",
+            description="Test coder",
+            innate_skills=["coding", "reviewing"],
+        )
 
         registry = AgentRegistry(temp_agents_dir)
         registry.discover()

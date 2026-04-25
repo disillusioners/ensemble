@@ -186,16 +186,30 @@ def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
     return "\n".join(lines)
 
 
+def _resolve_innate_skill_paths(agent_dir: Path, meta: dict) -> list[tuple[str, Path]]:
+    """Resolve innate skill file paths from meta config."""
+    innate_skills_dir = agent_dir.parent / "innate-skills"
+    return [
+        (name, innate_skills_dir / name / "skill.md")
+        for name in sorted(set(meta.get("innate_skills", [])))
+    ]
+
+
 def load_agent_skills(agent_dir: Path, meta: dict | None = None) -> dict[str, str]:
-    """Load agent skills from centralized innate-skills or local skills/ directory."""
+    """Load agent skills from centralized innate-skills or local skills/ directory.
+
+    When meta is provided with a non-empty innate_skills list, loads from the
+    centralized agents/innate-skills/ directory. Otherwise falls back to scanning
+    the agent's own skills/ directory for backward compatibility.
+
+    An empty innate_skills array ([]) is treated as absent, triggering legacy mode.
+    """
     skills: dict[str, str] = {}
 
     # New path: load from centralized innate-skills registry
     # NOTE: truthy check (not just "in") ensures empty array [] falls through to legacy
     if meta and meta.get("innate_skills"):
-        innate_skills_dir = agent_dir.parent / "innate-skills"
-        for skill_name in sorted(set(meta["innate_skills"])):
-            skill_file = innate_skills_dir / skill_name / "skill.md"
+        for skill_name, skill_file in _resolve_innate_skill_paths(agent_dir, meta):
             if skill_file.exists():
                 skills[skill_name] = skill_file.read_text(encoding="utf-8")
             else:
@@ -496,9 +510,7 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     # Include mtimes for all skill files (mode-aware: innate-skills or legacy)
     if meta and meta.get("innate_skills"):
         # Innate-skills mode: track centralized skill files
-        innate_skills_dir = agent_dir.parent / "innate-skills"
-        for skill_name in sorted(set(meta["innate_skills"])):
-            skill_file = innate_skills_dir / skill_name / "skill.md"
+        for skill_name, skill_file in _resolve_innate_skill_paths(agent_dir, meta):
             if skill_file.exists():
                 current_mtimes[f"innate-skills/{skill_name}/skill.md"] = skill_file.stat().st_mtime
     else:
