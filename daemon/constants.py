@@ -88,7 +88,9 @@ SYSTEM_DEFAULT_PROJECT_ID: str | None = None  # Set at startup by ensure_system_
 # ============================================================
 # Scheduler
 # ============================================================
-SCHEDULER_SEMAPHORE_TIMEOUT_S = 1.0        # Scheduled trigger semaphore timeout (raised from 0.1s)
+# Tradeoff: wider window for skipped triggers when max_concurrent is reached.
+# Monitor "skipped" callbacks to tune this value.
+SCHEDULER_SEMAPHORE_TIMEOUT_S = 1.0        # Raised from 0.1s for reliability.
 SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S = 10.0  # Manual trigger semaphore timeout
 SCHEDULER_GRACE_PERIOD_S = 30.0             # Grace period for running executions on stop
 SCHEDULER_ERROR_RETRY_S = 5.0               # Brief pause before retry on errors

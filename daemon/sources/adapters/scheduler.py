@@ -675,6 +675,9 @@ Original scheduled task:
             else:
                 await self._execute_immediate(execution_id, formatted_message, metadata)
             
+        except asyncio.CancelledError:
+            logger.info(f"Execution cancelled: {execution_id}")
+            raise  # finally still runs, semaphore released
         except Exception as e:
             logger.error(f"Failed to execute {trigger_type} message: {execution_id}, error={e}", exc_info=True)
             if self._execution_callback:
@@ -780,31 +783,35 @@ Original scheduled task:
         if not await self._acquire_execution_slot(SCHEDULER_SEMAPHORE_TIMEOUT_S, execution_id):
             return
         
-        # Check if mapped instance is still active (for reuse_instance mode)
-        if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
-            is_active, instance_id, instance_status = self._is_instance_active()
-            if is_active and instance_id:
-                logger.info(
-                    f"Skipping scheduled execution {execution_id}: instance {instance_id} "
-                    f"is still {instance_status} (reuse_instance mode)"
-                )
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="skipped",
-                            instance_id=instance_id,
-                            error_message=f"Instance still {instance_status}",
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-                if self._execution_semaphore:
-                    self._execution_semaphore.release()
-                return
-        
-        # Execute the scheduled run
-        await self._execute_run(execution_id, "scheduled")
+        semaphore_held = True
+        try:
+            # Check if mapped instance is still active (for reuse_instance mode)
+            if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+                is_active, instance_id, instance_status = self._is_instance_active()
+                if is_active and instance_id:
+                    logger.info(
+                        f"Skipping scheduled execution {execution_id}: instance {instance_id} "
+                        f"is still {instance_status} (reuse_instance mode)"
+                    )
+                    if self._execution_callback:
+                        try:
+                            self._execution_callback(
+                                execution_id=execution_id,
+                                schedule_id=self.source_id,
+                                status="skipped",
+                                instance_id=instance_id,
+                                error_message=f"Instance still {instance_status}",
+                            )
+                        except Exception as e:
+                            logger.warning(f"Execution callback error: {e}")
+                    return  # finally still runs, releases semaphore
+            
+            # Execute the scheduled run (its finally handles semaphore release)
+            await self._execute_run(execution_id, "scheduled")
+            semaphore_held = False  # _execute_run's finally releases it
+        finally:
+            if semaphore_held and self._execution_semaphore:
+                self._execution_semaphore.release()
     
     async def _execute_trigger(self, execution_id: str) -> None:
         """Execute a manual trigger.
@@ -820,28 +827,32 @@ Original scheduled task:
             # Callback already called inside _acquire_execution_slot() on timeout
             return
         
-        # Check if mapped instance is still active (for reuse_instance mode)
-        if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
-            is_active, instance_id, instance_status = self._is_instance_active()
-            if is_active and instance_id:
-                logger.info(
-                    f"Skipping manual trigger {execution_id}: instance {instance_id} "
-                    f"is still {instance_status} (reuse_instance mode)"
-                )
-                if self._execution_callback:
-                    try:
-                        self._execution_callback(
-                            execution_id=execution_id,
-                            schedule_id=self.source_id,
-                            status="skipped",
-                            instance_id=instance_id,
-                            error_message=f"Instance still {instance_status}",
-                        )
-                    except Exception as e:
-                        logger.warning(f"Execution callback error: {e}")
-                if self._execution_semaphore:
-                    self._execution_semaphore.release()
-                return
-        
-        # Execute the manual trigger (always immediate, no job queue)
-        await self._execute_run(execution_id, "manual")
+        semaphore_held = True
+        try:
+            # Check if mapped instance is still active (for reuse_instance mode)
+            if self._instance_mode == SchedulerInstanceMode.REUSE_INSTANCE:
+                is_active, instance_id, instance_status = self._is_instance_active()
+                if is_active and instance_id:
+                    logger.info(
+                        f"Skipping manual trigger {execution_id}: instance {instance_id} "
+                        f"is still {instance_status} (reuse_instance mode)"
+                    )
+                    if self._execution_callback:
+                        try:
+                            self._execution_callback(
+                                execution_id=execution_id,
+                                schedule_id=self.source_id,
+                                status="skipped",
+                                instance_id=instance_id,
+                                error_message=f"Instance still {instance_status}",
+                            )
+                        except Exception as e:
+                            logger.warning(f"Execution callback error: {e}")
+                    return  # finally still runs, releases semaphore
+            
+            # Execute the manual trigger (its finally handles semaphore release)
+            await self._execute_run(execution_id, "manual")
+            semaphore_held = False  # _execute_run's finally releases it
+        finally:
+            if semaphore_held and self._execution_semaphore:
+                self._execution_semaphore.release()
