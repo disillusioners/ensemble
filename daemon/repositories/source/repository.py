@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, insert
+from sqlalchemy import delete as sql_delete, insert, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
-from .models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution, SourceStatus
+from .models import SourceConfig, InstanceMapping, ProcessedMessage, ScheduleExecution, SourceStatus, ExecutionStatus
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class SQLModelSourceRepository:
     ) -> SourceConfig:
         """Create a new source configuration."""
         with Session(self.engine) as session:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             source_id = source_id or str(uuid.uuid4())
             
             source_config = SourceConfig(
@@ -87,7 +87,7 @@ class SQLModelSourceRepository:
             if enabled is not None:
                 source_config.enabled = enabled
             
-            source_config.updated_at = datetime.utcnow().isoformat()
+            source_config.updated_at = datetime.now(timezone.utc).isoformat()
             session.commit()
             session.refresh(source_config)
             
@@ -96,32 +96,47 @@ class SQLModelSourceRepository:
 
     def increment_scheduler_run_counter(self, source_id: str) -> int | None:
         """Atomically increment and return the scheduler run counter for a source.
-        
+
         The counter is stored in the source's config field (_run_counter) so it persists
         even if sessions crash. Initializes to 0 if not present.
-        
+
+        Uses atomic SQL with json_set() to avoid race conditions.
+
         Args:
             source_id: The source ID to increment the counter for.
-            
+
         Returns:
             The new counter value, or None if the source was not found.
         """
         with Session(self.engine) as session:
-            source_config = session.get(SourceConfig, source_id)
-            if source_config is None:
+            # Atomic update using json_set for _run_counter and updated_at
+            update_sql = text("""
+                UPDATE source_configs
+                SET config = json_set(
+                    config,
+                    '$._run_counter',
+                    COALESCE(CAST(json_extract(config, '$._run_counter') AS INTEGER), 0) + 1
+                ),
+                updated_at = :updated_at
+                WHERE source_id = :source_id
+            """)
+            session.execute(update_sql, {"source_id": source_id, "updated_at": datetime.now(timezone.utc).isoformat()})
+
+            # Select the new counter value
+            select_sql = text("""
+                SELECT CAST(json_extract(config, '$._run_counter') AS INTEGER) as counter
+                FROM source_configs
+                WHERE source_id = :source_id
+            """)
+            result = session.execute(select_sql, {"source_id": source_id}).fetchone()
+
+            session.commit()
+
+            if result is None:
                 logger.warning(f"Source not found for run counter increment: source_id={source_id}")
                 return None
-            
-            # Get current counter from config, initialize to 0 if not present
-            current_counter = source_config.config.get("_run_counter", 0)
-            new_counter = current_counter + 1
-            
-            # Update the config with new counter value
-            source_config.config["_run_counter"] = new_counter
-            source_config.updated_at = datetime.utcnow().isoformat()
-            
-            session.commit()
-            
+
+            new_counter = result[0]
             logger.debug(f"Incremented run counter: source_id={source_id}, new_value={new_counter}")
             return new_counter
 
@@ -173,7 +188,7 @@ class SQLModelSourceRepository:
             
             source_config.status = status
             source_config.error_message = error_message
-            source_config.updated_at = datetime.utcnow().isoformat()
+            source_config.updated_at = datetime.now(timezone.utc).isoformat()
             
             session.commit()
             session.refresh(source_config)
@@ -229,7 +244,7 @@ class SQLModelSourceRepository:
     ) -> InstanceMapping:
         """Create or update an instance mapping."""
         with Session(self.engine) as session:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             mapping_id = mapping_id or str(uuid.uuid4())
             
             # Check if mapping exists (upsert logic)
@@ -318,7 +333,7 @@ class SQLModelSourceRepository:
             if mapping is None:
                 return False
             
-            mapping.last_message_at = datetime.utcnow().isoformat()
+            mapping.last_message_at = datetime.now(timezone.utc).isoformat()
             session.commit()
             
             logger.debug(
@@ -363,7 +378,7 @@ class SQLModelSourceRepository:
     ) -> int:
         """Clean up inactive instance mappings older than max_age_days."""
         with Session(self.engine) as session:
-            cutoff_time = datetime.utcnow() - timedelta(days=max_age_days)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(days=max_age_days)
             cutoff_str = cutoff_time.isoformat()
             
             # Find inactive mappings
@@ -406,7 +421,7 @@ class SQLModelSourceRepository:
             False if this is a new message (and now marked as processed).
         """
         with Session(self.engine) as session:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             
             processed = ProcessedMessage(
                 source_id=source_id,
@@ -433,7 +448,7 @@ class SQLModelSourceRepository:
     ) -> int:
         """Clean up processed messages older than max_age_hours."""
         with Session(self.engine) as session:
-            cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
             cutoff_str = cutoff_time.isoformat()
             
             # Find messages to delete first
@@ -474,7 +489,7 @@ class SQLModelSourceRepository:
             execution = ScheduleExecution(
                 schedule_id=schedule_id,
                 instance_id=instance_id,
-                status="triggered",
+                status=ExecutionStatus.TRIGGERED.value,
             )
             
             # Use provided execution_id if available
@@ -491,10 +506,13 @@ class SQLModelSourceRepository:
     def record_execution_complete(
         self,
         execution_id: str,
-        status: str = "completed",
+        status: str = ExecutionStatus.COMPLETED.value,
         error_message: str | None = None,
     ) -> ScheduleExecution | None:
         """Update execution status to completed or failed."""
+        if not ExecutionStatus.is_valid(status):
+            raise ValueError(f"Invalid execution status: {status}. Must be one of: {', '.join(s.value for s in ExecutionStatus)}")
+
         with Session(self.engine) as session:
             execution = session.get(ScheduleExecution, execution_id)
             if execution is None:
@@ -503,7 +521,7 @@ class SQLModelSourceRepository:
             
             execution.status = status
             execution.error_message = error_message
-            execution.completed_at = datetime.utcnow().isoformat()
+            execution.completed_at = datetime.now(timezone.utc).isoformat()
             
             session.commit()
             session.refresh(execution)

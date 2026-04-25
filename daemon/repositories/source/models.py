@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column
+from sqlalchemy import Column, Index
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
@@ -22,6 +22,20 @@ class SourceStatus(str, enum.Enum):
     STARTING = "starting"
     RUNNING = "running"
     ERROR = "error"
+
+    @classmethod
+    def is_valid(cls, status: str) -> bool:
+        return status in cls._value2member_map_
+
+
+class ExecutionStatus(str, enum.Enum):
+    """Execution status enum for schedule executions."""
+    TRIGGERED = "triggered"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    QUEUED = "queued"
 
     @classmethod
     def is_valid(cls, status: str) -> bool:
@@ -46,8 +60,8 @@ class SourceConfig(SQLModel, table=True):
     status: str = Field(default=SourceStatus.STOPPED.value)
     error_message: str | None = None
     
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -82,7 +96,7 @@ class InstanceMapping(SQLModel, table=True):
     )
     
     last_message_at: str | None = None
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -105,7 +119,7 @@ class ProcessedMessage(SQLModel, table=True):
 
     source_id: str = Field(primary_key=True)
     external_message_id: str = Field(primary_key=True)
-    processed_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    processed_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -119,12 +133,15 @@ class ProcessedMessage(SQLModel, table=True):
 class ScheduleExecution(SQLModel, table=True):
     """SQLModel ScheduleExecution table for tracking scheduler execution history."""
     __tablename__ = "schedule_executions"
+    __table_args__ = (
+        Index("idx_schedule_executions_schedule_id_status", "schedule_id", "status"),
+    )
 
     execution_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     schedule_id: str = Field(foreign_key="source_configs.source_id", index=True)
-    triggered_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    triggered_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     instance_id: str | None = Field(default=None, index=True)
-    status: str = Field(default="triggered")  # 'triggered', 'completed', 'failed'
+    status: str = Field(default=ExecutionStatus.TRIGGERED.value)  # 'triggered', 'completed', 'failed'
     error_message: str | None = None
     completed_at: str | None = None
 
