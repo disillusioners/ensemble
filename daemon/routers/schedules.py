@@ -54,8 +54,8 @@ async def list_schedules(request: Request):
             if adapter and hasattr(adapter, '_get_next_trigger_time'):
                 try:
                     next_run_at = adapter._get_next_trigger_time()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to get next_run_at: {e}")
 
             # Get last_run_at from latest execution record
             last_run_at = None
@@ -63,8 +63,8 @@ async def list_schedules(request: Request):
                 latest_execution = manager._source_repository.get_latest_execution(src.source_id)
                 if latest_execution:
                     last_run_at = parse_utc_datetime(latest_execution.triggered_at)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to get last_run_at: {e}")
 
             schedules.append(ScheduleInfo(
                 id=src.source_id,
@@ -146,8 +146,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
     if adapter and hasattr(adapter, '_get_next_trigger_time'):
         try:
             next_run_at = adapter._get_next_trigger_time()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to get next_run_at: {e}")
 
     # Get last_run_at from latest execution record
     last_run_at = None
@@ -155,8 +155,8 @@ async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, req
         latest_execution = manager._source_repository.get_latest_execution(schedule_id)
         if latest_execution:
             last_run_at = parse_utc_datetime(latest_execution.triggered_at)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to get last_run_at: {e}")
 
     return ScheduleInfo(
         id=updated.source_id,

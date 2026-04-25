@@ -135,6 +135,7 @@ class ScheduleExecution(SQLModel, table=True):
     __tablename__ = "schedule_executions"
     __table_args__ = (
         Index("idx_schedule_executions_schedule_id_status", "schedule_id", "status"),
+        Index("idx_schedule_executions_triggered_at", "triggered_at"),
     )
 
     execution_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)

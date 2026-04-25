@@ -249,3 +249,16 @@ def mock_source_repo():
     repo = MagicMock()
     repo.increment_scheduler_run_counter = MagicMock(return_value=1)
     return repo
+
+
+def make_config(source_id: str, config: dict):
+    """Helper to create SourceConfig for scheduler tests."""
+    from daemon.sources.base import SourceConfig
+    return SourceConfig(
+        source_id=source_id,
+        source_type="scheduler",
+        name=f"Test Scheduler {source_id}",
+        config=config,
+        credentials={},
+        enabled=True,
+    )

@@ -9,20 +9,7 @@ from zoneinfo import ZoneInfo
 from daemon.sources.adapters.scheduler import SchedulerAdapter
 from daemon.sources.base import SourceConfig, IncomingMessage, SourceStatus
 
-
-# ==================== Fixtures ====================
-
-
-def make_config(source_id: str, config: dict) -> SourceConfig:
-    """Helper to create SourceConfig for scheduler."""
-    return SourceConfig(
-        source_id=source_id,
-        source_type="scheduler",
-        name=f"Test Scheduler {source_id}",
-        config=config,
-        credentials={},
-        enabled=True,
-    )
+from tests.conftest import make_config
 
 
 # ==================== Cron Parsing Tests ====================

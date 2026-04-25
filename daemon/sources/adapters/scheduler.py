@@ -17,6 +17,7 @@ from ..base import (
     SourceStatus,
 )
 from daemon.models import SchedulerInstanceMode, InstanceStatus
+from daemon.repositories.source.models import ExecutionStatus
 from daemon.registry import get_registry
 from daemon.constants import (
     SCHEDULER_SEMAPHORE_TIMEOUT_S,
@@ -589,7 +590,7 @@ Original scheduled task:
                     self._execution_callback(
                         execution_id=execution_id,
                         schedule_id=self.source_id,
-                        status="skipped",
+                        status=ExecutionStatus.SKIPPED.value,
                         instance_id=None,
                         error_message="Max concurrent executions reached",
                     )
@@ -617,7 +618,7 @@ Original scheduled task:
                     self._execution_callback(
                         execution_id=execution_id,
                         schedule_id=self.source_id,
-                        status="triggered",
+                        status=ExecutionStatus.TRIGGERED.value,
                         instance_id=None,
                         error_message=None,
                     )
@@ -685,7 +686,7 @@ Original scheduled task:
                     self._execution_callback(
                         execution_id=execution_id,
                         schedule_id=self.source_id,
-                        status="failed",
+                        status=ExecutionStatus.FAILED.value,
                         instance_id=None,
                         error_message=str(e),
                     )
@@ -730,7 +731,7 @@ Original scheduled task:
                     self._execution_callback(
                         execution_id=execution_id,
                         schedule_id=self.source_id,
-                        status="queued",
+                        status=ExecutionStatus.QUEUED.value,
                         instance_id=job_item.instance_id,
                         error_message=None,
                     )
@@ -764,7 +765,7 @@ Original scheduled task:
                 self._execution_callback(
                     execution_id=execution_id,
                     schedule_id=self.source_id,
-                    status="completed",
+                    status=ExecutionStatus.COMPLETED.value,
                     instance_id=self.source_id,
                     error_message=None,
                 )
@@ -798,7 +799,7 @@ Original scheduled task:
                             self._execution_callback(
                                 execution_id=execution_id,
                                 schedule_id=self.source_id,
-                                status="skipped",
+                                status=ExecutionStatus.SKIPPED.value,
                                 instance_id=instance_id,
                                 error_message=f"Instance still {instance_status}",
                             )
@@ -842,7 +843,7 @@ Original scheduled task:
                             self._execution_callback(
                                 execution_id=execution_id,
                                 schedule_id=self.source_id,
-                                status="skipped",
+                                status=ExecutionStatus.SKIPPED.value,
                                 instance_id=instance_id,
                                 error_message=f"Instance still {instance_status}",
                             )
