@@ -1,5 +1,6 @@
 """Markdown loader for agent prompts."""
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -185,29 +186,29 @@ def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
     return "\n".join(lines)
 
 
-def load_agent_skills(agent_dir: Path) -> dict[str, str]:
-    """Load all skill.md files from agent's skills/ directory.
-    
-    Args:
-        agent_dir: Path to the agent directory containing skills/ subdirectory.
-        
-    Returns:
-        Dict with skill name (directory name) as key, skill.md content as value.
-        Returns empty dict if skills/ directory doesn't exist.
-    """
-    skills_dir = agent_dir / "skills"
+def load_agent_skills(agent_dir: Path, meta: dict | None = None) -> dict[str, str]:
+    """Load agent skills from centralized innate-skills or local skills/ directory."""
     skills: dict[str, str] = {}
-    
+
+    # New path: load from centralized innate-skills registry
+    # NOTE: truthy check (not just "in") ensures empty array [] falls through to legacy
+    if meta and meta.get("innate_skills"):
+        innate_skills_dir = agent_dir.parent / "innate-skills"
+        for skill_name in sorted(meta["innate_skills"]):
+            skill_file = innate_skills_dir / skill_name / "skill.md"
+            if skill_file.exists():
+                skills[skill_name] = skill_file.read_text(encoding="utf-8")
+        return skills
+
+    # Legacy fallback: load from agent's own skills/ directory
+    skills_dir = agent_dir / "skills"
     if not skills_dir.exists() or not skills_dir.is_dir():
         return skills
-    
     for skill_dir in sorted(skills_dir.iterdir(), key=lambda p: p.name):
         if skill_dir.is_dir():
             skill_file = skill_dir / "skill.md"
             if skill_file.exists():
-                skill_name = skill_dir.name
-                skills[skill_name] = skill_file.read_text(encoding="utf-8")
-    
+                skills[skill_dir.name] = skill_file.read_text(encoding="utf-8")
     return skills
 
 
@@ -484,16 +485,26 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     elif tools_fallback_path.exists():
         current_mtimes["tools.md"] = tools_fallback_path.stat().st_mtime
     
-    # Include mtimes for all skill files in skills/ directory
-    skills_dir = agent_dir / "skills"
-    if skills_dir.exists() and skills_dir.is_dir():
-        for skill_dir in sorted(skills_dir.iterdir(), key=lambda p: p.name):
-            if skill_dir.is_dir():
-                skill_file = skill_dir / "skill.md"
-                if skill_file.exists():
-                    # Use relative path like "skills/coding/skill.md" as key
-                    relative_path = f"skills/{skill_dir.name}/skill.md"
-                    current_mtimes[relative_path] = skill_file.stat().st_mtime
+    # Include mtimes for all skill files (mode-aware: innate-skills or legacy)
+    meta_path = agent_dir / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
+
+    if meta and meta.get("innate_skills"):
+        # Innate-skills mode: track centralized skill files
+        innate_skills_dir = agent_dir.parent / "innate-skills"
+        for skill_name in sorted(meta["innate_skills"]):
+            skill_file = innate_skills_dir / skill_name / "skill.md"
+            if skill_file.exists():
+                current_mtimes[f"innate-skills/{skill_name}/skill.md"] = skill_file.stat().st_mtime
+    else:
+        # Legacy mode: scan agent's own skills/ directory
+        skills_dir = agent_dir / "skills"
+        if skills_dir.exists() and skills_dir.is_dir():
+            for skill_dir in sorted(skills_dir.iterdir(), key=lambda p: p.name):
+                if skill_dir.is_dir():
+                    skill_file = skill_dir / "skill.md"
+                    if skill_file.exists():
+                        current_mtimes[f"skills/{skill_dir.name}/skill.md"] = skill_file.stat().st_mtime
     
     # Track memories/ directory mtimes for cache invalidation
     memories_dir = agent_dir / "memories"
@@ -517,7 +528,7 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
-    skills = load_agent_skills(agent_dir)
+    skills = load_agent_skills(agent_dir, meta)
     dynamic_tools = load_tools_doc_for_agent(agent_id)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)

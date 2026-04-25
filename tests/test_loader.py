@@ -295,6 +295,66 @@ class TestLoadAgentSkills:
         
         assert skills == {}
 
+    def test_load_agent_skills_with_innate_skills(self, tmp_path):
+        """Test loading skills from centralized innate-skills registry."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create centralized innate-skills directory (sibling to agent dir)
+        innate_skills_dir = tmp_path / "innate-skills"
+        coding_skill_dir = innate_skills_dir / "coding"
+        coding_skill_dir.mkdir(parents=True)
+        (coding_skill_dir / "skill.md").write_text("# Coding\nYou are a coding expert.")
+
+        # Load skills with meta containing innate_skills
+        meta = {"innate_skills": ["coding"]}
+        skills = load_agent_skills(agent_dir, meta)
+
+        assert len(skills) == 1
+        assert "coding" in skills
+        assert "Coding" in skills["coding"]
+
+    def test_load_agent_skills_with_empty_innate_skills_falls_back_to_legacy(self, tmp_path):
+        """Test that empty innate_skills array falls through to legacy skills/ loading."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create legacy skills directory
+        skills_dir = agent_dir / "skills"
+        coding_dir = skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nLegacy skill.")
+
+        # Empty innate_skills should fall through to legacy
+        meta = {"innate_skills": []}
+        skills = load_agent_skills(agent_dir, meta)
+
+        assert len(skills) == 1
+        assert "coding" in skills
+
+    def test_load_agent_skills_multiple_innate_skills(self, tmp_path):
+        """Test loading multiple innate skills from centralized registry."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create centralized innate-skills directory
+        innate_skills_dir = tmp_path / "innate-skills"
+        coding_dir = innate_skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
+
+        reviewing_dir = innate_skills_dir / "reviewing"
+        reviewing_dir.mkdir(parents=True)
+        (reviewing_dir / "skill.md").write_text("# Reviewing\nReview code.")
+
+        # Load with multiple innate_skills
+        meta = {"innate_skills": ["coding", "reviewing"]}
+        skills = load_agent_skills(agent_dir, meta)
+
+        assert len(skills) == 2
+        assert "coding" in skills
+        assert "reviewing" in skills
+
 
 class TestComposeSystemPromptWithSkills:
     """Tests for compose_system_prompt with multiple skills."""

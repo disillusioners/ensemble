@@ -71,6 +71,29 @@ class TestDiscoverAgents:
         agents = registry.list_all()
         assert [a.id for a in agents] == ["alpha", "middle", "zebra"]
 
+    def test_discover_with_innate_skills(self, temp_agents_dir: Path) -> None:
+        """Test that innate_skills are properly loaded from meta.json."""
+        # Create agent with innate_skills
+        agent_dir = temp_agents_dir / "coder"
+        agent_dir.mkdir()
+        meta = {
+            "id": "coder",
+            "name": "Coder",
+            "description": "Test coder",
+            "icon": "🤖",
+            "color": "accent-blue",
+            "innate_skills": ["coding", "reviewing"],
+        }
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+
+        agent = registry.get("coder")
+        assert agent is not None
+        assert agent.innate_skills == ["coding", "reviewing"]
+
     def test_skip_hidden_dirs(self, temp_agents_dir: Path) -> None:
         """Test that hidden directories are skipped during discovery."""
         create_agent_meta(temp_agents_dir, "visible")
@@ -308,6 +331,7 @@ class TestAgentMetadata:
         assert meta.system is False
         assert meta.capabilities == []
         assert meta.tags == []
+        assert meta.innate_skills == []
 
     def test_agent_metadata_full(self, temp_agents_dir: Path) -> None:
         """Test AgentMetadata with all fields."""
@@ -322,6 +346,7 @@ class TestAgentMetadata:
             system=True,
             capabilities=["code_generation", "refactoring"],
             tags=["development", "coding"],
+            innate_skills=["coding", "reviewing"],
         )
 
         assert meta.id == "coder"
@@ -334,6 +359,7 @@ class TestAgentMetadata:
         assert meta.system is True
         assert meta.capabilities == ["code_generation", "refactoring"]
         assert meta.tags == ["development", "coding"]
+        assert meta.innate_skills == ["coding", "reviewing"]
 
     def test_agent_metadata_path_conversion(self) -> None:
         """Test that path is converted to Path object."""

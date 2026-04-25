@@ -173,6 +173,38 @@ class TestPathTraversalProtection:
         result = registry.find_skill("coding")
         assert "coder" in result
 
+    def test_find_skill_with_innate_skills(self, tmp_path: Path) -> None:
+        """find_skill should find skills from innate-skills registry when agent references them."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        # Create centralized innate-skills directory
+        innate_skills_dir = agents_dir / "innate-skills"
+        coding_skill_dir = innate_skills_dir / "coding"
+        coding_skill_dir.mkdir(parents=True)
+        (coding_skill_dir / "skill.md").write_text("# Coding skill from registry")
+
+        # Create agent that uses the innate skill
+        agent_dir = agents_dir / "coder"
+        agent_dir.mkdir()
+        meta = {
+            "id": "coder",
+            "name": "Coder",
+            "description": "Test coder",
+            "icon": "🤖",
+            "color": "accent-blue",
+            "innate_skills": ["coding"],  # Reference the centralized skill
+        }
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        # Should find the skill via innate-skills registry
+        result = registry.find_skill("coding")
+        assert "coder" in result
+
 
 class TestEmptyAgentListEdgeCase:
     """Test 5: Empty agent list edge case."""

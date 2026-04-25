@@ -59,6 +59,7 @@ class AgentMetadata(BaseModel):
     system: bool = Field(default=False, description="Whether this is a system agent")
     capabilities: list[str] = Field(default_factory=list, description="Agent capabilities")
     tags: list[str] = Field(default_factory=list, description="Agent tags")
+    innate_skills: list[str] = Field(default_factory=list, description="Innate skills from shared registry")
     tools: ToolFilter | None = Field(
         default=None,
         description="Tool filtering configuration. None means all tools allowed."
@@ -172,6 +173,7 @@ class AgentRegistry:
                     capabilities=meta.get("capabilities", []),
                     tags=meta.get("tags", []),
                     tools=tools_filter,
+                    innate_skills=meta.get("innate_skills", []),
                 )
                 self._agents[agent_id] = agent_meta
             except Exception as e:
@@ -304,7 +306,14 @@ class AgentRegistry:
         if '/' in skill_name or '\\' in skill_name or '..' in skill_name:
             return []
         agents_with_skill = []
+        innate_skill_path = self._agents_dir / "innate-skills" / skill_name / "skill.md"
+        innate_exists = innate_skill_path.exists()
         for agent_id, metadata in self._agents.items():
+            # Check innate-skills registry (via AgentMetadata.innate_skills)
+            if innate_exists and metadata.innate_skills and skill_name in metadata.innate_skills:
+                agents_with_skill.append(agent_id)
+                continue
+            # Legacy fallback: check per-agent skills/ directory
             skill_path = metadata.path / "skills" / skill_name / "skill.md"
             if skill_path.exists():
                 agents_with_skill.append(agent_id)
