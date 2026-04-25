@@ -205,6 +205,66 @@ class TestPathTraversalProtection:
         result = registry.find_skill("coding")
         assert "coder" in result
 
+    def test_find_skill_without_innate_skills_dir_falls_back_to_legacy(self, tmp_path: Path) -> None:
+        """find_skill should fall back to legacy per-agent skills/ when innate-skills dir doesn't exist."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        # NO innate-skills directory - only legacy per-agent skills
+
+        # Create agent with legacy skill
+        agent_dir = agents_dir / "coder"
+        agent_dir.mkdir()
+        skill_dir = agent_dir / "skills" / "coding"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.md").write_text("# Coding skill from legacy dir")
+
+        meta = {
+            "id": "coder",
+            "name": "Coder",
+            "description": "Test coder",
+            "icon": "🤖",
+            "color": "accent-blue",
+        }
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        # Should find the skill via legacy per-agent skills/ directory
+        result = registry.find_skill("coding")
+        assert "coder" in result
+
+    def test_find_skill_innate_skills_dir_missing_but_skill_in_legacy(self, tmp_path: Path) -> None:
+        """find_skill should find skill in legacy dir even when innate-skills dir doesn't exist."""
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        # Create agent with legacy skill
+        agent_dir = agents_dir / "reviewer"
+        agent_dir.mkdir()
+        skill_dir = agent_dir / "skills" / "reviewing"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "skill.md").write_text("# Reviewing skill")
+
+        meta = {
+            "id": "reviewer",
+            "name": "Reviewer",
+            "description": "Test reviewer",
+            "icon": "🤖",
+            "color": "accent-blue",
+        }
+        with open(agent_dir / "meta.json", "w") as f:
+            json.dump(meta, f)
+
+        registry = AgentRegistry(agents_dir)
+        registry.discover()
+
+        # Should find skill in legacy directory
+        result = registry.find_skill("reviewing")
+        assert "reviewer" in result
+
 
 class TestEmptyAgentListEdgeCase:
     """Test 5: Empty agent list edge case."""

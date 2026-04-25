@@ -231,6 +231,65 @@ class TestLoadAndCachePrompt:
         assert "Updated skills" in prompt3
         assert tokens3 > 0
 
+    def test_load_and_cache_prompt_invalid_json_meta_falls_back_to_legacy(self, tmp_path):
+        """Test that invalid JSON in meta.json causes graceful fallback to legacy skills/ loading."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create invalid JSON meta.json
+        (agent_dir / "meta.json").write_text("{broken json")
+
+        # Create base rule file
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+
+        # Create legacy skills directory with a skill
+        skills_dir = agent_dir / "skills"
+        coding_dir = skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nLegacy skill.")
+
+        cache = PromptCache()
+
+        # Should not crash, should fall back to legacy skills/ loading
+        prompt, tokens = load_and_cache_prompt("test_agent", agent_dir, cache)
+
+        # Should contain the legacy skill since meta was None on error
+        assert "# Coding" in prompt
+        assert "Legacy skill" in prompt
+        assert "# Rules" in prompt
+
+    def test_load_and_cache_prompt_innate_skills_mtime_triggers_reload(self, tmp_path):
+        """Test that cache invalidates when an innate skill file is modified."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create base file
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+
+        # Create centralized innate-skills directory
+        innate_skills_dir = tmp_path / "innate-skills"
+        coding_dir = innate_skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        skill_file = coding_dir / "skill.md"
+        skill_file.write_text("# Coding\nWrite code.")
+
+        # Create meta.json referencing the innate skill
+        (agent_dir / "meta.json").write_text('{"innate_skills": ["coding"]}')
+
+        cache = PromptCache()
+
+        # First load
+        prompt1, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
+        assert "Write code" in prompt1
+
+        # Modify the innate skill file
+        time.sleep(0.1)
+        skill_file.write_text("# Coding\nWrite better code")
+
+        # Should reload because innate skill mtime changed
+        prompt2, _ = load_and_cache_prompt("test_agent", agent_dir, cache)
+        assert "Write better code" in prompt2
+
 
 class TestLoadAgentSkills:
     """Tests for load_agent_skills function."""
@@ -354,6 +413,101 @@ class TestLoadAgentSkills:
         assert len(skills) == 2
         assert "coding" in skills
         assert "reviewing" in skills
+
+    def test_load_agent_skills_multiple_innate_skills_reversed_order(self, tmp_path):
+        """Test loading multiple innate skills in reversed/alphabetical order proves sorted() works."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create centralized innate-skills directory
+        innate_skills_dir = tmp_path / "innate-skills"
+        coding_dir = innate_skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
+
+        reviewing_dir = innate_skills_dir / "reviewing"
+        reviewing_dir.mkdir(parents=True)
+        (reviewing_dir / "skill.md").write_text("# Reviewing\nReview code.")
+
+        # Load with reversed order input - should still produce alphabetical output
+        meta = {"innate_skills": ["reviewing", "coding"]}
+        skills = load_agent_skills(agent_dir, meta)
+
+        assert len(skills) == 2
+        # Keys should be alphabetically sorted regardless of input order
+        skill_names = list(skills.keys())
+        assert skill_names == sorted(skill_names)
+        assert "coding" in skills
+        assert "reviewing" in skills
+
+    def test_load_agent_skills_missing_innate_skill_returns_empty_for_that_skill(self, tmp_path, caplog):
+        """Test that missing innate skill file returns empty dict for that skill and logs warning."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create innate-skills dir but NOT the skill file
+        innate_skills_dir = tmp_path / "innate-skills"
+        coding_dir = innate_skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nWrite code.")
+
+        # nonexistent-skill doesn't exist
+        meta = {"innate_skills": ["coding", "nonexistent-skill"]}
+        
+        with caplog.at_level("WARNING"):
+            skills = load_agent_skills(agent_dir, meta)
+
+        # Should still load the existing skill
+        assert "coding" in skills
+        # Missing skill should not appear in results
+        assert "nonexistent-skill" not in skills
+        # Warning should be logged for missing skill
+        assert any("nonexistent-skill" in record.message for record in caplog.records)
+        assert any("not found" in record.message.lower() for record in caplog.records)
+
+    def test_load_agent_skills_meta_none_activates_legacy_fallback(self, tmp_path):
+        """Test that explicitly passing meta=None activates legacy skills/ fallback."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create legacy skills directory
+        skills_dir = agent_dir / "skills"
+        coding_dir = skills_dir / "coding"
+        coding_dir.mkdir(parents=True)
+        (coding_dir / "skill.md").write_text("# Coding\nLegacy skill.")
+
+        # Explicitly pass meta=None
+        skills = load_agent_skills(agent_dir, meta=None)
+
+        assert len(skills) == 1
+        assert "coding" in skills
+
+    def test_load_agent_skills_innate_takes_priority_over_local_skills_dir(self, tmp_path):
+        """Test that innate-skills path is used when both innate_skills and local skills/ exist."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+
+        # Create centralized innate-skills directory
+        innate_skills_dir = tmp_path / "innate-skills"
+        some_skill_dir = innate_skills_dir / "some-skill"
+        some_skill_dir.mkdir(parents=True)
+        (some_skill_dir / "skill.md").write_text("# Some Skill\nFrom innate-skills.")
+
+        # Create local skills/ directory with different skill
+        local_skills_dir = agent_dir / "skills"
+        local_skill_dir = local_skills_dir / "local-skill"
+        local_skill_dir.mkdir(parents=True)
+        (local_skill_dir / "skill.md").write_text("# Local Skill\nFrom local skills/.")
+
+        # Agent has innate_skills defined
+        meta = {"innate_skills": ["some-skill"]}
+        skills = load_agent_skills(agent_dir, meta)
+
+        # Should use innate-skills path, local skills/ completely ignored
+        assert len(skills) == 1
+        assert "some-skill" in skills
+        assert "local-skill" not in skills
+        assert "From innate-skills" in skills["some-skill"]
 
 
 class TestComposeSystemPromptWithSkills:

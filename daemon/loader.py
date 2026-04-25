@@ -194,10 +194,12 @@ def load_agent_skills(agent_dir: Path, meta: dict | None = None) -> dict[str, st
     # NOTE: truthy check (not just "in") ensures empty array [] falls through to legacy
     if meta and meta.get("innate_skills"):
         innate_skills_dir = agent_dir.parent / "innate-skills"
-        for skill_name in sorted(meta["innate_skills"]):
+        for skill_name in sorted(set(meta["innate_skills"])):
             skill_file = innate_skills_dir / skill_name / "skill.md"
             if skill_file.exists():
                 skills[skill_name] = skill_file.read_text(encoding="utf-8")
+            else:
+                logger.warning(f"Innate skill '{skill_name}' declared in meta.json but not found at {skill_file}")
         return skills
 
     # Legacy fallback: load from agent's own skills/ directory
@@ -467,16 +469,22 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     if PROJECT_EXPERIENCE_FILE.exists():
         current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
     
-    # Include meta.json mtime for cache invalidation (tool filter config)
+    # Load meta.json ONCE with mtime tracking and error handling
     meta_path = agent_dir / "meta.json"
+    meta = None
     if meta_path.exists():
         current_mtimes["meta.json"] = meta_path.stat().st_mtime
-    
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            logger.warning(f"Failed to parse {meta_path}")
+            meta = None
+
     for filename in prompt_files:
         filepath = agent_dir / filename
         if filepath.exists():
             current_mtimes[filename] = filepath.stat().st_mtime
-    
+
     # Include mtime for tools_note.md or tools.md for cache invalidation
     tools_note_path = agent_dir / "tools_note.md"
     tools_fallback_path = agent_dir / "tools.md"
@@ -484,15 +492,12 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
         current_mtimes["tools_note.md"] = tools_note_path.stat().st_mtime
     elif tools_fallback_path.exists():
         current_mtimes["tools.md"] = tools_fallback_path.stat().st_mtime
-    
-    # Include mtimes for all skill files (mode-aware: innate-skills or legacy)
-    meta_path = agent_dir / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
 
+    # Include mtimes for all skill files (mode-aware: innate-skills or legacy)
     if meta and meta.get("innate_skills"):
         # Innate-skills mode: track centralized skill files
         innate_skills_dir = agent_dir.parent / "innate-skills"
-        for skill_name in sorted(meta["innate_skills"]):
+        for skill_name in sorted(set(meta["innate_skills"])):
             skill_file = innate_skills_dir / skill_name / "skill.md"
             if skill_file.exists():
                 current_mtimes[f"innate-skills/{skill_name}/skill.md"] = skill_file.stat().st_mtime
