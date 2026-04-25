@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 logger = logging.getLogger(__name__)
 
 # Directories to skip during agent discovery
-SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template"})
+SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template", "innate-skills"})
 
 
 class ToolFilter(BaseModel):
