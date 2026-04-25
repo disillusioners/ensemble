@@ -4,6 +4,7 @@
   "description": "Writes and runs tests, reports results",
   "icon": "🧪",
   "color": "accent-green",
+  "innate_skills": ["opencode", "test-pack"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help"]
   }

@@ -5,6 +5,7 @@
   "icon": "👑",
   "color": "accent-amber",
   "version": "1.0.0",
+  "innate_skills": ["coordination"],
   "tools": {
     "allow": ["time", "instance", "self", "project", "help"]
   }

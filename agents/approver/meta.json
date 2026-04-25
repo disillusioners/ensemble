@@ -4,6 +4,7 @@
   "description": "Independent second-pass reviewer that double-checks plans and decisions with fresh eyes, minimal context bias",
   "icon": "✅",
   "color": "accent-emerald",
+  "innate_skills": ["opencode"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help"]
   }

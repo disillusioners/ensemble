@@ -5,6 +5,7 @@
   "icon": "📋",
   "color": "accent-blue",
   "version": "1.0.0",
+  "innate_skills": ["job-orchestration"],
   "tools": {
     "allow": ["job", "help", "self", "time", "project"]
   }
