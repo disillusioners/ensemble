@@ -17,7 +17,7 @@ from langchain_core.outputs import LLMResult
 from .config import Config
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt
-from .utils import parse_think_tags, serialize_message, find_near_instance  # noqa: F401
+from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401
 from .persistence import (
     get_instance_messages,
     get_checkpointer,
@@ -1363,7 +1363,7 @@ class InstanceManager:
         """Get the source registry for adapter management."""
         return self.source_registry
 
-    def find_near_instance(self, instance_id: str, max_distance: int = 7) -> list[str]:
+    def find_near_instance(self, instance_id: str, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
         """Find all near-matching instance IDs from recent instances.
 
         Searches through the most recent 50 instances using edit distance to find all close matches.
@@ -1371,7 +1371,7 @@ class InstanceManager:
 
         Args:
             instance_id: The instance ID to find a near match for.
-            max_distance: Maximum edit distance threshold (default: 7).
+            max_distance: Maximum edit distance threshold (default: DEFAULT_FUZZY_MATCH_DISTANCE).
 
         Returns:
             List of all near-matching instance_ids sorted by edit distance (closest first),

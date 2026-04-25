@@ -35,6 +35,7 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
 
 
 def resolve_tool_filter(
@@ -151,12 +152,12 @@ def _is_null_workdir(value: str | None) -> bool:
 
 def _resolve_instance_id(
     manager: "InstanceManager",
-    instance_id: str,
+    instance_id: str | None,
 ) -> str:
     """Resolve instance_id with fuzzy matching fallback.
 
     First tries exact match. On KeyError, attempts fuzzy matching with
-    max_distance=7 to find all near matches. Raises ValueError with
+    max_distance=DEFAULT_FUZZY_MATCH_DISTANCE to find all near matches. Raises ValueError with
     helpful error message including suggestions if available.
 
     Args:
@@ -179,7 +180,7 @@ def _resolve_instance_id(
         return instance_id
     except KeyError:
         # Exact match failed - try fuzzy matching
-        near_matches = manager.find_near_instance(instance_id, max_distance=7)
+        near_matches = manager.find_near_instance(instance_id, max_distance=DEFAULT_FUZZY_MATCH_DISTANCE)
         if near_matches:
             if len(near_matches) == 1:
                 raise ValueError(
@@ -483,7 +484,8 @@ Returns:
             _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return {"error": str(e), "terminated": False}
-        return await manager.terminate_instance(instance_id)
+        result = await manager.terminate_instance(instance_id)
+        return {"terminated": result}
     
     terminate_instance._full_doc_ = """Terminate an instance. Use with caution.
 
@@ -491,7 +493,7 @@ Args:
     instance_id: The ID of the instance to terminate
 
 Returns:
-    True if termination was successful, False otherwise
+    dict with "terminated" key: {"terminated": True} on success, {"error": ..., "terminated": False} on error
 """
     
     @register_tool_category("instance")

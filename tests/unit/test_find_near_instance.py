@@ -165,7 +165,7 @@ class TestFindNearInstance:
         result = m.find_near_instance("abc-123-dzz", max_distance=3)
         assert result == ["abc-123-def"]
 
-    def test_find_near_instance_first_match_returned(self):
+    def test_find_near_instance_returns_all_exact_matches(self):
         """Test that all matching instances are returned (ordered by recency, then distance)."""
         from daemon.manager import InstanceManager
         

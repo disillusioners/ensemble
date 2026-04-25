@@ -12,6 +12,9 @@ from fastapi import HTTPException
 from daemon.models import ErrorCodes, ErrorResponse
 from daemon.registry import get_registry
 
+# Default max edit distance for fuzzy instance matching
+DEFAULT_FUZZY_MATCH_DISTANCE: int = 7
+
 # Pattern for parsing <think/> tags
 _THINK_PATTERN = re.compile(r'<think[^>]*>(.*?)</think\s*>', re.DOTALL | re.IGNORECASE)
 
@@ -377,7 +380,7 @@ def edit_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def find_near_instance(instance_id: str, instances: list, max_distance: int = 7) -> list[str]:
+def find_near_instance(instance_id: str, instances: list, max_distance: int = DEFAULT_FUZZY_MATCH_DISTANCE) -> list[str]:
     """Find all near-matching instance IDs from a list of instances using edit distance.
 
     Searches through instances using edit distance to find all close matches.
@@ -386,7 +389,7 @@ def find_near_instance(instance_id: str, instances: list, max_distance: int = 7)
     Args:
         instance_id: The instance ID to find a near match for.
         instances: List of instance objects with instance_id attribute.
-        max_distance: Maximum edit distance threshold (default: 7).
+        max_distance: Maximum edit distance threshold (default: DEFAULT_FUZZY_MATCH_DISTANCE).
 
     Returns:
         List of all near-matching instance_ids sorted by edit distance (closest first),
