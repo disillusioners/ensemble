@@ -1,6 +1,8 @@
 """Utility functions for the ensemble daemon."""
 
+import asyncio
 import hashlib
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -446,3 +448,129 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
         )
     
     return agent_id, metadata.path
+
+
+# ── Agent-as-Tool: Synchronous Invoke ────────────────────────────────────────
+
+_invoke_semaphore: asyncio.Semaphore | None = None
+logger_utils = logging.getLogger(__name__)
+
+
+def _get_invoke_semaphore() -> asyncio.Semaphore:
+    """Get or create the singleton semaphore for invoke_agent_and_wait.
+    
+    Lazy-initialized because asyncio.Semaphore needs a running event loop.
+    Cap is WORKER_POOL_SIZE - 1 (minimum 1) to guarantee a free worker.
+    """
+    global _invoke_semaphore
+    if _invoke_semaphore is None:
+        from .constants import WORKER_POOL_SIZE
+        cap = max(1, WORKER_POOL_SIZE - 1)
+        _invoke_semaphore = asyncio.Semaphore(cap)
+        logger_utils.info(f"invoke_agent_and_wait: concurrency cap = {cap}")
+    return _invoke_semaphore
+
+
+def _try_terminate_orphan(manager, instance_id: str | None) -> None:
+    """Best-effort terminate an orphaned instance after timeout/error.
+    
+    Fire-and-forget: if termination fails, the instance will eventually
+    be cleaned up by stale task recovery or watchdog.
+    """
+    if instance_id is None:
+        return
+    try:
+        asyncio.ensure_future(
+            manager.terminate_instance(instance_id),
+        )
+    except Exception:
+        logger_utils.debug(f"Failed to terminate orphaned instance {instance_id[:8]}...")
+
+
+async def invoke_agent_and_wait(
+    manager,
+    agent_id: str,
+    message: str,
+    project_id: str | None = None,
+    instance_name: str | None = None,
+    parent_id: str | None = None,
+    timeout: float = 300.0,
+) -> str:
+    """Spawn an agent, send a message, and synchronously wait for the result.
+    
+    This is the primary mechanism for synchronous agent invocation.
+    Used by knowledge tools to implement explore().
+    
+    DEADLOCK PREVENTION: Uses an asyncio.Semaphore capped at WORKER_POOL_SIZE - 1
+    to ensure at least 1 worker thread remains free to process the spawned agent.
+    
+    Args:
+        manager: The InstanceManager instance.
+        agent_id: Agent ID to spawn (e.g., 'explorer', 'experiencer').
+        message: The message/prompt to send to the agent.
+        project_id: Optional project ID for context.
+        instance_name: Optional name for the spawned instance.
+        parent_id: Optional parent instance ID (for hierarchy).
+        timeout: Maximum seconds to wait for completion.
+    
+    Returns:
+        The agent's final response content (on success).
+        Error string prefixed with "Error:" on failure or timeout.
+    """
+    from .services.completion_registry import get_completion_registry
+    
+    semaphore = _get_invoke_semaphore()
+    registry = get_completion_registry()
+    
+    # Acquire semaphore — ensures we don't consume all workers
+    await semaphore.acquire()
+    
+    instance_id = None
+    
+    try:
+        # 1. Spawn instance (synchronous — creates instance in DB)
+        instance_id = manager.spawn_instance(
+            agent_id=agent_id,
+            parent_id=parent_id,
+            project_id=project_id,
+            instance_name=instance_name,
+        )
+        
+        # 2. Register IMMEDIATELY after spawn (before enqueue)
+        # Buffered completion handles race if complete() fires before this
+        registry.register(instance_id)
+        
+        # 3. Enqueue message (creates Task in DB + notify_work())
+        await manager.enqueue_message(
+            instance_id=instance_id,
+            message=message,
+            source=f"invoke_and_wait:{parent_id or 'system'}",
+        )
+        
+        # 4. Wait for completion (success or error)
+        result = await registry.wait_for(instance_id, timeout=timeout)
+        
+        if result is None:
+            # Timeout — agent is still running. Best-effort terminate.
+            _try_terminate_orphan(manager, instance_id)
+            return (
+                f"Error: Agent timed out after {timeout}s. "
+                f"Instance {instance_id[:8]}... may still be running."
+            )
+        
+        if result.is_error:
+            # Agent errored out — it's already in ERROR status
+            return f"Error: Agent failed. {result.content}"
+        
+        # Success
+        return result.content or ""
+    
+    except Exception as e:
+        logger_utils.error(f"invoke_agent_and_wait failed: {e}", exc_info=True)
+        _try_terminate_orphan(manager, instance_id)
+        return f"Error: {e}"
+    finally:
+        # 5. Always cleanup
+        if instance_id is not None:
+            registry.unregister(instance_id)
+        semaphore.release()

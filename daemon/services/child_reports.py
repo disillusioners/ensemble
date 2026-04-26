@@ -555,6 +555,11 @@ Provide a concise summary:"""
                 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
+
+                # Signal CompletionRegistry for invoke_agent_and_wait() callers
+                from .completion_registry import get_completion_registry
+                get_completion_registry().complete(instance_id, result=last_content)
+
                 if self._events_service:
                     await self._events_service._publish_instance_lifecycle_event(
                         instance_id=instance_id,
@@ -595,7 +600,12 @@ Provide a concise summary:"""
             parent_id = instance.parent_id
             
             session.commit()
-        
+
+        # Signal CompletionRegistry for invoke_agent_and_wait() callers
+        # After commit (DB consistent), before SSE broadcast (non-critical)
+        from .completion_registry import get_completion_registry
+        get_completion_registry().complete(instance_id, result=last_content)
+
         # Broadcast child completion event asynchronously (using captured parent_id)
         try:
             await self._manager._live_hub.stream_lifecycle(

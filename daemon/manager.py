@@ -509,6 +509,10 @@ class InstanceManager:
         # (lifecycle service needs messaging for some operations)
         # Note: This is done after both are created to avoid circular issues
 
+        # NEW: CompletionRegistry for synchronous agent invoke-and-wait
+        from .services.completion_registry import get_completion_registry
+        self._completion_registry = get_completion_registry()
+
     @property
     def checkpointer(self):
         """Get the async checkpointer instance.
@@ -532,7 +536,22 @@ class InstanceManager:
         """
         self._loop = asyncio.get_running_loop()
         self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
+        # NEW: Set event loop for CompletionRegistry (thread-safe notification)
+        self._completion_registry.set_event_loop(self._loop)
+        # NEW: Schedule periodic stale cleanup (every 10 minutes)
+        asyncio.create_task(self._cleanup_stale_completions())
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
+
+    async def _cleanup_stale_completions(self) -> None:
+        """Background task to periodically clean stale CompletionRegistry entries."""
+        while not self._shutting_down:
+            try:
+                await asyncio.sleep(600)  # Every 10 minutes
+                self._completion_registry.cleanup_stale()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Stale completion cleanup failed: {e}")
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
@@ -672,6 +691,8 @@ class InstanceManager:
         )
         self._worker_pool.start()
         
+        # NEW: Expose pool size for CompletionRegistry invoke semaphore
+        self._worker_pool_size = num_workers
         logger.info(f"Worker pool started with {num_workers} workers (timeout={svc.task_timeout_minutes}min)")
 
     def shutdown_worker_pool(self) -> None:

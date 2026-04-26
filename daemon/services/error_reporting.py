@@ -242,6 +242,15 @@ class ErrorReportingService:
                                 f"pending messages, status=WAITING_CHILDREN after child error"
                             )
             
+            # Signal CompletionRegistry for invoke_agent_and_wait() callers
+            # After session commit — instance is in ERROR state in DB
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(
+                instance_id,
+                result=f"Agent error: {truncated_error}",
+                is_error=True,
+            )
+            
             # Step 4: Enqueue error report message to parent (outside transaction)
             error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"
             

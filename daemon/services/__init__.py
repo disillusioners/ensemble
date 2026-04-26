@@ -16,6 +16,7 @@ from daemon.services.error_reporting import ErrorReportingService
 from daemon.services.cancellation import CancellationService
 from daemon.services.title_generation import TitleGenerationService
 from daemon.services.event_publisher import EventPublisherService
+from daemon.services.completion_registry import CompletionRegistry, CompletionResult, get_completion_registry
 
 __all__ = [
     # Worker pool services
@@ -36,4 +37,8 @@ __all__ = [
     "CancellationService",
     "TitleGenerationService",
     "EventPublisherService",
+    # Completion registry
+    "CompletionRegistry",
+    "CompletionResult",
+    "get_completion_registry",
 ]
