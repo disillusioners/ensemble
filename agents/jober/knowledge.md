@@ -1,9 +1,5 @@
 # Knowledge
 
-*Domain expertise and tool knowledge — pre-loaded at birth*
-
----
-
 ## Knowledge Tools
 
 Use `explore(query)` to query project knowledge and `experience(text)` to record new knowledge.
@@ -12,17 +8,3 @@ Use `explore(query)` to query project knowledge and `experience(text)` to record
 - **experience(text)** — Record new knowledge about the current project to the RAG knowledge base. Use this when you learn something worth remembering for future sessions.
 
 These tools replace the old file-based memory system (`.agents/<agent-id>/memories/`). Project knowledge is now stored centrally in the RAG knowledge base where it can be queried and cross-referenced.
-
----
-
-## Domain Expertise
-
-(Will be defined when agent is created)
-
-## Tools
-
-(Tool-specific knowledge will be added here)
-
-## References
-
-(Important references and documentation links)

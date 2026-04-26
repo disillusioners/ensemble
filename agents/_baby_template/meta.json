@@ -5,5 +5,5 @@
   "icon": "👶",
   "color": "accent-gray",
   "version": "1.0.0",
-  "tools": {}
+  "tools": {"allow": ["knowledge"]}
 }

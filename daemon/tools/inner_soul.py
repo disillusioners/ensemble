@@ -170,6 +170,82 @@ CLASSIFICATION_RULES = {
     },
 }
 
+# Targets that are handled by the RAG knowledge system
+_RAG_TARGETS = {"memories", "memory"}
+
+# Classification types that are knowledge-oriented (not self-modification)
+_KNOWLEDGE_CLASSIFICATIONS = {
+    "knowledge", "pattern", "event", "skill", "mistake", "project_knowledge"
+}
+
+
+def _should_redirect_to_rag(
+    targets: list[str],
+    classification: dict,
+    explicit_target: bool,
+) -> bool:
+    """Determine if a request should be redirected to experience() instead of file-based memory.
+
+    Redirect when:
+    1. ALL resolved targets are RAG targets (memories/memory), AND
+    2. The classification is knowledge-oriented (not identity/personality/workflow)
+
+    Do NOT redirect when:
+    - Any target is soul/user/workflow (self-modification)
+    - The request is identity/personality/user-related
+
+    Args:
+        targets: The resolved list of target strings.
+        classification: The classification dict from _classify_request().
+        explicit_target: Whether the user explicitly specified a target.
+
+    Returns:
+        True if request should redirect to experience().
+    """
+    class_type = classification.get("type", "")
+
+    # Filter out "REJECT" from multi-match target merging.
+    actual_targets = [t for t in targets if t != "REJECT"]
+
+    # Special case: project_knowledge was REJECTED before — now redirect to RAG
+    if class_type == "project_knowledge":
+        return True
+
+    # Check if ALL resolved targets are RAG-managed
+    if not actual_targets or not all(t in _RAG_TARGETS for t in actual_targets):
+        return False  # Has soul/user/workflow — self-modification
+
+    # Check if classification is knowledge-oriented
+    if class_type in _KNOWLEDGE_CLASSIFICATIONS:
+        return True
+
+    return False
+
+
+def _format_rag_redirect(request: str, classification: dict, targets: list[str]) -> str:
+    """Format response for requests redirected to RAG knowledge system.
+
+    Instead of writing to files, guides the agent to use the experience() tool.
+    """
+    truncated = request[:80] + ('...' if len(request) > 80 else '')
+    class_type = classification.get("type", "unknown")
+
+    lines = [
+        f"📋 Redirected to Knowledge System: \"{truncated}\"",
+        f"  Classification: {class_type} ({classification.get('description', '')})",
+        f"  Original targets: {', '.join(targets)} → now handled by RAG",
+        "",
+        "This knowledge is better stored in the RAG knowledge base where it can be",
+        "queried and cross-referenced with other project knowledge.",
+        "",
+        "→ Use the `experience()` tool to record this knowledge:",
+        f'  experience(text="{request.replace(chr(34), chr(92)+chr(34))}")',
+        "",
+        "→ Use the `explore()` tool to query existing knowledge.",
+    ]
+
+    return "\n".join(lines)
+
 
 def create_inner_soul_tool(
     manager: "InstanceManager",
@@ -217,10 +293,6 @@ def create_inner_soul_tool(
             # Classify the request semantically
             classification = _classify_request(actual_request)
             
-            # CRITICAL: Check for project_knowledge classification BEFORE processing
-            if classification["type"] == "project_knowledge":
-                return _format_rejection(actual_request, classification)
-            
             # Determine targets
             if target:
                 # Explicit target takes precedence
@@ -234,6 +306,10 @@ def create_inner_soul_tool(
             else:
                 # Use semantic classification
                 targets = classification["targets"]
+            
+            # --- NEW: Check if this should redirect to RAG ---
+            if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
+                return _format_rag_redirect(actual_request, classification, targets)
             
             # Execute updates
             results = []

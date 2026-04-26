@@ -7,6 +7,6 @@
   "version": "1.0.0",
   "innate_skills": ["job-orchestration"],
   "tools": {
-    "allow": ["job", "help", "self", "time", "project"]
+    "allow": ["job", "help", "self", "time", "project", "knowledge"]
   }
 }
