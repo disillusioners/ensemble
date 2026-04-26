@@ -124,8 +124,9 @@ install: pyinstaller
 		rm -rf "$(INSTALL_DIR)/daemon"; \
 	fi
 	
-	# Copy agents directory
+	# Copy agents directory (clean copy)
 	@echo "$(YELLOW)Copying agents...$(NC)"
+	rm -rf $(INSTALL_DIR)/agents
 	cp -r $(CURDIR)/agents $(INSTALL_DIR)/agents
 	
 	# Copy and modify config.yaml with production port
