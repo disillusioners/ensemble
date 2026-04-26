@@ -191,6 +191,8 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "job": "daemon.tools.job_queue",
     "help": "daemon.tools.help",
     "mother": "daemon.tools.agent_mother",
+    "knowledge": "daemon.tools.knowledge_tools",
+    "rag": "daemon.tools.rag_tools",
 }
 
 
