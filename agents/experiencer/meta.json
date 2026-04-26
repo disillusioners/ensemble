@@ -1,0 +1,11 @@
+{
+  "id": "experiencer",
+  "name": "Experiencer",
+  "description": "Specializes in extracting entities and relationships from text and recording them into the RAG knowledge base",
+  "icon": "🧠",
+  "color": "accent-purple",
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["rag", "help", "time"]
+  }
+}
