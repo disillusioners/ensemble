@@ -1,0 +1,11 @@
+{
+  "id": "explorer",
+  "name": "Explorer",
+  "description": "Specializes in querying and synthesizing project knowledge from the RAG knowledge base",
+  "icon": "🔍",
+  "color": "accent-blue",
+  "version": "1.0.0",
+  "tools": {
+    "allow": ["rag", "filesystem", "help", "time"]
+  }
+}
