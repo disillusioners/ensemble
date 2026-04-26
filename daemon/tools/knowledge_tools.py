@@ -72,15 +72,18 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if pid:
             explorer_message += f"\nProject: {pid}"
 
-        result = await invoke_agent_and_wait(
-            manager=manager,
-            agent_id="explorer",
-            message=explorer_message,
-            project_id=pid,
-            parent_id=current_instance_id,
-            instance_name=f"explore-{query[:30]}",
-            timeout=300.0,
-        )
+        try:
+            result = await invoke_agent_and_wait(
+                manager=manager,
+                agent_id="explorer",
+                message=explorer_message,
+                project_id=pid,
+                parent_id=current_instance_id,
+                instance_name=f"explore-{query[:30]}",
+                timeout=300.0,
+            )
+        except Exception as e:
+            return f"Explorer agent failed: {e}"
 
         if result is None:
             return "Explorer agent timed out or failed. Try a simpler query."
@@ -114,17 +117,26 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             experiencer_message += f"\nProject: {pid}"
 
         # Fire-and-forget: spawn instance and enqueue message
-        instance_id = manager.spawn_instance(
-            agent_id="experiencer",
-            parent_id=current_instance_id,
-            project_id=pid,
-            instance_name=f"experience-{text[:30]}",
-        )
-        await manager.enqueue_message(
-            instance_id=instance_id,
-            message=experiencer_message,
-            source=f"experience:{current_instance_id}",
-        )
+        instance_id = None
+        try:
+            instance_id = manager.spawn_instance(
+                agent_id="experiencer",
+                parent_id=current_instance_id,
+                project_id=pid,
+                instance_name=f"experience-{text[:30]}",
+            )
+            await manager.enqueue_message(
+                instance_id=instance_id,
+                message=experiencer_message,
+                source=f"experience:{current_instance_id}",
+            )
+        except Exception as e:
+            if instance_id:
+                try:
+                    manager.terminate_instance(instance_id)
+                except Exception:
+                    pass
+            return f"Error: Failed to start knowledge recording: {e}"
 
         return f"Knowledge recording started. Instance: {instance_id[:8]}..."
 

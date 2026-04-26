@@ -85,6 +85,8 @@ When RAG is not configured:
 
 ## Migration Steps
 
+> ⚠️ **WARNING: Run the migration script only ONCE.** Running it multiple times will create duplicate entries in the RAG knowledge base. Use `--dry-run` first to preview what will be migrated.
+
 ### For Existing Projects
 
 1. **Set up LightRAG server** — See `docs/configuration/rag-configuration.md`
@@ -94,8 +96,10 @@ When RAG is not configured:
    python scripts/migrate_memory_to_rag.py --all
    # or for a specific agent:
    python scripts/migrate_memory_to_rag.py --agent coder
-   # dry-run first:
+   # dry-run first to preview:
    python scripts/migrate_memory_to_rag.py --dry-run --all
+   # force re-migration (ignore state file):
+   python scripts/migrate_memory_to_rag.py --force --all
    ```
 4. **Verify** — Use `explore(query="what do you know about this project?")` to test
 5. **Clean up** — After verifying all memories are imported, optionally remove old memory files

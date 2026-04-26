@@ -5,15 +5,90 @@ Usage:
     python scripts/migrate_memory_to_rag.py --all
     python scripts/migrate_memory_to_rag.py --agent coder
     python scripts/migrate_memory_to_rag.py --dry-run --all
+    python scripts/migrate_memory_to_rag.py --force --all
     python scripts/migrate_memory_to_rag.py --project-dir /path/to/project --all
+
+IMPORTANT: This script should only be run ONCE per project. Running multiple times
+may create duplicates. Use --dry-run first to preview what will be migrated.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
 from pathlib import Path
 from datetime import datetime
+
+# State file for tracking migrated files
+STATE_FILENAME = ".rag_migration_state.json"
+
+
+def get_state_file(project_dir: Path) -> Path:
+    """Get path to state file."""
+    return project_dir / STATE_FILENAME
+
+
+def load_state(project_dir: Path) -> dict:
+    """Load migration state from file."""
+    state_file = get_state_file(project_dir)
+    if state_file.exists():
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"WARNING: Could not read state file: {e}")
+    return {"migrated_files": {}}
+
+
+def save_state(project_dir: Path, state: dict) -> None:
+    """Save migration state to file."""
+    state_file = get_state_file(project_dir)
+    with open(state_file, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def is_migrated(state: dict, filepath: Path) -> bool:
+    """Check if file is already in migrated state."""
+    return str(filepath) in state.get("migrated_files", {})
+
+
+def mark_migrated(state: dict, filepath: Path) -> None:
+    """Mark file as migrated in state."""
+    if "migrated_files" not in state:
+        state["migrated_files"] = {}
+    state["migrated_files"][str(filepath)] = datetime.now().isoformat()
+
+
+def compute_content_hash(content: str, agent_name: str, filename: str) -> str:
+    """Compute SHA-256 hash of content for deduplication."""
+    data = f"{agent_name}:{filename}:{content}"
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:16]
+
+
+def check_hash_exists_in_rag(config: dict, content_hash: str) -> bool:
+    """Check if an entry with this content hash already exists in RAG."""
+    url = f"{config['host']}/api/documents/list"
+    headers = {"Content-Type": "application/json"}
+    if config["api_key"]:
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+    if config["workspace"]:
+        headers["X-Workspace"] = config["workspace"]
+
+    try:
+        resp = httpx.get(url, headers=headers, timeout=config["timeout"])
+        if resp.status_code == 200:
+            data = resp.json()
+            # Search for the hash in document descriptions/metadata
+            for doc in data.get("documents", []):
+                desc = doc.get("description", "") or ""
+                if content_hash in desc:
+                    return True
+        return False
+    except Exception:
+        return False
+
 
 try:
     import httpx
@@ -81,7 +156,9 @@ def extract_date_from_filename(filename: str) -> str:
     return "unknown"
 
 
-def insert_to_rag(config: dict, text: str, description: str, dry_run: bool = False) -> bool:
+def insert_to_rag(
+    config: dict, text: str, description: str, content_hash: str, dry_run: bool = False
+) -> bool:
     """Insert text into RAG knowledge base."""
     if dry_run:
         return True
@@ -93,8 +170,10 @@ def insert_to_rag(config: dict, text: str, description: str, dry_run: bool = Fal
     if config["workspace"]:
         headers["X-Workspace"] = config["workspace"]
 
+    # Include content hash in description for deduplication detection
+    full_description = f"{description} [hash:{content_hash}]"
     payload = {
-        "texts": [{"text": text, "description": description}]
+        "texts": [{"text": text, "description": full_description}]
     }
 
     try:
@@ -114,6 +193,7 @@ def main():
     parser.add_argument("--all", action="store_true", help="Process all agents")
     parser.add_argument("--agent", type=str, help="Process specific agent")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be imported")
+    parser.add_argument("--force", action="store_true", help="Ignore state file and re-migrate all files")
     parser.add_argument("--project-dir", type=str, default=".", help="Project directory")
     parser.add_argument("--rag-host", type=str, help="Override LIGHTRAG_HOST")
     args = parser.parse_args()
@@ -121,14 +201,24 @@ def main():
     if not args.all and not args.agent:
         parser.error("Must specify --all or --agent <name>")
 
+    # Prominent warning - script should only be run once
+    print("\n" + "!" * 60)
+    print("  WARNING: This script should only be run ONCE per project.")
+    print("  Running multiple times may create duplicate entries.")
+    print("  Use --dry-run first to preview what will be migrated.")
+    print("!" * 60 + "\n")
+
     project_dir = Path(args.project_dir).resolve()
     config = get_rag_config(args)
+    state = load_state(project_dir)
 
     print(f"Project: {project_dir}")
     print(f"RAG Host: {config['host']}")
     print(f"Workspace: {config['workspace']}")
     if args.dry_run:
         print("DRY RUN — no changes will be made")
+    if args.force:
+        print("FORCE MODE — ignoring state file, will re-migrate all files")
     print()
 
     files = find_memory_files(project_dir, args.agent)
@@ -141,9 +231,17 @@ def main():
 
     imported = 0
     skipped = 0
+    already_migrated = 0
+    duplicates = 0
     errors = 0
 
     for agent_name, filepath in files:
+        # Check if already migrated (skip unless --force is used)
+        if not args.force and is_migrated(state, filepath):
+            print(f"  [SKIP] {filepath.name}: already migrated")
+            already_migrated += 1
+            continue
+
         date = extract_date_from_filename(filepath.name)
 
         try:
@@ -159,25 +257,41 @@ def main():
             skipped += 1
             continue
 
+        # Compute content hash for deduplication
+        content_hash = compute_content_hash(content, agent_name, filepath.name)
+
+        # Check if this exact content is already in RAG (hash-based dedup)
+        if not args.force and check_hash_exists_in_rag(config, content_hash):
+            print(f"  [SKIP] {filepath.name}: duplicate content (hash:{content_hash})")
+            duplicates += 1
+            continue
+
         description = f"[Migration from {agent_name}] {filepath.stem}"
         tagged_text = f"[Source: {agent_name}] [Date: {date}] [Migration]\n\n{content}"
 
-        print(f"  {'[DRY RUN] ' if args.dry_run else ''}{filepath.name} ({len(content)} chars)")
+        print(f"  {'[DRY RUN] ' if args.dry_run else ''}{filepath.name} ({len(content)} chars) [hash:{content_hash}]")
 
-        success = insert_to_rag(config, tagged_text, description, args.dry_run)
+        success = insert_to_rag(config, tagged_text, description, content_hash, args.dry_run)
         if success:
             imported += 1
+            # Mark as migrated only if not dry-run
+            if not args.dry_run:
+                mark_migrated(state, filepath)
+                save_state(project_dir, state)
         else:
             errors += 1
 
     print(f"\n{'='*40}")
-    print(f"Imported: {imported}")
-    print(f"Skipped:  {skipped}")
-    print(f"Errors:   {errors}")
-    print(f"Total:    {len(files)}")
+    print(f"Imported:        {imported}")
+    print(f"Skipped:         {skipped}")
+    print(f"Already Migrated: {already_migrated}")
+    print(f"Duplicates:      {duplicates}")
+    print(f"Errors:          {errors}")
+    print(f"Total:           {len(files)}")
 
     if not args.dry_run and imported > 0:
-        print(f"\n Original files NOT deleted. Remove manually after verification.")
+        print(f"\n State saved to {STATE_FILENAME}")
+        print(f" Original files NOT deleted. Remove manually after verification.")
 
 
 if __name__ == "__main__":

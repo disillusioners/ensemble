@@ -72,7 +72,7 @@ def create_rag_tools(
                 description=description,
                 file_paths=file_paths,
             )
-            return f"Text inserted. Track ID: {result.track_id}"
+            return f"Text inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
             return f"RAG error: {e}"
 
@@ -103,7 +103,7 @@ def create_rag_tools(
         client = _get_rag_client()
         try:
             result = await client.insert_texts(texts=texts)
-            return f"{len(texts)} texts inserted. Track ID: {result.track_id}"
+            return f"{len(texts)} texts inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
             return f"RAG error: {e}"
 
@@ -136,7 +136,7 @@ def create_rag_tools(
         client = _get_rag_client()
         try:
             result = await client.query(query=query, mode=mode)
-            return result.response
+            return getattr(result, 'response', '')
         except RAGError as e:
             return f"RAG error: {e}"
 
@@ -173,17 +173,19 @@ def create_rag_tools(
 
             output_parts: list[str] = []
 
-            if result.entities:
+            entities = getattr(result, 'entities', []) or []
+            if entities:
                 output_parts.append("## Entities\n")
-                for entity in result.entities:
+                for entity in entities:
                     name = entity.get("name", "Unknown")
                     entity_type = entity.get("type", "UNKNOWN")
                     desc = entity.get("description", "")
                     output_parts.append(f"- **{name}** ({entity_type}): {desc}")
 
-            if result.relations:
+            relations = getattr(result, 'relations', []) or []
+            if relations:
                 output_parts.append("\n## Relations\n")
-                for relation in result.relations:
+                for relation in relations:
                     source = relation.get("source", "?")
                     target = relation.get("target", "?")
                     rel_type = relation.get("type", "RELATED_TO")
@@ -227,9 +229,10 @@ def create_rag_tools(
         client = _get_rag_client()
         try:
             result = await client.search_labels(label=label, max_results=max_results)
-            if not result.labels:
+            labels = getattr(result, 'labels', []) or []
+            if not labels:
                 return f"No labels found matching: {label}"
-            return "Matching labels:\n" + "\n".join(f"- {lbl}" for lbl in result.labels)
+            return "Matching labels:\n" + "\n".join(f"- {lbl}" for lbl in labels)
         except RAGError as e:
             return f"RAG error: {e}"
 
@@ -277,16 +280,18 @@ def create_rag_tools(
             else:
                 output_parts.append("## Full Knowledge Graph\n")
 
-            if result.nodes:
-                output_parts.append(f"### Nodes ({len(result.nodes)})\n")
-                for node in result.nodes:
+            nodes = getattr(result, 'nodes', []) or []
+            if nodes:
+                output_parts.append(f"### Nodes ({len(nodes)})\n")
+                for node in nodes:
                     node_id = node.get("id", node.get("name", "?"))
                     node_type = node.get("type", "UNKNOWN")
                     output_parts.append(f"- {node_id} ({node_type})")
 
-            if result.edges:
-                output_parts.append(f"\n### Edges ({len(result.edges)})\n")
-                for edge in result.edges:
+            edges = getattr(result, 'edges', []) or []
+            if edges:
+                output_parts.append(f"\n### Edges ({len(edges)})\n")
+                for edge in edges:
                     source = edge.get("source", "?")
                     target = edge.get("target", "?")
                     edge_type = edge.get("type", "RELATED_TO")
@@ -631,13 +636,17 @@ def create_rag_tools(
             )
 
             output_parts: list[str] = []
-            output_parts.append(f"## Documents (Page {result.page}/{result.page_size})")
-            output_parts.append(f"Total: {result.total} documents\n")
+            doc_page = getattr(result, 'page', 1) or 1
+            doc_page_size = getattr(result, 'page_size', page_size) or page_size
+            doc_total = getattr(result, 'total', 0) or 0
+            output_parts.append(f"## Documents (Page {doc_page}/{doc_page_size})")
+            output_parts.append(f"Total: {doc_total} documents\n")
 
-            if not result.documents:
+            documents = getattr(result, 'documents', []) or []
+            if not documents:
                 return "No documents found."
 
-            for doc in result.documents:
+            for doc in documents:
                 doc_id = doc.get("id", "?")
                 doc_status = doc.get("status", "unknown")
                 doc_name = doc.get("name", doc.get("file_name", "unnamed"))
@@ -676,14 +685,16 @@ def create_rag_tools(
             result = await client.track_status(track_id=track_id)
 
             output_parts: list[str] = []
-            output_parts.append(f"## Track Status: {result.track_id}")
-            output_parts.append(f"Status: {result.status}")
+            output_parts.append(f"## Track Status: {getattr(result, 'track_id', track_id)}")
+            output_parts.append(f"Status: {getattr(result, 'status', 'unknown')}")
 
-            if result.progress is not None:
-                output_parts.append(f"Progress: {result.progress * 100:.1f}%")
+            progress = getattr(result, 'progress', None)
+            if progress is not None:
+                output_parts.append(f"Progress: {progress * 100:.1f}%")
 
-            if result.message:
-                output_parts.append(f"Message: {result.message}")
+            message = getattr(result, 'message', '') or ''
+            if message:
+                output_parts.append(f"Message: {message}")
 
             return "\n".join(output_parts)
         except RAGError as e:

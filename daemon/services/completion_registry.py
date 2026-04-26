@@ -140,7 +140,7 @@ class CompletionRegistry:
             logger.debug("Buffered completion for %s (no event yet)", instance_id[:8])
             return True
 
-    def wait_for(self, instance_id: str, timeout: float = 300.0) -> CompletionResult | None:
+    async def wait_for(self, instance_id: str, timeout: float = 300.0) -> CompletionResult | None:
         """Wait for an instance to complete with a timeout.
 
         Args:
@@ -158,32 +158,19 @@ class CompletionRegistry:
             if instance_id not in self._events:
                 raise ValueError(f"Instance {instance_id[:8]} not registered")
             event = self._events[instance_id]
-
-        logger.debug("Waiting for instance %s (timeout=%.1f)", instance_id[:8], timeout)
-
         try:
-            # Run sync wait in async context
-            async def _wait() -> bool:
-                try:
-                    return await asyncio.wait_for(event.wait(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    return False
-
-            loop = asyncio.get_event_loop()
-            completed = loop.run_until_complete(_wait())
-
-            if not completed:
-                logger.warning("Timeout waiting for instance %s", instance_id[:8])
-                return None
-
-            with self._lock:
-                result = self._results.get(instance_id)
-                logger.debug("Instance %s completed (error=%s)", instance_id[:8], result.is_error if result else "N/A")
-                return result
-
-        except RuntimeError as e:
-            logger.error("Event loop error while waiting for %s: %s", instance_id[:8], e)
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for instance %s", instance_id[:8])
             return None
+        with self._lock:
+            result = self._results.get(instance_id)
+            logger.debug(
+                "Instance %s completed (error=%s)",
+                instance_id[:8],
+                result.is_error if result else "N/A",
+            )
+            return result
 
     def unregister(self, instance_id: str) -> None:
         """Remove all registry entries for an instance.

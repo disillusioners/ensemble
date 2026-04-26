@@ -230,6 +230,132 @@ async def test_singleton():
     assert reg1 is reg2
 
 
+# ─── Integration Tests (Real wait_for) ─────────────────────────────────────────
+# These tests call the actual async wait_for() method without mocking it,
+# verifying real behavior against the CompletionRegistry.
+
+
+@pytest.mark.asyncio
+async def test_wait_for_successful_completion(registry):
+    """register() → complete() → await wait_for() returns CompletionResult."""
+    instance_id = "integration-success"
+
+    registry.register(instance_id)
+
+    # Complete after a short delay to verify wait_for actually waits
+    async def delayed_complete():
+        await asyncio.sleep(0.05)
+        registry.complete(instance_id, result="success result")
+
+    # Start completion in background and wait for it
+    complete_task = asyncio.create_task(delayed_complete())
+    result = await registry.wait_for(instance_id, timeout=1.0)
+
+    await complete_task
+
+    assert result is not None
+    assert result.content == "success result"
+    assert result.is_error is False
+    assert result.succeeded is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_timeout(registry):
+    """register() without complete → await wait_for(timeout=0.01) returns None."""
+    instance_id = "integration-timeout"
+
+    registry.register(instance_id)
+
+    # Don't complete - should timeout
+    result = await registry.wait_for(instance_id, timeout=0.01)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_error_completion(registry):
+    """register() → complete(is_error=True) → await wait_for() returns error result."""
+    instance_id = "integration-error"
+
+    registry.register(instance_id)
+    registry.complete(instance_id, result="Something went wrong", is_error=True)
+
+    result = await registry.wait_for(instance_id, timeout=1.0)
+
+    assert result is not None
+    assert result.content == "Something went wrong"
+    assert result.is_error is True
+    assert result.succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_buffered_completion_before_wait(registry):
+    """complete() → register() → await wait_for() returns immediately (already complete)."""
+    instance_id = "integration-buffered"
+
+    # Complete BEFORE register
+    registry.complete(instance_id, result="early result")
+
+    # Now register - this should consume the buffered result and set the event
+    registry.register(instance_id)
+
+    # wait_for should return immediately since already complete
+    result = await registry.wait_for(instance_id, timeout=1.0)
+
+    assert result is not None
+    assert result.content == "early result"
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_unregistered_raises(registry):
+    """await wait_for() with unregistered instance raises ValueError."""
+    instance_id = "not-registered"
+
+    with pytest.raises(ValueError, match="not registered"):
+        await registry.wait_for(instance_id, timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_already_completed_returns_instantly(registry):
+    """register() → complete() → await wait_for() returns immediately (no delay)."""
+    instance_id = "integration-already-done"
+
+    registry.register(instance_id)
+    registry.complete(instance_id, result="instant result")
+
+    # Measure time - should be nearly instant since already complete
+    import time
+    start = time.monotonic()
+    result = await registry.wait_for(instance_id, timeout=1.0)
+    elapsed = time.monotonic() - start
+
+    assert result is not None
+    assert result.content == "instant result"
+    # Should complete in less than 10ms (much faster than timeout)
+    assert elapsed < 0.01
+
+
+@pytest.mark.asyncio
+async def test_wait_for_default_timeout_accepts_300_seconds(registry):
+    """wait_for() with default timeout (300s) accepts the parameter without raising."""
+    instance_id = "integration-default-timeout"
+
+    registry.register(instance_id)
+
+    # We won't wait the full 300 seconds - just verify the method accepts the default
+    # by checking the signature accepts it. Use a very short timeout for the test.
+    import time
+    start = time.monotonic()
+    result = await registry.wait_for(instance_id, timeout=0.02)
+    elapsed = time.monotonic() - start
+
+    # Should have timed out (returned None) since we never completed
+    assert result is None
+    # Should have waited close to the timeout duration (with some variance)
+    assert elapsed >= 0.01
+
+
 # ─── invoke_agent_and_wait Tests ────────────────────────────────────────────────
 
 

@@ -86,6 +86,13 @@ def mock_manager():
     return mgr
 
 
+@pytest.fixture
+def rag_enabled():
+    """Mock RAG as enabled for tests that expect redirect behavior."""
+    with patch("daemon.tools.inner_soul.is_rag_enabled", return_value=True):
+        yield
+
+
 # =============================================================================
 # Test _should_redirect_to_rag()
 # =============================================================================
@@ -98,37 +105,37 @@ class TestShouldRedirectToRag:
     # Should redirect (knowledge-oriented with RAG targets)
     # -------------------------------------------------------------------------
 
-    def test_knowledge_classification_with_memory_target_redirects(self):
+    def test_knowledge_classification_with_memory_target_redirects(self, rag_enabled):
         """knowledge classification with memory target should redirect."""
         classification = {"type": "knowledge", "targets": ["memory"]}
         assert _should_redirect_to_rag(["memory"], classification, explicit_target=False) is True
 
-    def test_knowledge_classification_with_memories_target_redirects(self):
+    def test_knowledge_classification_with_memories_target_redirects(self, rag_enabled):
         """knowledge classification with memories target should redirect."""
         classification = {"type": "knowledge", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_pattern_classification_with_memories_target_redirects(self):
+    def test_pattern_classification_with_memories_target_redirects(self, rag_enabled):
         """pattern classification with memories target should redirect."""
         classification = {"type": "pattern", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_event_classification_with_memories_target_redirects(self):
+    def test_event_classification_with_memories_target_redirects(self, rag_enabled):
         """event classification with memories target should redirect."""
         classification = {"type": "event", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_skill_classification_with_memories_target_redirects(self):
+    def test_skill_classification_with_memories_target_redirects(self, rag_enabled):
         """skill classification with memories target should redirect."""
         classification = {"type": "skill", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_mistake_classification_with_memories_target_redirects(self):
+    def test_mistake_classification_with_memories_target_redirects(self, rag_enabled):
         """mistake classification with memories target should redirect."""
         classification = {"type": "mistake", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_project_knowledge_classification_always_redirects(self):
+    def test_project_knowledge_classification_always_redirects(self, rag_enabled):
         """project_knowledge classification always redirects (special case)."""
         # Even with REJECT target, project_knowledge should redirect
         classification = {"type": "project_knowledge", "targets": ["REJECT"]}
@@ -192,13 +199,13 @@ class TestShouldRedirectToRag:
         classification = {"type": "workflow", "targets": ["workflow"]}
         assert _should_redirect_to_rag(["workflow", "memories"], classification, explicit_target=False) is False
 
-    def test_reject_filtered_out_with_only_rag_targets_redirects(self):
+    def test_reject_filtered_out_with_only_rag_targets_redirects(self, rag_enabled):
         """After REJECT is filtered out, only RAG targets remain -> redirect."""
         classification = {"type": "knowledge", "targets": ["memories", "REJECT"]}
         # REJECT gets filtered, leaving only "memories"
         assert _should_redirect_to_rag(["memories", "REJECT"], classification, explicit_target=False) is True
 
-    def test_explicit_target_overrides_classification(self):
+    def test_explicit_target_overrides_classification(self, rag_enabled):
         """Explicit target parameter takes precedence."""
         # With explicit target="memory", even if classification doesn't match,
         # the target itself should determine behavior
@@ -207,6 +214,17 @@ class TestShouldRedirectToRag:
         # Wait, actually with explicit_target=True and targets=["memory"],
         # it should still check if all targets are RAG targets
         assert _should_redirect_to_rag(["memory"], classification, explicit_target=True) is False
+
+    def test_rag_disabled_never_redirects(self):
+        """When RAG is not enabled, _should_redirect_to_rag should always return False."""
+        # This tests that the guard at the beginning of _should_redirect_to_rag works
+        classification = {"type": "knowledge", "targets": ["memories"]}
+        assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is False
+
+    def test_rag_disabled_preserves_old_behavior(self):
+        """When RAG is disabled, even project_knowledge should NOT redirect."""
+        classification = {"type": "project_knowledge", "targets": ["REJECT"]}
+        assert _should_redirect_to_rag(["REJECT"], classification, explicit_target=False) is False
 
 
 # =============================================================================
@@ -413,7 +431,7 @@ class TestFormatRagRedirect:
 class TestInnerSoulToolRedirect:
     """Tests for the full inner_soul tool with RAG redirect behavior."""
 
-    def test_knowledge_request_redirects_to_experience(self, mock_registry, mock_manager, temp_agent):
+    def test_knowledge_request_redirects_to_experience(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Knowledge request should redirect to experience(), not create file."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -433,7 +451,7 @@ class TestInnerSoulToolRedirect:
             memories_after = list(memories_dir.glob("*.md"))
             assert len(memories_after) == len(memories_before)
 
-    def test_identity_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent):
+    def test_identity_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Identity request should update soul.md, not redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -451,7 +469,7 @@ class TestInnerSoulToolRedirect:
             assert soul_after != soul_before
             assert "Cody" in soul_after
 
-    def test_project_knowledge_request_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_project_knowledge_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Project knowledge request should redirect (special case)."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -461,7 +479,7 @@ class TestInnerSoulToolRedirect:
             # Should redirect to RAG
             assert "experience()" in result
 
-    def test_intent_remember_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_intent_remember_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """intent='remember' should redirect to experience()."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -473,7 +491,7 @@ class TestInnerSoulToolRedirect:
             
             assert "experience()" in result
 
-    def test_personality_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent):
+    def test_personality_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Personality request should update files, not redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -491,7 +509,7 @@ class TestInnerSoulToolRedirect:
             # The change might go to soul.md or user.md depending on classification
             assert soul_after != soul_before or "cozy" in soul_after.lower()
 
-    def test_workflow_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent):
+    def test_workflow_request_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Workflow request should update workflow.md, not redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -508,7 +526,7 @@ class TestInnerSoulToolRedirect:
             workflow_after = workflow_file.read_text()
             assert workflow_after != workflow_before
 
-    def test_pattern_request_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_pattern_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Pattern request should redirect to experience()."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -518,7 +536,7 @@ class TestInnerSoulToolRedirect:
             assert "experience()" in result
             assert "pattern" in result.lower()
 
-    def test_event_request_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_event_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Event request should redirect to experience()."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -527,7 +545,7 @@ class TestInnerSoulToolRedirect:
             
             assert "experience()" in result
 
-    def test_skill_request_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_skill_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Skill request should redirect to experience()."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -536,7 +554,7 @@ class TestInnerSoulToolRedirect:
             
             assert "experience()" in result
 
-    def test_mistake_request_redirects(self, mock_registry, mock_manager, temp_agent):
+    def test_mistake_request_redirects(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Mistake request should redirect to experience()."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -546,7 +564,7 @@ class TestInnerSoulToolRedirect:
             assert "experience()" in result
             assert "mistake" in result.lower()
 
-    def test_user_preference_does_not_redirect(self, mock_registry, mock_manager, temp_agent):
+    def test_user_preference_does_not_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """User preference should update user.md, not redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -565,7 +583,7 @@ class TestInnerSoulToolRedirect:
             user_after = user_file.read_text()
             assert user_after != user_before
 
-    def test_content_parameter_works_for_redirect(self, mock_registry, mock_manager, temp_agent):
+    def test_content_parameter_works_for_redirect(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """content parameter (legacy) should also trigger redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -576,7 +594,7 @@ class TestInnerSoulToolRedirect:
             
             assert "experience()" in result
 
-    def test_request_over_2000_chars_returns_error(self, mock_registry, mock_manager, temp_agent):
+    def test_request_over_2000_chars_returns_error(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Request exceeding 2000 chars should return error, not redirect."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -587,7 +605,7 @@ class TestInnerSoulToolRedirect:
             assert "ERROR" in result
             assert "2000" in result
 
-    def test_empty_request_returns_error(self, mock_registry, mock_manager, temp_agent):
+    def test_empty_request_returns_error(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Empty request should return error."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -605,7 +623,7 @@ class TestInnerSoulToolRedirect:
 class TestInnerSoulToolResponseStructure:
     """Tests for response structure and formatting."""
 
-    def test_redirect_response_has_proper_format(self, mock_registry, mock_manager, temp_agent):
+    def test_redirect_response_has_proper_format(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Verify redirect response has expected format and content."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -621,7 +639,7 @@ class TestInnerSoulToolResponseStructure:
             assert any("experience()" in line for line in lines), "Should suggest experience()"
             assert any("explore()" in line for line in lines), "Should mention explore()"
 
-    def test_soul_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent):
+    def test_soul_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Verify soul update response has expected format."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
@@ -632,7 +650,7 @@ class TestInnerSoulToolResponseStructure:
             assert "Processed" in result or "soul" in result.lower()
             assert "soul.md" in result or "Soul" in result
 
-    def test_workflow_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent):
+    def test_workflow_update_response_has_proper_format(self, mock_registry, mock_manager, temp_agent, rag_enabled):
         """Verify workflow update response has expected format."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")

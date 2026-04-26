@@ -14,6 +14,7 @@ import re
 import logging
 
 from ._tool_registry import register_tool_category
+from ..rag.config import is_rag_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +188,12 @@ def _should_redirect_to_rag(
     """Determine if a request should be redirected to experience() instead of file-based memory.
 
     Redirect when:
-    1. ALL resolved targets are RAG targets (memories/memory), AND
-    2. The classification is knowledge-oriented (not identity/personality/workflow)
+    1. RAG is configured/enabled, AND
+    2. ALL resolved targets are RAG targets (memories/memory), AND
+    3. The classification is knowledge-oriented (not identity/personality/workflow)
 
     Do NOT redirect when:
+    - RAG is not configured/enabled
     - Any target is soul/user/workflow (self-modification)
     - The request is identity/personality/user-related
 
@@ -202,6 +205,10 @@ def _should_redirect_to_rag(
     Returns:
         True if request should redirect to experience().
     """
+    # Guard: If RAG is not enabled, preserve old file-based behavior
+    if not is_rag_enabled():
+        return False
+
     class_type = classification.get("type", "")
 
     # Filter out "REJECT" from multi-match target merging.
