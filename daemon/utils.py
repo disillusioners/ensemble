@@ -534,6 +534,7 @@ async def invoke_agent_and_wait(
             parent_id=parent_id,
             project_id=project_id,
             instance_name=instance_name,
+            invoked_as_tool=True,
         )
         
         # 2. Register IMMEDIATELY after spawn (before enqueue)

@@ -124,6 +124,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 parent_id=current_instance_id,
                 project_id=pid,
                 instance_name=f"experience-{text[:30]}",
+                invoked_as_tool=True,
             )
             await manager.enqueue_message(
                 instance_id=instance_id,

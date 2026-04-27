@@ -85,6 +85,7 @@ class InstanceLifecycleService:
         parent_id: str | None = None,
         project_id: str | None = None,
         instance_name: str | None = None,
+        invoked_as_tool: bool = False,
     ) -> str:
         """Create a new agent instance.
 
@@ -94,6 +95,7 @@ class InstanceLifecycleService:
             parent_id: Optional parent instance ID for hierarchical instances.
             project_id: Optional project ID for project context.
             instance_name: Optional short name for the instance.
+            invoked_as_tool: If True, marks instance as invoked-as-tool (default: False).
 
         Returns:
             The instance_id of the newly created instance.
@@ -208,6 +210,10 @@ class InstanceLifecycleService:
         # Store instance_name in metadata if provided
         if instance_name is not None:
             instance_metadata["instance_name"] = instance_name
+        
+        # Mark as invoked-as-tool if requested
+        if invoked_as_tool:
+            instance_metadata["invoked_as_tool"] = True
         
         logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
         
