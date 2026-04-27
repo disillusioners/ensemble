@@ -5,6 +5,7 @@
   "icon": "🧠",
   "color": "accent-purple",
   "version": "1.0.0",
+  "llm_model": "quick",
   "tools": {
     "allow": ["rag", "help", "time"]
   }

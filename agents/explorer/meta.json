@@ -5,6 +5,7 @@
   "icon": "🔍",
   "color": "accent-blue",
   "version": "1.0.0",
+  "llm_model": "quick",
   "tools": {
     "allow": ["rag", "filesystem", "help", "time"]
   }
