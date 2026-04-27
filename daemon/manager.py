@@ -716,6 +716,7 @@ class InstanceManager:
         parent_id: str | None = None,
         project_id: str | None = None,
         instance_name: str | None = None,
+        invoked_as_tool: bool = False,
     ) -> str:
         """Create a new agent instance.
 
@@ -728,6 +729,7 @@ class InstanceManager:
                 metadata so child instances don't rely on text extraction.
             instance_name: Optional short name for the instance (e.g., 'create-feature-a').
                 Used in completion reports to identify the task.
+            invoked_as_tool: If True, marks instance as invoked-as-tool (default: False).
 
         Returns:
             The instance_id of the newly created instance.
@@ -742,6 +744,7 @@ class InstanceManager:
             parent_id=parent_id,
             project_id=project_id,
             instance_name=instance_name,
+            invoked_as_tool=invoked_as_tool,
         )
 
     async def send_message(self, instance_id: str, message: str) -> MessageResult:
