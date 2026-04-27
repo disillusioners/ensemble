@@ -599,3 +599,43 @@ class TestValidateToolConfigs:
         
         warnings = registry.validate_tool_configs()
         assert warnings == []
+
+
+class TestLLMModelParsing:
+    """Tests for per-agent LLM model override parsing."""
+
+    def test_llm_model_defaults_to_none(self, temp_agents_dir: Path) -> None:
+        """Test that llm_model defaults to None when not specified in meta.json."""
+        create_agent_meta(temp_agents_dir, "test_agent")
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        agent = registry.get("test_agent")
+        assert agent is not None
+        assert agent.llm_model is None
+
+    def test_llm_model_parsed_from_meta_json(self, temp_agents_dir: Path) -> None:
+        """Test that llm_model is correctly parsed from meta.json."""
+        create_agent_meta(temp_agents_dir, "custom_agent", llm_model="gpt-4o-mini")
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        agent = registry.get("custom_agent")
+        assert agent is not None
+        assert agent.llm_model == "gpt-4o-mini"
+
+    def test_llm_model_whitespace_only_loaded_as_is(self, temp_agents_dir: Path) -> None:
+        """Test that whitespace-only llm_model is loaded as-is.
+
+        Validation (empty after strip) is handled downstream.
+        """
+        create_agent_meta(temp_agents_dir, "whitespace_agent", llm_model="  ")
+        
+        registry = AgentRegistry(temp_agents_dir)
+        registry.discover()
+        
+        agent = registry.get("whitespace_agent")
+        assert agent is not None
+        assert agent.llm_model == "  "
