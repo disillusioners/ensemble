@@ -85,10 +85,10 @@ class TestSlugify:
 
 
 class TestAccessMemoryTool:
-    """Tests for the access_memory tool deprecation."""
+    """Tests for the access_memory tool."""
 
-    def test_reading_valid_memory_file_returns_deprecation(self, tmp_path):
-        """Reading a valid memory file now returns deprecation message."""
+    def test_reading_valid_memory_file_returns_content(self, tmp_path):
+        """Reading a valid memory file returns its content."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory structure
@@ -113,12 +113,11 @@ class TestAccessMemoryTool:
             tool = create_access_memory_tool("test-agent")
             result = tool.invoke({"filename": "20260401_1430-test-memory.md"})
             
-            assert "DEPRECATED" in result
-            assert "explore()" in result
-            assert "experience()" in result
+            assert "Test Memory" in result
+            assert "This is test content." in result
 
-    def test_path_traversal_via_symlink_returns_deprecation(self, tmp_path):
-        """Path traversal attempt now returns deprecation message (security test obsolete)."""
+    def test_path_traversal_via_symlink_rejected(self, tmp_path):
+        """Path traversal via symlinks is rejected."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory structure
@@ -151,14 +150,12 @@ class TestAccessMemoryTool:
 
                 tool = create_access_memory_tool("test-agent")
                 
-                # Now returns deprecation message instead of "Access denied"
+                # The resolve() check catches symlinks pointing outside
                 result = tool.invoke({"filename": "malicious.md"})
-                assert "DEPRECATED" in result
-                assert "explore()" in result
-                assert "experience()" in result
+                assert result == "Access denied"
 
-    def test_missing_file_returns_deprecation(self, tmp_path):
-        """Missing file now returns deprecation message instead of not found list."""
+    def test_missing_file_returns_not_found_with_available(self, tmp_path):
+        """Missing file returns 'not found' message with available files."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory structure
@@ -183,12 +180,12 @@ class TestAccessMemoryTool:
             tool = create_access_memory_tool("test-agent")
             result = tool.invoke({"filename": "nonexistent.md"})
             
-            assert "DEPRECATED" in result
-            assert "explore()" in result
-            assert "experience()" in result
+            assert "not found" in result.lower()
+            assert "existing" in result.lower()
+            assert "another" in result.lower()
 
-    def test_missing_memories_directory_returns_deprecation(self, tmp_path):
-        """Missing memories/ directory now returns deprecation message."""
+    def test_missing_memories_directory_returns_message(self, tmp_path):
+        """Missing memories/ directory returns appropriate message."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory WITHOUT memories
@@ -207,12 +204,10 @@ class TestAccessMemoryTool:
             tool = create_access_memory_tool("test-agent")
             result = tool.invoke({"filename": "anyfile.md"})
             
-            assert "DEPRECATED" in result
-            assert "explore()" in result
-            assert "experience()" in result
+            assert "No memories/ directory found" in result
 
-    def test_path_components_in_filename_returns_deprecation(self, tmp_path):
-        """Filename with path components now returns deprecation message."""
+    def test_filename_with_path_components_stripped(self, tmp_path):
+        """Filename with path components has path stripped."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory structure
@@ -239,17 +234,15 @@ class TestAccessMemoryTool:
             # Try with path components
             result = tool.invoke({"filename": "subdir/20260401_1430-test-memory.md"})
             
-            # Now returns deprecation message instead of file content
-            assert "DEPRECATED" in result
-            assert "explore()" in result
-            assert "experience()" in result
+            # Should still find the file (path stripped, filename used)
+            assert "Test Memory Content" in result
 
 
 class TestSymlinkHandling:
-    """Tests for symlink safety in access_memory (now deprecated)."""
+    """Tests for symlink safety in access_memory."""
 
-    def test_symlinks_returns_deprecation(self, tmp_path):
-        """Symlink access now returns deprecation message."""
+    def test_symlinks_handled_safely(self, tmp_path):
+        """Symlinks to memory files are handled safely."""
         from daemon.tools.access_memory import create_access_memory_tool
 
         # Create agent directory structure
@@ -278,11 +271,9 @@ class TestSymlinkHandling:
 
                 tool = create_access_memory_tool("test-agent")
                 
-                # Read via symlink - now returns deprecation message
+                # Read via symlink
                 result = tool.invoke({"filename": "symlink-memory.md"})
-                assert "DEPRECATED" in result
-                assert "explore()" in result
-                assert "experience()" in result
+                assert "Real Memory" in result
 
 
 class TestLoadRecentMemories:
