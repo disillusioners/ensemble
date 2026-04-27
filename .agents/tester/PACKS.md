@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 20 packs
-- Unit: 17 | Integration: 1 | Mock: 2
+- Total: 21 packs
+- Unit: 18 | Integration: 1 | Mock: 2
 
 ## Unit Test Packs
 
@@ -25,6 +25,7 @@
 | rag_completion_registry_test | tests/unit/services/test_completion_registry.py | CompletionRegistry: register/complete/wait_for, buffered completions, timeout, thread safety, stale cleanup, invoke_agent_and_wait integration, semaphore deadlock prevention | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
 | rag_client_test | tests/unit/rag/test_client.py | RAG HTTP client: config, headers, schemas, all API methods (insert/query/graph/entity/relation/docs/status), error handling, connection retry | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
 | rag_tools_test | tests/unit/tools/test_rag_tools.py | 15 RAG tools: factory pattern, graceful disable, defensive attribute access, mock client, output formatting, error handling | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
+| llm_model_override_test | tests/unit/test_llm_config_override.py | Per-agent LLM model override: _build_llm_config, registry llm_model parsing, spawn_instance integration | 2 min | 2026-04-27 | ✅ PASS (feature/agent-llm-model, 9 tests, 0 failures) |
 
 ## Integration Test Packs
 

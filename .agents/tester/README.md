@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-26 RAG Knowledge Toolset Feature)
+## Test Results (Latest: 2026-04-27 Per-Agent LLM Model Override)
+
+### Per-Agent LLM Model Override Feature
+- **3,205 tests passed**, 0 failed, 27 skipped — ALL PASS (no regressions)
+- **9 new tests** — Registry llm_model parsing (3), _build_llm_config (4), spawn_instance integration (2)
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean feature, no issues
+- See `.agents/tester/RESULTS/2026-04-27-agent-llm-model-override.md` for full report
+
+### Per-Agent LLM Model Override Status: ✅ READY
 
 ### RAG Knowledge Toolset Feature
 - **3,097 tests passed**, 0 failed, 176 skipped — ALL PASS
