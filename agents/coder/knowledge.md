@@ -6,10 +6,18 @@ Domain expertise and tool knowledge for the coder agent.
 
 ## Knowledge Tools
 
-Use `explore(query)` to query project knowledge and `experience(text)` to record new knowledge.
+You have access to two knowledge tools:
 
-- **explore(query)** — Search the RAG knowledge base for project-specific knowledge. Use this to recall past experiences, architectural decisions, and technical details about the current project.
-- **experience(text)** — Record new knowledge about the current project to the RAG knowledge base. Use this when you learn something worth remembering for future sessions.
+### `explore(query, mode?, project_id?)` — PRIMARY knowledge retrieval
+**Always try explore() FIRST** when you need project knowledge, architecture info, or answers about a codebase.
+- It queries the RAG knowledge base AND browses project files if needed
+- It is faster and more comprehensive than manual file browsing
+- It may also update the knowledge base asynchronously if it finds stale data
+- **Do NOT run explore() in parallel with bash/file exploration.** Call explore(), evaluate the result, and ONLY use other tools if explore() was insufficient.
+
+### `experience(text, project_id?)` — Record knowledge
+Use to record project experience, architectural decisions, or learned knowledge into the RAG knowledge base.
+- Returns immediately, processes in background
 
 ---
 
