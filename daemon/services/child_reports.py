@@ -572,7 +572,49 @@ Provide a concise summary:"""
             # Idempotency checks
             if not await self._should_send_completion_report(session, instance_id, completed_message_id):
                 return
-            
+
+            # Check if this is a tool invocation (explore/experience)
+            # If so, skip parent notification but still update status and signal CompletionRegistry
+            if instance.instance_metadata and instance.instance_metadata.get("invoked_as_tool", False):
+                logger.info(
+                    f"Instance {instance_id[:8]}... completed (tool invocation, skipping parent report)"
+                )
+
+                # Update child status to COMPLETED
+                instance.status = InstanceStatus.COMPLETED.value
+                instance.updated_at = datetime.now(timezone.utc).isoformat()
+                instance.last_activity_at = datetime.now(timezone.utc)
+                instance.version = (instance.version or 1) + 1
+
+                # Remove from instance_hierarchy table for cleanup
+                session.execute(
+                    text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                    {"child_id": instance.instance_id}
+                )
+
+                # Capture parent_id before session closes
+                parent_id = instance.parent_id
+
+                session.commit()
+
+                # Signal CompletionRegistry for explore() callers
+                from .completion_registry import get_completion_registry
+                get_completion_registry().complete(instance_id, result=last_content)
+
+                # Optionally publish lifecycle event
+                if self._events_service:
+                    try:
+                        await self._events_service._publish_instance_lifecycle_event(
+                            instance_id=instance_id,
+                            status="completed",
+                            error=None,
+                            parent_id=parent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to publish lifecycle event: {e}")
+
+                return
+
             # ATOMIC: Instance completed — create completion report for parent
             logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
             
