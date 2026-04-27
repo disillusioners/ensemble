@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,7 +85,7 @@ class CompletionRegistry:
                 )
 
             self._events[instance_id] = event
-            self._register_times[instance_id] = asyncio.get_event_loop_time()
+            self._register_times[instance_id] = time.monotonic()
             logger.debug("Registered instance %s", instance_id[:8])
 
     def complete(
@@ -199,7 +200,7 @@ class CompletionRegistry:
         Returns:
             Number of entries cleaned up.
         """
-        current_time = asyncio.get_event_loop_time()
+        current_time = time.monotonic()
         cleaned = 0
 
         with self._lock:
