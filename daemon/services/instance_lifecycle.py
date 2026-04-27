@@ -20,6 +20,7 @@ from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
     from ..config import Config
+    from ..metadata import AgentMetadata
     from ..persistence import CheckpointSaver
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from ..repositories.project.repository import SQLModelProjectRepository
@@ -77,6 +78,20 @@ class InstanceLifecycleService:
     def _checkpointer(self) -> "CheckpointSaver | None":
         """Access checkpointer through manager for test mockability."""
         return self._manager._checkpointer
+
+    def _build_llm_config(self, metadata: "AgentMetadata | None" = None) -> dict:
+        """Build LLM config dict with optional per-agent model override."""
+        llm_config = {
+            "base_url": self._config.llm.base_url,
+            "api_key": self._config.llm.api_key,
+            "model": self._config.llm.model,
+            "model_vision": self._config.llm.model_vision,
+            "temperature": self._config.llm.temperature,
+            "request_timeout": self._config.llm.request_timeout,
+        }
+        if metadata and metadata.llm_model and metadata.llm_model.strip():
+            llm_config["model"] = metadata.llm_model.strip()
+        return llm_config
 
     def spawn_instance(
         self, 
@@ -158,18 +173,7 @@ class InstanceLifecycleService:
         tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
 
         # Build LLM config
-        llm_config = {
-            "base_url": self._config.llm.base_url,
-            "api_key": self._config.llm.api_key,
-            "model": self._config.llm.model,
-            "model_vision": self._config.llm.model_vision,
-            "temperature": self._config.llm.temperature,
-            "request_timeout": self._config.llm.request_timeout,
-        }
-
-        # Per-agent model override
-        if metadata.llm_model:
-            llm_config["model"] = metadata.llm_model
+        llm_config = self._build_llm_config(metadata)
 
         # Build retry config from queue settings
         retry_config = {
@@ -420,20 +424,9 @@ class InstanceLifecycleService:
         tools = create_instance_tools(self._manager, instance_id, meta.agent_id)
 
         # Build LLM config
-        llm_config = {
-            "base_url": self._config.llm.base_url,
-            "api_key": self._config.llm.api_key,
-            "model": self._config.llm.model,
-            "model_vision": self._config.llm.model_vision,
-            "temperature": self._config.llm.temperature,
-            "request_timeout": self._config.llm.request_timeout,
-        }
-
-        # Per-agent model override
         registry = get_registry()
         metadata = registry.get(meta.agent_id)
-        if metadata and metadata.llm_model:
-            llm_config["model"] = metadata.llm_model
+        llm_config = self._build_llm_config(metadata)
 
         # Build retry config from queue settings
         retry_config = {
