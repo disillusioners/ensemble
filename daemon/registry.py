@@ -64,6 +64,7 @@ class AgentMetadata(BaseModel):
         default=None,
         description="Tool filtering configuration. None means all tools allowed."
     )
+    llm_model: str | None = Field(default=None, description="Override the global LLM model for this agent")
 
     model_config = ConfigDict(
         extra="ignore",
@@ -174,6 +175,7 @@ class AgentRegistry:
                     tags=meta.get("tags", []),
                     tools=tools_filter,
                     innate_skills=meta.get("innate_skills", []),
+                    llm_model=meta.get("llm_model"),
                 )
                 self._agents[agent_id] = agent_meta
             except Exception as e:

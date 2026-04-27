@@ -167,6 +167,10 @@ class InstanceLifecycleService:
             "request_timeout": self._config.llm.request_timeout,
         }
 
+        # Per-agent model override
+        if metadata.llm_model:
+            llm_config["model"] = metadata.llm_model
+
         # Build retry config from queue settings
         retry_config = {
             "transient_attempts": self._config.queue.llm_retry_transient_attempts,
@@ -424,6 +428,12 @@ class InstanceLifecycleService:
             "temperature": self._config.llm.temperature,
             "request_timeout": self._config.llm.request_timeout,
         }
+
+        # Per-agent model override
+        registry = get_registry()
+        metadata = registry.get(meta.agent_id)
+        if metadata and metadata.llm_model:
+            llm_config["model"] = metadata.llm_model
 
         # Build retry config from queue settings
         retry_config = {
