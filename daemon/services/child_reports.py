@@ -586,12 +586,6 @@ Provide a concise summary:"""
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
 
-                # Remove from instance_hierarchy table for cleanup
-                session.execute(
-                    text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
-                    {"child_id": instance.instance_id}
-                )
-
                 # Capture parent_id before session closes
                 parent_id = instance.parent_id
 
