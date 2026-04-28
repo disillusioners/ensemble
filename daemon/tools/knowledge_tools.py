@@ -1,6 +1,7 @@
 """Knowledge management tools for exploring and recording project knowledge."""
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import TYPE_CHECKING
@@ -43,6 +44,12 @@ def _parse_should_update_kb(response: str) -> bool:
     if match:
         return match.group(1).lower() == "true"
     return False
+
+
+def _generate_idempotency_key(query: str, project_id: str) -> str:
+    """Generate a deterministic idempotency key for experiencer jobs."""
+    content = f"explorer-kb-update:{project_id}:{query.lower().strip()}"
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
 async def _enqueue_experiencer_job(
@@ -96,6 +103,7 @@ async def _enqueue_experiencer_job(
             project_id=project_id,
             priority=5,
             queue_id=queue.queue_id,
+            idempotency_key=_generate_idempotency_key(query, project_id),
             metadata={
                 "triggered_by": "explorer",
                 "original_query": query,
