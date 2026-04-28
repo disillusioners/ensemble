@@ -47,7 +47,7 @@ Rate the RAG response quality:
 
 1. Format the answer with sources
 2. Return immediately — do NOT browse files
-3. Skip to Step 5 for formatting, Step 6 only for async upsert
+3. Skip to Step 5 for formatting
 
 **Why skip file browsing?** Trust the knowledge base. Speed matters.
 
@@ -65,8 +65,6 @@ Rate the RAG response quality:
 4. Read **1-2 most relevant files** (MAX — speed matters)
 5. Extract additional context from file contents
 
-**Tip:** Keep it to 1-2 files maximum. You can upsert findings later.
-
 ---
 
 ## Step 5: Combine & Format
@@ -82,6 +80,12 @@ Merge RAG answer + file browsing results into a structured response:
 - File: {path} (if browsed during fallback)
 
 ## Confidence: {HIGH|MEDIUM|LOW}
+
+## Should Update KB: {true|false}
+
+**Guidance:**
+- Set to **true** if file browsing found information not in RAG (knowledge gap detected)
+- Set to **false** if RAG had good data and confidence is HIGH
 ```
 
 **Formatting rules:**
@@ -89,30 +93,6 @@ Merge RAG answer + file browsing results into a structured response:
 - Include sources for traceability
 - State confidence level clearly
 - Be concise — the caller needs answers, not essays
-
----
-
-## Step 6: Async Upsert (Optional)
-
-**Only execute if file browsing revealed new information:**
-
-1. Call `rag_insert_text` with:
-   - `text`: The new information found
-   - `description`: Brief description of what it is
-   - `file_paths`: Source files for traceability
-
-2. **Fire-and-forget** — don't wait for confirmation
-
-3. **Skip entirely** if RAG was already HIGH confidence
-
-**Example:**
-```
-rag_insert_text(
-    text="The payment module validates cards via Stripe API...",
-    description="Payment validation logic",
-    file_paths=["src/payments/validator.ts"]
-)
-```
 
 ---
 
@@ -151,16 +131,10 @@ HIGH      MEDIUM/LOW
                     ┌───────────────┐
                     │ Combine +     │
                     │ Format        │
-                    └───────────────┘
-                           │
-                           ▼
-                    ┌───────────────┐
-                    │ Async upsert  │ → Only if new info found
-                    │ (optional)    │
-                    └───────────────┘
-                           │
-                           ▼
-                       Return to caller
+                     └───────────────┘
+                            │
+                            ▼
+                        Return to caller
 ```
 
 ---

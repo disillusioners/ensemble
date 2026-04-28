@@ -147,28 +147,6 @@ now     1-2      broadly  broadly
 
 ---
 
-## Async Upsert Strategy
-
-When file browsing reveals information not in RAG:
-
-1. **Detect:** RAG had LOW/NONE confidence but file browsing found answers
-2. **Upsert:** Call `rag_insert_text(text, description, file_paths)` after returning
-3. **Fire-and-forget:** Don't wait for confirmation — the caller already got their answer
-4. **Traceability:** Always include source `file_paths` for future reference
-
-**Example upsert:**
-```
-rag_insert_text(
-    text="The auth system uses JWT tokens with 1-hour expiry",
-    description="Auth token expiry configuration",
-    file_paths=["src/auth/jwt.ts", "src/config/auth.yaml"]
-)
-```
-
-**Why async?** Speed. The caller is waiting — don't block on RAG writes.
-
----
-
 ## Workflow Reference
 
 See `workflow.md` for the complete step-by-step exploration process.
@@ -186,4 +164,8 @@ See `workflow.md` for the complete step-by-step exploration process.
 - File: {path} (if browsed during fallback)
 
 ## Confidence: {HIGH|MEDIUM|LOW}
+
+## Should Update KB: {true|false}
+
+Set to **true** if file browsing found information not in RAG (knowledge gap detected). Set to **false** if RAG had good data and confidence is HIGH.
 ```

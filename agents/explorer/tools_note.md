@@ -54,16 +54,6 @@ Get a **subgraph** around a specific entity. Use sparingly:
 - Can be expensive — limit `max_depth` and `max_nodes`
 - Good for understanding entity connections
 
-### rag_insert_text(text, description, file_paths)
-
-**Async upsert tool.** Insert new text into the knowledge base.
-
-**When to use:**
-- After file browsing reveals information not in RAG
-- Fire-and-forget — don't wait for confirmation
-
-**Tip:** Always include `file_paths` for traceability back to source files.
-
 ---
 
 ## Filesystem Tools (Fallback)
@@ -111,6 +101,7 @@ Get current time. Useful for timestamps in responses if needed.
 | Tool | Reason |
 |------|--------|
 | `rag_query` | FORBIDDEN — triggers internal LLM synthesis. Use `rag_query_data` instead |
+| `rag_insert_text` | FORBIDDEN — Experiencer handles knowledge upserts, not Explorer |
 | `explore()` | Would cause recursion — Explorer cannot call itself |
 | `experience()` | Would cause recursion |
 | `bash` | Not available — read-only agent |
@@ -122,4 +113,3 @@ Get current time. Useful for timestamps in responses if needed.
 1. **RAG first, files second** — Always try RAG before filesystem
 2. **Limit tool calls** — Max 2-3 calls before returning
 3. **Confidence is key** — HIGH confidence = return immediately
-4. **Async upsert** — Don't wait for rag_insert_text confirmation
