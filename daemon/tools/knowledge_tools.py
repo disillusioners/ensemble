@@ -1,6 +1,8 @@
 """Knowledge management tools for exploring and recording project knowledge."""
 
+import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -20,6 +22,93 @@ CATEGORY_DOC = """Knowledge management tools for exploring and recording project
 explore() queries the project knowledge base using the Explorer agent.
 experience() records new knowledge using the Experiencer agent.
 """
+
+# Pattern to match "## Should Update KB: true" or "## Should Update KB: false"
+_SHOULD_UPDATE_KB_PATTERN = re.compile(
+    r"##\s+Should\s+Update\s+KB:\s*(true|false)",
+    re.IGNORECASE,
+)
+
+
+def _parse_should_update_kb(response: str) -> bool:
+    """Parse the Explorer response for the should_update_kb flag.
+
+    Args:
+        response: The Explorer agent's response text.
+
+    Returns:
+        True if the response indicates knowledge should be updated, False otherwise.
+    """
+    match = _SHOULD_UPDATE_KB_PATTERN.search(response)
+    if match:
+        return match.group(1).lower() == "true"
+    return False
+
+
+async def _enqueue_experiencer_job(
+    manager: "InstanceManager",
+    query: str,
+    explorer_response: str,
+    project_id: str,
+    source_instance_id: str,
+) -> None:
+    """Fire-and-forget: create a job for the experiencer agent to update KB.
+
+    This function is designed to never raise — all errors are logged and swallowed.
+    The caller (explore tool) should not be affected by KB update failures.
+    """
+    try:
+        job_service = getattr(manager, "_job_queue_service", None)
+        if job_service is None:
+            logger.warning("JobQueueService not available, skipping experiencer job")
+            return
+
+        # Resolve system_parallel_queue for this project
+        queue = await asyncio.to_thread(
+            job_service._queue_repo.get_by_name, project_id, "system_parallel_queue"
+        )
+        if queue is None:
+            # Fall back to system_fifo_queue if parallel doesn't exist
+            queue = await asyncio.to_thread(
+                job_service._queue_repo.get_by_name, project_id, "system_fifo_queue"
+            )
+            if queue is None:
+                logger.warning(
+                    "No system queue found for project %s, skipping experiencer job",
+                    project_id,
+                )
+                return
+            logger.debug("No parallel queue for %s, using FIFO queue", project_id)
+
+        # Build message for experiencer with full context
+        experiencer_message = (
+            "Process new knowledge discovered during exploration.\n\n"
+            f"Original Query: {query}\n\n"
+            f"Explorer Findings:\n{explorer_response}\n\n"
+            f"Project: {project_id}"
+        )
+
+        # Create the job
+        await job_service.enqueue(
+            agent_id="experiencer",
+            message=experiencer_message,
+            source=f"explore:{source_instance_id}",
+            project_id=project_id,
+            priority=5,
+            queue_id=queue.queue_id,
+            metadata={
+                "triggered_by": "explorer",
+                "original_query": query,
+            },
+        )
+        logger.debug(
+            "Enqueued experiencer job for project %s on queue %s",
+            project_id, queue.queue_id,
+        )
+
+    except Exception as e:
+        # Fire-and-forget: don't fail the explore response if job creation fails
+        logger.warning("Failed to enqueue experiencer job: %s", e)
 
 
 def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
@@ -88,6 +177,23 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
 
         if result is None:
             return "Explorer agent timed out or failed. Try a simpler query."
+
+        # Parse response for should_update_kb flag
+        should_update_kb = _parse_should_update_kb(result)
+
+        # Strip the flag line from the response before returning to caller
+        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
+
+        # Fire-and-forget: create job for experiencer if knowledge update needed
+        if should_update_kb and pid:
+            asyncio.ensure_future(_enqueue_experiencer_job(
+                manager=manager,
+                query=query,
+                explorer_response=result,
+                project_id=pid,
+                source_instance_id=current_instance_id,
+            ))
+
         return result
 
     @register_tool_category("knowledge")
