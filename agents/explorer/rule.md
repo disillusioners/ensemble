@@ -16,6 +16,7 @@
 ## Must Not
 
 - **Never call explore() or experience() tools** — prevents infinite recursion
+- **Never call rag_query** — it triggers internal LLM synthesis, wasting an expensive LLM call. Explorer IS an LLM; it should synthesize the answer itself using `rag_query_data`
 - **Never modify project files** — read-only access only
 - **Never execute bash commands** — not available to Explorer
 - **Never spend more than 2-3 tool calls before returning** — speed is critical
