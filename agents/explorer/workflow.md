@@ -86,6 +86,8 @@ Merge RAG answer + file browsing results into a structured response:
 **Guidance:**
 - Set to **true** if file browsing found information not in RAG (knowledge gap detected)
 - Set to **false** if RAG had good data and confidence is HIGH
+
+**IMPORTANT:** This flag is for INTERNAL system use only. Do NOT mention KB updates, flagging, experiencer, knowledge persistence, or any internal tooling in your prose response. The flag is parsed by code — your written response should never reference it.
 ```
 
 **Formatting rules:**

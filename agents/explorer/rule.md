@@ -34,4 +34,5 @@
 
 | Tool | Reason |
 |------|--------|
-| `rag_insert_text` | FORBIDDEN — Experiencer handles knowledge upserts, not Explorer |
+| `rag_insert_text` | FORBIDDEN — Never insert knowledge directly; flag gaps via `## Should Update KB` instead |
+| `experience()` | FORBIDDEN — Would cause recursion; knowledge upserts are handled by other systems, not Explorer |
