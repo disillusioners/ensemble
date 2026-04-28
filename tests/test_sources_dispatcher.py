@@ -1006,14 +1006,14 @@ class TestInternalSourceLogLevels:
         await dispatcher_with_no_adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_dispatch_completed_non_internal_source_logs_error(
+    async def test_dispatch_completed_non_internal_source_logs_debug(
         self, dispatcher_with_no_adapter, caplog
     ):
-        """Verify telegram:123 logs ERROR when no adapter.
+        """Verify telegram:123 logs DEBUG when no adapter.
         
         When dispatch_completed is called with an external source like 'telegram:123',
-        and no adapter is found, it should log at ERROR level since this is unexpected
-        for external sources.
+        and no adapter is found, it logs at DEBUG level since the source may be
+        valid but not yet configured (e.g., explorer, experience, future sources).
         """
         caplog.set_level(logging.DEBUG, logger="daemon.sources.dispatcher")
         
@@ -1027,13 +1027,13 @@ class TestInternalSourceLogLevels:
             content="Hello"
         )
         
-        # Should log ERROR
+        # Should log DEBUG (not ERROR) - sources may be valid but not yet configured
         assert any(
-            record.levelno == logging.ERROR and 
+            record.levelno == logging.DEBUG and 
             "no adapter" in record.message.lower() and 
             "telegram" in record.message.lower()
             for record in caplog.records
-        ), "Should log ERROR about no adapter for telegram source"
+        ), "Should log DEBUG about no adapter for telegram source"
         
         await dispatcher_with_no_adapter.stop()
 
@@ -1074,15 +1074,15 @@ class TestInternalSourceLogLevels:
         await dispatcher_with_no_adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_dispatch_completed_contains_internal_but_not_prefix_logs_error(
+    async def test_dispatch_completed_contains_internal_but_not_prefix_logs_debug(
         self, dispatcher_with_no_adapter, caplog
     ):
-        """Verify some_internal:123 logs ERROR (not DEBUG).
+        """Verify some_internal:123 logs DEBUG (not ERROR).
         
         When dispatch_completed is called with a source like 'some_internal:123' that
-        contains 'internal' but does NOT start with 'internal_' prefix, it should
-        log ERROR (not DEBUG) when no adapter is found, because it's treated as
-        an external source.
+        contains 'internal' but does NOT start with 'internal_' prefix, it logs DEBUG
+        (not ERROR) when no adapter is found, since this may be a valid source that
+        just isn't configured yet.
         """
         caplog.set_level(logging.DEBUG, logger="daemon.sources.dispatcher")
         
@@ -1096,20 +1096,18 @@ class TestInternalSourceLogLevels:
             content="Hello"
         )
         
-        # Should log ERROR, not DEBUG for non-prefix internal
+        # Should log DEBUG, not ERROR
         assert any(
-            record.levelno == logging.ERROR and 
+            record.levelno == logging.DEBUG and 
             "no adapter" in record.message.lower()
             for record in caplog.records
-        ), "Should log ERROR for source that contains 'internal' but doesn't start with 'internal_'"
+        ), "Should log DEBUG for source that contains 'internal' but doesn't start with 'internal_'"
         
-        # No DEBUG message about "no adapter needed"
+        # Should NOT log ERROR
         assert not any(
-            record.levelno == logging.DEBUG and 
-            "no adapter" in record.message.lower() and 
-            "internal" in record.message.lower()
+            record.levelno == logging.ERROR and "no adapter" in record.message.lower()
             for record in caplog.records
-        ), "Should NOT log DEBUG 'no adapter needed' for non-prefix internal source"
+        ), "Should NOT log ERROR for non-prefix internal source"
         
         await dispatcher_with_no_adapter.stop()
 
@@ -1181,14 +1179,14 @@ class TestInternalSourceLogLevels:
         await dispatcher_with_no_adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_dispatch_message_non_internal_source_logs_error(
+    async def test_dispatch_message_non_internal_source_logs_debug(
         self, dispatcher_with_no_adapter, caplog
     ):
-        """Verify discord:456 logs ERROR when no adapter.
+        """Verify discord:456 logs DEBUG when no adapter.
         
         When dispatch_message is called with an external source like 'discord:456',
-        and no adapter is found, it should log at ERROR level since this is unexpected
-        for external sources.
+        and no adapter is found, it logs at DEBUG level since the source may be
+        valid but not yet configured.
         """
         caplog.set_level(logging.DEBUG, logger="daemon.sources.dispatcher")
         
@@ -1200,13 +1198,13 @@ class TestInternalSourceLogLevels:
             content="Hello"
         )
         
-        # Should log ERROR
+        # Should log DEBUG (not ERROR)
         assert any(
-            record.levelno == logging.ERROR and 
+            record.levelno == logging.DEBUG and 
             "no adapter" in record.message.lower() and 
             "discord" in record.message.lower()
             for record in caplog.records
-        ), "Should log ERROR about no adapter for discord source in dispatch_message"
+        ), "Should log DEBUG about no adapter for discord source in dispatch_message"
         
         await dispatcher_with_no_adapter.stop()
 
@@ -1244,14 +1242,14 @@ class TestInternalSourceLogLevels:
         await dispatcher_with_no_adapter.stop()
 
     @pytest.mark.asyncio
-    async def test_dispatch_message_contains_internal_but_not_prefix_logs_error(
+    async def test_dispatch_message_contains_internal_but_not_prefix_logs_debug(
         self, dispatcher_with_no_adapter, caplog
     ):
-        """Verify some_internal:123 logs ERROR.
+        """Verify some_internal:123 logs DEBUG.
         
         When dispatch_message is called with a source like 'some_internal:123' that
-        contains 'internal' but does NOT start with 'internal_' prefix, it should
-        log ERROR (not DEBUG) when no adapter is found.
+        contains 'internal' but does NOT start with 'internal_' prefix, it logs DEBUG
+        (not ERROR) when no adapter is found, since this may be a valid source.
         """
         caplog.set_level(logging.DEBUG, logger="daemon.sources.dispatcher")
         
@@ -1263,20 +1261,18 @@ class TestInternalSourceLogLevels:
             content="Hello"
         )
         
-        # Should log ERROR, not DEBUG
+        # Should log DEBUG, not ERROR
         assert any(
-            record.levelno == logging.ERROR and 
+            record.levelno == logging.DEBUG and 
             "no adapter" in record.message.lower()
             for record in caplog.records
-        ), "Should log ERROR for source that contains 'internal' but doesn't start with 'internal_'"
+        ), "Should log DEBUG for source that contains 'internal' but doesn't start with 'internal_'"
         
-        # No DEBUG message about "no adapter needed"
+        # Should NOT log ERROR
         assert not any(
-            record.levelno == logging.DEBUG and 
-            "no adapter" in record.message.lower() and 
-            "internal" in record.message.lower()
+            record.levelno == logging.ERROR and "no adapter" in record.message.lower()
             for record in caplog.records
-        ), "Should NOT log DEBUG 'no adapter needed' for non-prefix internal source"
+        ), "Should NOT log ERROR for non-prefix internal source"
         
         await dispatcher_with_no_adapter.stop()
 

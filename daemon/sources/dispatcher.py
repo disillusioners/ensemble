@@ -154,9 +154,9 @@ class ResponseDispatcher:
             if source_id.startswith("internal_"):
                 logger.debug(f"No adapter needed for internal source: {source_id}")
             else:
-                logger.error(f"No adapter found for source_id={source_id}")
+                logger.debug(f"No adapter found for source_id={source_id}")
             return
-        
+
         # Create OutgoingMessage
         outgoing = OutgoingMessage(
             external_user_id=external_user_id,
@@ -227,7 +227,7 @@ class ResponseDispatcher:
             if source_id.startswith("internal_"):
                 logger.debug(f"No adapter needed for internal source: {source_id}")
             else:
-                logger.error(f"No adapter found for source_id={source_id}")
+                logger.debug(f"No adapter found for source_id={source_id}")
             return
         
         # Create OutgoingMessage
