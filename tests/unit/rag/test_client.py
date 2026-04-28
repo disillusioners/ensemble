@@ -324,9 +324,9 @@ class TestClientQueryData:
         """query_data sends correct request and parses response."""
         response = await client_with_mock_transport.query_data("test query")
 
-        assert response.entities == mock_query_data_response["entities"]
-        assert response.relations == mock_query_data_response["relations"]
-        assert response.metadata == mock_query_data_response["metadata"]
+        assert response.entities == mock_query_data_response["data"]["entities"]
+        assert response.relationships == mock_query_data_response["data"]["relationships"]
+        assert response.metadata == mock_query_data_response["data"]["metadata"]
 
 
 class TestClientSearchLabels:

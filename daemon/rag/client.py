@@ -349,7 +349,7 @@ class AsyncLightRAGClient:
             history_turns=history_turns,
         )
         data = await self._request("POST", QUERY_DATA, json=request.to_api_dict())
-        return QueryDataResponse(**data)
+        return QueryDataResponse(**data.get("data", data))  # unwrap the "data" wrapper
 
     # -------------------------------------------------------------------------
     # Graph Operations
