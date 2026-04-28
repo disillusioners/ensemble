@@ -366,16 +366,16 @@ class QueryResponse(BaseModel):
 
 
 class QueryDataResponse(BaseModel):
-    """Response model for data query operations (entities and relations).
+    """Response model for data query operations (entities and relationships).
 
     Attributes:
         entities: List of entity dictionaries.
-        relations: List of relation dictionaries.
+        relationships: List of relationship dictionaries.
         metadata: Optional metadata about the query.
     """
 
     entities: list[dict] | None = Field(default=None, description="Retrieved entities")
-    relations: list[dict] | None = Field(default=None, description="Retrieved relations")
+    relationships: list[dict] | None = Field(default=None, description="Retrieved relationships")
     metadata: dict | None = Field(default=None, description="Query metadata")
 
 

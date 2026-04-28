@@ -182,14 +182,14 @@ def create_rag_tools(
                     desc = entity.get("description", "")
                     output_parts.append(f"- **{name}** ({entity_type}): {desc}")
 
-            relations = getattr(result, 'relations', []) or []
-            if relations:
-                output_parts.append("\n## Relations\n")
-                for relation in relations:
-                    source = relation.get("source", "?")
-                    target = relation.get("target", "?")
-                    rel_type = relation.get("type", "RELATED_TO")
-                    desc = relation.get("description", "")
+            relationships = getattr(result, 'relationships', []) or []
+            if relationships:
+                output_parts.append("\n## Relationships\n")
+                for relationship in relationships:
+                    source = relationship.get("source", "?")
+                    target = relationship.get("target", "?")
+                    rel_type = relationship.get("type", "RELATED_TO")
+                    desc = relationship.get("description", "")
                     output_parts.append(f"- {source} -[{rel_type}]-> {target}: {desc}")
 
             if not output_parts:

@@ -93,14 +93,17 @@ def mock_query_response() -> dict[str, Any]:
 def mock_query_data_response() -> dict[str, Any]:
     """Mock response for query_data."""
     return {
-        "entities": [
-            {"name": "Entity1", "type": "PERSON", "description": "First entity"},
-            {"name": "Entity2", "type": "PLACE", "description": "Second entity"},
-        ],
-        "relations": [
-            {"source": "Entity1", "target": "Entity2", "type": "RELATED_TO"},
-        ],
-        "metadata": {"count": 2},
+        "status": "success",
+        "data": {
+            "entities": [
+                {"name": "Entity1", "type": "PERSON", "description": "First entity"},
+                {"name": "Entity2", "type": "PLACE", "description": "Second entity"},
+            ],
+            "relationships": [
+                {"source": "Entity1", "target": "Entity2", "type": "RELATED_TO"},
+            ],
+            "metadata": {"count": 2},
+        },
     }
 
 
