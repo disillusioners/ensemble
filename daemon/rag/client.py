@@ -431,6 +431,9 @@ class AsyncLightRAGClient:
         """
         params = {"q": q, "limit": limit}
         data = await self._request("GET", SEARCH_LABELS, params=params, workspace=workspace)
+        # LightRAG API returns a plain list of labels, not a dict
+        if isinstance(data, list):
+            return LabelSearchResponse(labels=data)
         return LabelSearchResponse(**data)
 
     async def get_graph(
