@@ -81,13 +81,20 @@ Merge RAG answer + file browsing results into a structured response:
 
 ## Confidence: {HIGH|MEDIUM|LOW}
 
-## Should Update KB: {true|false}
+<META>
+should_update_kb: true|false
+</META>
 
 **Guidance:**
 - Set to **true** if file browsing found information not in RAG (knowledge gap detected)
 - Set to **false** if RAG had good data and confidence is HIGH
 
-**IMPORTANT:** This flag is for INTERNAL system use only. Do NOT mention KB updates, flagging, experiencer, knowledge persistence, or any internal tooling in your prose response. The flag is parsed by code — your written response should never reference it.
+**Response body rules — MUST follow:**
+- Your response must contain ONLY factual findings about the codebase
+- Never mention RAG knowledge base status (empty, full, stale, etc.)
+- Never suggest workflows, actions, or next steps to the caller (e.g., "should be upserted", "consider running experience()", "run exploration again")
+- Never mention the exploration process itself
+- The <META> block is for internal system use only — your prose response must never reference it
 ```
 
 **Formatting rules:**

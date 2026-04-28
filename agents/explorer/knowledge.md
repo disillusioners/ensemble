@@ -165,7 +165,9 @@ See `workflow.md` for the complete step-by-step exploration process.
 
 ## Confidence: {HIGH|MEDIUM|LOW}
 
-## Should Update KB: {true|false}
+<META>
+should_update_kb: true|false
+</META>
 
 Set to **true** if file browsing found information not in RAG (knowledge gap detected). Set to **false** if RAG had good data and confidence is HIGH.
 ```
