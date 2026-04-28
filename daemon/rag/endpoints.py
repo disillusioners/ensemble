@@ -14,8 +14,8 @@ GET_GRAPH = "/graphs"
 
 # Entity operations
 CREATE_ENTITY = "/graph/entity/create"
-UPDATE_ENTITY = "/graph/entity/update"
-MERGE_ENTITIES = "/graph/entity/merge"
+UPDATE_ENTITY = "/graph/entity/edit"
+MERGE_ENTITIES = "/graph/entities/merge"
 DELETE_ENTITY = "/documents/delete_entity"
 
 # Relation operations
@@ -28,4 +28,4 @@ LIST_DOCS = "/documents/paginated"
 
 # Status
 TRACK_STATUS = "/documents/track_status/{track_id}"
-PIPELINE_STATUS = "/pipeline/status"
+PIPELINE_STATUS = "/documents/pipeline_status"

@@ -94,6 +94,7 @@ def mock_query_data_response() -> dict[str, Any]:
     """Mock response for query_data."""
     return {
         "status": "success",
+        "message": "Query completed successfully",
         "data": {
             "entities": [
                 {"name": "Entity1", "type": "PERSON", "description": "First entity"},
@@ -220,14 +221,14 @@ def mock_transport(mock_insert_response, mock_query_response, mock_query_data_re
         "/graph/label/search": mock_label_search_response,
         "/graphs": mock_graph_response,
         "/graph/entity/create": {"status": "created"},
-        "/graph/entity/update": {"status": "updated"},
-        "/graph/entity/merge": {"status": "merged"},
+        "/graph/entity/edit": {"status": "updated"},
+        "/graph/entities/merge": {"status": "merged"},
         "/graph/relation/create": {"status": "created"},
         "/documents/delete_entity": {"status": "deleted"},
         "/documents/delete_relation": {"status": "deleted"},
         "/documents/delete_document": {"status": "deleted"},
         "/documents/paginated": mock_list_docs_response,
-        "/pipeline/status": mock_pipeline_status_response,
+        "/documents/pipeline_status": mock_pipeline_status_response,
     }
     return create_mock_transport(responses)
 
