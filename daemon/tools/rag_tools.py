@@ -144,6 +144,16 @@ def create_rag_tools(
         List of RAG tool functions.
     """
 
+    def _get_project_workspace() -> str | None:
+        """Extract project_id from instance metadata to use as RAG workspace."""
+        try:
+            instance = manager._instance_repository.get(current_instance_id)
+            if instance and instance.instance_metadata:
+                return instance.instance_metadata.get("project_id")
+        except Exception:
+            pass
+        return None
+
     @register_tool_category("rag")
     @tool
     async def rag_insert_text(
@@ -164,6 +174,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             # Auto-generate file_source if not provided
             if file_source is None:
@@ -174,6 +185,7 @@ def create_rag_tools(
             result = await client.insert_text(
                 text=text,
                 file_source=file_source,
+                workspace=workspace,
             )
             return f"Text inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
@@ -210,10 +222,12 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             result = await client.insert_texts(
                 texts=texts,
                 file_sources=file_sources,
+                workspace=workspace,
             )
             return f"{len(texts)} texts inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
@@ -270,6 +284,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             result = await client.query(
                 query=query,
@@ -285,6 +300,7 @@ def create_rag_tools(
                 hl_keywords=hl_keywords,
                 ll_keywords=ll_keywords,
                 conversation_history=conversation_history,
+                workspace=workspace,
             )
             return getattr(result, 'response', '')
         except RAGError as e:
@@ -351,6 +367,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             result = await client.query_data(
                 query=query,
@@ -366,6 +383,7 @@ def create_rag_tools(
                 hl_keywords=hl_keywords,
                 ll_keywords=ll_keywords,
                 conversation_history=conversation_history,
+                workspace=workspace,
             )
 
             output_parts: list[str] = []
@@ -445,8 +463,9 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
-            result = await client.search_labels(q=query, limit=max_results)
+            result = await client.search_labels(q=query, limit=max_results, workspace=workspace)
             labels = getattr(result, 'labels', []) or []
             if not labels:
                 return f"No labels found matching: {query}"
@@ -484,11 +503,13 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             result = await client.get_graph(
                 label=label,
                 max_depth=max_depth,
                 max_nodes=max_nodes,
+                workspace=workspace,
             )
 
             output_parts: list[str] = []
@@ -555,12 +576,14 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.create_entity(
                 entity_name=name,
                 entity_type=entity_type,
                 description=description,
                 metadata=properties,
+                workspace=workspace,
             )
             return f"Entity '{name}' created."
         except RAGError as e:
@@ -602,6 +625,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.create_relation(
                 source_entity=source,
@@ -609,6 +633,7 @@ def create_rag_tools(
                 relation_type=relation_type,
                 description=description,
                 metadata=properties,
+                workspace=workspace,
             )
             return f"Relation created: {source} -[{relation_type}]-> {target}"
         except RAGError as e:
@@ -655,6 +680,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.update_entity(
                 entity_name=name,
@@ -663,6 +689,7 @@ def create_rag_tools(
                 metadata=properties,
                 allow_rename=allow_rename,
                 allow_merge=allow_merge,
+                workspace=workspace,
             )
             return f"Entity '{name}' updated."
         except RAGError as e:
@@ -701,10 +728,12 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.merge_entities(
                 entities_to_change=source_entities,
                 entity_to_change_into=target_entity_name,
+                workspace=workspace,
             )
             return f"Entities {source_entities} merged into '{target_entity_name}'."
         except RAGError as e:
@@ -734,8 +763,9 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
-            await client.delete_entity(entity_name=entity_name)
+            await client.delete_entity(entity_name=entity_name, workspace=workspace)
             return f"Entity '{entity_name}' deleted."
         except RAGError as e:
             return f"RAG error: {e}"
@@ -767,10 +797,12 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.delete_relation(
                 source_entity=source,
                 target_entity=target,
+                workspace=workspace,
             )
             return "Relation deleted."
         except RAGError as e:
@@ -806,11 +838,13 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             await client.delete_docs(
                 doc_ids=doc_ids,
                 delete_file=delete_file,
                 delete_llm_cache=delete_llm_cache,
+                workspace=workspace,
             )
             return f"{len(doc_ids)} documents deleted."
         except RAGError as e:
@@ -853,6 +887,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
             result = await client.list_docs(
                 page=page,
@@ -861,6 +896,7 @@ def create_rag_tools(
                 status_filters=status_filters,
                 sort_field=sort_field,
                 sort_direction=sort_direction,
+                workspace=workspace,
             )
 
             output_parts: list[str] = []
@@ -912,8 +948,9 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
+        workspace = _get_project_workspace()
         try:
-            result = await client.track_status(track_id=track_id)
+            result = await client.track_status(track_id=track_id, workspace=workspace)
 
             output_parts: list[str] = []
             output_parts.append(f"## Track Status: {getattr(result, 'track_id', track_id)}")

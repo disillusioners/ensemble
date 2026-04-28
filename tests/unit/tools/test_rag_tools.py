@@ -58,7 +58,16 @@ def unconfigured_env():
 @pytest.fixture
 def mock_manager():
     """Create a mock InstanceManager."""
-    return MagicMock()
+    manager = MagicMock()
+    # Mock instance with project_id in metadata
+    mock_instance = MagicMock()
+    mock_instance.instance_metadata = {"project_id": "test-project-123"}
+    manager._instance_repository.get.return_value = mock_instance
+    # Mock project repository to return project name
+    mock_project = MagicMock()
+    mock_project.name = "test-project"
+    manager._project_repository.get.return_value = mock_project
+    return manager
 
 
 @pytest.fixture
@@ -69,10 +78,10 @@ def mock_client():
 
     # Configure common return values
     client.insert_text = AsyncMock(
-        return_value=InsertResponse(track_id="test-track-123", status="processing")
+        return_value=InsertResponse(track_id="test-track-123", status="processing", message="Text inserted successfully")
     )
     client.insert_texts = AsyncMock(
-        return_value=InsertResponse(track_id="test-track-456", status="processing")
+        return_value=InsertResponse(track_id="test-track-456", status="processing", message="Texts inserted successfully")
     )
     client.query = AsyncMock(
         return_value=QueryResponse(
@@ -81,12 +90,16 @@ def mock_client():
     )
     client.query_data = AsyncMock(
         return_value=QueryDataResponse(
-            entities=[
-                {"name": "Alice", "type": "PERSON", "description": "A test entity"},
-            ],
-            relations=[
-                {"source": "Alice", "target": "Bob", "type": "KNOWS", "description": "Friends"},
-            ],
+            status="success",
+            message="Query completed",
+            data={
+                "entities": [
+                    {"name": "Alice", "type": "PERSON", "description": "A test entity"},
+                ],
+                "relations": [
+                    {"source": "Alice", "target": "Bob", "type": "KNOWS", "description": "Friends"},
+                ],
+            }
         )
     )
     client.search_labels = AsyncMock(
@@ -124,9 +137,11 @@ def mock_client():
     client.track_status = AsyncMock(
         return_value=TrackStatusResponse(
             track_id="test-track-123",
-            status="completed",
-            progress=1.0,
-            message="Processing complete",
+            documents=[
+                {"id": "doc1", "status": "completed", "name": "test-doc-1.txt"},
+            ],
+            total_count=1,
+            status_summary={"completed": 1, "processing": 0, "failed": 0},
         )
     )
 
@@ -205,18 +220,18 @@ class TestRAGInsertText:
         assert "not configured" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_rag_insert_text_with_file_paths(self, rag_tools, mock_client):
-        """Verify file_paths parameter is passed through."""
+    async def test_rag_insert_text_with_category(self, rag_tools, mock_client):
+        """Verify category parameter is passed through."""
         insert_tool = next(t for t in rag_tools if t.name == "rag_insert_text")
 
         await insert_tool.ainvoke({
             "text": "Test content",
-            "file_paths": ["/path/to/file.txt"],
+            "category": "architecture",
         })
 
         mock_client.insert_text.assert_called_once()
         call_kwargs = mock_client.insert_text.call_args.kwargs
-        assert call_kwargs["file_paths"] == ["/path/to/file.txt"]
+        assert "/architecture/" in call_kwargs["file_source"]
 
 
 class TestRAGInsertTexts:
@@ -308,7 +323,7 @@ class TestRAGSearchLabels:
         """Verify label search returns matching labels."""
         search_tool = next(t for t in rag_tools if t.name == "rag_search_labels")
 
-        result = await search_tool.ainvoke({"label": "Person"})
+        result = await search_tool.ainvoke({"query": "Person"})
 
         assert "Matching labels" in result
         assert "Person" in result
@@ -325,7 +340,7 @@ class TestRAGSearchLabels:
         tools = create_rag_tools(mock_manager, "test-instance-id")
         search_tool = next(t for t in tools if t.name == "rag_search_labels")
 
-        result = await search_tool.ainvoke({"label": "NonExistent"})
+        result = await search_tool.ainvoke({"query": "NonExistent"})
 
         assert "No labels found" in result
 
@@ -425,8 +440,7 @@ class TestRAGMergeEntities:
         merge_tool = next(t for t in rag_tools if t.name == "rag_merge_entities")
 
         result = await merge_tool.ainvoke({
-            "source": "Entity1",
-            "target": "Entity2",
+            "source_entities": ["Entity1", "Entity2"],
             "target_entity_name": "MergedEntity",
         })
 
@@ -519,5 +533,4 @@ class TestRAGTrackStatus:
         result = await track_tool.ainvoke({"track_id": "test-track-123"})
 
         assert "test-track-123" in result
-        assert "completed" in result
-        assert "100" in result
+        assert "## Track Status:" in result

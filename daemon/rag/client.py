@@ -1,9 +1,15 @@
 """Async HTTP client for LightRAG API."""
 
 import logging
+import re
 from typing import Any
 
 import httpx
+
+
+def _sanitize_workspace(workspace: str) -> str:
+    """Match LightRAG's workspace sanitization: alphanumeric + underscore only."""
+    return re.sub(r'[^a-zA-Z0-9_]', '_', workspace)
 
 from .config import RAGConfig
 from .endpoints import (
@@ -129,6 +135,8 @@ class AsyncLightRAGClient:
         self,
         method: str,
         path: str,
+        *,
+        workspace: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Make an HTTP request with error handling and retry.
@@ -136,6 +144,7 @@ class AsyncLightRAGClient:
         Args:
             method: HTTP method (GET, POST, DELETE, etc.).
             path: API endpoint path.
+            workspace: Optional workspace override for this request.
             **kwargs: Additional arguments to pass to httpx request.
 
         Returns:
@@ -147,6 +156,12 @@ class AsyncLightRAGClient:
             RAGTimeoutError: If request times out.
             RAGResponseError: If server returns an error response.
         """
+        if workspace is not None:
+            # Merge with client's default headers to preserve headers like X-API-Key
+            headers = {**self._build_headers(), **kwargs.pop("headers", {})}
+            headers["LIGHTRAG-WORKSPACE"] = _sanitize_workspace(workspace)
+            kwargs["headers"] = headers
+
         client = self._ensure_client()
 
         # First attempt
@@ -206,12 +221,14 @@ class AsyncLightRAGClient:
         self,
         text: str,
         file_source: str | None = None,
+        workspace: str | None = None,
     ) -> InsertResponse:
         """Insert a single text into the knowledge graph.
 
         Args:
             text: The text content to insert.
             file_source: Optional file source path for the text.
+            workspace: Optional workspace override.
 
         Returns:
             InsertResponse with status and track_id.
@@ -220,19 +237,21 @@ class AsyncLightRAGClient:
             text=text,
             file_source=file_source,
         )
-        data = await self._request("POST", INSERT_TEXT, json=request.to_api_dict())
+        data = await self._request("POST", INSERT_TEXT, json=request.to_api_dict(), workspace=workspace)
         return InsertResponse(**data)
 
     async def insert_texts(
         self,
         texts: list[str],
         file_sources: list[str] | None = None,
+        workspace: str | None = None,
     ) -> InsertResponse:
         """Insert multiple texts into the knowledge graph.
 
         Args:
             texts: List of text strings to insert.
             file_sources: Optional list of file sources corresponding to texts.
+            workspace: Optional workspace override.
 
         Returns:
             InsertResponse with status and track_id.
@@ -241,7 +260,7 @@ class AsyncLightRAGClient:
             texts=texts,
             file_sources=file_sources,
         )
-        data = await self._request("POST", INSERT_TEXTS, json=request.to_api_dict())
+        data = await self._request("POST", INSERT_TEXTS, json=request.to_api_dict(), workspace=workspace)
         return InsertResponse(**data)
 
     # -------------------------------------------------------------------------
@@ -268,6 +287,7 @@ class AsyncLightRAGClient:
         enable_rerank: bool | None = None,
         include_references: bool | None = None,
         include_chunk_content: bool | None = None,
+        workspace: str | None = None,
     ) -> QueryResponse:
         """Query the knowledge graph.
 
@@ -290,6 +310,7 @@ class AsyncLightRAGClient:
             enable_rerank: Enable reranking of results.
             include_references: Include references in the response.
             include_chunk_content: Include chunk content in the response.
+            workspace: Optional workspace override.
 
         Returns:
             QueryResponse with generated response text.
@@ -314,7 +335,7 @@ class AsyncLightRAGClient:
             include_references=include_references,
             include_chunk_content=include_chunk_content,
         )
-        data = await self._request("POST", QUERY, json=request.to_api_dict())
+        data = await self._request("POST", QUERY, json=request.to_api_dict(), workspace=workspace)
         return QueryResponse(**data)
 
     async def query_data(
@@ -337,6 +358,7 @@ class AsyncLightRAGClient:
         enable_rerank: bool | None = None,
         include_references: bool | None = None,
         include_chunk_content: bool | None = None,
+        workspace: str | None = None,
     ) -> QueryDataResponse:
         """Query knowledge graph data (entities and relations).
 
@@ -359,6 +381,7 @@ class AsyncLightRAGClient:
             enable_rerank: Enable reranking of results.
             include_references: Include references in the response.
             include_chunk_content: Include chunk content in the response.
+            workspace: Optional workspace override.
 
         Returns:
             QueryDataResponse with status, message, and data.
@@ -383,7 +406,7 @@ class AsyncLightRAGClient:
             include_references=include_references,
             include_chunk_content=include_chunk_content,
         )
-        data = await self._request("POST", QUERY_DATA, json=request.to_api_dict())
+        data = await self._request("POST", QUERY_DATA, json=request.to_api_dict(), workspace=workspace)
         return QueryDataResponse(**data)
 
     # -------------------------------------------------------------------------
@@ -394,18 +417,20 @@ class AsyncLightRAGClient:
         self,
         q: str,
         limit: int = 50,
+        workspace: str | None = None,
     ) -> LabelSearchResponse:
         """Search for labels in the knowledge graph.
 
         Args:
             q: The label query to search for.
             limit: Maximum number of results to return.
+            workspace: Optional workspace override.
 
         Returns:
             LabelSearchResponse with matching labels.
         """
         params = {"q": q, "limit": limit}
-        data = await self._request("GET", SEARCH_LABELS, params=params)
+        data = await self._request("GET", SEARCH_LABELS, params=params, workspace=workspace)
         return LabelSearchResponse(**data)
 
     async def get_graph(
@@ -413,6 +438,7 @@ class AsyncLightRAGClient:
         label: str | None = None,
         max_depth: int = 3,
         max_nodes: int = 50,
+        workspace: str | None = None,
     ) -> GraphResponse:
         """Get the knowledge graph or subgraph.
 
@@ -420,6 +446,7 @@ class AsyncLightRAGClient:
             label: Optional label to filter the graph.
             max_depth: Maximum depth for graph traversal.
             max_nodes: Maximum number of nodes to return.
+            workspace: Optional workspace override.
 
         Returns:
             GraphResponse with nodes and edges.
@@ -427,7 +454,7 @@ class AsyncLightRAGClient:
         params: dict[str, Any] = {"max_depth": max_depth, "max_nodes": max_nodes}
         if label is not None:
             params["label"] = label
-        data = await self._request("GET", GET_GRAPH, params=params)
+        data = await self._request("GET", GET_GRAPH, params=params, workspace=workspace)
         return GraphResponse(**data)
 
     # -------------------------------------------------------------------------
@@ -440,6 +467,7 @@ class AsyncLightRAGClient:
         description: str = "",
         entity_type: str = "UNKNOWN",
         metadata: dict | None = None,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Create a new entity in the knowledge graph.
 
@@ -448,6 +476,7 @@ class AsyncLightRAGClient:
             description: Optional description of the entity.
             entity_type: Type/category of the entity.
             metadata: Optional metadata dictionary.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -464,7 +493,7 @@ class AsyncLightRAGClient:
             entity_name=entity_name,
             entity_data=entity_data,
         )
-        return await self._request("POST", CREATE_ENTITY, json=request.to_api_dict())
+        return await self._request("POST", CREATE_ENTITY, json=request.to_api_dict(), workspace=workspace)
 
     async def update_entity(
         self,
@@ -474,6 +503,7 @@ class AsyncLightRAGClient:
         metadata: dict | None = None,
         allow_rename: bool = False,
         allow_merge: bool = False,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Update an existing entity.
 
@@ -484,6 +514,7 @@ class AsyncLightRAGClient:
             metadata: New metadata for the entity.
             allow_rename: Allow renaming the entity.
             allow_merge: Allow merging with existing entity.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -502,18 +533,20 @@ class AsyncLightRAGClient:
             allow_rename=allow_rename,
             allow_merge=allow_merge,
         )
-        return await self._request("POST", UPDATE_ENTITY, json=request.to_api_dict())
+        return await self._request("POST", UPDATE_ENTITY, json=request.to_api_dict(), workspace=workspace)
 
     async def merge_entities(
         self,
         entities_to_change: list[str],
         entity_to_change_into: str,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Merge multiple entities into one.
 
         Args:
             entities_to_change: List of entity names to merge from.
             entity_to_change_into: Name of the target entity to merge into.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -522,19 +555,24 @@ class AsyncLightRAGClient:
             entities_to_change=entities_to_change,
             entity_to_change_into=entity_to_change_into,
         )
-        return await self._request("POST", MERGE_ENTITIES, json=request.to_api_dict())
+        return await self._request("POST", MERGE_ENTITIES, json=request.to_api_dict(), workspace=workspace)
 
-    async def delete_entity(self, entity_name: str) -> dict[str, Any]:
+    async def delete_entity(
+        self,
+        entity_name: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
         """Delete an entity from the knowledge graph.
 
         Args:
             entity_name: Name of the entity to delete.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
         """
         request = DeleteEntityRequest(entity_name=entity_name)
-        return await self._request("DELETE", DELETE_ENTITY, json=request.to_api_dict())
+        return await self._request("DELETE", DELETE_ENTITY, json=request.to_api_dict(), workspace=workspace)
 
     # -------------------------------------------------------------------------
     # Relation Operations
@@ -548,6 +586,7 @@ class AsyncLightRAGClient:
         relation_type: str = "RELATED_TO",
         metadata: dict | None = None,
         weight: float | None = None,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Create a relation between entities.
 
@@ -558,6 +597,7 @@ class AsyncLightRAGClient:
             relation_type: Type of the relation.
             metadata: Optional metadata dictionary.
             weight: Optional weight value for the relation.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -577,7 +617,7 @@ class AsyncLightRAGClient:
             target_entity=target_entity,
             relation_data=relation_data,
         )
-        return await self._request("POST", CREATE_RELATION, json=request.to_api_dict())
+        return await self._request("POST", CREATE_RELATION, json=request.to_api_dict(), workspace=workspace)
 
     async def update_relation(
         self,
@@ -587,6 +627,7 @@ class AsyncLightRAGClient:
         relation_type: str | None = None,
         metadata: dict | None = None,
         weight: float | None = None,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Update an existing relation.
 
@@ -597,6 +638,7 @@ class AsyncLightRAGClient:
             relation_type: New type for the relation.
             metadata: New metadata for the relation.
             weight: New weight for the relation.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -616,18 +658,20 @@ class AsyncLightRAGClient:
             target_id=target_id,
             updated_data=updated_data,
         )
-        return await self._request("POST", "/graph/relation/edit", json=request.to_api_dict())
+        return await self._request("POST", "/graph/relation/edit", json=request.to_api_dict(), workspace=workspace)
 
     async def delete_relation(
         self,
         source_entity: str,
         target_entity: str,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Delete a relation between entities.
 
         Args:
             source_entity: Name of the source entity.
             target_entity: Name of the target entity.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -636,7 +680,7 @@ class AsyncLightRAGClient:
             source_entity=source_entity,
             target_entity=target_entity,
         )
-        return await self._request("DELETE", DELETE_RELATION, json=request.to_api_dict())
+        return await self._request("DELETE", DELETE_RELATION, json=request.to_api_dict(), workspace=workspace)
 
     # -------------------------------------------------------------------------
     # Document Operations
@@ -647,6 +691,7 @@ class AsyncLightRAGClient:
         doc_ids: list[str],
         delete_file: bool = False,
         delete_llm_cache: bool = False,
+        workspace: str | None = None,
     ) -> dict[str, Any]:
         """Delete documents by IDs.
 
@@ -654,6 +699,7 @@ class AsyncLightRAGClient:
             doc_ids: List of document IDs to delete.
             delete_file: Whether to delete the source file.
             delete_llm_cache: Whether to delete LLM cache entries.
+            workspace: Optional workspace override.
 
         Returns:
             API response as dictionary.
@@ -663,7 +709,7 @@ class AsyncLightRAGClient:
             delete_file=delete_file,
             delete_llm_cache=delete_llm_cache,
         )
-        return await self._request("DELETE", DELETE_DOCS, json=request.to_api_dict())
+        return await self._request("DELETE", DELETE_DOCS, json=request.to_api_dict(), workspace=workspace)
 
     async def list_docs(
         self,
@@ -673,6 +719,7 @@ class AsyncLightRAGClient:
         status_filters: list[str] | None = None,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        workspace: str | None = None,
     ) -> ListDocsResponse:
         """List documents with pagination.
 
@@ -683,6 +730,7 @@ class AsyncLightRAGClient:
             status_filters: Filter by multiple statuses.
             sort_field: Field to sort by.
             sort_direction: Sort direction (asc/desc).
+            workspace: Optional workspace override.
 
         Returns:
             ListDocsResponse with paginated documents.
@@ -698,31 +746,42 @@ class AsyncLightRAGClient:
         if status_filters is not None:
             body["status_filters"] = status_filters
 
-        data = await self._request("POST", LIST_DOCS, json=body)
+        data = await self._request("POST", LIST_DOCS, json=body, workspace=workspace)
         return ListDocsResponse(**data)
 
     # -------------------------------------------------------------------------
     # Status Operations
     # -------------------------------------------------------------------------
 
-    async def track_status(self, track_id: str) -> TrackStatusResponse:
+    async def track_status(
+        self,
+        track_id: str,
+        workspace: str | None = None,
+    ) -> TrackStatusResponse:
         """Track the status of an async operation.
 
         Args:
             track_id: The tracking ID for the operation.
+            workspace: Optional workspace override.
 
         Returns:
             TrackStatusResponse with documents, total_count, and status_summary.
         """
         path = TRACK_STATUS.format(track_id=track_id)
-        data = await self._request("GET", path)
+        data = await self._request("GET", path, workspace=workspace)
         return TrackStatusResponse(**data)
 
-    async def pipeline_status(self) -> PipelineStatusResponse:
+    async def pipeline_status(
+        self,
+        workspace: str | None = None,
+    ) -> PipelineStatusResponse:
         """Get the overall pipeline status.
+
+        Args:
+            workspace: Optional workspace override.
 
         Returns:
             PipelineStatusResponse with pipeline status.
         """
-        data = await self._request("GET", PIPELINE_STATUS)
+        data = await self._request("GET", PIPELINE_STATUS, workspace=workspace)
         return PipelineStatusResponse(**data)
