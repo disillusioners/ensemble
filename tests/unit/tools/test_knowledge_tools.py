@@ -14,8 +14,8 @@ import pytest
 from daemon.tools.knowledge_tools import (
     _enqueue_experiencer_job,
     _generate_idempotency_key,
-    _META_BLOCK_PATTERN,
     _parse_should_update_kb,
+    _SHOULD_UPDATE_KB_PATTERN,
     create_knowledge_tools,
 )
 
@@ -338,66 +338,85 @@ class TestParseShouldUpdateKb:
     """Tests for _parse_should_update_kb() flag parsing function."""
 
     def test_parse_should_update_kb_true(self):
-        """<META> block with should_update_kb: true returns True."""
-        response = "Some response\n<META>\nshould_update_kb: true\n</META>\nMore text"
+        """Heading with Need Update KB: true returns True."""
+        response = "Some response\n## Need Update KB: true\nMore text"
         assert _parse_should_update_kb(response) is True
 
     def test_parse_should_update_kb_false(self):
-        """<META> block with should_update_kb: false returns False."""
-        response = "Some response\n<META>\nshould_update_kb: false\n</META>\nMore text"
+        """Heading with Need Update KB: false returns False."""
+        response = "Some response\n## Need Update KB: false\nMore text"
         assert _parse_should_update_kb(response) is False
 
     def test_parse_should_update_kb_missing(self):
-        """No META block in response returns False (default)."""
+        """No heading in response returns False (default)."""
         response = "## Answer\nSome text\n## Confidence: HIGH"
         assert _parse_should_update_kb(response) is False
 
     def test_parse_should_update_kb_case_insensitive(self):
         """Flag parsing is case-insensitive."""
-        assert _parse_should_update_kb("<META>\nshould_update_kb: TRUE\n</META>") is True
-        assert _parse_should_update_kb("<META>\nShould_Update_KB: True\n</META>") is True
-        assert _parse_should_update_kb("<META>\nSHOULD_UPDATE_KB: TRUE\n</META>") is True
+        assert _parse_should_update_kb("## Need Update KB: TRUE") is True
+        assert _parse_should_update_kb("## Need Update KB: True") is True
+        assert _parse_should_update_kb("## Need Update KB: TRUE") is True
+        assert _parse_should_update_kb("## NEED UPDATE KB: TRUE") is True
 
     def test_parse_should_update_kb_malformed(self):
         """Malformed flag values return False."""
-        response = "<META>\nshould_update_kb: maybe\n</META>"
+        response = "## Need Update KB: maybe"
         assert _parse_should_update_kb(response) is False
 
     def test_parse_should_update_kb_with_extra_whitespace(self):
-        """META block with extra whitespace/newlines still parses correctly."""
-        response = "<META>\n  \nshould_update_kb: true  \n  \n</META>"
+        """Heading with extra whitespace/newlines still parses correctly."""
+        response = "## Need Update KB: true  \nMore text"
         assert _parse_should_update_kb(response) is True
 
-    def test_parse_should_update_kb_with_additional_fields(self):
-        """META block with additional fields still works."""
-        response = "<META>\nshould_update_kb: true\nextra_field: value\nanother: test\n</META>"
+    def test_parse_should_update_kb_bold_true(self):
+        """Bold formatting **true** parses correctly as True."""
+        response = "## Need Update KB: **true**\nMore text"
         assert _parse_should_update_kb(response) is True
 
-    def test_parse_should_update_kb_old_format_returns_false(self):
-        """Old format ## Should Update KB: true returns False (no longer supported)."""
-        response = "Some response\n## Should Update KB: true\nMore text"
+    def test_parse_should_update_kb_bold_false(self):
+        """Bold formatting **false** parses correctly as False."""
+        response = "## Need Update KB: **false**\nMore text"
         assert _parse_should_update_kb(response) is False
 
-    def test_parse_should_update_kb_bold_format_returns_false(self):
-        """Bold formatting inside META block returns False (expects plain true/false)."""
-        response = "<META>\nshould_update_kb: **true**\n</META>"
+    def test_parse_should_update_kb_italic_true(self):
+        """Italic formatting *true* parses correctly as True."""
+        response = "## Need Update KB: *true*\nMore text"
+        assert _parse_should_update_kb(response) is True
+
+    def test_parse_should_update_kb_italic_false(self):
+        """Italic formatting *false* parses correctly as False."""
+        response = "## Need Update KB: *false*\nMore text"
         assert _parse_should_update_kb(response) is False
 
-    def test_parse_should_update_kb_meta_block_stripped_from_response(self):
-        """META block is properly stripped from response text."""
-        response = "Some response\n<META>\nshould_update_kb: true\n</META>\nMore text"
-        stripped = _META_BLOCK_PATTERN.sub("", response).strip()
-        # META block including its newlines is removed
-        assert "<META>" not in stripped
-        assert "should_update_kb" not in stripped
+    def test_parse_should_update_kb_heading_stripped_from_response(self):
+        """Heading is properly stripped from response text."""
+        response = "Some response\n## Need Update KB: true\nMore text"
+        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
+        # Heading including newlines is removed
+        assert "Need Update KB" not in stripped
         assert "Some response" in stripped
         assert "More text" in stripped
 
-    def test_parse_should_update_kb_response_without_meta_unchanged(self):
-        """Response without META block is returned unchanged."""
-        response = "Some response without META block"
-        stripped = _META_BLOCK_PATTERN.sub("", response).strip()
+    def test_parse_should_update_kb_bold_heading_stripped(self):
+        """Bold heading is stripped including bold markers."""
+        response = "Some response\n## Need Update KB: **true**\nMore text"
+        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
+        assert "Need Update KB" not in stripped
+        assert "**true**" not in stripped
+        assert "Some response" in stripped
+        assert "More text" in stripped
+
+    def test_parse_should_update_kb_response_without_heading_unchanged(self):
+        """Response without heading is returned unchanged."""
+        response = "Some response without Need Update KB"
+        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
         assert stripped == response
+
+    def test_parse_should_update_kb_old_meta_format_returns_false(self):
+        """Old META block format returns False (no longer supported)."""
+        response = "Some response\n<META>\nshould_update_kb: true\n</META>\nMore text"
+        assert _parse_should_update_kb(response) is False
 
 
 # =============================================================================
@@ -459,11 +478,11 @@ class TestExploreJobEnqueue:
     """Tests for explore() tool job enqueue behavior."""
 
     @pytest.mark.asyncio
-    async def test_explore_strips_meta_block_from_response(self, configured_env, mock_manager_with_job_queue):
-        """Response with META block is stripped before returning to caller."""
+    async def test_explore_strips_heading_from_response(self, configured_env, mock_manager_with_job_queue):
+        """Response with Need Update KB heading is stripped before returning to caller."""
         explorer_response = (
             "## Answer\nFound important information.\n\n"
-            "<META>\nshould_update_kb: true\n</META>"
+            "## Need Update KB: true"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -473,17 +492,16 @@ class TestExploreJobEnqueue:
 
             result = await explore_tool.ainvoke({"query": "What is X?"})
 
-            # META block should be stripped from result
-            assert "<META>" not in result
-            assert "should_update_kb" not in result
+            # Heading should be stripped from result
+            assert "Need Update KB" not in result
             assert "Found important information" in result
 
     @pytest.mark.asyncio
     async def test_explore_enqueues_job_when_flag_true(self, configured_env, mock_manager_with_job_queue):
-        """should_update_kb: true + project_id causes job to be enqueued."""
+        """Need Update KB: true + project_id causes job to be enqueued."""
         explorer_response = (
             "## Answer\nFound info from files.\n\n"
-            "<META>\nshould_update_kb: true\n</META>"
+            "## Need Update KB: true"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -504,10 +522,10 @@ class TestExploreJobEnqueue:
 
     @pytest.mark.asyncio
     async def test_explore_skips_job_when_flag_false(self, configured_env, mock_manager_with_job_queue):
-        """should_update_kb: false means no job is enqueued."""
+        """Need Update KB: false means no job is enqueued."""
         explorer_response = (
             "## Answer\nNo new knowledge found.\n\n"
-            "<META>\nshould_update_kb: false\n</META>"
+            "## Need Update KB: false"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -534,7 +552,7 @@ class TestExploreJobEnqueue:
 
         explorer_response = (
             "## Answer\nNew knowledge discovered.\n\n"
-            "<META>\nshould_update_kb: true\n</META>"
+            "## Need Update KB: true"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -554,7 +572,7 @@ class TestExploreJobEnqueue:
         """Job service raises exception - explore() still returns normally."""
         explorer_response = (
             "## Answer\nNew knowledge found.\n\n"
-            "<META>\nshould_update_kb: true\n</META>"
+            "## Need Update KB: true"
         )
 
         # Make enqueue raise an exception

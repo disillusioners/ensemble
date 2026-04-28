@@ -24,16 +24,10 @@ explore() queries the project knowledge base using the Explorer agent.
 experience() records new knowledge using the Experiencer agent.
 """
 
-# Pattern to match <META>...</META> block
-_META_BLOCK_PATTERN = re.compile(
-    r"<META>\s*\n(.*?)\n\s*</META>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-# Pattern to match should_update_kb within META block
+# Pattern to match ## Need Update KB: true|false heading (with optional bold/italic)
 _SHOULD_UPDATE_KB_PATTERN = re.compile(
-    r"should_update_kb:\s*(true|false)",
-    re.IGNORECASE,
+    r"^##\s+Need\s+Update\s+KB:\s*\*{0,2}(true|false)\*{0,2}\s*$",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 
@@ -46,16 +40,10 @@ def _parse_should_update_kb(response: str) -> bool:
     Returns:
         True if the response indicates knowledge should be updated, False otherwise.
     """
-    # First, extract the META block content
-    meta_match = _META_BLOCK_PATTERN.search(response)
-    if not meta_match:
-        return False
-
-    # Then, search within the META block for the flag
-    meta_content = meta_match.group(1)
-    flag_match = _SHOULD_UPDATE_KB_PATTERN.search(meta_content)
-    if flag_match:
-        return flag_match.group(1).lower() == "true"
+    # Search for ## Need Update KB: true|false pattern directly
+    match = _SHOULD_UPDATE_KB_PATTERN.search(response)
+    if match:
+        return match.group(1).lower() == "true"
     return False
 
 
@@ -202,8 +190,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         # Parse response for should_update_kb flag
         should_update_kb = _parse_should_update_kb(result)
 
-        # Strip the META block from the response before returning to caller
-        result = _META_BLOCK_PATTERN.sub("", result).strip()
+        # Strip the Need Update KB heading from the response before returning to caller
+        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
 
         # Fire-and-forget: create job for experiencer if knowledge update needed
         if should_update_kb and pid:
