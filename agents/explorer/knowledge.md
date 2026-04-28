@@ -59,51 +59,6 @@ Each relation connects two entities:
 | Some entities found but sparse or partial descriptions | **MEDIUM** | Good start, may need file fallback for details |
 | Few entities, no relations, weak/missing descriptions | **LOW** | RAG doesn't have good coverage — browse files |
 
-### Synthesizing an Answer
-
-Follow these steps to turn raw data into a response:
-
-1. **Read entity descriptions as facts** — each is a potential sentence in your answer
-2. **Follow relations to understand connections** — use them to build explanatory sentences
-3. **Build a coherent narrative** — don't just list entities; explain how they work together
-4. **Reference specific entity names** — for traceability and clarity
-
-**Synthesis approach by entity count:**
-
-| Count | Approach |
-|-------|----------|
-| 1-2 entities | Focus on what they do, use relations for context |
-| 3-5 entities | Group by type, explain relationships between groups |
-| 6+ entities | Prioritize the most relevant, mention variety ("Several services handle...") |
-
-### Synthesis Example
-
-**Raw RAG output:**
-```
-## Entities
-- **AuthService** (Service): Handles JWT token generation and validation for user sessions
-- **User** (Person): Represents a user with login credentials stored in the system
-- **Database** (Storage): PostgreSQL database containing user and session data
-- **TokenCache** (Cache): Redis cache for frequently accessed tokens
-
-## Relations
-- AuthService -[USES]-> TokenCache: Tokens are cached for fast validation
-- AuthService -[USES]-> Database: User data is fetched from the database
-- TokenCache -[BACKS_UP]-> Database: Cache is a read-through cache for database
-```
-
-**Synthesized answer:**
-```
-## Answer
-The auth system centers around **AuthService**, which manages JWT tokens for user sessions. When a user authenticates, **AuthService** validates their credentials against the **Database** (PostgreSQL). For performance, it checks the **TokenCache** (Redis) first — a read-through cache backed by the database — before hitting the database. This two-tier approach ensures fast token validation while maintaining persistent user data in PostgreSQL.
-```
-
-**Key synthesis principles used:**
-- Lead with the main entity (AuthService)
-- Weave in relations to explain HOW things connect
-- Use entity descriptions as atomic facts
-- Add one sentence of interpretation ("For performance...")
-
 ---
 
 ## Confidence Assessment Guide
@@ -143,29 +98,4 @@ RAG Response Received
 Return  Browse   Browse   Browse
 now     1-2      broadly  broadly
         files    (3-4)    (5+)
-```
-
----
-
-## Workflow Reference
-
-See `workflow.md` for the complete step-by-step exploration process.
-
----
-
-## Response Format Template
-
-```
-## Answer
-[Main response based on RAG + file findings]
-
-## Sources
-- RAG knowledge base (mode: {mode}, confidence: {level})
-- File: {path} (if browsed during fallback)
-
-## Confidence: {HIGH|MEDIUM|LOW}
-
-## Need Update KB: {true|false}
-
-Set to **true** if file browsing found information not in RAG (knowledge gap detected). Set to **false** if RAG had good data and confidence is HIGH.
 ```

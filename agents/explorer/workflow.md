@@ -69,36 +69,52 @@ Rate the RAG response quality:
 
 ## Step 5: Combine & Format
 
+**BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. Never omit either one. They must always appear together at the top of your response, before any body content.**
+
 Merge RAG answer + file browsing results into a structured response:
 
 ```
+## Confidence: {HIGH|MEDIUM|LOW}
+## Need Update KB: {true|false}
+
 ## Answer
 [Main response — combine RAG and file findings]
 
 ## Sources
 - RAG knowledge base (mode: {mode})
 - File: {path} (if browsed during fallback)
+```
 
-## Confidence: {HIGH|MEDIUM|LOW}
+**Complete response example:**
 
-## Need Update KB: {true|false}
+```markdown
+## Confidence: LOW
+## Need Update KB: true
 
-**Guidance:**
-- Set to **true** if file browsing found information not in RAG (knowledge gap detected)
-- Set to **false** if RAG had good data and confidence is HIGH
+## Answer
+The authentication module is located at `src/auth/`. It uses JWT tokens with RS256 signing.
+The main entry point is `AuthService.login()` which validates credentials against the user table.
 
-**Response body rules — MUST follow:**
+## Sources
+- File: src/auth/auth_service.py
+- File: src/auth/jwt_handler.py
+```
+
+### Guidance
+
+- Set `## Need Update KB:` to **true** if file browsing found information not in RAG (knowledge gap detected)
+- Set `## Need Update KB:` to **false** if RAG had good data and confidence is HIGH
+
+### Response body rules — MUST follow:
+- `## Confidence:` and `## Need Update KB:` headings MUST appear first, before any body content
 - Your response must contain ONLY factual findings about the codebase
 - Never mention RAG knowledge base status (empty, full, stale, etc.)
 - Never suggest workflows, actions, or next steps to the caller (e.g., "should be upserted", "consider running experience()", "run exploration again")
 - Never mention the exploration process itself
-- The Need Update KB line is for internal system use only — your prose response must never reference it
-```
 
 **Formatting rules:**
 - Lead with the answer
 - Include sources for traceability
-- State confidence level clearly
 - Be concise — the caller needs answers, not essays
 
 ---
