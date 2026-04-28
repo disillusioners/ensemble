@@ -8,9 +8,9 @@ Guide to the tools available to Explorer.
 
 These are your main tools for knowledge retrieval.
 
-### rag_query(query, mode)
+### rag_query_data(query, mode) ⭐ PRIMARY
 
-**Main query tool.** Get a generated response from the knowledge graph.
+**Your main retrieval tool.** Get **structured entities and relations** from the knowledge graph for YOU to synthesize.
 
 | Mode | When to Use | Behavior |
 |------|-------------|----------|
@@ -20,14 +20,26 @@ These are your main tools for knowledge retrieval.
 | `naive` | Simple keyword fallback | Basic text matching, no graph traversal |
 | `mix` | When you need everything | All modes combined, slowest but most thorough |
 
-**Tip:** Start with `hybrid`, use `local` for specific entity questions.
+**Output Format:**
+```
+## Entities
+- **EntityName** (entity_type): description text
 
-### rag_query_data(query, mode)
+## Relations
+- source_entity -[RELATION_TYPE]-> target_entity: description
+```
 
-Get **structured entities and relations** from the knowledge graph. Use when you need:
-- Specific entity details
-- Relationship mappings between entities
-- Structured data for further processing
+**Example output:**
+```
+## Entities
+- **User** (Person): Represents a user in the system with authentication credentials
+- **AuthService** (Service): Handles authentication and authorization
+
+## Relations
+- User -[USES]-> AuthService: Users authenticate via the AuthService
+```
+
+**Tip:** YOU synthesize the answer from this raw data — no extra LLM call needed!
 
 ### rag_search_labels(label, max_results)
 
@@ -98,6 +110,7 @@ Get current time. Useful for timestamps in responses if needed.
 
 | Tool | Reason |
 |------|--------|
+| `rag_query` | FORBIDDEN — triggers internal LLM synthesis. Use `rag_query_data` instead |
 | `explore()` | Would cause recursion — Explorer cannot call itself |
 | `experience()` | Would cause recursion |
 | `bash` | Not available — read-only agent |

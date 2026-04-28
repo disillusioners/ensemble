@@ -17,13 +17,13 @@ Step-by-step process for exploring project knowledge.
 
 ## Step 2: Query RAG
 
-Call `rag_query` with the parsed query and selected mode.
+Call `rag_query_data` with the parsed query and selected mode. This returns raw entity-relation data for YOU to synthesize — no extra LLM call.
 
 **Example calls:**
 ```
-rag_query("how does the auth system work?", "local")
-rag_query("what is the overall project architecture?", "global")
-rag_query("explain the API endpoints", "hybrid")
+rag_query_data("how does the auth system work?", "local")
+rag_query_data("what is the overall project architecture?", "global")
+rag_query_data("explain the API endpoints", "hybrid")
 ```
 
 ---
@@ -47,7 +47,7 @@ Rate the RAG response quality:
 
 1. Format the answer with sources
 2. Return immediately — do NOT browse files
-3. Skip to Step 6 only for async upsert (optional)
+3. Skip to Step 5 for formatting, Step 6 only for async upsert
 
 **Why skip file browsing?** Trust the knowledge base. Speed matters.
 
@@ -128,7 +128,7 @@ Start: Query received
         │
         ▼
 ┌───────────────┐
-│ Query RAG     │ → rag_query(query, mode)
+│ Query RAG     │ → rag_query_data(query, mode)
 └───────────────┘
         │
         ▼
@@ -143,15 +143,9 @@ HIGH      MEDIUM/LOW
    │         │
    ▼         ▼
 ┌───────────────┐   ┌───────────────┐
-│ Format +      │   │ Query data    │
-│ Return NOW    │   │ (optional)    │
+│ Format +      │   │ Browse 1-2     │
+│ Return NOW    │   │ relevant files │
 └───────────────┘   └───────────────┘
-                           │
-                           ▼
-                    ┌───────────────┐
-                    │ Browse 1-2     │
-                    │ relevant files │
-                    └───────────────┘
                            │
                            ▼
                     ┌───────────────┐
@@ -166,7 +160,7 @@ HIGH      MEDIUM/LOW
                     └───────────────┘
                            │
                            ▼
-                      Return to caller
+                       Return to caller
 ```
 
 ---
