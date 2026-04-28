@@ -591,3 +591,62 @@ class TestExploreJobEnqueue:
             # Result should still be returned normally
             assert result is not None
             assert "New knowledge found" in result
+
+    @pytest.mark.asyncio
+    async def test_explore_logs_warning_when_no_project_id(self, configured_env, mock_manager_with_job_queue, caplog):
+        """Warning is logged when project_id is missing but should_update_kb is True."""
+        # Override instance metadata to return no project (empty dict)
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {}
+        mock_manager_with_job_queue._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        explorer_response = (
+            "## Answer\nNew knowledge discovered.\n\n"
+            "## Need Update KB: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            with caplog.at_level("WARNING"):
+                await explore_tool.ainvoke({"query": "What is X?"})
+
+            await asyncio.sleep(0.1)
+
+            # Warning should be logged about missing project_id
+            assert any(
+                "project_id not available" in record.message
+                for record in caplog.records
+            ), "Expected warning about missing project_id"
+
+    @pytest.mark.asyncio
+    async def test_explore_passes_original_response_to_experiencer(
+        self, configured_env, mock_manager_with_job_queue
+    ):
+        """Experiencer job receives original response with Need Update KB heading."""
+        explorer_response = (
+            "## Answer\nFound info from files.\n\n"
+            "## Need Update KB: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is the architecture?"})
+
+            await asyncio.sleep(0.1)
+
+            # Verify job was enqueued with original response (containing heading)
+            mock_manager_with_job_queue._job_queue_service.enqueue.assert_called_once()
+            call_kwargs = mock_manager_with_job_queue._job_queue_service.enqueue.call_args.kwargs
+            # The explorer's full response should be passed (with the heading)
+            assert "## Need Update KB: true" in call_kwargs["message"]
+            # But the returned result should NOT have the heading
+            explore_result = await explore_tool.ainvoke({"query": "Another query?"})
+            assert "Need Update KB" not in explore_result

@@ -187,21 +187,36 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if result is None:
             return "Explorer agent timed out or failed. Try a simpler query."
 
-        # Parse response for should_update_kb flag
+        # Parse response for should_update_kb flag (use original result, before stripping)
         should_update_kb = _parse_should_update_kb(result)
+
+        # Fire-and-forget: create job for experiencer if knowledge update needed
+        # Pass original result so experiencer has full context including the flag heading
+        if should_update_kb:
+            if not pid:
+                logger.warning(
+                    "Cannot enqueue experiencer job: project_id not available. "
+                    "Ensure the agent instance has a project context set."
+                )
+            else:
+                try:
+                    asyncio.ensure_future(_enqueue_experiencer_job(
+                        manager=manager,
+                        query=query,
+                        explorer_response=result,  # Pass original result with heading
+                        project_id=pid,
+                        source_instance_id=current_instance_id,
+                    ))
+                except RuntimeError as e:
+                    # No running event loop - log warning but don't fail explore
+                    logger.warning(
+                        "Failed to schedule experiencer job (no event loop): %s", e
+                    )
+                except Exception as e:
+                    logger.warning("Failed to schedule experiencer job: %s", e)
 
         # Strip the Need Update KB heading from the response before returning to caller
         result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
-
-        # Fire-and-forget: create job for experiencer if knowledge update needed
-        if should_update_kb and pid:
-            asyncio.ensure_future(_enqueue_experiencer_job(
-                manager=manager,
-                query=query,
-                explorer_response=result,
-                project_id=pid,
-                source_instance_id=current_instance_id,
-            ))
 
         return result
 
