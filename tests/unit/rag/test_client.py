@@ -147,24 +147,23 @@ class TestSchemasToApiDict:
         """to_api_dict() excludes None values."""
         request = InsertTextRequest(
             text="test text",
-            description="test desc",
-            file_paths=None,
+            file_source=None,
         )
         api_dict = request.to_api_dict()
 
-        assert api_dict == {"text": "test text", "description": "test desc"}
-        assert "file_paths" not in api_dict
+        assert api_dict == {"text": "test text"}
+        assert "file_source" not in api_dict
 
-    def test_insert_text_request_to_api_dict_with_file_paths(self):
-        """to_api_dict() includes non-None file_paths."""
+    def test_insert_text_request_to_api_dict_with_file_source(self):
+        """to_api_dict() includes non-None file_source."""
         request = InsertTextRequest(
             text="test text",
-            file_paths=["/path/to/file1.txt", "/path/to/file2.txt"],
+            file_source="/path/to/file1.txt",
         )
         api_dict = request.to_api_dict()
 
         assert api_dict["text"] == "test text"
-        assert api_dict["file_paths"] == ["/path/to/file1.txt", "/path/to/file2.txt"]
+        assert api_dict["file_source"] == "/path/to/file1.txt"
 
     def test_insert_texts_request_to_api_dict(self):
         """InsertTextsRequest.to_api_dict() works correctly."""
@@ -189,11 +188,11 @@ class TestSchemasToApiDict:
         assert "top_k" not in api_dict
 
     def test_delete_docs_request_to_api_dict(self):
-        """DeleteDocsRequest.to_api_dict() works correctly."""
+        """DeleteDocsRequest.to_api_dict() includes all fields."""
         request = DeleteDocsRequest(doc_ids=["doc1", "doc2"])
         api_dict = request.to_api_dict()
 
-        assert api_dict == {"doc_ids": ["doc1", "doc2"]}
+        assert api_dict == {"doc_ids": ["doc1", "doc2"], "delete_file": False, "delete_llm_cache": False}
 
 
 class TestSchemaValidation:
@@ -202,7 +201,7 @@ class TestSchemaValidation:
     def test_query_request_default_mode(self):
         """QueryRequest has correct default mode."""
         request = QueryRequest(query="test")
-        assert request.mode == "hybrid"
+        assert request.mode == "mix"
 
     def test_query_request_custom_mode(self):
         """QueryRequest accepts custom mode."""
@@ -237,7 +236,7 @@ class TestClientInsertText:
         """Verify correct endpoint, request body, and response parsing."""
         response = await client_with_mock_transport.insert_text(
             "test text",
-            description="test desc",
+            file_source="/path/to/file.txt",
         )
 
         assert response.status == mock_insert_response["status"]
@@ -245,15 +244,13 @@ class TestClientInsertText:
         assert response.track_id == mock_insert_response["track_id"]
 
     @pytest.mark.asyncio
-    async def test_client_insert_text_with_file_paths(
+    async def test_client_insert_text_without_file_source(
         self,
         client_with_mock_transport: AsyncLightRAGClient,
     ):
-        """insert_text sends file_paths when provided."""
+        """insert_text works without file_source."""
         response = await client_with_mock_transport.insert_text(
             "test text",
-            description="test desc",
-            file_paths=["/path/to/file.txt"],
         )
 
         assert response.status == "accepted"
@@ -293,7 +290,7 @@ class TestClientQuery:
         )
 
         assert response.response == mock_query_response["response"]
-        assert response.metadata == mock_query_response["metadata"]
+        assert response.references is None
 
     @pytest.mark.asyncio
     async def test_client_query_with_params(
@@ -324,9 +321,9 @@ class TestClientQueryData:
         """query_data sends correct request and parses response."""
         response = await client_with_mock_transport.query_data("test query")
 
-        assert response.entities == mock_query_data_response["data"]["entities"]
-        assert response.relationships == mock_query_data_response["data"]["relationships"]
-        assert response.metadata == mock_query_data_response["data"]["metadata"]
+        assert response.status == mock_query_data_response["status"]
+        assert response.message == mock_query_data_response["message"]
+        assert response.data == mock_query_data_response["data"]
 
 
 class TestClientSearchLabels:
@@ -340,8 +337,8 @@ class TestClientSearchLabels:
     ):
         """search_labels sends correct request and parses response."""
         response = await client_with_mock_transport.search_labels(
-            "test_label",
-            max_results=5,
+            q="test_label",
+            limit=5,
         )
 
         assert response.labels == mock_label_search_response["labels"]
@@ -415,8 +412,8 @@ class TestClientMergeEntities:
     async def test_client_merge_entities(self, client_with_mock_transport: AsyncLightRAGClient):
         """merge_entities sends correct request and returns response."""
         response = await client_with_mock_transport.merge_entities(
-            source_entities=["Entity1", "Entity2"],
-            target_entity="MergedEntity",
+            entities_to_change=["Entity1", "Entity2"],
+            entity_to_change_into="MergedEntity",
         )
 
         assert response == {"status": "merged"}
@@ -495,7 +492,9 @@ class TestClientListDocs:
         response = await client_with_mock_transport.list_docs(
             page=2,
             page_size=25,
-            status="completed",
+            status_filter="completed",
+            sort_field="updated_at",
+            sort_direction="desc",
         )
 
         assert response.documents == mock_list_docs_response["documents"]
@@ -522,8 +521,8 @@ class TestClientTrackStatus:
         response = await client_with_mock_transport.track_status("track-12345")
 
         assert response.track_id == "track-12345"
-        assert response.status == "completed"
-        assert response.progress == 1.0
+        assert response.documents == []
+        assert response.total_count == 0
 
 
 class TestClientPipelineStatus:
@@ -538,10 +537,9 @@ class TestClientPipelineStatus:
         """pipeline_status sends correct request and parses response."""
         response = await client_with_mock_transport.pipeline_status()
 
-        assert response.status == mock_pipeline_status_response["status"]
-        assert response.progress == mock_pipeline_status_response["progress"]
-        assert response.queued == mock_pipeline_status_response["queued"]
-        assert response.processing == mock_pipeline_status_response["processing"]
+        assert response.busy == mock_pipeline_status_response.get("busy", False)
+        assert response.docs == mock_pipeline_status_response.get("docs", 0)
+        assert response.job_name == mock_pipeline_status_response.get("job_name", "")
 
 
 # =============================================================================

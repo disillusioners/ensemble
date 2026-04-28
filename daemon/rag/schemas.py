@@ -10,7 +10,7 @@ operations, and document management.
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 # =============================================================================
@@ -23,13 +23,11 @@ class InsertTextRequest(BaseModel):
 
     Attributes:
         text: The text content to insert.
-        description: Optional description or metadata for the text.
-        file_paths: Optional list of file paths associated with the text.
+        file_source: Optional file source/path for the text.
     """
 
     text: str = Field(..., description="Text content to insert into the knowledge graph")
-    description: str = Field(default="", description="Optional description for the text")
-    file_paths: list[str] | None = Field(default=None, description="Optional file paths")
+    file_source: str | None = Field(default=None, description="Optional file source path")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -41,9 +39,11 @@ class InsertTextsRequest(BaseModel):
 
     Attributes:
         texts: List of text strings to insert.
+        file_sources: Optional list of file sources corresponding to texts.
     """
 
     texts: list[str] = Field(..., description="List of text strings to insert")
+    file_sources: list[str] | None = Field(default=None, description="Optional file sources")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -60,171 +60,132 @@ class QueryRequest(BaseModel):
         only_need_prompt: Return only the generated prompt.
         response_type: Type of response to generate.
         top_k: Number of top results to return.
-        max_token_for_text_unit: Max tokens for text unit retrieval.
-        max_token_for_global_context: Max tokens for global context.
-        max_token_for_local_context: Max tokens for local context.
         hl_keywords: High-level keywords for query enhancement.
         ll_keywords: Low-level keywords for query enhancement.
         stream: Enable streaming response.
-        history_turns: Number of conversation turns to include.
+        chunk_top_k: Number of chunks to retrieve.
+        max_entity_tokens: Max tokens for entity retrieval.
+        max_relation_tokens: Max tokens for relation retrieval.
+        max_total_tokens: Max total tokens for the response.
+        conversation_history: List of conversation history turns.
+        user_prompt: User prompt for the query.
+        enable_rerank: Enable reranking of results.
+        include_references: Include references in the response.
+        include_chunk_content: Include chunk content in the response.
     """
 
     query: str = Field(..., description="Query string to search for")
     mode: str = Field(
-        default="hybrid",
+        default="mix",
         description="Query mode",
     )
     only_need_context: bool = Field(default=False, description="Return only context")
     only_need_prompt: bool = Field(default=False, description="Return only the prompt")
     response_type: str | None = Field(default=None, description="Response type")
     top_k: int | None = Field(default=None, description="Number of top results")
-    max_token_for_text_unit: int | None = Field(default=None, description="Max tokens for text unit")
-    max_token_for_global_context: int | None = Field(default=None, description="Max tokens for global context")
-    max_token_for_local_context: int | None = Field(default=None, description="Max tokens for local context")
     hl_keywords: list[str] | None = Field(default=None, description="High-level keywords")
     ll_keywords: list[str] | None = Field(default=None, description="Low-level keywords")
-    stream: bool = Field(default=False, description="Enable streaming response")
-    history_turns: int | None = Field(default=None, description="Conversation history turns")
+    stream: bool | None = Field(default=None, description="Enable streaming response")
+    chunk_top_k: int | None = Field(default=None, description="Number of chunks to retrieve")
+    max_entity_tokens: int | None = Field(default=None, description="Max tokens for entities")
+    max_relation_tokens: int | None = Field(default=None, description="Max tokens for relations")
+    max_total_tokens: int | None = Field(default=None, description="Max total tokens")
+    conversation_history: list[dict] | None = Field(default=None, description="Conversation history")
+    user_prompt: str | None = Field(default=None, description="User prompt")
+    enable_rerank: bool | None = Field(default=None, description="Enable reranking")
+    include_references: bool | None = Field(default=None, description="Include references")
+    include_chunk_content: bool | None = Field(default=None, description="Include chunk content")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-class QueryDataRequest(BaseModel):
-    """Request model for querying knowledge graph data (entities and relations).
-
-    Attributes:
-        query: The query string to search for.
-        mode: Query mode - one of local, global, hybrid, naive, mix.
-        only_need_context: Return only context without full response.
-        only_need_prompt: Return only the generated prompt.
-        response_type: Type of response to generate.
-        top_k: Number of top results to return.
-        max_token_for_text_unit: Max tokens for text unit retrieval.
-        max_token_for_global_context: Max tokens for global context.
-        max_token_for_local_context: Max tokens for local context.
-        hl_keywords: High-level keywords for query enhancement.
-        ll_keywords: Low-level keywords for query enhancement.
-        stream: Enable streaming response.
-        history_turns: Number of conversation turns to include.
-    """
-
-    query: str = Field(..., description="Query string to search for")
-    mode: str = Field(default="hybrid", description="Query mode")
-    only_need_context: bool = Field(default=False, description="Return only context")
-    only_need_prompt: bool = Field(default=False, description="Return only the prompt")
-    response_type: str | None = Field(default=None, description="Response type")
-    top_k: int | None = Field(default=None, description="Number of top results")
-    max_token_for_text_unit: int | None = Field(default=None, description="Max tokens for text unit")
-    max_token_for_global_context: int | None = Field(default=None, description="Max tokens for global context")
-    max_token_for_local_context: int | None = Field(default=None, description="Max tokens for local context")
-    hl_keywords: list[str] | None = Field(default=None, description="High-level keywords")
-    ll_keywords: list[str] | None = Field(default=None, description="Low-level keywords")
-    stream: bool = Field(default=False, description="Enable streaming response")
-    history_turns: int | None = Field(default=None, description="Conversation history turns")
-
-    def to_api_dict(self) -> dict[str, Any]:
-        """Return dictionary with None values excluded for API calls."""
-        return {k: v for k, v in self.model_dump().items() if v is not None}
+# Alias for QueryDataRequest - both endpoints use the same request model
+QueryDataRequest = QueryRequest
+"""Request model for querying knowledge graph data - alias for QueryRequest."""
 
 
 class LabelSearchRequest(BaseModel):
-    """Request model for searching by label.
+    """Request model for searching by label (GET with query params).
 
     Attributes:
-        label: The label to search for.
-        max_results: Maximum number of results to return.
+        q: The label query to search for.
+        limit: Maximum number of results to return.
     """
 
-    label: str = Field(..., description="Label to search for")
-    max_results: int = Field(default=10, description="Maximum number of results")
+    q: str = Field(..., description="Label query to search for")
+    limit: int = Field(default=50, description="Maximum number of results")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-class CreateEntityRequest(BaseModel):
+class EntityCreateRequest(BaseModel):
     """Request model for creating a new entity in the knowledge graph.
 
     Attributes:
         entity_name: Name of the entity to create.
-        description: Optional description of the entity.
-        entity_type: Type/category of the entity (default: UNKNOWN).
-        metadata: Optional metadata dictionary for the entity.
+        entity_data: Dictionary containing entity data (description, entity_type, metadata, etc.).
     """
 
     entity_name: str = Field(..., description="Name of the entity")
-    description: str = Field(default="", description="Description of the entity")
-    entity_type: str = Field(default="UNKNOWN", description="Type of the entity")
-    metadata: dict | None = Field(default=None, description="Entity metadata")
+    entity_data: dict = Field(default_factory=dict, description="Entity data dictionary")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-class CreateRelationRequest(BaseModel):
+class RelationCreateRequest(BaseModel):
     """Request model for creating a relation between entities.
 
     Attributes:
         source_entity: Name of the source entity.
         target_entity: Name of the target entity.
-        description: Optional description of the relation.
-        relation_type: Type of the relation (default: RELATED_TO).
-        metadata: Optional metadata dictionary for the relation.
-        weight: Optional weight value for the relation.
+        relation_data: Dictionary containing relation data (description, relation_type, metadata, weight, etc.).
     """
 
     source_entity: str = Field(..., description="Source entity name")
     target_entity: str = Field(..., description="Target entity name")
-    description: str = Field(default="", description="Relation description")
-    relation_type: str = Field(default="RELATED_TO", description="Type of relation")
-    metadata: dict | None = Field(default=None, description="Relation metadata")
-    weight: float | None = Field(default=None, description="Relation weight")
+    relation_data: dict = Field(default_factory=dict, description="Relation data dictionary")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-class UpdateEntityRequest(BaseModel):
+class EntityUpdateRequest(BaseModel):
     """Request model for updating an existing entity.
 
     Attributes:
         entity_name: Name of the entity to update.
-        description: New description for the entity.
-        entity_type: New type for the entity.
-        metadata: New metadata for the entity.
+        updated_data: Dictionary containing updated entity data.
+        allow_rename: Allow renaming the entity.
+        allow_merge: Allow merging with existing entity.
     """
 
     entity_name: str = Field(..., description="Name of the entity to update")
-    description: str | None = Field(default=None, description="New description")
-    entity_type: str | None = Field(default=None, description="New entity type")
-    metadata: dict | None = Field(default=None, description="New metadata")
+    updated_data: dict = Field(default_factory=dict, description="Updated entity data")
+    allow_rename: bool = Field(default=False, description="Allow renaming the entity")
+    allow_merge: bool = Field(default=False, description="Allow merging with existing entity")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-class MergeEntitiesRequest(BaseModel):
+class EntityMergeRequest(BaseModel):
     """Request model for merging multiple entities into one.
 
     Attributes:
-        source_entities: List of entity names to merge from.
-        target_entity: Name of the target entity to merge into.
-        description: Optional new description for the merged entity.
-        entity_type: Optional new type for the merged entity.
-        metadata: Optional new metadata for the merged entity.
+        entities_to_change: List of entity names to merge from.
+        entity_to_change_into: Name of the target entity to merge into.
     """
 
-    source_entities: list[str] = Field(..., description="Entities to merge")
-    target_entity: str = Field(..., description="Target entity name")
-    description: str | None = Field(default=None, description="New description")
-    entity_type: str | None = Field(default=None, description="New entity type")
-    metadata: dict | None = Field(default=None, description="New metadata")
+    entities_to_change: list[str] = Field(..., description="Entities to merge")
+    entity_to_change_into: str = Field(..., description="Target entity name")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -236,9 +197,13 @@ class DeleteDocsRequest(BaseModel):
 
     Attributes:
         doc_ids: List of document IDs to delete.
+        delete_file: Whether to delete the source file.
+        delete_llm_cache: Whether to delete LLM cache entries.
     """
 
     doc_ids: list[str] = Field(..., description="Document IDs to delete")
+    delete_file: bool = Field(default=False, description="Delete the source file")
+    delete_llm_cache: bool = Field(default=False, description="Delete LLM cache entries")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -265,51 +230,28 @@ class DeleteRelationRequest(BaseModel):
     Attributes:
         source_entity: Name of the source entity.
         target_entity: Name of the target entity.
-        relation_type: Type of relation to delete (optional, deletes all if None).
     """
 
     source_entity: str = Field(..., description="Source entity name")
     target_entity: str = Field(..., description="Target entity name")
-    relation_type: str | None = Field(default=None, description="Relation type to delete")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
-# Aliases for Entity operations
-EntityCreateRequest = CreateEntityRequest
-"""Alias for CreateEntityRequest."""
-EntityUpdateRequest = UpdateEntityRequest
-"""Alias for UpdateEntityRequest."""
-EntityMergeRequest = MergeEntitiesRequest
-"""Alias for MergeEntitiesRequest."""
-
-
-class RelationCreateRequest(CreateRelationRequest):
-    """Alias for CreateRelationRequest for relation creation."""
-
-    pass
-
-
 class RelationUpdateRequest(BaseModel):
     """Request model for updating an existing relation.
 
     Attributes:
-        source_entity: Name of the source entity.
-        target_entity: Name of the target entity.
-        description: New description for the relation.
-        relation_type: New type for the relation.
-        metadata: New metadata for the relation.
-        weight: New weight for the relation.
+        source_id: ID of the source entity.
+        target_id: ID of the target entity.
+        updated_data: Dictionary containing updated relation data.
     """
 
-    source_entity: str = Field(..., description="Source entity name")
-    target_entity: str = Field(..., description="Target entity name")
-    description: str | None = Field(default=None, description="New description")
-    relation_type: str | None = Field(default=None, description="New relation type")
-    metadata: dict | None = Field(default=None, description="New metadata")
-    weight: float | None = Field(default=None, description="New weight")
+    source_id: str = Field(..., description="Source entity ID")
+    target_id: str = Field(..., description="Target entity ID")
+    updated_data: dict = Field(default_factory=dict, description="Updated relation data")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -322,12 +264,18 @@ class DocumentsRequest(BaseModel):
     Attributes:
         page: Page number (1-indexed).
         page_size: Number of documents per page.
-        status: Optional filter by document status.
+        status_filter: Filter by single status.
+        status_filters: Filter by multiple statuses.
+        sort_field: Field to sort by.
+        sort_direction: Sort direction (asc/desc).
     """
 
     page: int = Field(default=1, description="Page number (1-indexed)")
     page_size: int = Field(default=50, description="Documents per page")
-    status: str | None = Field(default=None, description="Filter by status")
+    status_filter: str | None = Field(default=None, description="Filter by status")
+    status_filters: list[str] | None = Field(default=None, description="Filter by multiple statuses")
+    sort_field: str = Field(default="updated_at", description="Field to sort by")
+    sort_direction: str = Field(default="desc", description="Sort direction")
 
     def to_api_dict(self) -> dict[str, Any]:
         """Return dictionary with None values excluded for API calls."""
@@ -343,14 +291,14 @@ class InsertResponse(BaseModel):
     """Response model for text insertion operations.
 
     Attributes:
-        status: Status of the insertion (e.g., "accepted").
-        message: Optional message from the server.
-        track_id: Optional tracking ID for async operations.
+        status: Status of the insertion.
+        message: Response message from the server.
+        track_id: Tracking ID for async operations.
     """
 
-    status: str = Field(default="accepted", description="Insertion status")
-    message: str = Field(default="", description="Response message")
-    track_id: str | None = Field(default=None, description="Tracking ID for async operations")
+    status: str = Field(..., description="Insertion status")
+    message: str = Field(..., description="Response message")
+    track_id: str = Field(..., description="Tracking ID for async operations")
 
 
 class QueryResponse(BaseModel):
@@ -358,24 +306,26 @@ class QueryResponse(BaseModel):
 
     Attributes:
         response: The generated response text.
-        metadata: Optional metadata about the query results.
+        references: Optional list of reference dictionaries.
     """
 
-    response: str = Field(default="", description="Generated response text")
-    metadata: dict | None = Field(default=None, description="Response metadata")
+    response: str = Field(..., description="Generated response text")
+    references: list[dict] | None = Field(default=None, description="Response references")
 
 
 class QueryDataResponse(BaseModel):
     """Response model for data query operations (entities and relationships).
 
     Attributes:
-        entities: List of entity dictionaries.
-        relationships: List of relationship dictionaries.
+        status: Status of the query.
+        message: Response message.
+        data: Query result data.
         metadata: Optional metadata about the query.
     """
 
-    entities: list[dict] | None = Field(default=None, description="Retrieved entities")
-    relationships: list[dict] | None = Field(default=None, description="Retrieved relationships")
+    status: str = Field(..., description="Query status")
+    message: str = Field(..., description="Response message")
+    data: dict = Field(default_factory=dict, description="Query result data")
     metadata: dict | None = Field(default=None, description="Query metadata")
 
 
@@ -408,36 +358,41 @@ class TrackStatusResponse(BaseModel):
 
     Attributes:
         track_id: The tracking ID for the operation.
-        status: Current status of the operation.
-        progress: Progress percentage (0-1).
-        message: Optional status message.
+        documents: List of document dictionaries.
+        total_count: Total number of documents.
+        status_summary: Summary of document statuses.
     """
 
-    track_id: str = Field(default="", description="Tracking ID")
-    status: str = Field(default="", description="Operation status")
-    progress: float | None = Field(default=None, description="Progress (0-1)")
-    message: str | None = Field(default=None, description="Status message")
+    track_id: str = Field(..., description="Tracking ID")
+    documents: list[dict] = Field(default_factory=list, description="Document list")
+    total_count: int = Field(default=0, description="Total document count")
+    status_summary: dict = Field(default_factory=dict, description="Status summary")
 
 
-class ListDocsResponse(BaseModel):
-    """Response model for document listing with pagination.
+class PaginatedDocsResponse(BaseModel):
+    """Response model for paginated document listing.
 
     Attributes:
         documents: List of document dictionaries.
-        total: Total number of documents.
-        page: Current page number.
-        page_size: Number of documents per page.
+        total: Total number of documents (for backwards compatibility).
+        page: Current page number (for backwards compatibility).
+        page_size: Number of documents per page (for backwards compatibility).
+        pagination: Pagination info dict with page, page_size, total_count,
+            total_pages, has_next, has_prev fields.
+        status_counts: Status counts dictionary.
     """
 
     documents: list[dict] = Field(default_factory=list, description="List of documents")
     total: int = Field(default=0, description="Total document count")
     page: int = Field(default=1, description="Current page")
     page_size: int = Field(default=50, description="Documents per page")
+    pagination: dict | None = Field(default=None, description="Pagination metadata")
+    status_counts: dict | None = Field(default=None, description="Status counts")
 
 
-# Alias for ListDocsResponse
-PaginatedDocsResponse = ListDocsResponse
-"""Alias for ListDocsResponse."""
+# Alias for backwards compatibility
+ListDocsResponse = PaginatedDocsResponse
+"""Alias for PaginatedDocsResponse."""
 
 
 class DocStatusResponse(BaseModel):
@@ -460,15 +415,27 @@ class PipelineStatusResponse(BaseModel):
     """Response model for pipeline status queries.
 
     Attributes:
-        status: Overall pipeline status.
-        progress: Overall progress (0-1).
-        message: Optional status message.
-        queued: Number of items queued.
-        processing: Number of items currently processing.
+        autoscanned: Whether autoscan is enabled.
+        busy: Whether the pipeline is busy.
+        job_name: Current job name.
+        job_start: Job start time.
+        docs: Number of documents.
+        batchs: Number of batches.
+        cur_batch: Current batch number.
+        request_pending: Whether a request is pending.
+        latest_message: Latest status message.
+        history_messages: List of historical messages.
+        update_status: Update status dictionary.
     """
 
-    status: str = Field(default="", description="Pipeline status")
-    progress: float | None = Field(default=None, description="Progress (0-1)")
-    message: str | None = Field(default=None, description="Status message")
-    queued: int | None = Field(default=None, description="Items in queue")
-    processing: int | None = Field(default=None, description="Items processing")
+    autoscanned: bool = Field(default=False, description="Whether autoscan is enabled")
+    busy: bool = Field(default=False, description="Whether the pipeline is busy")
+    job_name: str = Field(default="", description="Current job name")
+    job_start: str | None = Field(default=None, description="Job start time")
+    docs: int = Field(default=0, description="Number of documents")
+    batchs: int = Field(default=0, description="Number of batches")
+    cur_batch: int = Field(default=0, description="Current batch number")
+    request_pending: bool = Field(default=False, description="Whether a request is pending")
+    latest_message: str = Field(default="", description="Latest status message")
+    history_messages: list[str] | None = Field(default=None, description="Historical messages")
+    update_status: dict | None = Field(default=None, description="Update status")

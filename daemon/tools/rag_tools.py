@@ -1,6 +1,8 @@
 """RAG knowledge management tools for interacting with LightRAG."""
 
+import hashlib
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
@@ -32,6 +34,102 @@ def _get_rag_client() -> AsyncLightRAGClient:
     return _rag_client
 
 
+def _slugify(text: str, max_length: int = 50) -> str:
+    """Convert text to a URL-safe slug.
+
+    Args:
+        text: Text to slugify.
+        max_length: Maximum length of the slug.
+
+    Returns:
+        Slugified text.
+    """
+    # Convert to lowercase and replace non-alphanumeric with hyphens
+    slug = re.sub(r'[^a-z0-9\s-]', '', text.lower())
+    slug = re.sub(r'[\s]+', '-', slug)
+    slug = slug.strip('-')
+    return slug[:max_length]
+
+
+def _generate_simple_filename(text: str) -> str:
+    """Generate a simple descriptive filename from text content.
+
+    Args:
+        text: The text content.
+
+    Returns:
+        A short descriptive filename (slugified first line or hash).
+    """
+    if not text:
+        return "untitled"
+
+    # Get first line and extract first meaningful part
+    first_line = text.strip().split('\n')[0].strip()
+    if len(first_line) >= 5:
+        return _slugify(first_line, max_length=40)
+    else:
+        # Use a short hash of the text if too short
+        short_hash = hashlib.md5(text.encode()).hexdigest()[:8]
+        return f"doc-{short_hash}"
+
+
+def _get_project_name_from_instance(manager: TYPE_CHECKING.ANY, instance_id: str) -> str | None:
+    """Get project name from instance metadata.
+
+    Args:
+        manager: The InstanceManager instance.
+        instance_id: The current instance ID.
+
+    Returns:
+        Project name if found, None otherwise.
+    """
+    try:
+        instance_meta = manager._instance_repository.get(instance_id)
+        if instance_meta and instance_meta.instance_metadata:
+            project_id = instance_meta.instance_metadata.get("project_id")
+            if project_id:
+                project = manager._project_repository.get(project_id)
+                if project:
+                    return project.name
+    except Exception:
+        pass
+    return None
+
+
+def _generate_file_source(
+    manager: TYPE_CHECKING.ANY,
+    instance_id: str,
+    category: str,
+    text: str,
+) -> str:
+    """Generate a file_source path for a text insertion.
+
+    Format: projects/<project-name>/docs/<category>/<simple-hash>.md
+
+    Args:
+        manager: The InstanceManager instance.
+        instance_id: The current instance ID.
+        category: Content category (e.g., "general", "architecture").
+        text: The text content for generating filename.
+
+    Returns:
+        Generated file_source path.
+    """
+    # Try to get project name, fall back to instance_id
+    project_name = _get_project_name_from_instance(manager, instance_id)
+    if not project_name:
+        project_name = instance_id[:8]
+
+    # Generate descriptive filename
+    filename = _generate_simple_filename(text)
+
+    # Sanitize project name for path
+    project_path = re.sub(r'[^a-z0-9-]', '-', project_name.lower())
+    project_path = re.sub(r'-+', '-', project_path).strip('-')
+
+    return f"projects/{project_path}/docs/{category}/{filename}.md"
+
+
 def create_rag_tools(
     manager: TYPE_CHECKING.ANY,  # InstanceManager, avoid circular import
     current_instance_id: str,
@@ -50,15 +148,15 @@ def create_rag_tools(
     @tool
     async def rag_insert_text(
         text: str,
-        description: str = "",
-        file_paths: list[str] | None = None,
+        file_source: str | None = None,
+        category: str = "general",
     ) -> str:
         """Insert a single text into the RAG knowledge graph.
 
         Args:
             text: The text content to insert.
-            description: Optional description or metadata for the text.
-            file_paths: Optional list of file paths associated with the text.
+            file_source: Optional file source path. Auto-generated if not provided.
+            category: Content category for organization (e.g., "general", "architecture", "api", "knowledge", "experience").
 
         Returns:
             Success message with track ID for tracking async operations.
@@ -67,10 +165,15 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
+            # Auto-generate file_source if not provided
+            if file_source is None:
+                file_source = _generate_file_source(
+                    manager, current_instance_id, category, text
+                )
+
             result = await client.insert_text(
                 text=text,
-                description=description,
-                file_paths=file_paths,
+                file_source=file_source,
             )
             return f"Text inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
@@ -80,8 +183,10 @@ def create_rag_tools(
 
     Args:
         text: The text content to insert.
-        description: Optional description or metadata for the text.
-        file_paths: Optional list of file paths associated with the text.
+        file_source: Optional file source path. Auto-generated if not provided.
+            Format: projects/<project>/docs/<category>/<filename>.md
+        category: Content category for organization (default: "general").
+            Common categories: "general", "architecture", "api", "knowledge", "experience"
 
     Returns:
         Success message with track ID for tracking async operations.
@@ -89,11 +194,15 @@ def create_rag_tools(
 
     @register_tool_category("rag")
     @tool
-    async def rag_insert_texts(texts: list[str]) -> str:
+    async def rag_insert_texts(
+        texts: list[str],
+        file_sources: list[str] | None = None,
+    ) -> str:
         """Insert multiple texts into the RAG knowledge graph.
 
         Args:
             texts: List of text strings to insert.
+            file_sources: Optional list of file sources corresponding to texts.
 
         Returns:
             Success message with track ID for tracking async operations.
@@ -102,7 +211,10 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
-            result = await client.insert_texts(texts=texts)
+            result = await client.insert_texts(
+                texts=texts,
+                file_sources=file_sources,
+            )
             return f"{len(texts)} texts inserted. Track ID: {getattr(result, 'track_id', '')}"
         except RAGError as e:
             return f"RAG error: {e}"
@@ -111,6 +223,8 @@ def create_rag_tools(
 
     Args:
         texts: List of text strings to insert.
+        file_sources: Optional list of file sources corresponding to texts.
+            Must match the length of texts if provided.
 
     Returns:
         Success message with track ID for tracking async operations.
@@ -120,13 +234,35 @@ def create_rag_tools(
     @tool
     async def rag_query(
         query: str,
-        mode: str = "hybrid",
+        mode: str = "mix",
+        only_need_context: bool = False,
+        only_need_prompt: bool = False,
+        response_type: str | None = None,
+        top_k: int | None = None,
+        chunk_top_k: int | None = None,
+        max_entity_tokens: int | None = None,
+        max_relation_tokens: int | None = None,
+        max_total_tokens: int | None = None,
+        hl_keywords: list[str] | None = None,
+        ll_keywords: list[str] | None = None,
+        conversation_history: list[dict] | None = None,
     ) -> str:
         """Query the RAG knowledge graph and get a generated response.
 
         Args:
             query: The query string to search for.
-            mode: Query mode - one of local, global, hybrid, naive, mix (default: hybrid).
+            mode: Query mode - one of local, global, hybrid, naive, mix (default: mix).
+            only_need_context: Return only context without full response.
+            only_need_prompt: Return only the generated prompt.
+            response_type: Type of response to generate.
+            top_k: Number of top results to return.
+            chunk_top_k: Number of chunks to retrieve.
+            max_entity_tokens: Max tokens for entity retrieval.
+            max_relation_tokens: Max tokens for relation retrieval.
+            max_total_tokens: Max total tokens for the response.
+            hl_keywords: High-level keywords for query enhancement.
+            ll_keywords: Low-level keywords for query enhancement.
+            conversation_history: List of conversation history turns.
 
         Returns:
             Generated response text from the knowledge graph.
@@ -135,7 +271,21 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
-            result = await client.query(query=query, mode=mode)
+            result = await client.query(
+                query=query,
+                mode=mode,
+                only_need_context=only_need_context,
+                only_need_prompt=only_need_prompt,
+                response_type=response_type,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                max_entity_tokens=max_entity_tokens,
+                max_relation_tokens=max_relation_tokens,
+                max_total_tokens=max_total_tokens,
+                hl_keywords=hl_keywords,
+                ll_keywords=ll_keywords,
+                conversation_history=conversation_history,
+            )
             return getattr(result, 'response', '')
         except RAGError as e:
             return f"RAG error: {e}"
@@ -144,7 +294,18 @@ def create_rag_tools(
 
     Args:
         query: The query string to search for.
-        mode: Query mode - one of local, global, hybrid, naive, mix (default: hybrid).
+        mode: Query mode - one of local, global, hybrid, naive, mix (default: mix).
+        only_need_context: Return only context without full response (default: False).
+        only_need_prompt: Return only the generated prompt (default: False).
+        response_type: Type of response to generate (optional).
+        top_k: Number of top results to return (optional).
+        chunk_top_k: Number of chunks to retrieve (optional).
+        max_entity_tokens: Max tokens for entity retrieval (optional).
+        max_relation_tokens: Max tokens for relation retrieval (optional).
+        max_total_tokens: Max total tokens for the response (optional).
+        hl_keywords: High-level keywords for query enhancement (optional).
+        ll_keywords: Low-level keywords for query enhancement (optional).
+        conversation_history: List of conversation history turns (optional).
 
     Returns:
         Generated response text from the knowledge graph.
@@ -154,13 +315,35 @@ def create_rag_tools(
     @tool
     async def rag_query_data(
         query: str,
-        mode: str = "hybrid",
+        mode: str = "mix",
+        only_need_context: bool = False,
+        only_need_prompt: bool = False,
+        response_type: str | None = None,
+        top_k: int | None = None,
+        chunk_top_k: int | None = None,
+        max_entity_tokens: int | None = None,
+        max_relation_tokens: int | None = None,
+        max_total_tokens: int | None = None,
+        hl_keywords: list[str] | None = None,
+        ll_keywords: list[str] | None = None,
+        conversation_history: list[dict] | None = None,
     ) -> str:
         """Query the RAG knowledge graph and get structured data (entities and relations).
 
         Args:
             query: The query string to search for.
-            mode: Query mode - one of local, global, hybrid, naive, mix (default: hybrid).
+            mode: Query mode - one of local, global, hybrid, naive, mix (default: mix).
+            only_need_context: Return only context without full response.
+            only_need_prompt: Return only the generated prompt.
+            response_type: Type of response to generate.
+            top_k: Number of top results to return.
+            chunk_top_k: Number of chunks to retrieve.
+            max_entity_tokens: Max tokens for entity retrieval.
+            max_relation_tokens: Max tokens for relation retrieval.
+            max_total_tokens: Max total tokens for the response.
+            hl_keywords: High-level keywords for query enhancement.
+            ll_keywords: Low-level keywords for query enhancement.
+            conversation_history: List of conversation history turns.
 
         Returns:
             Formatted string containing entities and relations from the query.
@@ -169,11 +352,30 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
-            result = await client.query_data(query=query, mode=mode)
+            result = await client.query_data(
+                query=query,
+                mode=mode,
+                only_need_context=only_need_context,
+                only_need_prompt=only_need_prompt,
+                response_type=response_type,
+                top_k=top_k,
+                chunk_top_k=chunk_top_k,
+                max_entity_tokens=max_entity_tokens,
+                max_relation_tokens=max_relation_tokens,
+                max_total_tokens=max_total_tokens,
+                hl_keywords=hl_keywords,
+                ll_keywords=ll_keywords,
+                conversation_history=conversation_history,
+            )
 
             output_parts: list[str] = []
 
+            # Try to extract entities from result
             entities = getattr(result, 'entities', []) or []
+            if not entities and hasattr(result, 'data'):
+                data = result.data or {}
+                entities = data.get('entities', []) or []
+
             if entities:
                 output_parts.append("## Entities\n")
                 for entity in entities:
@@ -182,7 +384,12 @@ def create_rag_tools(
                     desc = entity.get("description", "")
                     output_parts.append(f"- **{name}** ({entity_type}): {desc}")
 
+            # Try to extract relationships from result
             relationships = getattr(result, 'relationships', []) or []
+            if not relationships and hasattr(result, 'data'):
+                data = result.data or {}
+                relationships = data.get('relationships', data.get('relations', [])) or []
+
             if relationships:
                 output_parts.append("\n## Relationships\n")
                 for relationship in relationships:
@@ -203,7 +410,18 @@ def create_rag_tools(
 
     Args:
         query: The query string to search for.
-        mode: Query mode - one of local, global, hybrid, naive, mix (default: hybrid).
+        mode: Query mode - one of local, global, hybrid, naive, mix (default: mix).
+        only_need_context: Return only context without full response (default: False).
+        only_need_prompt: Return only the generated prompt (default: False).
+        response_type: Type of response to generate (optional).
+        top_k: Number of top results to return (optional).
+        chunk_top_k: Number of chunks to retrieve (optional).
+        max_entity_tokens: Max tokens for entity retrieval (optional).
+        max_relation_tokens: Max tokens for relation retrieval (optional).
+        max_total_tokens: Max total tokens for the response (optional).
+        hl_keywords: High-level keywords for query enhancement (optional).
+        ll_keywords: Low-level keywords for query enhancement (optional).
+        conversation_history: List of conversation history turns (optional).
 
     Returns:
         Formatted string containing entities and relations from the query.
@@ -212,13 +430,13 @@ def create_rag_tools(
     @register_tool_category("rag")
     @tool
     async def rag_search_labels(
-        label: str,
+        query: str,
         max_results: int = 10,
     ) -> str:
         """Search for labels in the RAG knowledge graph.
 
         Args:
-            label: The label to search for.
+            query: The label query to search for.
             max_results: Maximum number of results to return (default: 10).
 
         Returns:
@@ -228,10 +446,10 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
-            result = await client.search_labels(label=label, max_results=max_results)
+            result = await client.search_labels(q=query, limit=max_results)
             labels = getattr(result, 'labels', []) or []
             if not labels:
-                return f"No labels found matching: {label}"
+                return f"No labels found matching: {query}"
             return "Matching labels:\n" + "\n".join(f"- {lbl}" for lbl in labels)
         except RAGError as e:
             return f"RAG error: {e}"
@@ -239,7 +457,7 @@ def create_rag_tools(
     rag_search_labels._full_doc_ = """Search for labels in the RAG knowledge graph.
 
     Args:
-        label: The label to search for.
+        query: The label query to search for.
         max_results: Maximum number of results to return (default: 10).
 
     Returns:
@@ -417,6 +635,8 @@ def create_rag_tools(
         entity_type: str | None = None,
         description: str | None = None,
         properties: dict | None = None,
+        allow_rename: bool = False,
+        allow_merge: bool = False,
     ) -> str:
         """Update an existing entity in the RAG knowledge graph.
 
@@ -426,6 +646,8 @@ def create_rag_tools(
             entity_type: New type/category for the entity.
             description: New description for the entity.
             properties: New metadata dictionary.
+            allow_rename: Allow renaming the entity (default: False).
+            allow_merge: Allow merging with existing entity (default: False).
 
         Returns:
             Success message confirming entity update.
@@ -436,9 +658,11 @@ def create_rag_tools(
         try:
             await client.update_entity(
                 entity_name=name,
-                entity_type=entity_type,
                 description=description,
+                entity_type=entity_type,
                 metadata=properties,
+                allow_rename=allow_rename,
+                allow_merge=allow_merge,
             )
             return f"Entity '{name}' updated."
         except RAGError as e:
@@ -448,10 +672,12 @@ def create_rag_tools(
 
     Args:
         name: Name of the entity to update.
-        updated_name: New name for the entity.
+        updated_name: New name for the entity (use with allow_rename=True).
         entity_type: New type/category for the entity.
         description: New description for the entity.
         properties: New metadata dictionary.
+        allow_rename: Allow renaming the entity (default: False).
+        allow_merge: Allow merging with existing entity (default: False).
 
     Returns:
         Success message confirming entity update.
@@ -460,22 +686,14 @@ def create_rag_tools(
     @register_tool_category("rag")
     @tool
     async def rag_merge_entities(
-        source: str,
-        target: str,
+        source_entities: list[str],
         target_entity_name: str,
-        entity_type: str | None = None,
-        description: str | None = None,
-        properties: dict | None = None,
     ) -> str:
         """Merge multiple entities into one in the RAG knowledge graph.
 
         Args:
-            source: Name of the source entity to merge from.
-            target: Another entity name to merge from.
+            source_entities: List of entity names to merge from.
             target_entity_name: Name of the target entity to merge into.
-            entity_type: Optional new type for the merged entity.
-            description: Optional new description for the merged entity.
-            properties: Optional new metadata dictionary.
 
         Returns:
             Success message confirming entity merge.
@@ -485,25 +703,18 @@ def create_rag_tools(
         client = _get_rag_client()
         try:
             await client.merge_entities(
-                source_entities=[source, target],
-                target_entity=target_entity_name,
-                entity_type=entity_type,
-                description=description,
-                metadata=properties,
+                entities_to_change=source_entities,
+                entity_to_change_into=target_entity_name,
             )
-            return f"Entities merged into '{target_entity_name}'."
+            return f"Entities {source_entities} merged into '{target_entity_name}'."
         except RAGError as e:
             return f"RAG error: {e}"
 
     rag_merge_entities._full_doc_ = """Merge multiple entities into one in the RAG knowledge graph.
 
     Args:
-        source: Name of the source entity to merge from.
-        target: Another entity name to merge from.
+        source_entities: List of entity names to merge from.
         target_entity_name: Name of the target entity to merge into.
-        entity_type: Optional new type for the merged entity.
-        description: Optional new description for the merged entity.
-        properties: Optional new metadata dictionary.
 
     Returns:
         Success message confirming entity merge.
@@ -543,14 +754,12 @@ def create_rag_tools(
     async def rag_delete_relation(
         source: str,
         target: str,
-        relation: str | None = None,
     ) -> str:
         """Delete a relation between entities in the RAG knowledge graph.
 
         Args:
             source: Name of the source entity.
             target: Name of the target entity.
-            relation: Optional relation type to delete (deletes all if not specified).
 
         Returns:
             Success message confirming relation deletion.
@@ -562,7 +771,6 @@ def create_rag_tools(
             await client.delete_relation(
                 source_entity=source,
                 target_entity=target,
-                relation_type=relation,
             )
             return "Relation deleted."
         except RAGError as e:
@@ -573,7 +781,6 @@ def create_rag_tools(
     Args:
         source: Name of the source entity.
         target: Name of the target entity.
-        relation: Optional relation type to delete (deletes all if not specified).
 
     Returns:
         Success message confirming relation deletion.
@@ -581,11 +788,17 @@ def create_rag_tools(
 
     @register_tool_category("rag")
     @tool
-    async def rag_delete_docs(doc_ids: list[str]) -> str:
+    async def rag_delete_docs(
+        doc_ids: list[str],
+        delete_file: bool = False,
+        delete_llm_cache: bool = False,
+    ) -> str:
         """Delete documents by their IDs from the RAG system.
 
         Args:
             doc_ids: List of document IDs to delete.
+            delete_file: Whether to delete the source file (default: False).
+            delete_llm_cache: Whether to delete LLM cache entries (default: False).
 
         Returns:
             Success message with count of deleted documents.
@@ -594,7 +807,11 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         try:
-            await client.delete_docs(doc_ids=doc_ids)
+            await client.delete_docs(
+                doc_ids=doc_ids,
+                delete_file=delete_file,
+                delete_llm_cache=delete_llm_cache,
+            )
             return f"{len(doc_ids)} documents deleted."
         except RAGError as e:
             return f"RAG error: {e}"
@@ -603,6 +820,8 @@ def create_rag_tools(
 
     Args:
         doc_ids: List of document IDs to delete.
+        delete_file: Whether to delete the source file (default: False).
+        delete_llm_cache: Whether to delete LLM cache entries (default: False).
 
     Returns:
         Success message with count of deleted documents.
@@ -613,14 +832,20 @@ def create_rag_tools(
     async def rag_list_docs(
         page: int = 1,
         page_size: int = 50,
-        status: str | None = None,
+        status_filter: str | None = None,
+        status_filters: list[str] | None = None,
+        sort_field: str = "updated_at",
+        sort_direction: str = "desc",
     ) -> str:
         """List documents in the RAG system with pagination.
 
         Args:
             page: Page number, 1-indexed (default: 1).
             page_size: Number of documents per page (default: 50).
-            status: Optional filter by document status.
+            status_filter: Filter by single document status.
+            status_filters: Filter by multiple document statuses.
+            sort_field: Field to sort by (default: "updated_at").
+            sort_direction: Sort direction - "asc" or "desc" (default: "desc").
 
         Returns:
             Formatted list of documents with pagination info.
@@ -632,7 +857,10 @@ def create_rag_tools(
             result = await client.list_docs(
                 page=page,
                 page_size=page_size,
-                status=status,
+                status_filter=status_filter,
+                status_filters=status_filters,
+                sort_field=sort_field,
+                sort_direction=sort_direction,
             )
 
             output_parts: list[str] = []
@@ -661,7 +889,10 @@ def create_rag_tools(
     Args:
         page: Page number, 1-indexed (default: 1).
         page_size: Number of documents per page (default: 50).
-        status: Optional filter by document status.
+        status_filter: Filter by single document status (optional).
+        status_filters: Filter by multiple document statuses (optional).
+        sort_field: Field to sort by (default: "updated_at").
+        sort_direction: Sort direction - "asc" or "desc" (default: "desc").
 
     Returns:
         Formatted list of documents with pagination info.

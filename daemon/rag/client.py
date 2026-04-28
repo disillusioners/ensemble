@@ -31,26 +31,26 @@ from .exceptions import (
     RAGTimeoutError,
 )
 from .schemas import (
-    CreateEntityRequest,
-    CreateRelationRequest,
     DeleteDocsRequest,
     DeleteEntityRequest,
     DeleteRelationRequest,
+    EntityCreateRequest,
+    EntityMergeRequest,
+    EntityUpdateRequest,
     GraphResponse,
     InsertResponse,
     InsertTextRequest,
     InsertTextsRequest,
-    LabelSearchRequest,
     LabelSearchResponse,
     ListDocsResponse,
-    MergeEntitiesRequest,
     PipelineStatusResponse,
     QueryDataRequest,
     QueryDataResponse,
     QueryRequest,
     QueryResponse,
+    RelationCreateRequest,
+    RelationUpdateRequest,
     TrackStatusResponse,
-    UpdateEntityRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -205,37 +205,42 @@ class AsyncLightRAGClient:
     async def insert_text(
         self,
         text: str,
-        description: str = "",
-        file_paths: list[str] | None = None,
+        file_source: str | None = None,
     ) -> InsertResponse:
         """Insert a single text into the knowledge graph.
 
         Args:
             text: The text content to insert.
-            description: Optional description or metadata for the text.
-            file_paths: Optional list of file paths associated with the text.
+            file_source: Optional file source path for the text.
 
         Returns:
-            InsertResponse with status and optional track_id.
+            InsertResponse with status and track_id.
         """
         request = InsertTextRequest(
             text=text,
-            description=description,
-            file_paths=file_paths,
+            file_source=file_source,
         )
         data = await self._request("POST", INSERT_TEXT, json=request.to_api_dict())
         return InsertResponse(**data)
 
-    async def insert_texts(self, texts: list[str]) -> InsertResponse:
+    async def insert_texts(
+        self,
+        texts: list[str],
+        file_sources: list[str] | None = None,
+    ) -> InsertResponse:
         """Insert multiple texts into the knowledge graph.
 
         Args:
             texts: List of text strings to insert.
+            file_sources: Optional list of file sources corresponding to texts.
 
         Returns:
-            InsertResponse with status and optional track_id.
+            InsertResponse with status and track_id.
         """
-        request = InsertTextsRequest(texts=texts)
+        request = InsertTextsRequest(
+            texts=texts,
+            file_sources=file_sources,
+        )
         data = await self._request("POST", INSERT_TEXTS, json=request.to_api_dict())
         return InsertResponse(**data)
 
@@ -246,18 +251,23 @@ class AsyncLightRAGClient:
     async def query(
         self,
         query: str,
-        mode: str = "hybrid",
+        mode: str = "mix",
         only_need_context: bool = False,
         only_need_prompt: bool = False,
         response_type: str | None = None,
         top_k: int | None = None,
-        max_token_for_text_unit: int | None = None,
-        max_token_for_global_context: int | None = None,
-        max_token_for_local_context: int | None = None,
         hl_keywords: list[str] | None = None,
         ll_keywords: list[str] | None = None,
-        stream: bool = False,
-        history_turns: int | None = None,
+        stream: bool | None = None,
+        chunk_top_k: int | None = None,
+        max_entity_tokens: int | None = None,
+        max_relation_tokens: int | None = None,
+        max_total_tokens: int | None = None,
+        conversation_history: list[dict] | None = None,
+        user_prompt: str | None = None,
+        enable_rerank: bool | None = None,
+        include_references: bool | None = None,
+        include_chunk_content: bool | None = None,
     ) -> QueryResponse:
         """Query the knowledge graph.
 
@@ -268,13 +278,18 @@ class AsyncLightRAGClient:
             only_need_prompt: Return only the generated prompt.
             response_type: Type of response to generate.
             top_k: Number of top results to return.
-            max_token_for_text_unit: Max tokens for text unit retrieval.
-            max_token_for_global_context: Max tokens for global context.
-            max_token_for_local_context: Max tokens for local context.
             hl_keywords: High-level keywords for query enhancement.
             ll_keywords: Low-level keywords for query enhancement.
             stream: Enable streaming response.
-            history_turns: Number of conversation turns to include.
+            chunk_top_k: Number of chunks to retrieve.
+            max_entity_tokens: Max tokens for entity retrieval.
+            max_relation_tokens: Max tokens for relation retrieval.
+            max_total_tokens: Max total tokens for the response.
+            conversation_history: List of conversation history turns.
+            user_prompt: User prompt for the query.
+            enable_rerank: Enable reranking of results.
+            include_references: Include references in the response.
+            include_chunk_content: Include chunk content in the response.
 
         Returns:
             QueryResponse with generated response text.
@@ -286,13 +301,18 @@ class AsyncLightRAGClient:
             only_need_prompt=only_need_prompt,
             response_type=response_type,
             top_k=top_k,
-            max_token_for_text_unit=max_token_for_text_unit,
-            max_token_for_global_context=max_token_for_global_context,
-            max_token_for_local_context=max_token_for_local_context,
             hl_keywords=hl_keywords,
             ll_keywords=ll_keywords,
             stream=stream,
-            history_turns=history_turns,
+            chunk_top_k=chunk_top_k,
+            max_entity_tokens=max_entity_tokens,
+            max_relation_tokens=max_relation_tokens,
+            max_total_tokens=max_total_tokens,
+            conversation_history=conversation_history,
+            user_prompt=user_prompt,
+            enable_rerank=enable_rerank,
+            include_references=include_references,
+            include_chunk_content=include_chunk_content,
         )
         data = await self._request("POST", QUERY, json=request.to_api_dict())
         return QueryResponse(**data)
@@ -300,18 +320,23 @@ class AsyncLightRAGClient:
     async def query_data(
         self,
         query: str,
-        mode: str = "hybrid",
+        mode: str = "mix",
         only_need_context: bool = False,
         only_need_prompt: bool = False,
         response_type: str | None = None,
         top_k: int | None = None,
-        max_token_for_text_unit: int | None = None,
-        max_token_for_global_context: int | None = None,
-        max_token_for_local_context: int | None = None,
         hl_keywords: list[str] | None = None,
         ll_keywords: list[str] | None = None,
-        stream: bool = False,
-        history_turns: int | None = None,
+        stream: bool | None = None,
+        chunk_top_k: int | None = None,
+        max_entity_tokens: int | None = None,
+        max_relation_tokens: int | None = None,
+        max_total_tokens: int | None = None,
+        conversation_history: list[dict] | None = None,
+        user_prompt: str | None = None,
+        enable_rerank: bool | None = None,
+        include_references: bool | None = None,
+        include_chunk_content: bool | None = None,
     ) -> QueryDataResponse:
         """Query knowledge graph data (entities and relations).
 
@@ -322,16 +347,21 @@ class AsyncLightRAGClient:
             only_need_prompt: Return only the generated prompt.
             response_type: Type of response to generate.
             top_k: Number of top results to return.
-            max_token_for_text_unit: Max tokens for text unit retrieval.
-            max_token_for_global_context: Max tokens for global context.
-            max_token_for_local_context: Max tokens for local context.
             hl_keywords: High-level keywords for query enhancement.
             ll_keywords: Low-level keywords for query enhancement.
             stream: Enable streaming response.
-            history_turns: Number of conversation turns to include.
+            chunk_top_k: Number of chunks to retrieve.
+            max_entity_tokens: Max tokens for entity retrieval.
+            max_relation_tokens: Max tokens for relation retrieval.
+            max_total_tokens: Max total tokens for the response.
+            conversation_history: List of conversation history turns.
+            user_prompt: User prompt for the query.
+            enable_rerank: Enable reranking of results.
+            include_references: Include references in the response.
+            include_chunk_content: Include chunk content in the response.
 
         Returns:
-            QueryDataResponse with entities and relations.
+            QueryDataResponse with status, message, and data.
         """
         request = QueryDataRequest(
             query=query,
@@ -340,16 +370,21 @@ class AsyncLightRAGClient:
             only_need_prompt=only_need_prompt,
             response_type=response_type,
             top_k=top_k,
-            max_token_for_text_unit=max_token_for_text_unit,
-            max_token_for_global_context=max_token_for_global_context,
-            max_token_for_local_context=max_token_for_local_context,
             hl_keywords=hl_keywords,
             ll_keywords=ll_keywords,
             stream=stream,
-            history_turns=history_turns,
+            chunk_top_k=chunk_top_k,
+            max_entity_tokens=max_entity_tokens,
+            max_relation_tokens=max_relation_tokens,
+            max_total_tokens=max_total_tokens,
+            conversation_history=conversation_history,
+            user_prompt=user_prompt,
+            enable_rerank=enable_rerank,
+            include_references=include_references,
+            include_chunk_content=include_chunk_content,
         )
         data = await self._request("POST", QUERY_DATA, json=request.to_api_dict())
-        return QueryDataResponse(**data.get("data", data))  # unwrap the "data" wrapper
+        return QueryDataResponse(**data)
 
     # -------------------------------------------------------------------------
     # Graph Operations
@@ -357,20 +392,20 @@ class AsyncLightRAGClient:
 
     async def search_labels(
         self,
-        label: str,
-        max_results: int = 10,
+        q: str,
+        limit: int = 50,
     ) -> LabelSearchResponse:
         """Search for labels in the knowledge graph.
 
         Args:
-            label: The label to search for.
-            max_results: Maximum number of results to return.
+            q: The label query to search for.
+            limit: Maximum number of results to return.
 
         Returns:
             LabelSearchResponse with matching labels.
         """
-        request = LabelSearchRequest(label=label, max_results=max_results)
-        data = await self._request("POST", SEARCH_LABELS, json=request.to_api_dict())
+        params = {"q": q, "limit": limit}
+        data = await self._request("GET", SEARCH_LABELS, params=params)
         return LabelSearchResponse(**data)
 
     async def get_graph(
@@ -417,11 +452,17 @@ class AsyncLightRAGClient:
         Returns:
             API response as dictionary.
         """
-        request = CreateEntityRequest(
+        entity_data: dict[str, Any] = {}
+        if description:
+            entity_data["description"] = description
+        if entity_type:
+            entity_data["entity_type"] = entity_type
+        if metadata:
+            entity_data.update(metadata)
+
+        request = EntityCreateRequest(
             entity_name=entity_name,
-            description=description,
-            entity_type=entity_type,
-            metadata=metadata,
+            entity_data=entity_data,
         )
         return await self._request("POST", CREATE_ENTITY, json=request.to_api_dict())
 
@@ -431,6 +472,8 @@ class AsyncLightRAGClient:
         description: str | None = None,
         entity_type: str | None = None,
         metadata: dict | None = None,
+        allow_rename: bool = False,
+        allow_merge: bool = False,
     ) -> dict[str, Any]:
         """Update an existing entity.
 
@@ -439,44 +482,45 @@ class AsyncLightRAGClient:
             description: New description for the entity.
             entity_type: New type for the entity.
             metadata: New metadata for the entity.
+            allow_rename: Allow renaming the entity.
+            allow_merge: Allow merging with existing entity.
 
         Returns:
             API response as dictionary.
         """
-        request = UpdateEntityRequest(
+        updated_data: dict[str, Any] = {}
+        if description is not None:
+            updated_data["description"] = description
+        if entity_type is not None:
+            updated_data["entity_type"] = entity_type
+        if metadata is not None:
+            updated_data.update(metadata)
+
+        request = EntityUpdateRequest(
             entity_name=entity_name,
-            description=description,
-            entity_type=entity_type,
-            metadata=metadata,
+            updated_data=updated_data,
+            allow_rename=allow_rename,
+            allow_merge=allow_merge,
         )
         return await self._request("POST", UPDATE_ENTITY, json=request.to_api_dict())
 
     async def merge_entities(
         self,
-        source_entities: list[str],
-        target_entity: str,
-        description: str | None = None,
-        entity_type: str | None = None,
-        metadata: dict | None = None,
+        entities_to_change: list[str],
+        entity_to_change_into: str,
     ) -> dict[str, Any]:
         """Merge multiple entities into one.
 
         Args:
-            source_entities: List of entity names to merge from.
-            target_entity: Name of the target entity to merge into.
-            description: Optional new description for the merged entity.
-            entity_type: Optional new type for the merged entity.
-            metadata: Optional new metadata for the merged entity.
+            entities_to_change: List of entity names to merge from.
+            entity_to_change_into: Name of the target entity to merge into.
 
         Returns:
             API response as dictionary.
         """
-        request = MergeEntitiesRequest(
-            source_entities=source_entities,
-            target_entity=target_entity,
-            description=description,
-            entity_type=entity_type,
-            metadata=metadata,
+        request = EntityMergeRequest(
+            entities_to_change=entities_to_change,
+            entity_to_change_into=entity_to_change_into,
         )
         return await self._request("POST", MERGE_ENTITIES, json=request.to_api_dict())
 
@@ -490,7 +534,7 @@ class AsyncLightRAGClient:
             API response as dictionary.
         """
         request = DeleteEntityRequest(entity_name=entity_name)
-        return await self._request("POST", DELETE_ENTITY, json=request.to_api_dict())
+        return await self._request("DELETE", DELETE_ENTITY, json=request.to_api_dict())
 
     # -------------------------------------------------------------------------
     # Relation Operations
@@ -518,28 +562,72 @@ class AsyncLightRAGClient:
         Returns:
             API response as dictionary.
         """
-        request = CreateRelationRequest(
+        relation_data: dict[str, Any] = {}
+        if description:
+            relation_data["description"] = description
+        if relation_type:
+            relation_data["relation_type"] = relation_type
+        if metadata:
+            relation_data.update(metadata)
+        if weight is not None:
+            relation_data["weight"] = weight
+
+        request = RelationCreateRequest(
             source_entity=source_entity,
             target_entity=target_entity,
-            description=description,
-            relation_type=relation_type,
-            metadata=metadata,
-            weight=weight,
+            relation_data=relation_data,
         )
         return await self._request("POST", CREATE_RELATION, json=request.to_api_dict())
+
+    async def update_relation(
+        self,
+        source_id: str,
+        target_id: str,
+        description: str | None = None,
+        relation_type: str | None = None,
+        metadata: dict | None = None,
+        weight: float | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing relation.
+
+        Args:
+            source_id: ID of the source entity.
+            target_id: ID of the target entity.
+            description: New description for the relation.
+            relation_type: New type for the relation.
+            metadata: New metadata for the relation.
+            weight: New weight for the relation.
+
+        Returns:
+            API response as dictionary.
+        """
+        updated_data: dict[str, Any] = {}
+        if description is not None:
+            updated_data["description"] = description
+        if relation_type is not None:
+            updated_data["relation_type"] = relation_type
+        if metadata is not None:
+            updated_data.update(metadata)
+        if weight is not None:
+            updated_data["weight"] = weight
+
+        request = RelationUpdateRequest(
+            source_id=source_id,
+            target_id=target_id,
+            updated_data=updated_data,
+        )
+        return await self._request("POST", "/graph/relation/edit", json=request.to_api_dict())
 
     async def delete_relation(
         self,
         source_entity: str,
         target_entity: str,
-        relation_type: str | None = None,
     ) -> dict[str, Any]:
         """Delete a relation between entities.
 
         Args:
             source_entity: Name of the source entity.
             target_entity: Name of the target entity.
-            relation_type: Type of relation to delete (optional).
 
         Returns:
             API response as dictionary.
@@ -547,46 +635,70 @@ class AsyncLightRAGClient:
         request = DeleteRelationRequest(
             source_entity=source_entity,
             target_entity=target_entity,
-            relation_type=relation_type,
         )
-        return await self._request("POST", DELETE_RELATION, json=request.to_api_dict())
+        return await self._request("DELETE", DELETE_RELATION, json=request.to_api_dict())
 
     # -------------------------------------------------------------------------
     # Document Operations
     # -------------------------------------------------------------------------
 
-    async def delete_docs(self, doc_ids: list[str]) -> dict[str, Any]:
+    async def delete_docs(
+        self,
+        doc_ids: list[str],
+        delete_file: bool = False,
+        delete_llm_cache: bool = False,
+    ) -> dict[str, Any]:
         """Delete documents by IDs.
 
         Args:
             doc_ids: List of document IDs to delete.
+            delete_file: Whether to delete the source file.
+            delete_llm_cache: Whether to delete LLM cache entries.
 
         Returns:
             API response as dictionary.
         """
-        request = DeleteDocsRequest(doc_ids=doc_ids)
-        return await self._request("POST", DELETE_DOCS, json=request.to_api_dict())
+        request = DeleteDocsRequest(
+            doc_ids=doc_ids,
+            delete_file=delete_file,
+            delete_llm_cache=delete_llm_cache,
+        )
+        return await self._request("DELETE", DELETE_DOCS, json=request.to_api_dict())
 
     async def list_docs(
         self,
         page: int = 1,
         page_size: int = 50,
-        status: str | None = None,
+        status_filter: str | None = None,
+        status_filters: list[str] | None = None,
+        sort_field: str = "updated_at",
+        sort_direction: str = "desc",
     ) -> ListDocsResponse:
         """List documents with pagination.
 
         Args:
             page: Page number (1-indexed).
             page_size: Number of documents per page.
-            status: Optional filter by document status.
+            status_filter: Filter by single status.
+            status_filters: Filter by multiple statuses.
+            sort_field: Field to sort by.
+            sort_direction: Sort direction (asc/desc).
 
         Returns:
             ListDocsResponse with paginated documents.
         """
-        params: dict[str, Any] = {"page": page, "page_size": page_size}
-        if status is not None:
-            params["status"] = status
-        data = await self._request("GET", LIST_DOCS, params=params)
+        body: dict[str, Any] = {
+            "page": page,
+            "page_size": page_size,
+            "sort_field": sort_field,
+            "sort_direction": sort_direction,
+        }
+        if status_filter is not None:
+            body["status_filter"] = status_filter
+        if status_filters is not None:
+            body["status_filters"] = status_filters
+
+        data = await self._request("POST", LIST_DOCS, json=body)
         return ListDocsResponse(**data)
 
     # -------------------------------------------------------------------------
@@ -600,7 +712,7 @@ class AsyncLightRAGClient:
             track_id: The tracking ID for the operation.
 
         Returns:
-            TrackStatusResponse with current status.
+            TrackStatusResponse with documents, total_count, and status_summary.
         """
         path = TRACK_STATUS.format(track_id=track_id)
         data = await self._request("GET", path)
