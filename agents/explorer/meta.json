@@ -7,6 +7,6 @@
   "version": "2.0.0",
   "llm_model": "quick",
   "tools": {
-    "allow": ["rag_insert_text", "rag_insert_texts", "rag_query_data", "rag_search_labels", "rag_get_graph", "rag_create_entity", "rag_create_relation", "rag_update_entity", "rag_merge_entities", "rag_delete_entity", "rag_delete_relation", "rag_delete_docs", "rag_list_docs", "rag_track_status", "filesystem", "help", "time"]
+    "allow": ["rag", "filesystem", "help", "time"]
   }
 }
