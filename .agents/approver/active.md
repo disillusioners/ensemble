@@ -1,5 +1,5 @@
-Current Plan: RAG Knowledge Toolset
-Tracking File: rag-knowledge-toolset-tracking.md
-Iteration: 002
+Current Plan: Explorer/Experiencer RAG Upgrade
+Tracking File: explorer-experiencer-rag-upgrade-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-04-25 20:05
+Last Updated: 2026-04-26 14:30

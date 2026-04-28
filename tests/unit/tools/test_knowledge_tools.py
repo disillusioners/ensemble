@@ -5,12 +5,18 @@ factory function, including RAG configuration checks, agent invocation,
 and fire-and-forget patterns.
 """
 
+import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daemon.tools.knowledge_tools import create_knowledge_tools
+from daemon.tools.knowledge_tools import (
+    _enqueue_experiencer_job,
+    _generate_idempotency_key,
+    _parse_should_update_kb,
+    create_knowledge_tools,
+)
 
 
 # =============================================================================
@@ -320,3 +326,212 @@ class TestExperienceTool:
         mock_manager.spawn_instance.assert_called_once()
         call_kwargs = mock_manager.spawn_instance.call_args.kwargs
         assert call_kwargs["agent_id"] == "experiencer"
+
+
+# =============================================================================
+# Parse Should Update KB Tests
+# =============================================================================
+
+
+class TestParseShouldUpdateKb:
+    """Tests for _parse_should_update_kb() flag parsing function."""
+
+    def test_parse_should_update_kb_true(self):
+        """## Should Update KB: true returns True."""
+        response = "Some response\n## Should Update KB: true\nMore text"
+        assert _parse_should_update_kb(response) is True
+
+    def test_parse_should_update_kb_false(self):
+        """## Should Update KB: false returns False."""
+        response = "Some response\n## Should Update KB: false\nMore text"
+        assert _parse_should_update_kb(response) is False
+
+    def test_parse_should_update_kb_missing(self):
+        """No flag in response returns False (default)."""
+        response = "## Answer\nSome text\n## Confidence: HIGH"
+        assert _parse_should_update_kb(response) is False
+
+    def test_parse_should_update_kb_case_insensitive(self):
+        """Flag parsing is case-insensitive."""
+        assert _parse_should_update_kb("## should update kb: TRUE") is True
+        assert _parse_should_update_kb("## Should Update KB: True") is True
+        assert _parse_should_update_kb("## SHOULD UPDATE KB: TRUE") is True
+
+    def test_parse_should_update_kb_malformed(self):
+        """Malformed flag values return False."""
+        response = "## Should Update KB: maybe"
+        assert _parse_should_update_kb(response) is False
+
+
+# =============================================================================
+# Idempotency Key Tests
+# =============================================================================
+
+
+class TestGenerateIdempotencyKey:
+    """Tests for _generate_idempotency_key() function."""
+
+    def test_idempotency_key_deterministic(self):
+        """Same inputs produce the same key."""
+        key1 = _generate_idempotency_key("What is the project?", "proj-123")
+        key2 = _generate_idempotency_key("What is the project?", "proj-123")
+        assert key1 == key2
+
+    def test_idempotency_key_different_queries(self):
+        """Different queries produce different keys."""
+        key1 = _generate_idempotency_key("What is the project?", "proj-123")
+        key2 = _generate_idempotency_key("What is the architecture?", "proj-123")
+        assert key1 != key2
+
+    def test_idempotency_key_different_projects(self):
+        """Different projects produce different keys."""
+        key1 = _generate_idempotency_key("What is the project?", "proj-123")
+        key2 = _generate_idempotency_key("What is the project?", "proj-456")
+        assert key1 != key2
+
+
+# =============================================================================
+# Explore Job Enqueue Integration Tests
+# =============================================================================
+
+
+@pytest.fixture
+def mock_manager_with_job_queue(configured_env, mock_manager):
+    """Create a mock manager with job queue service for explore tests."""
+    # Set up instance metadata
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+    mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+    # Set up job queue service
+    mock_queue = MagicMock()
+    mock_queue.queue_id = "system-parallel-queue-123"
+    mock_queue_repo = MagicMock()
+    mock_queue_repo.get_by_name = MagicMock(return_value=mock_queue)
+
+    mock_job_service = MagicMock()
+    mock_job_service._queue_repo = mock_queue_repo
+    mock_job_service.enqueue = AsyncMock(return_value=MagicMock(job_id="job-123"))
+
+    mock_manager._job_queue_service = mock_job_service
+
+    return mock_manager
+
+
+class TestExploreJobEnqueue:
+    """Tests for explore() tool job enqueue behavior."""
+
+    @pytest.mark.asyncio
+    async def test_explore_strips_flag_from_response(self, configured_env, mock_manager_with_job_queue):
+        """Response with flag is stripped before returning to caller."""
+        explorer_response = (
+            "## Answer\nFound important information.\n\n"
+            "## Should Update KB: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            result = await explore_tool.ainvoke({"query": "What is X?"})
+
+            # Flag should be stripped from result
+            assert "Should Update KB:" not in result
+            assert "Found important information" in result
+
+    @pytest.mark.asyncio
+    async def test_explore_enqueues_job_when_flag_true(self, configured_env, mock_manager_with_job_queue):
+        """should_update_kb: true + project_id causes job to be enqueued."""
+        explorer_response = (
+            "## Answer\nFound info from files.\n\n"
+            "## Should Update KB: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is the architecture?"})
+
+            # Allow fire-and-forget task to complete
+            await asyncio.sleep(0.1)
+
+            # Verify job was enqueued
+            mock_manager_with_job_queue._job_queue_service.enqueue.assert_called_once()
+            call_kwargs = mock_manager_with_job_queue._job_queue_service.enqueue.call_args.kwargs
+            assert call_kwargs["agent_id"] == "experiencer"
+            assert "What is the architecture?" in call_kwargs["message"]
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_job_when_flag_false(self, configured_env, mock_manager_with_job_queue):
+        """should_update_kb: false means no job is enqueued."""
+        explorer_response = (
+            "## Answer\nNo new knowledge found.\n\n"
+            "## Should Update KB: false"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is X?"})
+
+            await asyncio.sleep(0.1)
+
+            # No job should have been enqueued
+            mock_manager_with_job_queue._job_queue_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_job_when_no_project_id(self, configured_env, mock_manager_with_job_queue):
+        """Flag true but no project_id means no job is enqueued."""
+        # Override instance metadata to return no project (empty dict)
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {}
+        mock_manager_with_job_queue._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        explorer_response = (
+            "## Answer\nNew knowledge discovered.\n\n"
+            "## Should Update KB: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is X?"})
+
+            await asyncio.sleep(0.1)
+
+            # Job should NOT be enqueued because project_id is None
+            mock_manager_with_job_queue._job_queue_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_job_enqueue_failure_is_silent(self, configured_env, mock_manager_with_job_queue):
+        """Job service raises exception - explore() still returns normally."""
+        explorer_response = (
+            "## Answer\nNew knowledge found.\n\n"
+            "## Should Update KB: true"
+        )
+
+        # Make enqueue raise an exception
+        mock_manager_with_job_queue._job_queue_service.enqueue = AsyncMock(
+            side_effect=Exception("Database error")
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            # This should not raise - failure should be silent
+            result = await explore_tool.ainvoke({"query": "What is X?"})
+
+            # Result should still be returned normally
+            assert result is not None
+            assert "New knowledge found" in result
