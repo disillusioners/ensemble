@@ -51,10 +51,12 @@ def mock_manager():
     """Create a mock InstanceManager with configured return values."""
     manager = MagicMock()
 
-    # Configure get_instance to return mock instance with metadata
-    mock_instance = MagicMock()
-    mock_instance.instance_metadata = {"project_id": "test-project-123"}
-    manager.get_instance = MagicMock(return_value=mock_instance)
+    # Configure _instance_repository.get to return mock instance with metadata
+    # (NOT get_instance which returns CompiledStateGraph)
+    mock_instance_meta = MagicMock()
+    mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+    manager._instance_repository = MagicMock()
+    manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
     # Configure spawn_instance to return a predictable ID
     manager.spawn_instance = MagicMock(return_value="spawned-instance-abc123")
@@ -103,7 +105,9 @@ class TestExploreTool:
     @pytest.mark.asyncio
     async def test_explore_success(self, configured_env, mock_manager):
         """Verify explore returns result from explorer agent."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
@@ -131,7 +135,9 @@ class TestExploreTool:
     @pytest.mark.asyncio
     async def test_explore_timeout_returns_error(self, configured_env, mock_manager):
         """Verify graceful error when agent times out."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
@@ -146,9 +152,9 @@ class TestExploreTool:
     @pytest.mark.asyncio
     async def test_explore_auto_injects_project_id(self, configured_env, mock_manager):
         """Verify project_id from instance context is used."""
-        mock_instance = MagicMock()
-        mock_instance.instance_metadata = {"project_id": "auto-detected-project"}
-        mock_manager.get_instance = MagicMock(return_value=mock_instance)
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "auto-detected-project"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
@@ -158,12 +164,14 @@ class TestExploreTool:
             await explore_tool.ainvoke({"query": "Test"})
 
             # Verify project_id was extracted from instance
-            mock_manager.get_instance.assert_called_with("parent-instance-id")
+            mock_manager._instance_repository.get.assert_called_with("parent-instance-id")
 
     @pytest.mark.asyncio
     async def test_explore_passes_mode_in_message(self, configured_env, mock_manager):
         """Verify mode parameter is included in the message sent to explorer."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
@@ -194,7 +202,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_success(self, configured_env, mock_manager):
         """Verify experience returns confirmation after spawning."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project-123"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
@@ -223,9 +233,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_auto_injects_project_id(self, configured_env, mock_manager):
         """Verify project_id from context is used when spawning."""
-        mock_instance = MagicMock()
-        mock_instance.instance_metadata = {"project_id": "test-project-123"}
-        mock_manager.get_instance = MagicMock(return_value=mock_instance)
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
@@ -240,7 +250,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_returns_immediately(self, configured_env, mock_manager):
         """Verify return value includes instance ID prefix (fire-and-forget)."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project-123"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
@@ -257,7 +269,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_sends_correct_message(self, configured_env, mock_manager):
         """Verify the message sent to experiencer includes the knowledge text."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project-123"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
@@ -275,7 +289,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_includes_project_in_message(self, configured_env, mock_manager):
         """Verify project ID is included in the message when available."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project-123"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
@@ -292,7 +308,9 @@ class TestExperienceTool:
     @pytest.mark.asyncio
     async def test_experience_uses_experiencer_agent(self, configured_env, mock_manager):
         """Verify experiencer agent is spawned."""
-        mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={"project_id": "test-project-123"}))
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
