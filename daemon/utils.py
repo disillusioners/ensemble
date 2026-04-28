@@ -545,7 +545,7 @@ async def invoke_agent_and_wait(
         await manager.enqueue_message(
             instance_id=instance_id,
             message=message,
-            source=f"invoke_and_wait:{parent_id or 'system'}",
+            source=f"internal_invoke_and_wait:{parent_id or 'system'}",
         )
         
         # 4. Wait for completion (success or error)
