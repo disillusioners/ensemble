@@ -83,7 +83,7 @@ class TestAutoProvisionSystemQueues:
     """Tests for auto_provision_system_queues()."""
 
     @pytest.mark.asyncio
-    async def test_auto_provision_creates_both_queues(self, service, mock_queue_repo):
+    async def test_auto_provision_creates_all_system_queues(self, service, mock_queue_repo):
         """Creates FIFO, parallel, and KB FIFO system queues for project."""
         # No queue exists yet
         mock_queue_repo.get_by_name.return_value = None
@@ -262,6 +262,24 @@ class TestCreateCustomQueue:
             await service.create_queue(
                 project_id="proj-1",
                 queue_name="SYSTEM_FIFO_QUEUE",
+            )
+
+    @pytest.mark.asyncio
+    async def test_reserved_name_system_kb_fifo_queue(self, service, mock_queue_repo):
+        """Rejects queue name system_kb_fifo_queue as reserved."""
+        with pytest.raises(ValueError, match="reserved"):
+            await service.create_queue(
+                project_id="proj-1",
+                queue_name="system_kb_fifo_queue",
+            )
+
+    @pytest.mark.asyncio
+    async def test_reserved_name_case_insensitive_system_kb_fifo_queue(self, service, mock_queue_repo):
+        """Reserved name check is case-insensitive for system_kb_fifo_queue."""
+        with pytest.raises(ValueError, match="reserved"):
+            await service.create_queue(
+                project_id="proj-1",
+                queue_name="SYSTEM_KB_FIFO_QUEUE",
             )
 
     @pytest.mark.asyncio
@@ -457,6 +475,15 @@ class TestUpdateQueue:
 
         with pytest.raises(ValueError, match="reserved"):
             await service.update_queue("proj-1", "q-001", queue_name="system_fifo_queue")
+
+    @pytest.mark.asyncio
+    async def test_rename_to_reserved_system_kb_fifo_queue(self, service, mock_queue_repo):
+        """Cannot rename queue to reserved system_kb_fifo_queue."""
+        queue = make_queue(queue_id="q-001", project_id="proj-1", queue_name="custom")
+        mock_queue_repo.get.return_value = queue
+
+        with pytest.raises(ValueError, match="reserved"):
+            await service.update_queue("proj-1", "q-001", queue_name="system_kb_fifo_queue")
 
     @pytest.mark.asyncio
     async def test_update_queue_rejects_fifo_concurrency_change(self, service, mock_queue_repo):

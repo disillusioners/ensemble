@@ -125,11 +125,41 @@ def queue_repository_with_system_queues(engine):
         is_system=True,
     )
     repo.create(
+        project_id="project-1",
+        queue_name="system_parallel_queue",
+        queue_type="parallel",
+        concurrency_limit=3,
+        is_system=True,
+    )
+    repo.create(
+        project_id="project-1",
+        queue_name="system_kb_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+        description="System FIFO queue for Knowledge Base import jobs",
+    )
+    repo.create(
         project_id="project-2",
         queue_name="system_fifo_queue",
         queue_type="fifo",
         concurrency_limit=1,
         is_system=True,
+    )
+    repo.create(
+        project_id="project-2",
+        queue_name="system_parallel_queue",
+        queue_type="parallel",
+        concurrency_limit=3,
+        is_system=True,
+    )
+    repo.create(
+        project_id="project-2",
+        queue_name="system_kb_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+        description="System FIFO queue for Knowledge Base import jobs",
     )
     # Also set up for the test system project ID (used when normalize_project_id() is called with None)
     repo.create(
