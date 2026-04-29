@@ -48,7 +48,7 @@ def _parse_should_update_kb(response: str) -> bool:
 
 
 def _generate_idempotency_key(query: str, project_id: str) -> str:
-    """Generate a deterministic idempotency key for experiencer jobs."""
+    """Generate a deterministic idempotency key for kb-importer jobs."""
     content = f"explorer-kb-update:{project_id}:{query.lower().strip()}"
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
@@ -60,7 +60,7 @@ async def _enqueue_kb_update_job(
     project_id: str,
     source_instance_id: str,
 ) -> None:
-    """Fire-and-forget: create a job for the experiencer agent to update KB.
+    """Fire-and-forget: create a job for the kb-importer agent to update KB.
 
     This function is designed to never raise — all errors are logged and swallowed.
     The caller (explore tool) should not be affected by KB update failures.
@@ -190,12 +190,12 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         # Parse response for should_update_kb flag (use original result, before stripping)
         should_update_kb = _parse_should_update_kb(result)
 
-        # Fire-and-forget: create job for experiencer if knowledge update needed
-        # Pass original result so experiencer has full context including the flag heading
+        # Fire-and-forget: create job for kb-importer if knowledge update needed
+        # Pass original result so kb-importer has full context including the flag heading
         if should_update_kb:
             if not pid:
                 logger.warning(
-                    "Cannot enqueue experiencer job: project_id not available. "
+                    "Cannot enqueue kb-importer job: project_id not available. "
                     "Ensure the agent instance has a project context set."
                 )
             else:
@@ -210,10 +210,10 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 except RuntimeError as e:
                     # No running event loop - log warning but don't fail explore
                     logger.warning(
-                        "Failed to schedule experiencer job (no event loop): %s", e
+                        "Failed to schedule kb-importer job (no event loop): %s", e
                     )
                 except Exception as e:
-                    logger.warning("Failed to schedule experiencer job: %s", e)
+                    logger.warning("Failed to schedule kb-importer job: %s", e)
 
         # Strip the Need Update KB heading from the response before returning to caller
         result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
