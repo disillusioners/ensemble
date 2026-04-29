@@ -514,6 +514,146 @@ class TestGenerateIdempotencyKey:
         assert key1 != key2
 
 
+class TestGenerateExperienceIdempotencyKey:
+    """Tests for _generate_experience_idempotency_key() function."""
+
+    def test_experience_idempotency_key_deterministic(self):
+        """Same inputs produce the same key."""
+        key1 = _generate_experience_idempotency_key("Important knowledge", "proj-123")
+        key2 = _generate_experience_idempotency_key("Important knowledge", "proj-123")
+        assert key1 == key2
+
+    def test_experience_idempotency_key_different_text(self):
+        """Different text produces different keys."""
+        key1 = _generate_experience_idempotency_key("Python 3.11 is fast", "proj-123")
+        key2 = _generate_experience_idempotency_key("Rust is memory safe", "proj-123")
+        assert key1 != key2
+
+    def test_experience_idempotency_key_different_projects(self):
+        """Different projects produce different keys."""
+        key1 = _generate_experience_idempotency_key("Same text", "proj-123")
+        key2 = _generate_experience_idempotency_key("Same text", "proj-456")
+        assert key1 != key2
+
+    def test_experience_idempotency_key_long_text(self):
+        """Very long text (10000+ chars) is handled correctly."""
+        long_text = "x" * 15000
+        # Should not crash
+        key = _generate_experience_idempotency_key(long_text, "proj-123")
+        # Should produce a valid 32-character hex hash
+        assert len(key) == 32
+        assert all(c in "0123456789abcdef" for c in key)
+
+
+# =============================================================================
+# Experience Job Enqueue Integration Tests
+# =============================================================================
+
+
+class TestExperienceJobEnqueue:
+    """Tests for experience() tool job enqueue behavior."""
+
+    @pytest.mark.asyncio
+    async def test_experience_queue_fallback_to_system_fifo(
+        self, configured_env, mock_manager
+    ):
+        """When system_kb_fifo_queue doesn't exist, falls back to system_fifo_queue."""
+        # Set up instance metadata
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Set up job queue service where KB queue returns None, FIFO queue returns valid queue
+        fallback_queue = MagicMock()
+        fallback_queue.queue_id = "system-fifo-queue-456"
+
+        kb_queue_repo = MagicMock()
+        # First call returns None (KB queue doesn't exist)
+        # Second call returns fallback queue
+        kb_queue_repo.get_by_name = MagicMock(
+            side_effect=[None, fallback_queue]
+        )
+
+        job_service = MagicMock()
+        job_service._queue_repo = kb_queue_repo
+        job_service.enqueue = AsyncMock(return_value=MagicMock(job_id="job-789"))
+        mock_manager._job_queue_service = job_service
+
+        tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+        experience_tool = next(t for t in tools if t.name == "experience")
+
+        await experience_tool.ainvoke({"text": "Test knowledge text"})
+
+        await asyncio.sleep(0.1)
+
+        # Verify both queues were checked
+        assert kb_queue_repo.get_by_name.call_count == 2
+        kb_queue_repo.get_by_name.assert_any_call("test-project-123", "system_kb_fifo_queue")
+        kb_queue_repo.get_by_name.assert_any_call("test-project-123", "system_fifo_queue")
+
+        # Verify job was enqueued with fallback queue's ID
+        job_service.enqueue.assert_called_once()
+        call_kwargs = job_service.enqueue.call_args.kwargs
+        assert call_kwargs["queue_id"] == "system-fifo-queue-456"
+        assert call_kwargs["agent_id"] == "experiencer"
+
+    @pytest.mark.asyncio
+    async def test_experience_no_job_queue_service(self, configured_env, mock_manager, caplog):
+        """When _job_queue_service is None, experience() returns success without crashing."""
+        # Set up instance metadata
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Remove _job_queue_service (or set to None)
+        mock_manager._job_queue_service = None
+
+        tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+        experience_tool = next(t for t in tools if t.name == "experience")
+
+        with caplog.at_level("WARNING"):
+            result = await experience_tool.ainvoke({"text": "Test knowledge"})
+
+        # Should still return success (fire-and-forget pattern)
+        assert "Knowledge recording started" in result
+        # Warning should be logged about missing job queue service
+        assert any(
+            "JobQueueService not available" in record.message
+            for record in caplog.records
+        ), "Expected warning about missing JobQueueService"
+
+    @pytest.mark.asyncio
+    async def test_experience_no_system_queue_skips_enqueue(
+        self, configured_env, mock_manager
+    ):
+        """When neither KB queue nor FIFO queue exists, no job is enqueued."""
+        # Set up instance metadata
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Both queues return None
+        kb_queue_repo = MagicMock()
+        kb_queue_repo.get_by_name = MagicMock(return_value=None)
+
+        job_service = MagicMock()
+        job_service._queue_repo = kb_queue_repo
+        job_service.enqueue = AsyncMock(return_value=MagicMock(job_id="job-999"))
+        mock_manager._job_queue_service = job_service
+
+        tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+        experience_tool = next(t for t in tools if t.name == "experience")
+
+        await experience_tool.ainvoke({"text": "Test knowledge text"})
+
+        await asyncio.sleep(0.1)
+
+        # Verify both queues were checked
+        assert kb_queue_repo.get_by_name.call_count == 2
+        # No job should have been enqueued
+        job_service.enqueue.assert_not_called()
+
+
 # =============================================================================
 # Explore Job Enqueue Integration Tests
 # =============================================================================
