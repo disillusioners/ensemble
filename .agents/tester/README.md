@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-27 Per-Agent LLM Model Override)
+## Test Results (Latest: 2026-04-29 KB-FIFO Queue Feature)
+
+### KB-FIFO Queue Feature
+- **1,418 tests passed**, 0 failed, 27 skipped — ALL PASS (no regressions)
+- **3 test packs**: job_queue (991), core (624), api (193) — all pass
+- **New system_kb_fifo_queue** — auto-provisioning, reserved name, KB job routing, FIFO properties verified
+- **Quick fix**: Pre-existing API test modernization (commit 3326259)
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- See `.agents/tester/RESULTS/2026-04-29-kb-fifo-queue.md` for full report
+
+### KB-FIFO Queue Status: ✅ READY
 
 ### Per-Agent LLM Model Override Feature
 - **3,205 tests passed**, 0 failed, 27 skipped — ALL PASS (no regressions)
