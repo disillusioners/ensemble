@@ -71,12 +71,12 @@ async def _enqueue_kb_update_job(
             logger.warning("JobQueueService not available, skipping kb-importer job")
             return
 
-        # Resolve system_parallel_queue for this project
+        # Resolve system_kb_fifo_queue for KB import jobs
         queue = await asyncio.to_thread(
-            job_service._queue_repo.get_by_name, project_id, "system_parallel_queue"
+            job_service._queue_repo.get_by_name, project_id, "system_kb_fifo_queue"
         )
         if queue is None:
-            # Fall back to system_fifo_queue if parallel doesn't exist
+            # Fall back to system_fifo_queue if KB queue doesn't exist
             queue = await asyncio.to_thread(
                 job_service._queue_repo.get_by_name, project_id, "system_fifo_queue"
             )
@@ -86,7 +86,7 @@ async def _enqueue_kb_update_job(
                     project_id,
                 )
                 return
-            logger.debug("No parallel queue for %s, using FIFO queue", project_id)
+            logger.debug("No KB FIFO queue for %s, using system FIFO queue", project_id)
 
         # Build message for kb-importer with full context
         kb_importer_message = (

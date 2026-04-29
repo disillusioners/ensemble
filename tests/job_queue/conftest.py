@@ -108,6 +108,14 @@ def queue_repository_with_system_queues(engine):
         concurrency_limit=3,
         is_system=True,
     )
+    repo.create(
+        project_id="test-project",
+        queue_name="system_kb_fifo_queue",
+        queue_type="fifo",
+        concurrency_limit=1,
+        is_system=True,
+        description="System FIFO queue for Knowledge Base import jobs",
+    )
     # Also set up for project-1 and project-2 used in some tests
     repo.create(
         project_id="project-1",

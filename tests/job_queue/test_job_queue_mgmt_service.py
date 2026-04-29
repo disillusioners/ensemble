@@ -84,17 +84,18 @@ class TestAutoProvisionSystemQueues:
 
     @pytest.mark.asyncio
     async def test_auto_provision_creates_both_queues(self, service, mock_queue_repo):
-        """Creates FIFO and parallel system queues for project."""
-        # Neither queue exists yet
+        """Creates FIFO, parallel, and KB FIFO system queues for project."""
+        # No queue exists yet
         mock_queue_repo.get_by_name.return_value = None
         mock_queue_repo.create.side_effect = [
             make_queue(queue_id="sys-fifo", queue_name="system_fifo_queue", is_system=True),
             make_queue(queue_id="sys-para", queue_name="system_parallel_queue", is_system=True),
+            make_queue(queue_id="sys-kb-fifo", queue_name="system_kb_fifo_queue", is_system=True),
         ]
 
         result = await service.auto_provision_system_queues("proj-1")
 
-        assert len(result) == 2
+        assert len(result) == 3
         mock_queue_repo.create.assert_has_calls([
             call(
                 project_id="proj-1",
@@ -110,6 +111,14 @@ class TestAutoProvisionSystemQueues:
                 concurrency_limit=5,
                 is_system=True,
             ),
+            call(
+                project_id="proj-1",
+                queue_name="system_kb_fifo_queue",
+                queue_type="fifo",
+                concurrency_limit=1,
+                is_system=True,
+                description="System FIFO queue for Knowledge Base import jobs",
+            ),
         ])
 
     @pytest.mark.asyncio
@@ -119,6 +128,7 @@ class TestAutoProvisionSystemQueues:
         created = [
             make_queue(queue_name="system_fifo_queue", is_system=True),
             make_queue(queue_name="system_parallel_queue", is_system=True),
+            make_queue(queue_name="system_kb_fifo_queue", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -126,14 +136,16 @@ class TestAutoProvisionSystemQueues:
 
         assert result[0].queue_name == "system_fifo_queue"
         assert result[1].queue_name == "system_parallel_queue"
+        assert result[2].queue_name == "system_kb_fifo_queue"
 
     @pytest.mark.asyncio
     async def test_auto_provision_sets_queue_type(self, service, mock_queue_repo):
-        """One queue is FIFO, one is parallel."""
+        """Queues have expected types: FIFO, parallel, and KB FIFO."""
         mock_queue_repo.get_by_name.return_value = None
         created = [
             make_queue(queue_name="system_fifo_queue", queue_type="fifo", is_system=True),
             make_queue(queue_name="system_parallel_queue", queue_type="parallel", is_system=True),
+            make_queue(queue_name="system_kb_fifo_queue", queue_type="fifo", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -141,14 +153,16 @@ class TestAutoProvisionSystemQueues:
 
         assert result[0].queue_type == "fifo"
         assert result[1].queue_type == "parallel"
+        assert result[2].queue_type == "fifo"
 
     @pytest.mark.asyncio
     async def test_auto_provision_sets_system_flag(self, service, mock_queue_repo):
-        """Both created queues are marked as system."""
+        """All created queues are marked as system."""
         mock_queue_repo.get_by_name.return_value = None
         created = [
             make_queue(queue_name="system_fifo_queue", is_system=True),
             make_queue(queue_name="system_parallel_queue", is_system=True),
+            make_queue(queue_name="system_kb_fifo_queue", is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -156,18 +170,20 @@ class TestAutoProvisionSystemQueues:
 
         assert result[0].is_system is True
         assert result[1].is_system is True
+        assert result[2].is_system is True
 
     @pytest.mark.asyncio
     async def test_auto_provision_idempotent(self, service, mock_queue_repo):
         """Calling twice does not create duplicates."""
-        # Both queues already exist
+        # All queues already exist
         existing_fifo = make_queue(queue_name="system_fifo_queue", is_system=True)
         existing_para = make_queue(queue_name="system_parallel_queue", is_system=True)
-        mock_queue_repo.get_by_name.side_effect = [existing_fifo, existing_para]
+        existing_kb_fifo = make_queue(queue_name="system_kb_fifo_queue", is_system=True)
+        mock_queue_repo.get_by_name.side_effect = [existing_fifo, existing_para, existing_kb_fifo]
 
         result = await service.auto_provision_system_queues("proj-1")
 
-        assert len(result) == 2
+        assert len(result) == 3
         mock_queue_repo.create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -177,6 +193,7 @@ class TestAutoProvisionSystemQueues:
         created = [
             make_queue(queue_name="system_fifo_queue", concurrency_limit=1, is_system=True),
             make_queue(queue_name="system_parallel_queue", concurrency_limit=5, is_system=True),
+            make_queue(queue_name="system_kb_fifo_queue", concurrency_limit=1, is_system=True),
         ]
         mock_queue_repo.create.side_effect = created
 
@@ -184,6 +201,7 @@ class TestAutoProvisionSystemQueues:
 
         assert result[0].concurrency_limit == 1
         assert result[1].concurrency_limit == 5
+        assert result[2].concurrency_limit == 1
 
 
 # ---------------------------------------------------------------------------

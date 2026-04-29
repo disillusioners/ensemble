@@ -18,7 +18,7 @@ from daemon.repositories.job_queue.models import JobQueue, JobStatus
 
 
 # Reserved system queue names that cannot be created or deleted
-RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue"}
+RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue"}
 
 
 class JobQueueMgmtService:
@@ -55,9 +55,10 @@ class JobQueueMgmtService:
     async def auto_provision_system_queues(self, project_id: str) -> list[JobQueue]:
         """Create system queues for a project if they don't exist.
         
-        Creates two system queues:
+        Creates three system queues:
         - system_fifo_queue: FIFO queue with concurrency_limit=1
         - system_parallel_queue: Parallel queue with concurrency_limit=5
+        - system_kb_fifo_queue: FIFO queue for KB import jobs with concurrency_limit=1
         
         Idempotent: skips creation if queue already exists.
         
@@ -102,6 +103,24 @@ class JobQueueMgmtService:
                 is_system=True,
             )
         system_queues.append(parallel_queue)
+        
+        # Check and create system KB FIFO queue (for knowledge base import jobs)
+        kb_fifo_queue = await asyncio.to_thread(
+            self._queue_repo.get_by_name,
+            project_id,
+            "system_kb_fifo_queue",
+        )
+        if kb_fifo_queue is None:
+            kb_fifo_queue = await asyncio.to_thread(
+                self._queue_repo.create,
+                project_id=project_id,
+                queue_name="system_kb_fifo_queue",
+                queue_type="fifo",
+                concurrency_limit=1,
+                is_system=True,
+                description="System FIFO queue for Knowledge Base import jobs",
+            )
+        system_queues.append(kb_fifo_queue)
         
         return system_queues
     
