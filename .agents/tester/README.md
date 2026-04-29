@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-29 KB-FIFO Queue Feature)
+## Test Results (Latest: 2026-04-29 Experiencer Fire-and-Forget)
+
+### Experiencer Fire-and-Forget Feature
+- **47 knowledge_tools tests passed**, 0 failed — ALL PASS
+- **991 job_queue + 47 API tests** — no regressions
+- **5/5 verification points passed** — fire-and-forget, queue routing, edge cases, idempotency keys
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean feature, no issues
+- See `.agents/tester/RESULTS/2026-04-29-experiencer-kb-queue.md` for full report
+
+### Experiencer Fire-and-Forget Status: ✅ READY
 
 ### KB-FIFO Queue Feature
 - **1,418 tests passed**, 0 failed, 27 skipped — ALL PASS (no regressions)
