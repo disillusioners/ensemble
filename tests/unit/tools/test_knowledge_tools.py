@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.tools.knowledge_tools import (
-    _enqueue_experiencer_job,
+    _enqueue_experience_job,
+    _enqueue_kb_update_job,
+    _generate_experience_idempotency_key,
     _generate_idempotency_key,
     _parse_should_update_kb,
     _SHOULD_UPDATE_KB_PATTERN,
@@ -65,11 +67,23 @@ def mock_manager():
     manager._instance_repository = MagicMock()
     manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
-    # Configure spawn_instance to return a predictable ID
+    # Configure spawn_instance to return a predictable ID (legacy, for backwards compat)
     manager.spawn_instance = MagicMock(return_value="spawned-instance-abc123")
 
-    # Configure enqueue_message as async
+    # Configure enqueue_message as async (legacy, for backwards compat)
     manager.enqueue_message = AsyncMock()
+
+    # Set up job queue service for new fire-and-forget pattern
+    mock_queue = MagicMock()
+    mock_queue.queue_id = "system-kb-fifo-queue-123"
+    mock_queue_repo = MagicMock()
+    mock_queue_repo.get_by_name = MagicMock(return_value=mock_queue)
+
+    mock_job_service = MagicMock()
+    mock_job_service._queue_repo = mock_queue_repo
+    mock_job_service.enqueue = AsyncMock(return_value=MagicMock(job_id="job-456"))
+
+    manager._job_queue_service = mock_job_service
 
     return manager
 
@@ -208,7 +222,7 @@ class TestExperienceTool:
 
     @pytest.mark.asyncio
     async def test_experience_success(self, configured_env, mock_manager):
-        """Verify experience returns confirmation after spawning."""
+        """Verify experience returns confirmation after enqueuing job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
@@ -220,9 +234,12 @@ class TestExperienceTool:
             "text": "This is important knowledge to record.",
         })
 
+        # Allow fire-and-forget task to complete
+        await asyncio.sleep(0.1)
+
         assert "Knowledge recording started" in result
-        mock_manager.spawn_instance.assert_called_once()
-        mock_manager.enqueue_message.assert_called_once()
+        # Verify job was enqueued
+        mock_manager._job_queue_service.enqueue.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_experience_not_configured(self, unconfigured_env, mock_manager):
@@ -234,12 +251,12 @@ class TestExperienceTool:
 
         assert "Error" in result
         assert "not configured" in result.lower()
-        # Should not have spawned any instance
-        mock_manager.spawn_instance.assert_not_called()
+        # Should not have enqueued any job
+        mock_manager._job_queue_service.enqueue.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_experience_auto_injects_project_id(self, configured_env, mock_manager):
-        """Verify project_id from context is used when spawning."""
+        """Verify project_id from context is used when enqueuing job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
@@ -249,14 +266,17 @@ class TestExperienceTool:
 
         await experience_tool.ainvoke({"text": "Test knowledge text"})
 
-        # Verify spawn_instance was called with project_id from instance metadata
-        mock_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_manager.spawn_instance.call_args.kwargs
+        # Allow fire-and-forget task to complete
+        await asyncio.sleep(0.1)
+
+        # Verify job was enqueued with project_id from instance metadata
+        mock_manager._job_queue_service.enqueue.assert_called_once()
+        call_kwargs = mock_manager._job_queue_service.enqueue.call_args.kwargs
         assert call_kwargs["project_id"] == "test-project-123"
 
     @pytest.mark.asyncio
     async def test_experience_returns_immediately(self, configured_env, mock_manager):
-        """Verify return value includes instance ID prefix (fire-and-forget)."""
+        """Verify return value indicates recording has started (fire-and-forget)."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
@@ -268,10 +288,10 @@ class TestExperienceTool:
             "text": "Quick knowledge recording.",
         })
 
-        # Return should include truncated instance ID
-        assert "spawned-instance" in result or "..." in result
-        # The full ID is not in the result (truncated)
-        assert "spawned-instance-abc123" not in result
+        # Return should indicate recording started
+        assert "Knowledge recording started" in result
+        # Should NOT return instance ID anymore
+        assert "spawned-instance" not in result
 
     @pytest.mark.asyncio
     async def test_experience_sends_correct_message(self, configured_env, mock_manager):
@@ -287,8 +307,11 @@ class TestExperienceTool:
             "text": "The project uses Python 3.11 and FastAPI.",
         })
 
-        mock_manager.enqueue_message.assert_called_once()
-        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
+        # Allow fire-and-forget task to complete
+        await asyncio.sleep(0.1)
+
+        mock_manager._job_queue_service.enqueue.assert_called_once()
+        call_kwargs = mock_manager._job_queue_service.enqueue.call_args.kwargs
         message = call_kwargs["message"]
         assert "Python 3.11" in message
         assert "FastAPI" in message
@@ -307,14 +330,17 @@ class TestExperienceTool:
             "text": "Important finding about the project.",
         })
 
-        mock_manager.enqueue_message.assert_called_once()
-        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
+        # Allow fire-and-forget task to complete
+        await asyncio.sleep(0.1)
+
+        mock_manager._job_queue_service.enqueue.assert_called_once()
+        call_kwargs = mock_manager._job_queue_service.enqueue.call_args.kwargs
         message = call_kwargs["message"]
         assert "Project: test-project-123" in message
 
     @pytest.mark.asyncio
     async def test_experience_uses_experiencer_agent(self, configured_env, mock_manager):
-        """Verify experiencer agent is spawned."""
+        """Verify experiencer agent is targeted by the enqueued job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
@@ -324,9 +350,51 @@ class TestExperienceTool:
 
         await experience_tool.ainvoke({"text": "Test"})
 
-        mock_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_manager.spawn_instance.call_args.kwargs
+        # Allow fire-and-forget task to complete
+        await asyncio.sleep(0.1)
+
+        mock_manager._job_queue_service.enqueue.assert_called_once()
+        call_kwargs = mock_manager._job_queue_service.enqueue.call_args.kwargs
         assert call_kwargs["agent_id"] == "experiencer"
+
+    @pytest.mark.asyncio
+    async def test_experience_job_enqueue_failure_is_silent(self, configured_env, mock_manager):
+        """Job service raises exception - experience() still returns normally."""
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Make enqueue raise an exception
+        mock_manager._job_queue_service.enqueue = AsyncMock(
+            side_effect=Exception("Database error")
+        )
+
+        tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+        experience_tool = next(t for t in tools if t.name == "experience")
+
+        # This should not raise - failure should be silent
+        result = await experience_tool.ainvoke({"text": "Test knowledge"})
+
+        # Result should still be returned normally
+        assert "Knowledge recording started" in result
+
+    @pytest.mark.asyncio
+    async def test_experience_returns_error_when_no_project_id(self, configured_env, mock_manager):
+        """Error returned when project_id is not available."""
+        # Override instance metadata to return no project (empty dict)
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {}
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+        experience_tool = next(t for t in tools if t.name == "experience")
+
+        result = await experience_tool.ainvoke({"text": "Test knowledge"})
+
+        assert "Error" in result
+        assert "project_id" in result.lower()
+        # No job should be enqueued
+        mock_manager._job_queue_service.enqueue.assert_not_called()
 
 
 # =============================================================================
@@ -517,7 +585,8 @@ class TestExploreJobEnqueue:
             # Verify job was enqueued
             mock_manager_with_job_queue._job_queue_service.enqueue.assert_called_once()
             call_kwargs = mock_manager_with_job_queue._job_queue_service.enqueue.call_args.kwargs
-            assert call_kwargs["agent_id"] == "experiencer"
+            # Note: explore tool enqueues kb-importer jobs, not experiencer
+            assert call_kwargs["agent_id"] == "kb-importer"
             assert "What is the architecture?" in call_kwargs["message"]
 
     @pytest.mark.asyncio

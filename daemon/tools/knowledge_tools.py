@@ -53,6 +53,12 @@ def _generate_idempotency_key(query: str, project_id: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
+def _generate_experience_idempotency_key(text: str, project_id: str) -> str:
+    """Generate a deterministic idempotency key for experiencer jobs."""
+    content = f"experience:{project_id}:{text.lower().strip()}"
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+
 async def _enqueue_kb_update_job(
     manager: "InstanceManager",
     query: str,
@@ -118,6 +124,71 @@ async def _enqueue_kb_update_job(
     except Exception as e:
         # Fire-and-forget: don't fail the explore response if job creation fails
         logger.warning("Failed to enqueue kb-importer job: %s", e)
+
+
+async def _enqueue_experience_job(
+    manager: "InstanceManager",
+    text: str,
+    project_id: str,
+    source_instance_id: str,
+) -> None:
+    """Fire-and-forget: create a job for the experiencer agent to record knowledge.
+
+    This function is designed to never raise — all errors are logged and swallowed.
+    The caller (experience tool) should not be affected by job creation failures.
+    """
+    try:
+        job_service = getattr(manager, "_job_queue_service", None)
+        if job_service is None:
+            logger.warning("JobQueueService not available, skipping experiencer job")
+            return
+
+        # Resolve system_kb_fifo_queue for experience jobs
+        queue = await asyncio.to_thread(
+            job_service._queue_repo.get_by_name, project_id, "system_kb_fifo_queue"
+        )
+        if queue is None:
+            # Fall back to system_fifo_queue if KB queue doesn't exist
+            queue = await asyncio.to_thread(
+                job_service._queue_repo.get_by_name, project_id, "system_fifo_queue"
+            )
+            if queue is None:
+                logger.warning(
+                    "No system queue found for project %s, skipping experiencer job",
+                    project_id,
+                )
+                return
+            logger.debug("No KB FIFO queue for %s, using system FIFO queue", project_id)
+
+        # Build message for experiencer
+        experiencer_message = (
+            "Process and record the following knowledge:\n\n"
+            f"{text}\n\n"
+            f"Project: {project_id}"
+        )
+
+        # Create the job
+        await job_service.enqueue(
+            agent_id="experiencer",
+            message=experiencer_message,
+            source=f"experience:{source_instance_id}",
+            project_id=project_id,
+            priority=5,
+            queue_id=queue.queue_id,
+            idempotency_key=_generate_experience_idempotency_key(text, project_id),
+            metadata={
+                "triggered_by": "experience_tool",
+                "text_preview": text[:100],
+            },
+        )
+        logger.debug(
+            "Enqueued experiencer job for project %s on queue %s",
+            project_id, queue.queue_id,
+        )
+
+    except Exception as e:
+        # Fire-and-forget: don't fail the experience response if job creation fails
+        logger.warning("Failed to enqueue experiencer job: %s", e)
 
 
 def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
@@ -243,33 +314,23 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
 
         pid = project_id or _get_project_id()
 
-        experiencer_message = f"Process and record the following knowledge:\n\n{text}"
-        if pid:
-            experiencer_message += f"\nProject: {pid}"
+        if not pid:
+            return "Error: project_id not available. Ensure the agent instance has a project context set."
 
-        # Fire-and-forget: spawn instance and enqueue message
-        instance_id = None
+        # Fire-and-forget: enqueue job for experiencer agent
         try:
-            instance_id = manager.spawn_instance(
-                agent_id="experiencer",
-                parent_id=current_instance_id,
+            asyncio.ensure_future(_enqueue_experience_job(
+                manager=manager,
+                text=text,
                 project_id=pid,
-                instance_name=f"experience-{text[:30]}",
-                invoked_as_tool=True,
-            )
-            await manager.enqueue_message(
-                instance_id=instance_id,
-                message=experiencer_message,
-                source=f"experience:{current_instance_id}",
-            )
+                source_instance_id=current_instance_id,
+            ))
+        except RuntimeError as e:
+            # No running event loop - log warning but don't fail experience
+            logger.warning("Failed to schedule experiencer job (no event loop): %s", e)
         except Exception as e:
-            if instance_id:
-                try:
-                    manager.terminate_instance(instance_id)
-                except Exception:
-                    pass
-            return f"Error: Failed to start knowledge recording: {e}"
+            logger.warning("Failed to schedule experiencer job: %s", e)
 
-        return f"Knowledge recording started. Instance: {instance_id[:8]}..."
+        return "Knowledge recording started."
 
     return [explore, experience]
