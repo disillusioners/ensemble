@@ -177,6 +177,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_insert_text: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             if file_source is None:
                 logger.warning(
@@ -230,6 +236,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_insert_texts: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.insert_texts(
                 texts=texts,
@@ -292,6 +304,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_query: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.query(
                 query=query,
@@ -375,6 +393,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_query_data: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.query_data(
                 query=query,
@@ -512,6 +536,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_search_labels: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.search_labels(q=query, limit=max_results, workspace=workspace)
             labels = getattr(result, 'labels', []) or []
@@ -552,6 +582,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_get_graph: could not resolve workspace from instance %s project_id. "
+                "Query will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.get_graph(
                 label=label,
@@ -625,6 +661,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_create_entity: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.create_entity(
                 entity_name=name,
@@ -674,6 +716,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_create_relation: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.create_relation(
                 source_entity=source,
@@ -729,6 +777,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_update_entity: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.update_entity(
                 entity_name=name,
@@ -777,6 +831,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_merge_entities: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.merge_entities(
                 entities_to_change=source_entities,
@@ -812,6 +872,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_delete_entity: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.delete_entity(entity_name=entity_name, workspace=workspace)
             return f"Entity '{entity_name}' deleted."
@@ -846,6 +912,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_delete_relation: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.delete_relation(
                 source_entity=source,
@@ -887,6 +959,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_delete_docs: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             await client.delete_docs(
                 doc_ids=doc_ids,
@@ -936,6 +1014,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_list_docs: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.list_docs(
                 page=page,
@@ -997,6 +1081,12 @@ def create_rag_tools(
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
         workspace = _get_project_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_track_status: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
         try:
             result = await client.track_status(track_id=track_id, workspace=workspace)
 
