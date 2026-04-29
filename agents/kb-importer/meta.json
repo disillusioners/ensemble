@@ -1,0 +1,12 @@
+{
+  "id": "kb-importer",
+  "name": "KB Importer",
+  "description": "Lightweight agent that prepares and imports documents into the RAG knowledge base. Formats text, generates descriptive file sources, and uses rag_insert_text for bulk ingestion.",
+  "icon": "📥",
+  "color": "accent-green",
+  "version": "1.0.0",
+  "llm_model": "quick",
+  "tools": {
+    "allow": ["rag", "help", "time"]
+  }
+}

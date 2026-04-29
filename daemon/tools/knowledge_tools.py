@@ -53,7 +53,7 @@ def _generate_idempotency_key(query: str, project_id: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
-async def _enqueue_experiencer_job(
+async def _enqueue_kb_update_job(
     manager: "InstanceManager",
     query: str,
     explorer_response: str,
@@ -68,7 +68,7 @@ async def _enqueue_experiencer_job(
     try:
         job_service = getattr(manager, "_job_queue_service", None)
         if job_service is None:
-            logger.warning("JobQueueService not available, skipping experiencer job")
+            logger.warning("JobQueueService not available, skipping kb-importer job")
             return
 
         # Resolve system_parallel_queue for this project
@@ -82,14 +82,14 @@ async def _enqueue_experiencer_job(
             )
             if queue is None:
                 logger.warning(
-                    "No system queue found for project %s, skipping experiencer job",
+                    "No system queue found for project %s, skipping kb-importer job",
                     project_id,
                 )
                 return
             logger.debug("No parallel queue for %s, using FIFO queue", project_id)
 
-        # Build message for experiencer with full context
-        experiencer_message = (
+        # Build message for kb-importer with full context
+        kb_importer_message = (
             "Process new knowledge discovered during exploration.\n\n"
             f"Original Query: {query}\n\n"
             f"Explorer Findings:\n{explorer_response}\n\n"
@@ -98,8 +98,8 @@ async def _enqueue_experiencer_job(
 
         # Create the job
         await job_service.enqueue(
-            agent_id="experiencer",
-            message=experiencer_message,
+            agent_id="kb-importer",
+            message=kb_importer_message,
             source=f"explore:{source_instance_id}",
             project_id=project_id,
             priority=5,
@@ -111,13 +111,13 @@ async def _enqueue_experiencer_job(
             },
         )
         logger.debug(
-            "Enqueued experiencer job for project %s on queue %s",
+            "Enqueued kb-importer job for project %s on queue %s",
             project_id, queue.queue_id,
         )
 
     except Exception as e:
         # Fire-and-forget: don't fail the explore response if job creation fails
-        logger.warning("Failed to enqueue experiencer job: %s", e)
+        logger.warning("Failed to enqueue kb-importer job: %s", e)
 
 
 def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
@@ -200,7 +200,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 )
             else:
                 try:
-                    asyncio.ensure_future(_enqueue_experiencer_job(
+                    asyncio.ensure_future(_enqueue_kb_update_job(
                         manager=manager,
                         query=query,
                         explorer_response=result,  # Pass original result with heading
