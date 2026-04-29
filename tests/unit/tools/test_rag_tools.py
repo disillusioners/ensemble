@@ -94,10 +94,10 @@ def mock_client():
             message="Query completed",
             data={
                 "entities": [
-                    {"name": "Alice", "type": "PERSON", "description": "A test entity"},
+                    {"entity_name": "Alice", "entity_type": "PERSON", "description": "A test entity"},
                 ],
-                "relations": [
-                    {"source": "Alice", "target": "Bob", "type": "KNOWS", "description": "Friends"},
+                "relationships": [
+                    {"src_id": "Alice", "tgt_id": "Bob", "relation_type": "KNOWS", "description": "Friends"},
                 ],
             }
         )
@@ -306,7 +306,7 @@ class TestRAGQueryData:
 
         assert "## Entities" in result
         assert "Alice" in result
-        assert "## Relations" in result
+        assert "## Relationships" in result
         assert "Bob" in result
 
 

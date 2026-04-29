@@ -97,11 +97,11 @@ def mock_query_data_response() -> dict[str, Any]:
         "message": "Query completed successfully",
         "data": {
             "entities": [
-                {"name": "Entity1", "type": "PERSON", "description": "First entity"},
-                {"name": "Entity2", "type": "PLACE", "description": "Second entity"},
+                {"entity_name": "Entity1", "entity_type": "PERSON", "description": "First entity"},
+                {"entity_name": "Entity2", "entity_type": "PLACE", "description": "Second entity"},
             ],
             "relationships": [
-                {"source": "Entity1", "target": "Entity2", "type": "RELATED_TO"},
+                {"src_id": "Entity1", "tgt_id": "Entity2", "relation_type": "RELATED_TO"},
             ],
             "metadata": {"count": 2},
         },

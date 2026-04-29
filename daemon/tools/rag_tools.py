@@ -395,11 +395,15 @@ def create_rag_tools(
                 entities = data.get('entities', []) or []
 
             if entities:
-                output_parts.append("## Entities\n")
+                output_parts.append(f"## Entities ({len(entities)} found)\n")
                 for entity in entities:
-                    name = entity.get("name", "Unknown")
-                    entity_type = entity.get("type", "UNKNOWN")
+                    # Use entity_name and entity_type (LightRAG's actual field names)
+                    name = entity.get("entity_name", entity.get("name", "Unknown"))
+                    entity_type = entity.get("entity_type", entity.get("type", "UNKNOWN"))
                     desc = entity.get("description", "")
+                    # Keep first part before <SEP> separator (LightRAG concatenates descriptions with this)
+                    if "<SEP>" in desc:
+                        desc = desc.split("<SEP>")[0].strip()
                     output_parts.append(f"- **{name}** ({entity_type}): {desc}")
 
             # Try to extract relationships from result
@@ -409,13 +413,50 @@ def create_rag_tools(
                 relationships = data.get('relationships', data.get('relations', [])) or []
 
             if relationships:
-                output_parts.append("\n## Relationships\n")
+                output_parts.append(f"\n## Relationships ({len(relationships)} found)\n")
                 for relationship in relationships:
-                    source = relationship.get("source", "?")
-                    target = relationship.get("target", "?")
-                    rel_type = relationship.get("type", "RELATED_TO")
+                    # Use src_id and tgt_id (LightRAG's actual field names)
+                    src = relationship.get("src_id", relationship.get("source", "?"))
+                    tgt = relationship.get("tgt_id", relationship.get("target", "?"))
+                    rel_type = relationship.get("relation_type", relationship.get("type", "RELATED_TO"))
                     desc = relationship.get("description", "")
-                    output_parts.append(f"- {source} -[{rel_type}]-> {target}: {desc}")
+                    # Keep first part before <SEP>
+                    if "<SEP>" in desc:
+                        desc = desc.split("<SEP>")[0].strip()
+                    # Include keywords if present
+                    keywords = relationship.get("keywords")
+                    keywords_str = ""
+                    if keywords and isinstance(keywords, list) and len(keywords) > 0:
+                        keywords_str = f" [{', '.join(keywords)}]"
+                    output_parts.append(f"- **{src}** → **{tgt}**: {desc}{keywords_str}")
+
+            # Try to extract chunks from result
+            chunks = getattr(result, 'chunks', []) or []
+            if not chunks and hasattr(result, 'data'):
+                data = result.data or {}
+                chunks = data.get('chunks', []) or []
+
+            if chunks:
+                output_parts.append(f"\n## Source Chunks ({len(chunks)})\n")
+                for i, chunk in enumerate(chunks, 1):
+                    content = chunk.get("content", "")
+                    file_path = chunk.get("file_path", "")
+                    if file_path:
+                        output_parts.append(f"### [{i}] {file_path}\n{content}")
+                    else:
+                        output_parts.append(f"### [{i}]\n{content}")
+
+            # Try to extract references from result
+            references = getattr(result, 'references', []) or []
+            if not references and hasattr(result, 'data'):
+                data = result.data or {}
+                references = data.get('references', []) or []
+
+            if references:
+                output_parts.append("\n## References")
+                for ref in references:
+                    file_path = ref.get("file_path", "?")
+                    output_parts.append(f"- `{file_path}`")
 
             if not output_parts:
                 return "No entities or relations found for this query."
