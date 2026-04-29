@@ -165,7 +165,9 @@ def create_rag_tools(
 
         Args:
             text: The text content to insert.
-            file_source: Optional file source path. Auto-generated if not provided.
+            file_source: File source path. LLM should generate this explicitly.
+                Format: projects/<project>/docs/<category>/<filename>.md
+                If not provided, a fallback path will be auto-generated (warning logged).
             category: Content category for organization (e.g., "general", "architecture", "api", "knowledge", "experience").
 
         Returns:
@@ -176,8 +178,12 @@ def create_rag_tools(
         client = _get_rag_client()
         workspace = _get_project_workspace()
         try:
-            # Auto-generate file_source if not provided
             if file_source is None:
+                logger.warning(
+                    "rag_insert_text called with null file_source, using fallback generation. "
+                    "LLM should provide file_source explicitly. Text preview: %s...",
+                    text[:100]
+                )
                 file_source = _generate_file_source(
                     manager, current_instance_id, category, text
                 )
@@ -195,8 +201,9 @@ def create_rag_tools(
 
     Args:
         text: The text content to insert.
-        file_source: Optional file source path. Auto-generated if not provided.
+        file_source: File source path. LLM should generate this explicitly.
             Format: projects/<project>/docs/<category>/<filename>.md
+            If not provided, a fallback path will be auto-generated.
         category: Content category for organization (default: "general").
             Common categories: "general", "architecture", "api", "knowledge", "experience"
 

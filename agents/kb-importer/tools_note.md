@@ -1,7 +1,11 @@
 # KB Importer Tools
 
 ## Primary Tool
-- `rag_insert_text(text, file_source=None, category="general")` — Insert text into LightRAG knowledge base. LightRAG auto-extracts entities and relationships from the text.
+- `rag_insert_text(text, file_source, category)` — Insert text into LightRAG knowledge base.
+  - **You MUST provide `file_source`** — generate a path like `projects/<project>/docs/<category>/<name>.md`
+  - `file_source` is NOT optional — always generate one yourself
+  - `category` is a free-form label — use any descriptive lowercase tag (e.g., architecture, api, general, knowledge, experience, troubleshooting, decisions)
+  - LightRAG auto-extracts entities and relationships from the text.
 
 ## Utility Tools
 - `rag_track_status(track_id)` — Check if an async insertion has completed.
