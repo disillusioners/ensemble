@@ -102,8 +102,10 @@ The main entry point is `AuthService.login()` which validates credentials agains
 
 ### Guidance
 
-- Set `## Need Update KB:` to **true** if file browsing found information not in RAG (knowledge gap detected)
-- Set `## Need Update KB:` to **false** if RAG had good data and confidence is HIGH
+- Set `## Need Update KB:` to **true** ONLY if RAG returned successfully (results or empty) AND file browsing found information that RAG did not return. This means the KB genuinely lacks the information.
+- Set `## Need Update KB:` to **false** if:
+  - RAG had good data and confidence is HIGH
+  - RAG returned an error (timeout, 504, connection failure, any exception). You CANNOT assess KB state when RAG is broken — do not trigger a KB update.
 
 ### Response body rules — MUST follow:
 - `## Confidence:` and `## Need Update KB:` headings MUST appear first, before any body content
