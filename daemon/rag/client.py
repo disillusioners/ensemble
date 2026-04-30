@@ -198,6 +198,10 @@ class AsyncLightRAGClient:
                 status_code=e.response.status_code,
                 detail=detail,
             ) from e
+        except httpx.RemoteProtocolError as e:
+            # Server disconnected without sending a response (e.g., crashed, network issue)
+            logger.warning("LightRAG server disconnected: %s %s", method, path)
+            raise RAGConnectionError() from e
 
     async def close(self) -> None:
         """Close the HTTP client and release resources."""
