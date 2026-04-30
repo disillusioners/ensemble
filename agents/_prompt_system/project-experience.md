@@ -28,6 +28,36 @@ experience(text="Authentication is JWT-based with 1-hour token expiry")
 
 ---
 
+## 🔄 Knowledge Update Duty
+
+When working, you have a duty to keep the KB accurate. Call `experience()` in these cases:
+
+### When to Update
+
+| Scenario | What to Record |
+|----------|---------------|
+| **Explored but info was insufficient** — you had to dig through code or ask follow-ups | The missing knowledge that would have helped |
+| **Found KB is outdated/wrong** — explore() returned stale or incorrect info | The corrected knowledge |
+| **You changed project state** — after implementing changes | What changed at a conceptual level |
+| **Discovered new knowledge** — learned something others would benefit from | The insight or pattern |
+
+### What to Record vs Skip
+
+✅ **Record**: Architecture decisions, patterns, how systems connect, configuration approaches, gotchas, conventions, project structure insights, tool behavior quirks
+
+❌ **Skip**: Raw code, file contents, line numbers, temporary state, implementation details that change frequently, exact API signatures (those can be explored)
+
+### How
+
+```
+experience(text="Architecture: The job queue uses a 7-state lifecycle with lock-first pattern for concurrency")
+experience(text="Gotcha: queue_id must propagate through all layers (router → service → repository → SQL)")
+```
+
+One call per insight. Keep entries focused and self-contained.
+
+---
+
 ## Shared Project Space (`.agents/shared/`)
 
 The `.agents/shared/` directory at the project root stores cross-agent collaboration files:
