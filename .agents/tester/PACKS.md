@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 21 packs
-- Unit: 18 | Integration: 1 | Mock: 2
+- Total: 22 packs
+- Unit: 19 | Integration: 1 | Mock: 2
 
 ## Unit Test Packs
 
@@ -26,6 +26,7 @@
 | rag_client_test | tests/unit/rag/test_client.py | RAG HTTP client: config, headers, schemas, all API methods (insert/query/graph/entity/relation/docs/status), error handling, connection retry | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
 | rag_tools_test | tests/unit/tools/test_rag_tools.py | 15 RAG tools: factory pattern, graceful disable, defensive attribute access, mock client, output formatting, error handling | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
 | llm_model_override_test | tests/unit/test_llm_config_override.py | Per-agent LLM model override: _build_llm_config, registry llm_model parsing, spawn_instance integration | 2 min | 2026-04-27 | ✅ PASS (feature/agent-llm-model, 9 tests, 0 failures) |
+| title_generation_trigger_test | tests/unit/services/test_title_generation_trigger.py | Title generation trigger: 3 completion paths, non-blocking, idempotency, edge cases, fire-and-forget | 2 min | 2026-05-01 | ✅ PASS (13 tests, 0 failures, fix/instance-list-title) |
 
 ## Integration Test Packs
 

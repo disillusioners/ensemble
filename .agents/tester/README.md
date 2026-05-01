@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-04-29 Experiencer Fire-and-Forget)
+## Test Results (Latest: 2026-05-01 Instance Title Generation Trigger)
+
+### Instance Title Generation Trigger Fix (branch fix/instance-list-title)
+- **117 existing tests passed** — no regressions (2 pre-existing failures in knowledge_tools async mocking, unrelated)
+- **13 new tests** — ALL PASS (trigger method, 3 completion paths, non-blocking, idempotency, edge cases, fire-and-forget)
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean fix, no issues
+- See `.agents/tester/RESULTS/2026-05-01-title-generation-trigger.md` for full report
+
+### Title Generation Trigger Status: ✅ READY
 
 ### Experiencer Fire-and-Forget Feature
 - **47 knowledge_tools tests passed**, 0 failed — ALL PASS
