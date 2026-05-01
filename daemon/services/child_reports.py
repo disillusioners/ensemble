@@ -16,6 +16,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..registry import get_registry
+from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -66,6 +67,33 @@ class ChildReportsService:
     def _checkpointer(self) -> "CheckpointSaver | None":
         """Access checkpointer through manager for test mockability."""
         return self._manager._checkpointer
+
+    def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
+        """Trigger title generation for an instance after message completion.
+        
+        This is fire-and-forget - runs asynchronously without blocking the caller.
+        Title generation checks if title already exists before generating.
+        
+        Args:
+            instance_id: The instance ID that completed.
+            completed_message_id: The message ID that completed (to get user content).
+        """
+        # Get the original user message content for title generation
+        message = self._manager._queue_repository.get(completed_message_id)
+        if message is None:
+            logger.warning(
+                f"Cannot trigger title generation for {instance_id[:8]}...: "
+                f"message {completed_message_id[:8]}... not found"
+            )
+            return
+        
+        message_content = message.content or ""
+        
+        # Use MainLoopBridge for fire-and-forget async execution
+        MainLoopBridge.run_async_no_wait(
+            self._manager._generate_and_broadcast_title(instance_id, message_content)
+        )
+        logger.debug(f"Title generation triggered for instance {instance_id[:8]}...")
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
         """Get formatted prefix for instance completion reports.
@@ -567,6 +595,9 @@ Provide a concise summary:"""
                         error=None,
                         parent_id=None,
                     )
+                
+                # Trigger title generation (fire-and-forget)
+                self._trigger_title_generation(instance_id, completed_message_id)
                 return
             
             # Idempotency checks
@@ -606,6 +637,9 @@ Provide a concise summary:"""
                         )
                     except Exception as e:
                         logger.warning(f"Failed to publish lifecycle event: {e}")
+
+                # Trigger title generation (fire-and-forget)
+                self._trigger_title_generation(instance_id, completed_message_id)
 
                 return
 
@@ -667,3 +701,6 @@ Provide a concise summary:"""
                     )
             except Exception as e:
                 logger.warning(f"Failed to publish lifecycle event for completed parent {completed_parent_id[:8]}...: {e}")
+
+        # Trigger title generation for child instance (fire-and-forget)
+        self._trigger_title_generation(instance_id, completed_message_id)
