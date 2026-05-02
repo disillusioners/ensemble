@@ -34,6 +34,30 @@ def _get_rag_client() -> AsyncLightRAGClient:
     return _rag_client
 
 
+def _get_project_workspace(manager: Any, current_instance_id: str) -> str | None:
+    """Extract project name from instance metadata to use as RAG workspace.
+
+    Args:
+        manager: The InstanceManager instance.
+        current_instance_id: The current instance ID.
+
+    Returns:
+        Project name if found and non-empty, project_id as fallback, None otherwise.
+    """
+    try:
+        instance = manager._instance_repository.get(current_instance_id)
+        if instance and instance.instance_metadata:
+            project_id = instance.instance_metadata.get("project_id")
+            if project_id:
+                project = manager._project_repository.get(project_id)
+                if project and project.name:
+                    return project.name
+                return project_id
+    except Exception:
+        pass
+    return None
+
+
 def _slugify(text: str, max_length: int = 50) -> str:
     """Convert text to a URL-safe slug.
 
@@ -73,7 +97,7 @@ def _generate_simple_filename(text: str) -> str:
         return f"doc-{short_hash}"
 
 
-def _get_project_name_from_instance(manager: TYPE_CHECKING.ANY, instance_id: str) -> str | None:
+def _get_project_name_from_instance(manager: Any, instance_id: str) -> str | None:
     """Get project name from instance metadata.
 
     Args:
@@ -97,7 +121,7 @@ def _get_project_name_from_instance(manager: TYPE_CHECKING.ANY, instance_id: str
 
 
 def _generate_file_source(
-    manager: TYPE_CHECKING.ANY,
+    manager: Any,
     instance_id: str,
     category: str,
     text: str,
@@ -131,7 +155,7 @@ def _generate_file_source(
 
 
 def create_rag_tools(
-    manager: TYPE_CHECKING.ANY,  # InstanceManager, avoid circular import
+    manager: Any,  # InstanceManager, avoid circular import
     current_instance_id: str,
 ) -> list:
     """Create all RAG tools with proper error handling.
@@ -144,15 +168,9 @@ def create_rag_tools(
         List of RAG tool functions.
     """
 
-    def _get_project_workspace() -> str | None:
-        """Extract project_id from instance metadata to use as RAG workspace."""
-        try:
-            instance = manager._instance_repository.get(current_instance_id)
-            if instance and instance.instance_metadata:
-                return instance.instance_metadata.get("project_id")
-        except Exception:
-            pass
-        return None
+    def _get_workspace() -> str | None:
+        """Extract project name from instance metadata to use as RAG workspace."""
+        return _get_project_workspace(manager, current_instance_id)
 
     @register_tool_category("rag")
     @tool
@@ -176,7 +194,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_insert_text: could not resolve workspace from instance %s project_id. "
@@ -235,7 +253,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_insert_texts: could not resolve workspace from instance %s project_id. "
@@ -303,7 +321,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_query: could not resolve workspace from instance %s project_id. "
@@ -392,7 +410,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_query_data: could not resolve workspace from instance %s project_id. "
@@ -535,7 +553,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_search_labels: could not resolve workspace from instance %s project_id. "
@@ -581,7 +599,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_get_graph: could not resolve workspace from instance %s project_id. "
@@ -660,7 +678,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_create_entity: could not resolve workspace from instance %s project_id. "
@@ -715,7 +733,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_create_relation: could not resolve workspace from instance %s project_id. "
@@ -776,7 +794,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_update_entity: could not resolve workspace from instance %s project_id. "
@@ -830,7 +848,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_merge_entities: could not resolve workspace from instance %s project_id. "
@@ -871,7 +889,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_delete_entity: could not resolve workspace from instance %s project_id. "
@@ -911,7 +929,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_delete_relation: could not resolve workspace from instance %s project_id. "
@@ -958,7 +976,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_delete_docs: could not resolve workspace from instance %s project_id. "
@@ -1013,7 +1031,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_list_docs: could not resolve workspace from instance %s project_id. "
@@ -1080,7 +1098,7 @@ def create_rag_tools(
         if not is_rag_enabled():
             return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
         client = _get_rag_client()
-        workspace = _get_project_workspace()
+        workspace = _get_workspace()
         if workspace is None:
             logger.warning(
                 "rag_track_status: could not resolve workspace from instance %s project_id. "

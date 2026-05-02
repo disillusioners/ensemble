@@ -3,11 +3,12 @@
 Tests workspace sanitization, per-request headers, and project workspace extraction.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from daemon.rag.client import _sanitize_workspace
+from daemon.tools.rag_tools import _get_project_workspace
 
 
 # =============================================================================
@@ -97,6 +98,8 @@ class TestClientWorkspaceHeader:
             headers=client._build_headers(),
         )
 
+        from unittest.mock import patch
+
         with patch.object(httpx.AsyncClient, 'request', mock_request):
             await client.query("test query", workspace="test-project")
 
@@ -130,6 +133,8 @@ class TestClientWorkspaceHeader:
             timeout=httpx.Timeout(configured_config.timeout),
             headers=client._build_headers(),
         )
+
+        from unittest.mock import patch
 
         with patch.object(httpx.AsyncClient, 'request', mock_request):
             await client.query("test query", workspace=None)
@@ -169,6 +174,8 @@ class TestClientWorkspaceHeader:
             headers=client._build_headers(),
         )
 
+        from unittest.mock import patch
+
         with patch.object(httpx.AsyncClient, 'request', mock_request):
             # UUID with hyphens
             await client.insert_text("test", workspace="550e8400-e29b-41d4-a716-446655440000")
@@ -207,6 +214,8 @@ class TestClientWorkspaceHeader:
             headers=client._build_headers(),
         )
 
+        from unittest.mock import patch
+
         with patch.object(httpx.AsyncClient, 'request', mock_request):
             # Default workspace from config (no override) - uses client defaults
             await client.query("test query")
@@ -243,6 +252,8 @@ class TestClientWorkspaceHeader:
             headers=client._build_headers(),
         )
 
+        from unittest.mock import patch
+
         with patch.object(httpx.AsyncClient, 'request', mock_request):
             await client.query("test query", workspace="test-project")
             # API key from default headers should be preserved
@@ -263,19 +274,19 @@ class TestClientWorkspaceHeader:
 class TestGetProjectWorkspace:
     """Tests for _get_project_workspace function extraction logic."""
 
-    def test_get_project_workspace_returns_project_id(self):
-        """_get_project_workspace returns project_id from instance metadata."""
+    def test_get_project_workspace_returns_project_name(self):
+        """_get_project_workspace returns project name when project_id is in instance metadata."""
         mock_instance = MagicMock()
-        mock_instance.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance.instance_metadata = {"project_id": "proj-uuid-123"}
+        mock_project = MagicMock()
+        mock_project.name = "my-test-project"
 
         mock_manager = MagicMock()
         mock_manager._instance_repository.get.return_value = mock_instance
+        mock_manager._project_repository.get.return_value = mock_project
 
-        # Direct test of the extraction logic
-        instance = mock_manager._instance_repository.get("instance-abc")
-        assert instance is mock_instance
-        result = instance.instance_metadata.get("project_id")
-        assert result == "test-project-123"
+        result = _get_project_workspace(mock_manager, "instance-abc")
+        assert result == "my-test-project"
 
     def test_get_project_workspace_returns_none_when_no_metadata(self):
         """_get_project_workspace returns None when instance has no metadata."""
@@ -285,10 +296,7 @@ class TestGetProjectWorkspace:
         mock_manager = MagicMock()
         mock_manager._instance_repository.get.return_value = mock_instance
 
-        # Direct test of the extraction logic
-        instance = mock_manager._instance_repository.get("instance-abc")
-        assert instance is mock_instance
-        result = instance.instance_metadata.get("project_id") if instance.instance_metadata else None
+        result = _get_project_workspace(mock_manager, "instance-abc")
         assert result is None
 
     def test_get_project_workspace_returns_none_when_instance_not_found(self):
@@ -296,9 +304,8 @@ class TestGetProjectWorkspace:
         mock_manager = MagicMock()
         mock_manager._instance_repository.get.return_value = None
 
-        # Direct test of the extraction logic
-        instance = mock_manager._instance_repository.get("nonexistent-instance")
-        assert instance is None
+        result = _get_project_workspace(mock_manager, "nonexistent-instance")
+        assert result is None
 
     def test_get_project_workspace_returns_none_when_no_project_id(self):
         """_get_project_workspace returns None when metadata has no project_id."""
@@ -308,11 +315,36 @@ class TestGetProjectWorkspace:
         mock_manager = MagicMock()
         mock_manager._instance_repository.get.return_value = mock_instance
 
-        # Direct test of the extraction logic
-        instance = mock_manager._instance_repository.get("instance-abc")
-        assert instance is mock_instance
-        result = instance.instance_metadata.get("project_id")
+        result = _get_project_workspace(mock_manager, "instance-abc")
         assert result is None
+
+    def test_get_project_workspace_falls_back_to_project_id_when_name_empty(self):
+        """_get_project_workspace returns project_id when project.name is empty or None."""
+        mock_instance = MagicMock()
+        mock_instance.instance_metadata = {"project_id": "proj-uuid-123"}
+        mock_project = MagicMock()
+        mock_project.name = ""  # Empty name
+
+        mock_manager = MagicMock()
+        mock_manager._instance_repository.get.return_value = mock_instance
+        mock_manager._project_repository.get.return_value = mock_project
+
+        result = _get_project_workspace(mock_manager, "instance-abc")
+        assert result == "proj-uuid-123"
+
+    def test_get_project_workspace_falls_back_to_project_id_when_name_none(self):
+        """_get_project_workspace returns project_id when project.name is None."""
+        mock_instance = MagicMock()
+        mock_instance.instance_metadata = {"project_id": "proj-uuid-456"}
+        mock_project = MagicMock()
+        mock_project.name = None  # None name
+
+        mock_manager = MagicMock()
+        mock_manager._instance_repository.get.return_value = mock_instance
+        mock_manager._project_repository.get.return_value = mock_project
+
+        result = _get_project_workspace(mock_manager, "instance-abc")
+        assert result == "proj-uuid-456"
 
 
 # =============================================================================
@@ -353,100 +385,133 @@ class TestWorkspaceScopingIntegration:
         assert result is None
 
     def test_rag_tools_extract_workspace_from_instance(self):
-        """RAG tools correctly extract project_id as workspace from instance metadata."""
-        # Simulate the _get_project_workspace logic from rag_tools.py
-        def simulate_get_project_workspace(manager, current_instance_id):
-            try:
-                instance = manager._instance_repository.get(current_instance_id)
-                if instance and instance.instance_metadata:
-                    return instance.instance_metadata.get("project_id")
-            except Exception:
-                pass
-            return None
-
-        # Test case 1: With project_id
+        """RAG tools correctly extract project name as workspace from instance metadata."""
+        # Test case 1: With project_id that resolves to project name
         mock_instance = MagicMock()
-        mock_instance.instance_metadata = {"project_id": "workspace-from-instance"}
+        mock_instance.instance_metadata = {"project_id": "proj-uuid-123"}
+        mock_project = MagicMock()
+        mock_project.name = "my-test-project"
         mock_manager = MagicMock()
         mock_manager._instance_repository.get.return_value = mock_instance
+        mock_manager._project_repository.get.return_value = mock_project
 
-        result = simulate_get_project_workspace(mock_manager, "instance-abc")
-        assert result == "workspace-from-instance"
+        result = _get_project_workspace(mock_manager, "instance-abc")
+        assert result == "my-test-project"
 
         # Test case 2: Without project_id
         mock_instance.instance_metadata = {}
-        result = simulate_get_project_workspace(mock_manager, "instance-abc")
+        mock_manager._project_repository.get.return_value = None
+        result = _get_project_workspace(mock_manager, "instance-abc")
         assert result is None
 
         # Test case 3: Instance not found
         mock_manager._instance_repository.get.return_value = None
-        result = simulate_get_project_workspace(mock_manager, "nonexistent")
+        result = _get_project_workspace(mock_manager, "nonexistent")
         assert result is None
 
+        # Test case 4: Project not found
+        mock_instance.instance_metadata = {"project_id": "nonexistent-proj"}
+        mock_manager._instance_repository.get.return_value = mock_instance
+        mock_manager._project_repository.get.return_value = None
+        result = _get_project_workspace(mock_manager, "instance-abc")
+        assert result == "nonexistent-proj"  # Falls back to project_id
+
     def test_complete_workspace_flow(self):
-        """Test the complete flow: instance -> project_id -> workspace -> sanitization."""
+        """Test the complete flow: instance -> project_id -> project_name -> workspace -> sanitization."""
         # Simulates: knowledge tool spawns instance with project_id
-        #           -> RAG tool extracts project_id as workspace
+        #           -> RAG tool looks up project and extracts project_name as workspace
         #           -> Client sanitizes workspace for HTTP header
 
         project_id = "my-project-uuid"
+        project_name = "my-test-project"
 
         # Step 1: Simulate knowledge tool spawning with project_id
         # (This is verified by checking the invoke_agent_and_wait/spawn_instance calls)
         spawn_args = {"project_id": project_id}
         assert spawn_args["project_id"] == project_id
 
-        # Step 2: Simulate RAG tool extracting workspace
-        def get_project_workspace(instance_metadata):
-            if instance_metadata:
-                return instance_metadata.get("project_id")
+        # Step 2: Simulate RAG tool extracting workspace (project name, not project_id)
+        def get_project_workspace(manager, current_instance_id):
+            if manager and current_instance_id:
+                proj_id = manager._instance_repository.get(current_instance_id)
+                if proj_id and proj_id.instance_metadata:
+                    project = manager._project_repository.get(proj_id.instance_metadata.get("project_id"))
+                    if project and project.name:
+                        return project.name
+                    return proj_id.instance_metadata.get("project_id")
             return None
 
-        workspace = get_project_workspace({"project_id": project_id})
-        assert workspace == project_id
+        mock_project = MagicMock()
+        mock_project.name = project_name
+        mock_project_repo = MagicMock()
+        mock_project_repo.get.return_value = mock_project
+
+        mock_instance = MagicMock()
+        mock_instance.instance_metadata = {"project_id": project_id}
+        mock_instance_repo = MagicMock()
+        mock_instance_repo.get.return_value = mock_instance
+
+        mock_manager = MagicMock()
+        mock_manager._instance_repository = mock_instance_repo
+        mock_manager._project_repository = mock_project_repo
+
+        workspace = _get_project_workspace(mock_manager, "test-instance")
+        assert workspace == project_name
 
         # Step 3: Verify sanitization works
         sanitized = _sanitize_workspace(workspace)
-        assert sanitized == "my_project_uuid"
+        assert sanitized == "my_test_project"
 
         # Final result: workspace is properly sanitized for HTTP header
-        assert sanitized == _sanitize_workspace("my-project-uuid")
+        assert sanitized == _sanitize_workspace("my-test-project")
 
 
 def test_get_project_workspace_direct():
     """Directly test _get_project_workspace extraction logic with all edge cases."""
-
-    # Simulate _get_project_workspace logic
-    def get_project_workspace(manager, instance_id):
-        try:
-            instance = manager._instance_repository.get(instance_id)
-            if instance and instance.instance_metadata:
-                return instance.instance_metadata.get("project_id")
-        except Exception:
-            pass
-        return None
-
-    # Case 1: Instance with project_id
+    # Case 1: Instance with project_id that resolves to project name
     mock_instance = MagicMock()
-    mock_instance.instance_metadata = {"project_id": "proj-123"}
+    mock_instance.instance_metadata = {"project_id": "proj-uuid-123"}
+    mock_project = MagicMock()
+    mock_project.name = "resolved-project-name"
     mock_manager = MagicMock()
     mock_manager._instance_repository.get.return_value = mock_instance
+    mock_manager._project_repository.get.return_value = mock_project
 
-    result = get_project_workspace(mock_manager, "test-instance")
-    assert result == "proj-123"
+    result = _get_project_workspace(mock_manager, "test-instance")
+    assert result == "resolved-project-name"
 
     # Case 2: Instance without project_id
     mock_instance.instance_metadata = {}
-    result = get_project_workspace(mock_manager, "test-instance")
+    result = _get_project_workspace(mock_manager, "test-instance")
     assert result is None
 
     # Case 3: Instance not found
     mock_manager._instance_repository.get.return_value = None
-    result = get_project_workspace(mock_manager, "nonexistent")
+    result = _get_project_workspace(mock_manager, "nonexistent")
     assert result is None
 
     # Case 4: Instance with None metadata
     mock_instance.instance_metadata = None
     mock_manager._instance_repository.get.return_value = mock_instance
-    result = get_project_workspace(mock_manager, "test-instance")
+    result = _get_project_workspace(mock_manager, "test-instance")
     assert result is None
+
+    # Case 5: Project not found (project_id exists but project lookup fails)
+    mock_instance.instance_metadata = {"project_id": "orphan-proj"}
+    mock_manager._instance_repository.get.return_value = mock_instance
+    mock_manager._project_repository.get.return_value = None
+    result = _get_project_workspace(mock_manager, "test-instance")
+    assert result == "orphan-proj"  # Falls back to project_id
+
+    # Case 6: Project with empty name
+    mock_instance.instance_metadata = {"project_id": "proj-empty-name"}
+    mock_project.name = ""
+    mock_manager._project_repository.get.return_value = mock_project
+    result = _get_project_workspace(mock_manager, "test-instance")
+    assert result == "proj-empty-name"  # Falls back to project_id
+
+    # Case 7: Project with None name
+    mock_instance.instance_metadata = {"project_id": "proj-none-name"}
+    mock_project.name = None
+    result = _get_project_workspace(mock_manager, "test-instance")
+    assert result == "proj-none-name"  # Falls back to project_id
