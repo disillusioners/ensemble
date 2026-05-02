@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-01 Instance Title Generation Trigger)
+## Test Results (Latest: 2026-05-02 LightRAG Workspace Scoping)
+
+### LightRAG Workspace Scoping (refactor: use project name for LIGHTRAG-WORKSPACE)
+- **117 RAG tests passed** (workspace scoping 24 + rag_tools 23 + rag_client 42 + completion_registry 28)
+- **24 new tests** — ALL PASS (sanitize_workspace, get_project_workspace, edge cases, integration)
+- **0 regressions** in existing RAG tests
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean refactor, no issues
+- See `.agents/tester/RESULTS/2026-05-02-rag-workspace-scoping.md` for full report
+
+### LightRAG Workspace Scoping Status: ✅ READY
 
 ### Instance Title Generation Trigger Fix (branch fix/instance-list-title)
 - **117 existing tests passed** — no regressions (2 pre-existing failures in knowledge_tools async mocking, unrelated)
