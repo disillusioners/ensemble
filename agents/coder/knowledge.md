@@ -75,3 +75,20 @@ When spawning opencode sessions, identify project type:
 | Backend | Node.js, Python, Go, API routes | Standard tools only |
 | Full-stack | Both frontend and backend | agent-browser for frontend parts |
 | CLI/Headless | No UI, command-line | Standard tools only |
+
+---
+
+## When to Use explore()
+
+**Priority Rule:** explore() > opencode_skill for gathering context. explore() is faster (RAG query) and returns structured knowledge. Only fall back to opencode_skill exploration when explore() doesn't cover what you need.
+
+**Use explore() when:**
+- Before spawning opencode for a new task — explore for relevant architecture/patterns first
+- When opencode reports unexpected behavior — explore for known gotchas
+
+**Skip explore() when:**
+- Already have sufficient context from current session
+- Results return low-confidence or empty (sparse KB) — proceed to opencode directly
+
+**After gaining useful knowledge:**
+- Use experience() to record learnings for future sessions

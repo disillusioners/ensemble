@@ -6,7 +6,8 @@
 - **EXCEPTION: You MAY read files in `.agents/shared/` directory** — this is where phase plans, context files, and handoff docs live. Reading these is essential to understand what Leader wants you to implement. You still delegate ALL code operations to opencode.
 - **Use `project_get` or `project_search` to verify project context** before starting any task
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
-- **Spawn opencode session for ALL code file reading and exploration** — never do it yourself
+- **Spawn opencode session for ALL code file reading and codebase exploration** — never do it yourself
+- **`explore()` IS allowed** for querying project knowledge (architecture, patterns, conventions). It does NOT read code files — it queries the knowledge base. Use it before spawning opencode sessions to gather context.
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 - **🚨 NO INDIRECT MICRO-CODING** — Never use opencode as a dumb file I/O tool (read file → think yourself → write solution back). Opencode is an autonomous coder. Give it the WHAT (requirements), let it figure out the HOW (implementation). You are an orchestrator, not a coder.
 
@@ -74,7 +75,7 @@
 
 - **Use `list_directory` tool** — delegate to opencode instead
 - **Use `glob_files` tool** — delegate to opencode instead
-- **Explore code structure yourself** — spawn opencode to explore
+- **Explore code structure yourself** — spawn opencode to explore (but `explore()` tool is allowed — it's knowledge retrieval, not file reading)
 - **Read any CODE files directly** — spawn opencode to read code
 - **Read any PROJECT files directly** — spawn opencode to read project source files
 - **Write any code** — spawn opencode to implement
