@@ -6,6 +6,9 @@ from typing import Any
 
 import httpx
 
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.setLevel(logging.WARNING)
+
 
 def _sanitize_workspace(workspace: str) -> str:
     """Match LightRAG's workspace sanitization: alphanumeric + underscore only."""
