@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-04 RAG Tools 5 Bug Fixes)
+## Test Results (Latest: 2026-05-05 Reasoning Content Fallback Bug Fixes)
+
+### Reasoning Content Fallback Bug Fixes (branch fix/reasoning-content-bugs)
+- **21 reasoning tests passed** (8 roundtrip + 6 edge cases + 7 fallback) — ALL PASS
+- **7 new tests** covering all 4 bug fixes: fallback chain, empty string preservation, streaming reasoning key, logging safety
+- **0 regressions** in existing tests
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean implementation
+- See `.agents/tester/RESULTS/2026-05-05-reasoning-content-fallback.md` for full report
+
+### Reasoning Content Fallback Bug Fixes Status: ✅ READY
 
 ### RAG Tools 5 Bug Fixes (branch fix/rag-tools-5-bugs)
 - **93 RAG tests passed** (43 client + 25 workspace scoping + 25 tools) — ALL PASS
