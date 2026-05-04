@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-02 LightRAG Workspace Scoping)
+## Test Results (Latest: 2026-05-04 Reasoning Content Passback Fix)
+
+### Reasoning Content Passback Fix
+- **14 reasoning tests passed** (8 roundtrip + 6 edge cases) — ALL PASS
+- **520+ full unit tests passed**, 1 pre-existing failure (unrelated: jober watch)
+- **0 regressions** in existing tests
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **Known gap documented**: `additional_kwargs["reasoning"]` alternate key not injected (low risk)
+- **0 quick fixes needed** — Clean fix, no issues
+- See `.agents/tester/RESULTS/2026-05-04-reasoning-content-passback.md` for full report
+
+### Reasoning Content Passback Status: ✅ READY
 
 ### LightRAG Workspace Scoping (refactor: use project name for LIGHTRAG-WORKSPACE)
 - **117 RAG tests passed** (workspace scoping 24 + rag_tools 23 + rag_client 42 + completion_registry 28)

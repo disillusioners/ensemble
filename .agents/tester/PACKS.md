@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 23 packs
-- Unit: 20 | Integration: 1 | Mock: 2
+- Total: 24 packs
+- Unit: 21 | Integration: 1 | Mock: 2
 
 ## Unit Test Packs
 
@@ -28,6 +28,8 @@
 | rag_workspace_scoping_test | tests/unit/rag/test_workspace_scoping.py | LightRAG workspace scoping: project name resolution, _sanitize_workspace, fallback to project_id, edge cases | 2 min | 2026-05-02 | ✅ PASS (24 tests, NEW — refactor: use project name for LIGHTRAG-WORKSPACE) |
 | llm_model_override_test | tests/unit/test_llm_config_override.py | Per-agent LLM model override: _build_llm_config, registry llm_model parsing, spawn_instance integration | 2 min | 2026-04-27 | ✅ PASS (feature/agent-llm-model, 9 tests, 0 failures) |
 | title_generation_trigger_test | tests/unit/services/test_title_generation_trigger.py | Title generation trigger: 3 completion paths, non-blocking, idempotency, edge cases, fire-and-forget | 2 min | 2026-05-01 | ✅ PASS (13 tests, 0 failures, fix/instance-list-title) |
+| reasoning_content_roundtrip_test | tests/unit/test_reasoning_content_roundtrip.py | reasoning_content passback: _get_request_payload preserves reasoning in AIMessages, empty strings, mixed types, tool messages | 2 min | 2026-05-04 | ✅ PASS (8 tests, 0 failures) |
+| reasoning_content_edge_cases_test | tests/unit/test_reasoning_content_edge_cases.py | reasoning_content edge cases: SystemMessage, multi-turn, human-only, reasoning alternate key gap | 2 min | 2026-05-04 | ✅ PASS (6 tests, 0 failures, NEW) |
 
 ## Integration Test Packs
 
