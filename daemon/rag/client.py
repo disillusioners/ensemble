@@ -21,6 +21,7 @@ from .endpoints import (
     DELETE_DOCS,
     DELETE_ENTITY,
     DELETE_RELATION,
+    GET_ENTITY,
     GET_GRAPH,
     INSERT_TEXT,
     INSERT_TEXTS,
@@ -509,6 +510,23 @@ class AsyncLightRAGClient:
             entity_data=entity_data,
         )
         return await self._request("POST", CREATE_ENTITY, json=request.to_api_dict(), workspace=workspace)
+
+    async def get_entity(
+        self,
+        entity_name: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        """Get an entity from the knowledge graph by name.
+
+        Args:
+            entity_name: Name of the entity to retrieve.
+            workspace: Optional workspace override.
+
+        Returns:
+            API response as dictionary with entity details.
+        """
+        params = {"name": entity_name}
+        return await self._request("GET", GET_ENTITY, params=params, workspace=workspace)
 
     async def update_entity(
         self,

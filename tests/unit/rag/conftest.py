@@ -224,7 +224,7 @@ def mock_transport(mock_insert_response, mock_query_response, mock_query_data_re
         "/graph/entity/edit": {"status": "updated"},
         "/graph/entities/merge": {"status": "merged"},
         "/graph/relation/create": {"status": "created"},
-        "/documents/delete_entity": {"status": "deleted"},
+        "/graph/entity/delete": {"status": "deleted"},
         "/documents/delete_relation": {"status": "deleted"},
         "/documents/delete_document": {"status": "deleted"},
         "/documents/paginated": mock_list_docs_response,

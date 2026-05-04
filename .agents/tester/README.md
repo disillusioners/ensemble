@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-04 RAG Search Workspace Mismatch Fix)
+## Test Results (Latest: 2026-05-04 RAG Tools 5 Bug Fixes)
+
+### RAG Tools 5 Bug Fixes (branch fix/rag-tools-5-bugs)
+- **93 RAG tests passed** (43 client + 25 workspace scoping + 25 tools) — ALL PASS
+- **5/5 bugs validated**: updated_name forwarding, rag_get_entity tool, docs fixes, delete endpoint
+- **1000+ full suite tests passed** (3 pre-existing failures unrelated to RAG)
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **1 quick fix applied** — added rag_get_entity unit tests + fixed tool count 15→16 (commit 98ce3cb)
+- See `.agents/tester/RESULTS/2026-05-04-rag-tools-5-bug-fixes.md` for full report
+
+### RAG Tools 5 Bug Fixes Status: ✅ READY
 
 ### RAG Search Workspace Mismatch Fix
 - **68 RAG tests passed** (43 client + 25 workspace scoping) — ALL PASS, includes 2 new header behavior tests

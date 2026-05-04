@@ -711,6 +711,67 @@ def create_rag_tools(
 
     @register_tool_category("rag")
     @tool
+    async def rag_get_entity(name: str) -> str:
+        """Get an entity from the RAG knowledge graph by name.
+
+        Args:
+            name: Name of the entity to retrieve.
+
+        Returns:
+            Formatted entity details including type, description, and properties.
+        """
+        if not is_rag_enabled():
+            return "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable."
+        client = _get_rag_client()
+        workspace = _get_workspace()
+        if workspace is None:
+            logger.warning(
+                "rag_get_entity: could not resolve workspace from instance %s project_id. "
+                "Operation will use default workspace.",
+                current_instance_id,
+            )
+        try:
+            result = await client.get_entity(entity_name=name, workspace=workspace)
+
+            output_parts: list[str] = []
+
+            # Extract entity details from result
+            entity_name = result.get("entity_name", result.get("name", name))
+            entity_type = result.get("entity_type", "UNKNOWN")
+            description = result.get("description", "")
+
+            output_parts.append(f"## Entity: {entity_name}")
+            output_parts.append(f"**Type:** {entity_type}")
+
+            if description:
+                # Keep first part before <SEP> separator
+                if "<SEP>" in description:
+                    description = description.split("<SEP>")[0].strip()
+                output_parts.append(f"\n**Description:**\n{description}")
+
+            # Include any additional properties
+            properties = {k: v for k, v in result.items()
+                          if k not in ("entity_name", "name", "entity_type", "type", "description")}
+            if properties:
+                output_parts.append("\n**Properties:**")
+                for key, value in properties.items():
+                    output_parts.append(f"- {key}: {value}")
+
+            return "\n".join(output_parts)
+        except RAGError as e:
+            return f"RAG error: {e}"
+
+    rag_get_entity._full_doc_ = """Get an entity from the RAG knowledge graph by name.
+
+    Args:
+        name: Name of the entity to retrieve.
+
+    Returns:
+        Formatted entity details including type, description, and properties.
+    """
+
+    @register_tool_category("rag")
+    @tool
     async def rag_create_relation(
         source: str,
         target: str,
@@ -802,11 +863,14 @@ def create_rag_tools(
                 current_instance_id,
             )
         try:
+            metadata = properties.copy() if properties else {}
+            if updated_name is not None:
+                metadata["name"] = updated_name
             await client.update_entity(
                 entity_name=name,
                 description=description,
                 entity_type=entity_type,
-                metadata=properties,
+                metadata=metadata if metadata else None,
                 allow_rename=allow_rename,
                 allow_merge=allow_merge,
                 workspace=workspace,
@@ -1141,6 +1205,7 @@ def create_rag_tools(
         rag_search_labels,
         rag_get_graph,
         rag_create_entity,
+        rag_get_entity,
         rag_create_relation,
         rag_update_entity,
         rag_merge_entities,

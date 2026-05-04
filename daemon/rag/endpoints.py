@@ -14,9 +14,10 @@ GET_GRAPH = "/graphs"
 
 # Entity operations
 CREATE_ENTITY = "/graph/entity/create"
+GET_ENTITY = "/graph/entity"
 UPDATE_ENTITY = "/graph/entity/edit"
 MERGE_ENTITIES = "/graph/entities/merge"
-DELETE_ENTITY = "/documents/delete_entity"
+DELETE_ENTITY = "/graph/entity/delete"
 
 # Relation operations
 CREATE_RELATION = "/graph/relation/create"

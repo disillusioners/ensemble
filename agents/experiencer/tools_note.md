@@ -16,16 +16,13 @@
 **Usage:**
 ```raw
 rag_insert_text(
-    content="The full text to insert...",
-    metadata={
-        "source": "email",  # optional source type
-        "date": "2024-01-15",  # optional date
-        "type": "meeting_notes"  # optional classification
-    }
+    text="The full text to insert...",
+    file_source="projects/my-project/docs/general/doc-name.md",  # Required for tracking
+    category="general"  # Content category: general, architecture, api, knowledge, experience
 )
 ```
 
-**Returns:** Document insertion confirmation
+**Returns:** Success message with track ID for tracking async operations.
 
 ---
 
@@ -43,19 +40,19 @@ rag_insert_text(
 **Usage:**
 ```raw
 rag_create_entity(
-    label="InstanceManager",  # The entity name (required)
-    type="Module",  # Entity type (required)
+    name="InstanceManager",  # The entity name (required)
+    entity_type="Module",  # Entity type (default: "UNKNOWN")
     description="Orchestrates agent instance lifecycle including creation, monitoring, and cleanup",  # What it is
-    metadata={  # Optional additional data
+    properties={  # Optional additional data
         "file": "daemon/manager.py",
         "language": "python"
     }
 )
 ```
 
-**Returns:** `{"entity_id": "abc123", ...}`
+**Returns:** Success message confirming entity creation
 
-**Important:** Record the returned `entity_id` for relationship creation.
+**Note:** In LightRAG, entity names ARE the identifiers. There are no separate `entity_id` values — entity names serve as node IDs. Use `rag_search_labels` to check if an entity exists before creating one.
 
 ---
 
@@ -72,8 +69,8 @@ rag_create_entity(
 **Usage:**
 ```raw
 rag_create_relation(
-    source_id="entity_id_1",  # Source entity ID
-    target_id="entity_id_2",  # Target entity ID
+    source="EntityName1",  # Source entity name
+    target="EntityName2",  # Target entity name
     relation_type="DEPENDS_ON",  # Relationship type
     description="InstanceManager uses InstanceModel for data persistence"  # Context
 )
@@ -97,24 +94,29 @@ rag_create_relation(
 
 ### rag_search_labels
 
-**Purpose:** Search for existing entities by label/name to avoid duplicates.
+**Purpose:** Search for existing entity names (labels) to avoid duplicates.
 
 **Best for:**
 - Checking if an entity already exists before creating
-- Finding existing entity IDs for relationship creation
+- Finding entity names for relationship creation
 - Identifying potential duplicates
 
 **Usage:**
 ```raw
 rag_search_labels(
     query="InstanceManager",  # Search query
-    type="Module"  # Optional: filter by entity type
+    max_results=10  # Maximum results to return (default: 10)
 )
 ```
 
-**Returns:** List of matching entities with their IDs
+**Returns:** A formatted list of matching entity name strings, e.g.:
+```
+Matching labels:
+- InstanceManager
+- InstanceModel
+```
 
-**Important:** Use this BEFORE creating entities to prevent duplicates.
+**Important:** In LightRAG, entity names ARE the identifiers — there are no separate `entity_id` values. The entity name is both its label and its unique node ID. Use this BEFORE creating entities to prevent duplicates.
 
 ---
 
@@ -130,7 +132,7 @@ rag_search_labels(
 **Usage:**
 ```raw
 rag_get_entity(
-    entity_id="abc123"  # The entity ID to look up
+    name="EntityName"  # The entity name to look up
 )
 ```
 
@@ -184,18 +186,18 @@ time()
 1. Analyze text → identify entities
 2. For each entity:
    a. rag_search_labels(query=[entity_name])
-   b. If found → use existing entity_id
-   c. If not found → rag_create_entity(...)
-3. Collect all entity_ids for next step
+   b. If found → entity name already exists, use it directly
+   c. If not found → rag_create_entity(name=[entity_name], ...)
+3. Use entity names for relationship creation
 ```
 
 ### Relationship Creation Pattern
 ```raw
-1. Have source_entity_id and target_entity_id
+1. Have source_entity_name and target_entity_name (entity names are the identifiers)
 2. Identify relationship_type based on context
 3. rag_create_relation(
-       source_id=source_entity_id,
-       target_id=target_entity_id,
+       source=source_entity_name,
+       target=target_entity_name,
        relation_type=relationship_type,
        description="Context about this relationship"
    )
@@ -203,7 +205,7 @@ time()
 
 ### Full Extraction Pattern
 ```raw
-1. rag_insert_text(content=[long_text], metadata={...})
+1. rag_insert_text(text=[long_text], file_source=[path], category=[type])
 2. Analyze → extract entities → create entities
 3. Identify relations → create relations
 4. Report summary
@@ -217,45 +219,44 @@ time()
 
 ```raw
 # WRONG - creates duplicates
-rag_create_entity(label="UserService", ...)
-rag_create_entity(label="UserService", ...)  # Duplicate!
+rag_create_entity(name="UserService", entity_type="Module", ...)
+rag_create_entity(name="UserService", entity_type="Module", ...)  # Duplicate!
 
 # RIGHT - check first
 results = rag_search_labels(query="UserService")
-if results:
-    user_service_id = results[0]["entity_id"]  # Use existing
+if "UserService" in results:  # Name already exists
+    # Use existing entity directly
 else:
-    result = rag_create_entity(label="UserService", ...)
-    user_service_id = result["entity_id"]  # Create new
+    rag_create_entity(name="UserService", entity_type="Module", ...)
 ```
 
-### Record Entity IDs for Relationships
+### Entity Names ARE Identifiers
 
-When you create entities, **always record the returned entity_id**.
-
-You need the ID to create relationships between entities.
+In LightRAG, entity names ARE the identifiers. There are no separate `entity_id` values.
 
 ```raw
-result = rag_create_entity(label="API", ...)
-api_id = result["entity_id"]  # Save this!
+# Entity name = node ID = label (all the same thing)
+result = rag_create_entity(name="API", entity_type="Module", ...)
+# Success: "Entity 'API' created."
 
-result = rag_create_entity(label="AuthModule", ...)
-auth_id = result["entity_id"]  # Save this!
+result = rag_create_entity(name="AuthModule", entity_type="Module", ...)
+# Success: "Entity 'AuthModule' created."
 
-rag_create_relation(source_id=api_id, target_id=auth_id, ...)
+# Use entity names directly in relationships
+rag_create_relation(source="API", target="AuthModule", relation_type="USES", ...)
 ```
 
 ### Error Tolerant Batch Processing
 
 ```raw
 # Process all entities, handle failures gracefully
-entity_ids = []
+entity_names = []
 for entity in entities:
     try:
-        result = rag_create_entity(...)
-        entity_ids.append(result["entity_id"])
+        result = rag_create_entity(name=entity["name"], entity_type=entity.get("type", "UNKNOWN"), ...)
+        entity_names.append(entity["name"])
     except Exception as e:
-        log(f"Failed to create {entity['label']}: {e}")
+        log(f"Failed to create {entity['name']}: {e}")
         continue  # Don't stop, continue with others
 ```
 
@@ -279,25 +280,21 @@ Only use `RELATES_TO` when no more specific type fits.
 
 ```raw
 # Structured: explicit facts with named entities
-rag_create_entity(label="JWT", type="Protocol", description="...")
-rag_create_relation(source_id=api_id, target_id=jwt_id, relation_type="USES", ...)
+rag_create_entity(name="JWT", entity_type="Protocol", description="...")
+rag_create_relation(source="API", target="JWT", relation_type="USES", ...)
 
 # Document: narrative without clear entity boundaries
-rag_insert_text(content="During the meeting, we discussed...", metadata={...})
+rag_insert_text(text="During the meeting, we discussed...", category="general")
 ```
 
 ### Metadata for Context
 
-Add useful metadata to help with future retrieval:
+Add useful metadata via properties to help with future retrieval:
 
 ```raw
 rag_insert_text(
-    content="Architecture decision record...",
-    metadata={
-        "source": "adr-001",
-        "type": "decision",
-        "project": "ensemble",
-        "date": "2024-01-15"
-    }
+    text="Architecture decision record...",
+    file_source="projects/ensemble/docs/decisions/adr-001.md",
+    category="knowledge"
 )
 ```
