@@ -57,13 +57,13 @@ class ThinkingChatOpenAI(ChatOpenAI):
                 if hasattr(gen_message, 'additional_kwargs'):
                     # Check for reasoning_content in various places
                     reasoning = gen_message.additional_kwargs.get('reasoning_content')
-                    if not reasoning:
+                    if reasoning is not None:
                         reasoning = gen_message.additional_kwargs.get('reasoning')
-                    if not reasoning and hasattr(gen_message, 'response_metadata'):
+                    if reasoning is not None and hasattr(gen_message, 'response_metadata'):
                         meta = gen_message.response_metadata or {}
                         reasoning = meta.get('reasoning_content') or meta.get('reasoning')
                     
-                    if reasoning and hasattr(gen_message, 'additional_kwargs'):
+                    if reasoning is not None and hasattr(gen_message, 'additional_kwargs'):
                         gen_message.additional_kwargs['reasoning_content'] = reasoning
                         logger.debug(f"[LLM] Extracted reasoning: {reasoning[:100] if reasoning else 'none'}...")
                         
@@ -130,12 +130,14 @@ class ThinkingChatOpenAI(ChatOpenAI):
         """
         # Extract reasoning_content before parent processes the delta
         reasoning_content = _dict.get("reasoning_content")
+        if reasoning_content is None:
+            reasoning_content = _dict.get("reasoning")
 
         # Call module-level function (ChatOpenAI doesn't override it)
         result = _base_convert_delta_to_message_chunk(_dict, default_class)
 
         # If we found reasoning_content and the result is an AIMessageChunk, store it
-        if reasoning_content and isinstance(result, AIMessageChunk):
+        if reasoning_content is not None and isinstance(result, AIMessageChunk):
             result.additional_kwargs["reasoning_content"] = reasoning_content
             logger.debug(f"[LLM] Stream extracted reasoning_content: {reasoning_content[:50]}...")
 
