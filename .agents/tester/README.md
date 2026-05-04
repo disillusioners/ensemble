@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-04 Reasoning Content Passback Fix)
+## Test Results (Latest: 2026-05-04 RAG Search Workspace Mismatch Fix)
+
+### RAG Search Workspace Mismatch Fix
+- **68 RAG tests passed** (43 client + 25 workspace scoping) — ALL PASS, includes 2 new header behavior tests
+- **9 integration checks passed** — workspace defaults, header behavior, request overrides
+- **4 edge case checks passed** — whitespace-only, tabs, leading/trailing spaces
+- **3306/3308 full suite tests passed** (2 pre-existing failures in test_invoked_as_tool.py, unrelated)
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **1 quick fix applied** — strip whitespace from workspace param in _request() (commit fe1e826)
+- See `.agents/tester/RESULTS/2026-05-04-rag-workspace-mismatch-fix.md` for full report
+
+### RAG Search Workspace Mismatch Status: ✅ READY
 
 ### Reasoning Content Passback Fix
 - **14 reasoning tests passed** (8 roundtrip + 6 edge cases) — ALL PASS
