@@ -5,10 +5,11 @@ from langchain_openai.chat_models.base import (
     BaseChatOpenAI,
     _convert_delta_to_message_chunk as _base_convert_delta_to_message_chunk,
 )
-from langchain_core.messages import AIMessageChunk, BaseMessage, BaseMessageChunk, HumanMessage, SystemMessage
-from langchain_core.messages.ai import UsageMetadata
-from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from langchain_core.language_models import LanguageModelInput
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
+from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
 from typing import Any, Mapping, cast
 import asyncio
 import logging
@@ -69,6 +70,47 @@ class ThinkingChatOpenAI(ChatOpenAI):
             logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
         
         return result
+
+    def _get_request_payload(
+        self,
+        input_: LanguageModelInput,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        """Override to preserve reasoning_content in assistant message dicts.
+        
+        Providers like DeepSeek require reasoning_content as a top-level field
+        in assistant messages when tool calls are involved, for multi-turn reasoning.
+        The parent's _convert_message_to_dict() strips this field, so we re-inject it.
+        """
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        
+        # Get original messages to access additional_kwargs
+        try:
+            original_messages = self._convert_input(input_).to_messages()
+        except Exception as e:
+            logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
+            return payload
+        
+        payload_messages = payload.get("messages", [])
+        
+        # Build a mapping of assistant message indices to original AIMessages
+        # Payload messages and original messages should have the same order
+        assistant_idx = 0
+        original_assistants = [m for m in original_messages if isinstance(m, AIMessage)]
+        
+        for msg in payload_messages:
+            if msg.get("role") == "assistant":
+                if assistant_idx < len(original_assistants):
+                    original = original_assistants[assistant_idx]
+                    reasoning = original.additional_kwargs.get('reasoning_content')
+                    if reasoning:
+                        msg["reasoning_content"] = reasoning
+                        logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
+                    assistant_idx += 1
+        
+        return payload
 
     def _convert_delta_to_message_chunk(
         self, _dict: Mapping[str, Any], default_class: type[BaseMessageChunk]
