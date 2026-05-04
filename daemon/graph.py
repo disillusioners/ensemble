@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
