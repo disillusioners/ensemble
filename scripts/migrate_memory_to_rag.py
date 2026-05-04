@@ -110,7 +110,7 @@ def get_rag_config(args):
     return {
         "host": host.rstrip("/"),
         "api_key": os.environ.get("LIGHTRAG_API_KEY", ""),
-        "workspace": os.environ.get("LIGHTRAG_WORKSPACE", "default"),
+        "workspace": os.environ.get("LIGHTRAG_WORKSPACE", ""),
         "timeout": int(os.environ.get("LIGHTRAG_TIMEOUT", "60")),
     }
 

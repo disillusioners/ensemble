@@ -13,7 +13,7 @@ class RAGConfig:
     """
     host: str | None = None
     api_key: str | None = None
-    workspace: str = "default"
+    workspace: str = ""
     timeout: float = 120.0
 
     @property
@@ -32,7 +32,7 @@ class RAGConfig:
         return cls(
             host=os.getenv("LIGHTRAG_HOST"),
             api_key=os.getenv("LIGHTRAG_API_KEY"),
-            workspace=os.getenv("LIGHTRAG_WORKSPACE", "default"),
+            workspace=os.getenv("LIGHTRAG_WORKSPACE", "").strip(),
             timeout=float(os.getenv("LIGHTRAG_TIMEOUT", "120")),
         )
 

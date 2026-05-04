@@ -68,7 +68,7 @@ class TestRAGConfig:
 
         assert config.host is None
         assert config.api_key is None
-        assert config.workspace == "default"
+        assert config.workspace == ""
         assert config.timeout == 120.0
 
 
@@ -690,3 +690,26 @@ class TestModuleImports:
         assert issubclass(RAGConnectionError, RAGError)
         assert issubclass(RAGTimeoutError, RAGError)
         assert issubclass(RAGResponseError, RAGError)
+
+
+# =============================================================================
+# Header Building Tests
+# =============================================================================
+
+
+class TestBuildHeaders:
+    """Tests for _build_headers method."""
+
+    def test_build_headers_omits_workspace_when_empty(self):
+        """_build_headers() omits LIGHTRAG-WORKSPACE when workspace is empty string."""
+        config = RAGConfig(host="http://localhost", workspace="")
+        client = AsyncLightRAGClient(config)
+        headers = client._build_headers()
+        assert "LIGHTRAG-WORKSPACE" not in headers
+
+    def test_build_headers_includes_workspace_when_set(self):
+        """_build_headers() includes LIGHTRAG-WORKSPACE header when workspace is set."""
+        config = RAGConfig(host="http://localhost", workspace="my-workspace")
+        client = AsyncLightRAGClient(config)
+        headers = client._build_headers()
+        assert headers["LIGHTRAG-WORKSPACE"] == "my-workspace"

@@ -106,11 +106,14 @@ class AsyncLightRAGClient:
         """Build default headers for API requests.
 
         Returns:
-            Dictionary of headers including X-API-Key and LIGHTRAG-WORKSPACE.
+            Dictionary of headers including X-API-Key and optionally LIGHTRAG-WORKSPACE.
+            The workspace header is only included when workspace is a non-empty string.
         """
-        headers: dict[str, str] = {
-            "LIGHTRAG-WORKSPACE": self._config.workspace,
-        }
+        headers: dict[str, str] = {}
+        # Only include workspace header when explicitly configured (non-empty)
+        # This allows the server to use its default (unscoped) workspace
+        if self._config.workspace:
+            headers["LIGHTRAG-WORKSPACE"] = self._config.workspace
         if self._config.api_key:
             headers["X-API-Key"] = self._config.api_key
         return headers
@@ -159,10 +162,12 @@ class AsyncLightRAGClient:
             RAGTimeoutError: If request times out.
             RAGResponseError: If server returns an error response.
         """
-        if workspace is not None:
+        # Only set workspace header when workspace is a non-empty string
+        # Strip whitespace for consistency with env var handling
+        if workspace is not None and workspace.strip():
             # Merge with client's default headers to preserve headers like X-API-Key
             headers = {**self._build_headers(), **kwargs.pop("headers", {})}
-            headers["LIGHTRAG-WORKSPACE"] = _sanitize_workspace(workspace)
+            headers["LIGHTRAG-WORKSPACE"] = _sanitize_workspace(workspace.strip())
             kwargs["headers"] = headers
 
         client = self._ensure_client()
