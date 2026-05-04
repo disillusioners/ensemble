@@ -84,32 +84,37 @@ class ThinkingChatOpenAI(ChatOpenAI):
         in assistant messages when tool calls are involved, for multi-turn reasoning.
         The parent's _convert_message_to_dict() strips this field, so we re-inject it.
         """
-        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        
-        # Get original messages to access additional_kwargs
+        # Extract original messages once BEFORE calling super() to avoid double conversion.
+        # super()._get_request_payload() internally calls _convert_input().to_messages(),
+        # so we extract messages here first and use them for matching.
         try:
             original_messages = self._convert_input(input_).to_messages()
         except Exception as e:
             logger.debug(f"[LLM] Could not get original messages for reasoning_content injection: {e}")
-            return payload
-        
+            return super()._get_request_payload(input_, stop=stop, **kwargs)
+
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+
         payload_messages = payload.get("messages", [])
-        
-        # Build a mapping of assistant message indices to original AIMessages
-        # Payload messages and original messages should have the same order
+
+        # Build a mapping of assistant message indices to original AIMessages.
+        # Index-based pairing invariant:
+        # - The N-th assistant payload dict corresponds to the N-th original AIMessage.
+        # - This relies on _convert_message_to_dict preserving message order (it does).
+        # - We filter to assistant-only messages for matching since that's all we need to patch.
         assistant_idx = 0
         original_assistants = [m for m in original_messages if isinstance(m, AIMessage)]
-        
+
         for msg in payload_messages:
             if msg.get("role") == "assistant":
                 if assistant_idx < len(original_assistants):
                     original = original_assistants[assistant_idx]
                     reasoning = original.additional_kwargs.get('reasoning_content')
-                    if reasoning:
+                    if reasoning is not None:
                         msg["reasoning_content"] = reasoning
                         logger.debug(f"[LLM] Injected reasoning_content for assistant message {assistant_idx}")
                     assistant_idx += 1
-        
+
         return payload
 
     def _convert_delta_to_message_chunk(

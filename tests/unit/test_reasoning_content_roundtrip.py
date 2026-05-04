@@ -156,4 +156,22 @@ class TestGetRequestPayloadPreservesReasoningContent:
         assert payload.get("stop") == ["END"]
         assert payload["messages"][1].get("reasoning_content") == "Thinking"
 
+    def test_empty_string_reasoning_content_preserved(self):
+        """Empty string reasoning_content is preserved (not treated as falsy)."""
+        llm = ThinkingChatOpenAI(model="test-model", api_key="test-key")
+
+        messages = [
+            AIMessage(
+                content="Answer.",
+                additional_kwargs={"reasoning_content": ""}
+            )
+        ]
+
+        payload = llm._get_request_payload(messages)
+
+        assistant_msg = payload["messages"][0]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg.get("reasoning_content") == ""
+
+
 
