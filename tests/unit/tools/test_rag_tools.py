@@ -1,6 +1,6 @@
 """Tests for RAG knowledge management tools (daemon.tools.rag_tools).
 
-Tests the 15 RAG tools created by create_rag_tools() factory function,
+Tests the 16 RAG tools created by create_rag_tools() factory function,
 including insert, query, graph operations, and entity management.
 """
 
@@ -117,6 +117,11 @@ def mock_client():
         )
     )
     client.create_entity = AsyncMock(return_value={"status": "created"})
+    client.get_entity = AsyncMock(return_value={
+        "entity_name": "TestEntity",
+        "entity_type": "CONCEPT",
+        "description": "A test entity for unit testing",
+    })
     client.create_relation = AsyncMock(return_value={"status": "created"})
     client.update_entity = AsyncMock(return_value={"status": "updated"})
     client.merge_entities = AsyncMock(return_value={"status": "merged"})
@@ -167,13 +172,13 @@ def rag_tools(configured_env, mock_manager, mock_client):
 class TestRAGToolsFactory:
     """Tests for the create_rag_tools factory function."""
 
-    def test_rag_tools_factory_returns_15_tools(self, configured_env, mock_manager, mock_client):
-        """Factory returns exactly 15 tools."""
+    def test_rag_tools_factory_returns_16_tools(self, configured_env, mock_manager, mock_client):
+        """Factory returns exactly 16 tools."""
         import daemon.tools.rag_tools as rag_tools_module
         rag_tools_module._rag_client = mock_client
 
         tools = create_rag_tools(mock_manager, "test-instance-id")
-        assert len(tools) == 15
+        assert len(tools) == 16
 
     def test_rag_tools_have_correct_category(self, rag_tools):
         """All tools have _tool_category == 'rag'."""
@@ -393,6 +398,36 @@ class TestRAGCreateEntity:
 
         assert "TestEntity" in result
         assert "created" in result.lower()
+
+
+class TestRAGGetEntity:
+    """Tests for rag_get_entity tool."""
+
+    @pytest.mark.asyncio
+    async def test_rag_get_entity_success(self, rag_tools, mock_client):
+        """Verify entity retrieval returns formatted details."""
+        get_tool = next(t for t in rag_tools if t.name == "rag_get_entity")
+
+        result = await get_tool.ainvoke({"name": "TestEntity"})
+
+        assert "TestEntity" in result
+        assert "CONCEPT" in result
+        mock_client.get_entity.assert_called_once()
+        call_kwargs = mock_client.get_entity.call_args.kwargs
+        assert call_kwargs["entity_name"] == "TestEntity"
+
+    @pytest.mark.asyncio
+    async def test_rag_get_entity_not_configured(self, configured_env, mock_manager, unconfigured_env):
+        """Verify get entity returns error when RAG is not configured."""
+        import daemon.tools.rag_tools as rag_tools_module
+        rag_tools_module._rag_client = None
+
+        tools = create_rag_tools(mock_manager, "test-instance-id")
+        get_tool = next(t for t in tools if t.name == "rag_get_entity")
+
+        result = await get_tool.ainvoke({"name": "TestEntity"})
+
+        assert "not configured" in result.lower()
 
 
 class TestRAGCreateRelation:
