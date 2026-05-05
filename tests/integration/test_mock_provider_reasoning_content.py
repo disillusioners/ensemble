@@ -481,15 +481,14 @@ class TestReasoningContentEdgeCases:
         req = server_state.request_history[0]
 
         assistant_msgs = [m for m in req["messages"] if m.get("role") == "assistant"]
-        # Empty string reasoning_content should still be present (using is not None check)
-        assert "reasoning_content" in assistant_msgs[0], (
+        # Empty string reasoning_content should still be present (not treated as falsy)
+        assert assistant_msgs[0].get("reasoning_content") == "", (
             "Empty string reasoning_content should still be present in payload"
         )
 
         print("\n[Empty String Test] Verified: Empty reasoning_content preserved")
 
-    @pytest.mark.asyncio
-    async def test_conversation_without_reasoning_content_via_http(
+    def test_conversation_without_reasoning_content_via_http(
         self, mock_http_server
     ):
         """Conversation without reasoning_content should work without errors."""
