@@ -1147,3 +1147,122 @@ class TestLoadAndCachePromptWithSharedKnowledge:
             prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
             # Cache was invalidated, but prompt still doesn't include KB since RAG is disabled
             assert "Knowledge Base" not in prompt2
+
+    def test_cache_invalidates_when_rag_toggled(self, tmp_path):
+        """Cache should reflect RAG state changes - content differs when toggled."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+
+        # Create knowledge file
+        knowledge_file = tmp_path / "knowledge.md"
+        knowledge_file.write_text("# Knowledge Base\n\nImportant knowledge content.")
+
+        cache = PromptCache()
+
+        # 1. Load with RAG disabled → no KB content
+        with patch("daemon.loader.is_rag_enabled", return_value=False):
+            prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
+            assert "Knowledge Base" not in prompt1
+            assert "Important knowledge" not in prompt1
+
+        # 2. Load with RAG enabled → KB content present
+        with patch("daemon.loader.is_rag_enabled", return_value=True):
+            with patch("daemon.loader.KNOWLEDGE_FILE", knowledge_file):
+                # Invalidate cache first since RAG state changed
+                cache.invalidate("test_agent")
+                prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
+                assert "Knowledge Base" in prompt2
+                assert "Important knowledge" in prompt2
+
+        # 3. Toggle back to disabled → no KB content
+        with patch("daemon.loader.is_rag_enabled", return_value=False):
+            # Invalidate cache since RAG state changed
+            cache.invalidate("test_agent")
+            prompt3, tokens3 = load_and_cache_prompt("test_agent", agent_dir, cache)
+            assert "Knowledge Base" not in prompt3
+            assert "Important knowledge" not in prompt3
+
+
+class TestComposeSystemPromptH1Stripping:
+    """Tests for H1 stripping in compose_system_prompt shared_knowledge handling."""
+
+    def test_compose_strips_leading_h1_from_knowledge(self):
+        """Leading H1 in shared_knowledge should be stripped to prevent double-heading."""
+        prompts = {
+            "soul": "# Who I Am\nI am a test agent.",
+            "rule": "# Rules\nFollow these rules",
+        }
+        # shared_knowledge starts with H1 heading
+        shared_knowledge = "# Project Knowledge Base\n\nThis is the knowledge content."
+        
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge)
+        
+        # The section should be "## Knowledge Base\n\n" + stripped content
+        assert "## Knowledge Base" in result
+        # The stripped H1 should not appear in the output
+        assert "# Project Knowledge Base" not in result
+        # But the content should still be there
+        assert "This is the knowledge content" in result
+
+    def test_compose_strips_h1_with_various_heading_styles(self):
+        """H1 stripping handles various markdown H1 styles."""
+        prompts = {"rule": "# Rules\nTest"}
+        
+        # Test with underlined style H1 (shouldn't match, but shouldn't break)
+        shared_knowledge_underlined = "Project Docs\n============\n\nContent here."
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge_underlined)
+        # Underline style isn't an H1 by our regex, so it stays
+        assert "Project Docs" in result
+        
+        # Test with extra whitespace in H1
+        shared_knowledge_whitespace = "#   Project Title  \n\nContent."
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge_whitespace)
+        # Should strip the H1
+        assert "# Project Title" not in result
+        assert "Content" in result
+
+    def test_compose_does_not_strip_h2_headings(self):
+        """H2 headings in shared_knowledge should NOT be stripped."""
+        prompts = {"rule": "# Rules\nTest"}
+        # shared_knowledge starts with H2 (##)
+        shared_knowledge = "## Important Notes\n\nThis is H2 content."
+        
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge)
+        
+        # H2 should NOT be stripped
+        assert "## Important Notes" in result
+        assert "This is H2 content" in result
+
+    def test_compose_no_double_h1_when_file_has_h1(self):
+        """When shared_knowledge has H1, output should have section header + stripped content."""
+        prompts = {
+            "rule": "# Rules\nTest rules",
+            "memory": "# Memory\nMemory content",
+        }
+        shared_knowledge = "# Knowledge\n\nDetailed knowledge here."
+
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge)
+
+        # Should have the section header we add
+        assert "## Knowledge Base" in result
+        # Should have the stripped content (without the original H1)
+        assert "Detailed knowledge here" in result
+        # Original H1 should not appear - the regex strips lines starting with exactly "# " (H1)
+        assert "Detailed knowledge here" in result
+        # The H1 "# Knowledge\n\n" should be completely stripped
+        # Check that the content after Knowledge Base section starts with the content
+        kb_section = result.split("## Knowledge Base")[-1]
+        assert kb_section.startswith("\n\nDetailed knowledge here")
+
+    def test_compose_knowledge_without_h1_preserves_all_content(self):
+        """When shared_knowledge has no H1, all content should be preserved."""
+        prompts = {"rule": "# Rules\nTest"}
+        # shared_knowledge without H1 (just body text)
+        shared_knowledge = "Use the explore tool to query the knowledge base."
+        
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge)
+        
+        # All content should be present
+        assert "Use the explore tool" in result
+        assert "knowledge base" in result

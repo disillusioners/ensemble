@@ -937,3 +937,73 @@ class TestKnowledgeToolsConditionalCreation:
                 tool_names = [t.name for t in tools]
                 assert "explore" in tool_names
                 assert "experience" in tool_names
+
+    def test_create_instance_tools_excludes_rag_tools_when_disabled(self, unconfigured_env, mock_manager):
+        """When RAG is disabled, explore and experience tools should NOT be in the final tool list."""
+        from daemon.tools.instance import create_instance_tools
+        
+        with patch("daemon.tools.instance.is_rag_enabled", return_value=False):
+            with patch("daemon.tools.instance.create_knowledge_tools") as mock_create:
+                with patch("daemon.tools.instance.create_rag_tools", return_value=[]):
+                    with patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()):
+                        with patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()):
+                            with patch("daemon.tools.instance.create_project_tools", return_value=[]):
+                                with patch("daemon.tools.instance.create_job_tools", return_value=[]):
+                                    with patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()):
+                                        with patch("daemon.tools.instance.scan_tools_for_full_docs"):
+                                            with patch("daemon.tools.instance._apply_tool_filter", return_value=[]):
+                                                tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
+                
+                # create_knowledge_tools should NOT have been called
+                mock_create.assert_not_called()
+                
+                # Verify explore and experience tools are not in the result
+                tool_names = [t.name for t in tools if hasattr(t, 'name')]
+                assert "explore" not in tool_names, "explore tool should not be present when RAG is disabled"
+                assert "experience" not in tool_names, "experience tool should not be present when RAG is disabled"
+                
+                # Also verify no RAG-prefixed tools are present
+                for name in tool_names:
+                    assert not name.startswith("rag_"), f"RAG tool {name} should not be present when LIGHTRAG_HOST is unset"
+
+    def test_create_instance_tools_includes_rag_tools_when_enabled(self, configured_env, mock_manager):
+        """When RAG is enabled, explore and experience tools SHOULD be in the final tool list."""
+        from daemon.tools.instance import create_instance_tools
+        from daemon.registry import get_registry, AgentMetadata, ToolFilter
+        
+        with patch("daemon.tools.instance.is_rag_enabled", return_value=True):
+            with patch("daemon.tools.instance.create_knowledge_tools") as mock_create:
+                # Return actual knowledge tools with proper name attribute
+                mock_explore = MagicMock()
+                mock_explore.name = "explore"
+                mock_experience = MagicMock()
+                mock_experience.name = "experience"
+                mock_create.return_value = [mock_explore, mock_experience]
+                with patch("daemon.tools.instance.create_rag_tools", return_value=[]):
+                    with patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()):
+                        with patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()):
+                            with patch("daemon.tools.instance.create_project_tools", return_value=[]):
+                                with patch("daemon.tools.instance.create_job_tools", return_value=[]):
+                                    with patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()):
+                                        with patch("daemon.tools.instance.scan_tools_for_full_docs"):
+                                            # Patch registry to return no tools filter (allow all)
+                                            mock_registry = MagicMock()
+                                            mock_agent_meta = AgentMetadata(
+                                                id="test-agent",
+                                                name="Test",
+                                                description="Test agent",
+                                                path=MagicMock(),
+                                                system=False,
+                                            )
+                                            mock_agent_meta.tools = None  # No restrictions
+                                            mock_registry.get.return_value = mock_agent_meta
+                                            with patch("daemon.registry.get_registry", return_value=mock_registry):
+                                                tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
+                
+                # create_knowledge_tools SHOULD have been called
+                mock_create.assert_called_once_with(mock_manager, "test-instance")
+                
+                # Verify explore and experience tools are in the final tool list
+                tool_names = [t.name for t in tools]
+                assert "explore" in tool_names, "explore tool should be present when RAG is enabled"
+                assert "experience" in tool_names, "experience tool should be present when RAG is enabled"
