@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .rag.config import is_rag_enabled
 from .registry import ToolFilter
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ if getattr(sys, 'frozen', False):
 else:
     _base_dir = Path(__file__).parent.parent
 PROJECT_EXPERIENCE_FILE = _base_dir / "agents" / "_prompt_system" / "project-experience.md"
+KNOWLEDGE_FILE = _base_dir / "agents" / "_prompt_system" / "knowledge.md"
 
 
 def _ensure_tool_metadata_populated() -> None:
@@ -164,6 +166,17 @@ def load_project_experience() -> str:
     return ""
 
 
+def load_shared_knowledge() -> str:
+    """Load shared knowledge base instructions. Only loaded when RAG is enabled.
+    
+    Returns:
+        Content of knowledge.md or empty string if not found/disabled.
+    """
+    if is_rag_enabled() and KNOWLEDGE_FILE.exists():
+        return KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    return ""
+
+
 def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
     """Load list of recent memory filenames from memories/ directory.
     
@@ -266,7 +279,8 @@ def compose_system_prompt(
     skills: dict[str, str] | None = None,
     dynamic_tools: str = "",
     project_experience: str = "",
-    recent_memories: str = ""
+    recent_memories: str = "",
+    shared_knowledge: str = ""
 ) -> str:
     """Compose system prompt from prompts dict and optional skills.
     
@@ -277,6 +291,8 @@ def compose_system_prompt(
                 Loaded from agent's skills/ directory.
         dynamic_tools: Dynamic tools content from load_tools_doc_for_agent() (agent's available tools).
         project_experience: Project experience content from project-experience.md (shared by all agents).
+        recent_memories: List of recent memory filenames.
+        shared_knowledge: Shared knowledge base content from knowledge.md.
         
     Returns:
         Composed system prompt with sections in order:
@@ -289,7 +305,8 @@ def compose_system_prompt(
         7. workflow.md (methodology)
         8. memory.md (knowledge)
         9. Recent memories (filenames only)
-        10. project-experience.md (how to use .agents directory for project knowledge)
+        10. shared_knowledge (from _prompt_system/knowledge.md)
+        11. project-experience.md (how to use .agents directory for project knowledge)
         Separated by "\n\n---\n\n". Headers come from the file content itself.
     """
     sections: list[str] = []
@@ -341,7 +358,11 @@ def compose_system_prompt(
     if recent_memories:
         sections.append(f"## Recent Memories\n\n{recent_memories}")
     
-    # 10. Add project experience section (shared .agents directory usage)
+    # 10. Add shared knowledge section (from _prompt_system/knowledge.md)
+    if shared_knowledge.strip():
+        sections.append(f"## Knowledge Base\n\n{shared_knowledge.strip()}")
+    
+    # 11. Add project experience section (shared .agents directory usage)
     if project_experience.strip():
         sections.append(f"## Project Experience\n\n{project_experience.strip()}")
     
@@ -483,6 +504,10 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     if PROJECT_EXPERIENCE_FILE.exists():
         current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
     
+    # Include shared knowledge file mtime for cache invalidation (when RAG is enabled)
+    if is_rag_enabled() and KNOWLEDGE_FILE.exists():
+        current_mtimes["knowledge.md"] = KNOWLEDGE_FILE.stat().st_mtime
+    
     # Load meta.json ONCE with mtime tracking and error handling
     meta_path = agent_dir / "meta.json"
     meta = None
@@ -549,7 +574,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     dynamic_tools = load_tools_doc_for_agent(agent_id)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
-    system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories)
+    shared_knowledge = load_shared_knowledge()
+    system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
     
     # Update cache

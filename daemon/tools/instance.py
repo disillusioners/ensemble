@@ -38,6 +38,7 @@ from .rag_tools import create_rag_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
+from daemon.rag.config import is_rag_enabled
 
 
 def resolve_tool_filter(
@@ -588,9 +589,10 @@ Returns:
     rag_tool_list = create_rag_tools(manager, current_instance_id)
     tools.extend(rag_tool_list)
 
-    # Create and add knowledge tools
-    knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
-    tools.extend(knowledge_tool_list)
+    # Create and add knowledge tools (only when RAG is configured)
+    if is_rag_enabled():
+        knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
+        tools.extend(knowledge_tool_list)
 
     # Add help tool (must be last so it knows about all other tools)
     help_tool = create_help_tool(tools, agent_id)

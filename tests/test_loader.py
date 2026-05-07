@@ -13,6 +13,7 @@ from daemon.loader import (
     load_agent_prompts,
     load_agent_skills,
     load_and_cache_prompt,
+    load_shared_knowledge,
     load_tools_doc_for_agent,
 )
 
@@ -954,3 +955,169 @@ class TestLoadToolsDocForAgent:
         available_lines = [l for l in lines if "Available tools:" in l]
         # At least one category should be present (not all denied)
         assert len(available_lines) > 0
+
+
+# =============================================================================
+# Tests for load_shared_knowledge and shared_knowledge parameter
+# =============================================================================
+
+
+class TestLoadSharedKnowledge:
+    """Tests for load_shared_knowledge function."""
+
+    def test_load_shared_knowledge_returns_empty_when_rag_disabled(self):
+        """load_shared_knowledge should return empty string when RAG is disabled."""
+        with patch("daemon.loader.is_rag_enabled", return_value=False):
+            result = load_shared_knowledge()
+            assert result == ""
+
+    def test_load_shared_knowledge_returns_empty_when_file_missing(self):
+        """load_shared_knowledge should return empty string when knowledge.md doesn't exist."""
+        fake_file = MagicMock()
+        fake_file.exists = MagicMock(return_value=False)
+        
+        with patch("daemon.loader.is_rag_enabled", return_value=True):
+            with patch("daemon.loader.KNOWLEDGE_FILE", fake_file):
+                result = load_shared_knowledge()
+                assert result == ""
+
+    def test_load_shared_knowledge_returns_content_when_rag_enabled_and_file_exists(self, tmp_path):
+        """load_shared_knowledge should return file content when RAG is enabled and file exists."""
+        knowledge_file = tmp_path / "knowledge.md"
+        knowledge_file.write_text("# Knowledge Base\n\nThis is shared knowledge.")
+        
+        with patch("daemon.loader.is_rag_enabled", return_value=True):
+            with patch("daemon.loader.KNOWLEDGE_FILE", knowledge_file):
+                result = load_shared_knowledge()
+                assert "# Knowledge Base" in result
+                assert "This is shared knowledge" in result
+
+
+class TestComposeSystemPromptWithSharedKnowledge:
+    """Tests for compose_system_prompt with shared_knowledge parameter."""
+
+    def test_compose_system_prompt_with_empty_shared_knowledge(self):
+        """compose_system_prompt should work with empty shared_knowledge (default)."""
+        prompts = {
+            "soul": "# Who I Am\nI am a test agent.",
+            "rule": "# Rules\nFollow these rules",
+        }
+        result = compose_system_prompt(prompts, shared_knowledge="")
+        assert "# Who I Am" in result
+        assert "# Rules" in result
+        assert "Knowledge Base" not in result
+
+    def test_compose_system_prompt_includes_shared_knowledge_when_provided(self):
+        """compose_system_prompt should include shared_knowledge section when provided."""
+        prompts = {
+            "soul": "# Who I Am\nI am a test agent.",
+            "rule": "# Rules\nFollow these rules",
+        }
+        shared_knowledge = "Use the explore tool to query the knowledge base."
+        result = compose_system_prompt(prompts, shared_knowledge=shared_knowledge)
+        assert "Knowledge Base" in result
+        assert "explore tool" in result
+
+    def test_compose_system_prompt_shared_knowledge_ordering(self):
+        """shared_knowledge should appear after memory and before project experience."""
+        prompts = {
+            "soul": "# Who I Am",
+            "rule": "# Rules",
+            "workflow": "# Workflow",
+            "memory": "# Memory",
+        }
+        shared_knowledge = "Shared KB content"
+        project_experience = "Project experience content"
+        result = compose_system_prompt(
+            prompts,
+            shared_knowledge=shared_knowledge,
+            project_experience=project_experience,
+        )
+        memory_pos = result.find("# Memory")
+        knowledge_pos = result.find("## Knowledge Base")
+        project_pos = result.find("## Project Experience")
+        assert memory_pos < knowledge_pos < project_pos
+
+    def test_compose_system_prompt_skips_empty_shared_knowledge_section(self):
+        """compose_system_prompt should not add Knowledge Base section when shared_knowledge is empty."""
+        prompts = {
+            "soul": "# Who I Am",
+            "memory": "# Memory",
+        }
+        result = compose_system_prompt(prompts, shared_knowledge="   ")
+        assert "Knowledge Base" not in result
+
+    def test_compose_system_prompt_with_all_dynamic_params(self):
+        """compose_system_prompt should work with all dynamic parameters including shared_knowledge."""
+        prompts = {
+            "soul": "# Who I Am",
+            "rule": "# Rules",
+            "memory": "# Memory\n\nMemory content",
+        }
+        skills = {
+            "coding": "# Coding\nWrite code.",
+        }
+        dynamic_tools = "## Bash\n\nAvailable tools: bash"
+        project_experience = "Use .agents directory for project context."
+        recent_memories = "- memory-001.md\n- memory-002.md"
+        shared_knowledge = "Query the knowledge base for project patterns."
+        
+        result = compose_system_prompt(
+            prompts,
+            skills=skills,
+            dynamic_tools=dynamic_tools,
+            project_experience=project_experience,
+            recent_memories=recent_memories,
+            shared_knowledge=shared_knowledge,
+        )
+        
+        assert "# Who I Am" in result
+        assert "# Rules" in result
+        assert "# Coding" in result
+        assert "Bash" in result
+        assert "# Memory" in result
+        assert "memory-001.md" in result
+        assert "## Knowledge Base" in result
+        assert "## Project Experience" in result
+        assert "query the knowledge base" in result.lower()
+
+
+class TestLoadAndCachePromptWithSharedKnowledge:
+    """Tests for load_and_cache_prompt with shared_knowledge."""
+
+    def test_cache_tracks_knowledge_mtime_when_rag_enabled(self, tmp_path):
+        """Cache should include knowledge.md mtime when RAG is enabled."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+
+        # Create knowledge file
+        knowledge_file = tmp_path / "knowledge.md"
+        knowledge_file.write_text("# Knowledge Base\n\nKnowledge content.")
+
+        with patch("daemon.loader.is_rag_enabled", return_value=True):
+            with patch("daemon.loader.KNOWLEDGE_FILE", knowledge_file):
+                cache = PromptCache()
+                prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
+                assert "Knowledge Base" in prompt1
+
+                # Modify knowledge file
+                time.sleep(0.1)
+                knowledge_file.write_text("# Knowledge Base\n\nUpdated knowledge.")
+
+                # Should reload
+                prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
+                assert "Updated knowledge" in prompt2
+
+    def test_cache_skips_knowledge_mtime_when_rag_disabled(self, tmp_path):
+        """Cache should NOT include knowledge.md when RAG is disabled."""
+        agent_dir = tmp_path / "test_agent"
+        agent_dir.mkdir()
+        (agent_dir / "rule.md").write_text("# Rules\nTest rules")
+
+        cache = PromptCache()
+
+        with patch("daemon.loader.is_rag_enabled", return_value=False):
+            prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
+            assert "# Rules" in prompt1
+            assert "Knowledge Base" not in prompt1

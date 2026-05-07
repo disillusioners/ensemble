@@ -859,3 +859,81 @@ class TestExploreJobEnqueue:
             # But the returned result should NOT have the heading
             explore_result = await explore_tool.ainvoke({"query": "Another query?"})
             assert "Need Update KB" not in explore_result
+
+
+# =============================================================================
+# Conditional Creation Tests (for instance.py integration)
+# =============================================================================
+
+
+class TestKnowledgeToolsConditionalCreation:
+    """Tests for knowledge tools conditional creation based on RAG status."""
+
+    def test_create_instance_tools_does_not_call_create_knowledge_tools_when_rag_disabled(
+        self, unconfigured_env, mock_manager
+    ):
+        """create_instance_tools should NOT call create_knowledge_tools when RAG is disabled."""
+        from daemon.tools.instance import create_instance_tools
+        
+        with patch("daemon.tools.instance.is_rag_enabled", return_value=False):
+            with patch("daemon.tools.instance.create_knowledge_tools") as mock_create:
+                # Mock required tools to avoid other dependencies
+                with patch("daemon.tools.instance.create_rag_tools", return_value=[]):
+                    with patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()):
+                        with patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()):
+                            with patch("daemon.tools.instance.create_project_tools", return_value=[]):
+                                with patch("daemon.tools.instance.create_job_tools", return_value=[]):
+                                    with patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()):
+                                        with patch("daemon.tools.instance.scan_tools_for_full_docs"):
+                                            with patch("daemon.tools.instance._apply_tool_filter", return_value=[]):
+                                                tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
+                
+                # create_knowledge_tools should NOT have been called
+                mock_create.assert_not_called()
+                # Verify explore and experience tools are not in the result
+                tool_names = [t.name for t in tools if hasattr(t, 'name')]
+                assert "explore" not in tool_names
+                assert "experience" not in tool_names
+
+    def test_create_instance_tools_calls_create_knowledge_tools_when_rag_enabled(
+        self, configured_env, mock_manager
+    ):
+        """create_instance_tools SHOULD call create_knowledge_tools when RAG is enabled."""
+        from daemon.tools.instance import create_instance_tools
+        from daemon.registry import get_registry, AgentMetadata, ToolFilter
+        
+        with patch("daemon.tools.instance.is_rag_enabled", return_value=True):
+            with patch("daemon.tools.instance.create_knowledge_tools") as mock_create:
+                # Return actual knowledge tools with proper name attribute
+                mock_explore = MagicMock()
+                mock_explore.name = "explore"
+                mock_experience = MagicMock()
+                mock_experience.name = "experience"
+                mock_create.return_value = [mock_explore, mock_experience]
+                with patch("daemon.tools.instance.create_rag_tools", return_value=[]):
+                    with patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()):
+                        with patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()):
+                            with patch("daemon.tools.instance.create_project_tools", return_value=[]):
+                                with patch("daemon.tools.instance.create_job_tools", return_value=[]):
+                                    with patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()):
+                                        with patch("daemon.tools.instance.scan_tools_for_full_docs"):
+                                            # Patch registry to return no tools filter (allow all)
+                                            mock_registry = MagicMock()
+                                            mock_agent_meta = AgentMetadata(
+                                                id="test-agent",
+                                                name="Test",
+                                                description="Test agent",
+                                                path=MagicMock(),
+                                                system=False,
+                                            )
+                                            mock_agent_meta.tools = None  # No restrictions
+                                            mock_registry.get.return_value = mock_agent_meta
+                                            with patch("daemon.registry.get_registry", return_value=mock_registry):
+                                                tools = create_instance_tools(mock_manager, "test-instance", "test-agent")
+                
+                # create_knowledge_tools SHOULD have been called
+                mock_create.assert_called_once_with(mock_manager, "test-instance")
+                # Verify explore and experience tools are in the result
+                tool_names = [t.name for t in tools]
+                assert "explore" in tool_names
+                assert "experience" in tool_names
