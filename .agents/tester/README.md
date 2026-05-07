@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-05 Reasoning Content Fallback Bug Fixes)
+## Test Results (Latest: 2026-05-07 KB Tools Conditional Disabling)
+
+### KB Tools Conditional Disabling (branch feature/kb-disable-when-no-lightrag)
+- **1,029 tests passed**, 0 failed (2 pre-existing unrelated failures)
+- **110 new feature tests** (61 loader + 49 knowledge tools) — ALL PASS
+- **~15 gap coverage tests added** — tool list verification, cache toggle, H1 stripping, edge cases
+- **6/6 test scenarios validated**: Tool availability, Prompt assembly, Cache behavior, Per-agent files, Edge cases, Backward compat
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **1 quick fix applied** — test assertion fix for H1 stripping test (commit e4a2fbd)
+- **Minor finding**: Whitespace-only LIGHTRAG_HOST treated as enabled (documented, not blocking)
+- See `.agents/tester/RESULTS/2026-05-07-kb-disable-when-no-lightrag.md` for full report
+
+### KB Tools Conditional Disabling Status: ✅ READY
 
 ### Reasoning Content Fallback Bug Fixes (branch fix/reasoning-content-bugs)
 - **21 reasoning tests passed** (8 roundtrip + 6 edge cases + 7 fallback) — ALL PASS
