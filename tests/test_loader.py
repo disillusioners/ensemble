@@ -1047,6 +1047,13 @@ class TestComposeSystemPromptWithSharedKnowledge:
         result = compose_system_prompt(prompts, shared_knowledge="   ")
         assert "Knowledge Base" not in result
 
+    def test_compose_system_prompt_backward_compatible_no_shared_knowledge_param(self):
+        """compose_system_prompt() works when called without shared_knowledge parameter."""
+        prompts = {"rule": "# Rules\nFollow rules"}
+        result = compose_system_prompt(prompts)
+        assert "# Rules" in result
+        assert "Knowledge Base" not in result
+
     def test_compose_system_prompt_with_all_dynamic_params(self):
         """compose_system_prompt should work with all dynamic parameters including shared_knowledge."""
         prompts = {
@@ -1109,15 +1116,34 @@ class TestLoadAndCachePromptWithSharedKnowledge:
                 prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
                 assert "Updated knowledge" in prompt2
 
-    def test_cache_skips_knowledge_mtime_when_rag_disabled(self, tmp_path):
-        """Cache should NOT include knowledge.md when RAG is disabled."""
+    def test_cache_always_tracks_knowledge_mtime(self, tmp_path):
+        """Cache always tracks knowledge.md mtime regardless of RAG state.
+
+        This ensures cache invalidates when knowledge.md changes even if RAG
+        is currently disabled. The mtime is tracked unconditionally so that
+        enabling RAG later will pick up any changes made while disabled.
+        """
         agent_dir = tmp_path / "test_agent"
         agent_dir.mkdir()
         (agent_dir / "rule.md").write_text("# Rules\nTest rules")
 
+        # Create knowledge file
+        knowledge_file = tmp_path / "knowledge.md"
+        knowledge_file.write_text("# Knowledge Base\n\nKnowledge content.")
+
         cache = PromptCache()
 
         with patch("daemon.loader.is_rag_enabled", return_value=False):
+            # First load
             prompt1, tokens1 = load_and_cache_prompt("test_agent", agent_dir, cache)
             assert "# Rules" in prompt1
-            assert "Knowledge Base" not in prompt1
+            assert "Knowledge Base" not in prompt1  # Not included in prompt when RAG disabled
+
+            # Modify knowledge file
+            time.sleep(0.1)
+            knowledge_file.write_text("# Knowledge Base\n\nUpdated knowledge.")
+
+            # Should reload because knowledge.md mtime changed (even though RAG is disabled)
+            prompt2, tokens2 = load_and_cache_prompt("test_agent", agent_dir, cache)
+            # Cache was invalidated, but prompt still doesn't include KB since RAG is disabled
+            assert "Knowledge Base" not in prompt2

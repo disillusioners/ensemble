@@ -585,12 +585,11 @@ Returns:
         mother_tools = create_mother_tools(manager, current_instance_id)
         tools.extend(mother_tools)
 
-    # Create and add RAG tools
-    rag_tool_list = create_rag_tools(manager, current_instance_id)
-    tools.extend(rag_tool_list)
-
-    # Create and add knowledge tools (only when RAG is configured)
+    # Create and add RAG tools (only when RAG is configured)
     if is_rag_enabled():
+        rag_tool_list = create_rag_tools(manager, current_instance_id)
+        tools.extend(rag_tool_list)
+
         knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
         tools.extend(knowledge_tool_list)
 

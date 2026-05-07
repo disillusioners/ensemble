@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -360,7 +361,10 @@ def compose_system_prompt(
     
     # 10. Add shared knowledge section (from _prompt_system/knowledge.md)
     if shared_knowledge.strip():
-        sections.append(f"## Knowledge Base\n\n{shared_knowledge.strip()}")
+        # Strip leading H1 heading from knowledge content (file has its own, we add section heading)
+        content = shared_knowledge.strip()
+        content = re.sub(r'^#\s+.*\n*', '', content, count=1)
+        sections.append(f"## Knowledge Base\n\n{content}")
     
     # 11. Add project experience section (shared .agents directory usage)
     if project_experience.strip():
@@ -504,8 +508,8 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
     if PROJECT_EXPERIENCE_FILE.exists():
         current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
     
-    # Include shared knowledge file mtime for cache invalidation (when RAG is enabled)
-    if is_rag_enabled() and KNOWLEDGE_FILE.exists():
+    # Always track knowledge.md mtime for cache invalidation
+    if KNOWLEDGE_FILE.exists():
         current_mtimes["knowledge.md"] = KNOWLEDGE_FILE.stat().st_mtime
     
     # Load meta.json ONCE with mtime tracking and error handling

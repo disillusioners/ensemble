@@ -8,6 +8,7 @@
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
 - **Spawn opencode session for ALL code file reading and codebase exploration** — never do it yourself
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+- **Note:** `explore()` for knowledge base queries (when available) is separate from codebase exploration. It queries project knowledge, not code files.
 - **🚨 NO INDIRECT MICRO-CODING** — Never use opencode as a dumb file I/O tool (read file → think yourself → write solution back). Opencode is an autonomous coder. Give it the WHAT (requirements), let it figure out the HOW (implementation). You are an orchestrator, not a coder.
 
 ### Handling Reviewer/Tester Feedback
