@@ -9,15 +9,44 @@ Step-by-step process for exploring project knowledge.
 - Extract the **core question** from the caller's message
 - Identify if it's **specific** (entity-focused) or **broad** (topic-focused)
 - Select initial query mode:
-  - Specific entity questions → `local`
-  - Broad topics/overviews → `global`
-  - Default/unclear → `hybrid`
+
+| Mode | Best For | How It Works |
+|------|----------|--------------|
+| `local` | Specific entity details, "what is X?", "how does Y work?" | Extracts subgraph around matching entities, focuses on local context |
+| `global` | Broad topics, "what is the overall architecture?", "summarize X" | Uses community summaries, broader reasoning across the graph |
+| `hybrid` | Default, most queries | Combines local + global for comprehensive answers |
+| `naive` | Simple keyword search, fallback | Basic text matching, no graph traversal |
+| `mix` | When you need everything | All modes combined, most comprehensive but slowest |
+
+**Quick Selection:**
+- Don't know what mode? → `hybrid`
+- Specific thing/entity? → `local`
+- Broad topic/overview? → `global`
+- Need exhaustive results? → `mix`
 
 ---
 
 ## Step 2: Query RAG
 
 Call `rag_query_data` with the parsed query and selected mode. This returns raw entity-relation data for YOU to synthesize — no extra LLM call.
+
+**Entity structure** (use in synthesis):
+- `name`: Entity identifier — use to reference it
+- `type`: Category (e.g., Person, Service, Function, Class)
+- `description`: The actual information — your primary content source
+
+```
+- **AuthService** (Service): Handles JWT token generation and validation
+```
+
+**Relation structure** (use to trace connections):
+- `source` / `target`: Connected entity names
+- `type`: Relationship type (e.g., USES, IMPLEMENTS, DEPENDS_ON)
+- `description`: Context about the relationship
+
+```
+- AuthService -[USES]-> Database: AuthService stores sessions in Database
+```
 
 **Example calls:**
 ```
@@ -30,14 +59,42 @@ rag_query_data("explain the API endpoints", "hybrid")
 
 ## Step 3: Assess Confidence
 
-Rate the RAG response quality:
+Rate the RAG response quality based on signal strength:
 
-| Confidence | Indicators | Next Step |
-|------------|------------|-----------|
-| **HIGH** | Specific, relevant, complete answer with entities | → Step 4a |
-| **MEDIUM** | Partial answer, somewhat relevant | → Step 4b |
-| **LOW** | No results, wrong answer, RAG error | → Step 4b |
-| **NONE** | RAG not configured or completely empty | → Step 4b |
+| Signal | Confidence | Interpretation | Action |
+|--------|------------|-----------------|--------|
+| Multiple relevant entities with good descriptions, relations connecting them | **HIGH** | Rich material — synthesize and return | → Step 4a |
+| Some entities found but sparse or partial descriptions | **MEDIUM** | Good start, may need file fallback for details | → Step 4b |
+| Few entities, no relations, weak/missing descriptions | **LOW** | RAG doesn't have good coverage — browse files | → Step 4b |
+| RAG returns "no results" or clearly wrong answer | **LOW** | Browse files more broadly, report what you found | → Step 4b |
+| RAG error or not configured | **NONE** | Go straight to file browsing | → Step 4b |
+
+**Confidence Decision Tree:**
+```
+RAG Response Received
+        │
+        ▼
+┌───────────────────┐
+│ Is it specific &  │
+│ relevant?         │
+└───────────────────┘
+        │
+   Yes ─┴─ No
+    │        │
+    │        ▼
+    │  ┌─────────────────┐
+    │  │ Partial/vague?  │
+    │  └─────────────────┘
+    │        │
+   Yes ─┴─ No      Yes ─┴─ No
+    │    │           │
+ HIGH  MEDIUM      LOW   NONE
+    │    │           │      │
+    ▼    ▼           ▼      ▼
+Return  Browse   Browse   Browse
+now     1-2      broadly  broadly
+        files    (3-4)    (5+)
+```
 
 ---
 

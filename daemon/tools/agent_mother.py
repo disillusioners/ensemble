@@ -298,7 +298,7 @@ Returns:
                 "error": "Cannot read system agents except _mother and _inner_soul"
             }
         
-        valid_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "knowledge.md", "tools.md", "growth.md", "meta.json"]
+        valid_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md", "growth.md", "meta.json"]
         if file not in valid_files:
             return {
                 "success": False,
@@ -338,7 +338,7 @@ Returns:
 
 Args:
     agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
-    file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, knowledge.md, tools.md)
+    file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
 
 Returns:
     Dict with success status and file content, or error message
@@ -356,7 +356,7 @@ Returns:
             }
         
         # Only allow modifying specific files
-        modifiable_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "knowledge.md", "tools.md"]
+        modifiable_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md"]
         if file not in modifiable_files:
             return {
                 "success": False,
@@ -396,7 +396,7 @@ Returns:
 
 Args:
     agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
-    file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md, knowledge.md, tools.md)
+    file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
     content: The new content for the file
 
 Returns:

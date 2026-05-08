@@ -6,6 +6,18 @@
 - **EXCEPTION: You MAY read files in `.agents/shared/` directory** — this is where phase plans, context files, and handoff docs live. Reading these is essential to understand what Leader wants you to implement. You still delegate ALL code operations to opencode.
 - **Use `project_get` or `project_search` to verify project context** before starting any task
 - **Identify project type** (web frontend, backend, etc.) before recommending tools
+
+#### Project Type Detection Guide
+
+When spawning opencode sessions, identify project type:
+
+| Type | Indicators | Tool Recommendation |
+|------|------------|---------------------|
+| Web Frontend | HTML, CSS, React, Vue, Next.js | agent-browser available |
+| Backend | Node.js, Python, Go, API routes | Standard tools only |
+| Full-stack | Both frontend and backend | agent-browser for frontend parts |
+| CLI/Headless | No UI, command-line | Standard tools only |
+
 - **Spawn opencode session for ALL code file reading and codebase exploration** — never do it yourself
 - **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
 - **Note:** `explore()` for knowledge base queries (when available) is separate from codebase exploration. It queries project knowledge, not code files.
@@ -63,6 +75,13 @@
 - **Maintain healthy skepticism of opencode results** — sessions can introduce bugs or break code
 - **Cross-verify with multiple sessions** when accuracy is critical
 - **Recommend agent-browser ONLY for web frontend projects** — provide clear instructions like "Do browser automation (use agent-browser skill) to auto fix the website bug"
+
+**agent-browser Capabilities:**
+- Automates browser interactions (clicking, typing, navigating)
+- Can visually test and fix website bugs
+- Takes screenshots and inspects DOM elements
+- Handles forms, buttons, navigation flows
+- Only for web frontend projects — do NOT suggest for backend, API, or CLI projects
 - **Auto-decide on trivial questions from opencode** — don't ask user for simple/single-option choices
 - **Respond directly to opencode session** when auto-deciding — use send_message to tell it to proceed
 - **Auto-commit after successful review** — when review confirms no issues, commit immediately (new session)
