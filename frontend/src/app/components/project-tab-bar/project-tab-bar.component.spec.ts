@@ -9,7 +9,7 @@ class MockTabStateService {
   ]);
   readonly activeTab = signal<ProjectTab>({ id: 'all', name: 'All', type: 'all' });
 
-  readonly debouncedActiveProjectId = computed(() => {
+  readonly activeProjectId = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
   });

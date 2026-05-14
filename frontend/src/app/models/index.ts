@@ -4,6 +4,7 @@ export type InstanceStatus = 'idle' | 'running' | 'waiting' | 'error' | 'termina
 export interface InstanceInfo {
   instance_id: string;
   agent_id: string;
+  project_id: string | null;
   status: InstanceStatus;
   parent_id: string | null;
   children: string[];

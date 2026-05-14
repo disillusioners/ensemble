@@ -21,7 +21,7 @@ export class TabStateService {
    * Returns the active project id if viewing a project tab, null if viewing All tab.
    * Debouncing is handled in the component using rxjs.
    */
-  readonly debouncedActiveProjectId: Signal<string | null> = computed(() => {
+  readonly activeProjectId: Signal<string | null> = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
   });

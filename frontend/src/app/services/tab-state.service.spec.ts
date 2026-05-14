@@ -15,7 +15,7 @@ class TestableTabStateService {
   readonly openTabs = signal<ProjectTab[]>([ALL_TAB]);
   readonly activeTab = signal<ProjectTab>(ALL_TAB);
 
-  readonly debouncedActiveProjectId = computed(() => {
+  readonly activeProjectId = computed(() => {
     const tab = this.activeTab();
     return tab.type === 'project' ? tab.id : null;
   });
@@ -342,17 +342,17 @@ describe('TabStateService', () => {
     });
   });
 
-  describe('debouncedActiveProjectId', () => {
+  describe('activeProjectId', () => {
     it('should return null for All tab', () => {
       service.activeTab.set(ALL_TAB);
 
-      expect(service.debouncedActiveProjectId()).toBeNull();
+      expect(service.activeProjectId()).toBeNull();
     });
 
     it('should return project id for project tab', () => {
       service.addTab({ project_id: 'project-1', name: 'Project 1' });
 
-      expect(service.debouncedActiveProjectId()).toBe('project-1');
+      expect(service.activeProjectId()).toBe('project-1');
     });
 
     it('should return correct id when switching tabs', () => {
@@ -360,10 +360,10 @@ describe('TabStateService', () => {
       service.addTab({ project_id: 'project-2', name: 'Project 2' });
       service.setActiveTab('project-2');
 
-      expect(service.debouncedActiveProjectId()).toBe('project-2');
+      expect(service.activeProjectId()).toBe('project-2');
 
       service.setActiveTab('all');
-      expect(service.debouncedActiveProjectId()).toBeNull();
+      expect(service.activeProjectId()).toBeNull();
     });
   });
 });

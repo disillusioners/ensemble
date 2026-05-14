@@ -53,7 +53,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly instanceNotFound = signal<string | null>(null);
 
   private tabEffect = effect(() => {
-    const projectId = this.tabStateService.debouncedActiveProjectId();
+    const projectId = this.tabStateService.activeProjectId();
     this.instanceService.startPolling(projectId ?? undefined);
   });
 
@@ -160,7 +160,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.tabStateService.restoreState();
-    this.instanceService.startPolling(this.tabStateService.debouncedActiveProjectId() ?? undefined);
+    this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
     this.loadInitialData();
     
     // Subscribe to route parameter changes
