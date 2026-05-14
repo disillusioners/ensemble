@@ -26,8 +26,15 @@
 - Projects: NO DELETE endpoint — use timestamp-prefixed unique names, instances cleaned up
 - localStorage: Tests clear `ensemble-project-tabs` key before each run
 
-## Test Results
-- 8 tests, all passing (13.1s runtime)
+## Reviewer Fixes Applied (2nd commit: f74cf15)
+- **Fix 1**: Added Test 9 — background tab polling verification (intercept `/api/instances` requests, verify only active tab polls)
+- **Fix 2**: Test 3 strengthened — exact instance ID assertions via `a[href="/instances/{id}"]` selectors instead of weak count checks
+- **Fix 3**: localStorage clear moved from `afterEach` to `beforeEach` — fixes persistence test
+- **Fix 4**: Replaced `waitForTimeout(500)` with `waitForResponse()` in test 3
+- **Fix 5**: README.md port reference 4199 → 4200
+
+## Test Results (Final)
+- 9 tests, all passing (50.8s runtime — polling test adds ~24s for two 12s wait cycles)
 - Tests run serially (data dependencies between tests)
 
 ## NPM Scripts
