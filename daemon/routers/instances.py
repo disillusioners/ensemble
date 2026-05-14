@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from daemon.cancellation import CancellationReason
 from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
@@ -91,6 +91,7 @@ async def list_instances(
     request: Request,
     limit: int = DEFAULT_PAGE_LIMIT,
     offset: int = 0,
+    project_id: str | None = Query(None, description="Filter instances by project ID"),
 ) -> InstanceListResponse:
     """List instances with pagination.
     
@@ -98,6 +99,7 @@ async def list_instances(
         request: FastAPI request object.
         limit: Maximum number of instances to return (default: 20, max: 100).
         offset: Number of instances to skip (default: 0, min: 0).
+        project_id: Filter instances by project ID (optional).
     """
     manager = _get_manager(request)
     
@@ -105,7 +107,9 @@ async def list_instances(
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
     
-    instances_data, total = manager.list_instances(limit=limit, offset=offset)
+    instances_data, total = manager.list_instances(
+        limit=limit, offset=offset, project_id=project_id
+    )
     instances = []
     for inst in instances_data:
         instances.append(InstanceInfo(

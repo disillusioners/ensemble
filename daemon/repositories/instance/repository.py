@@ -185,6 +185,7 @@ class SQLModelInstanceRepository:
     def list(
         self,
         status: str | None = None,
+        project_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[Instance], int]:
@@ -192,6 +193,7 @@ class SQLModelInstanceRepository:
         
         Args:
             status: Optional status filter.
+            project_id: Optional project ID filter.
             limit: Maximum number of instances to return.
             offset: Number of instances to skip.
             
@@ -203,12 +205,16 @@ class SQLModelInstanceRepository:
             count_stmt = select(func.count()).select_from(Instance)
             if status:
                 count_stmt = count_stmt.where(Instance.status == status)
+            if project_id is not None:
+                count_stmt = count_stmt.where(Instance.project_id == project_id)
             total = db_session.exec(count_stmt).one()
 
             # Get paginated instances
             stmt = select(Instance)
             if status:
                 stmt = stmt.where(Instance.status == status)
+            if project_id is not None:
+                stmt = stmt.where(Instance.project_id == project_id)
             
             stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
             instances = list(db_session.exec(stmt))

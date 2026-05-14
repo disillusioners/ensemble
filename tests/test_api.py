@@ -336,6 +336,101 @@ async def test_list_instances(client, mock_manager):
 
 
 @pytest.mark.asyncio
+async def test_list_instances_no_project_id_filter(client, mock_manager):
+    """Test GET /instances without project_id filter returns all instances."""
+    response = await client.get("/instances")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "instances" in data
+    assert len(data["instances"]) == 1
+    # Verify manager was called with project_id=None
+    mock_manager.list_instances.assert_called_once_with(
+        limit=20, offset=0, project_id=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_instances_filter_by_project_id(client, mock_manager):
+    """Test GET /instances?project_id=test-project-123 filters correctly."""
+    # Configure mock to return instances for a specific project
+    mock_manager.list_instances.return_value = ([
+        {
+            "instance_id": "instance-project-1",
+            "agent_id": "coder",
+            "agent_dir": "/path/to/agent1",
+            "status": "running",
+            "parent_id": None,
+            "children": [],
+            "project_id": "test-project-123",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00"
+        }
+    ], 1)
+    
+    response = await client.get("/instances?project_id=test-project-123")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "instances" in data
+    assert len(data["instances"]) == 1
+    assert data["instances"][0]["instance_id"] == "instance-project-1"
+    assert data["instances"][0]["project_id"] == "test-project-123"
+    # Verify manager was called with the correct project_id
+    mock_manager.list_instances.assert_called_once_with(
+        limit=20, offset=0, project_id="test-project-123"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_instances_filter_by_nonexistent_project_id(client, mock_manager):
+    """Test GET /instances?project_id=nonexistent returns empty list."""
+    mock_manager.list_instances.return_value = ([], 0)
+    
+    response = await client.get("/instances?project_id=nonexistent")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "instances" in data
+    assert len(data["instances"]) == 0
+    assert data["total"] == 0
+    # Verify manager was called with the nonexistent project_id
+    mock_manager.list_instances.assert_called_once_with(
+        limit=20, offset=0, project_id="nonexistent"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_instances_project_id_with_status_filter(client, mock_manager):
+    """Test GET /instances?project_id=xxx&status=running passes both filters."""
+    mock_manager.list_instances.return_value = ([
+        {
+            "instance_id": "instance-running-1",
+            "agent_id": "coder",
+            "agent_dir": "/path/to/agent1",
+            "status": "running",
+            "parent_id": None,
+            "children": [],
+            "project_id": "test-project",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00"
+        }
+    ], 1)
+    
+    # Note: The status filter is part of the query string but project_id is what we test here
+    response = await client.get("/instances?project_id=test-project&status=running")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert "instances" in data
+    assert len(data["instances"]) == 1
+    # Verify project_id was passed to manager
+    mock_manager.list_instances.assert_called_once_with(
+        limit=20, offset=0, project_id="test-project"
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_instance_success(client, mock_manager):
     """Test GET /instances/{id}."""
     response = await client.get("/instances/test-instance-id")
