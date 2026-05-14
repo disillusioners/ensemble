@@ -89,14 +89,30 @@
 }
 
 .empty-state {
-  padding: 32px 16px;
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  opacity: 0.6;
 
   p {
-    color: #64748b;
-    font-size: 14px;
-    margin: 0 0 12px 0;
+    margin: 0;
   }
+}
+
+.empty-icon {
+  font-size: 2rem;
+  width: 2rem;
+  height: 2rem;
+  margin-bottom: 0.5rem;
+  color: #64748b;
+}
+
+.empty-text {
+  font-size: 0.875rem;
+  margin: 0;
+  color: #64748b;
 }
 
 .loading-state {
@@ -107,17 +123,6 @@
   padding: 32px 16px;
   color: #64748b;
   font-size: 14px;
-}
-
-.new-chat-link {
-  color: #10a7f7;
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-
-  &:hover {
-    text-decoration: underline;
-  }
 }
 
 .instances {

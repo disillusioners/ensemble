@@ -1,5 +1,5 @@
-Current Plan: Explorer/Experiencer RAG Upgrade
-Tracking File: explorer-experiencer-rag-upgrade-tracking.md
+Current Plan: Project-Based Tabs for Instance UI
+Tracking File: project-tabs-ui-tracking.md
 Iteration: 001
 Status: APPROVED
-Last Updated: 2026-04-26 14:30
+Last Updated: 2026-05-14

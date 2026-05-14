@@ -81,8 +81,16 @@ class TestableInstanceService {
   startPolling(projectId?: string): void {
     this.stopPolling();
     this.currentProjectId = projectId ?? null;
+
+    // Clear old instances immediately to avoid showing stale data
+    this.instances.set([]);
+    this.totalInstances.set(0);
+    this.currentOffset = 0;
+
+    // Immediate load
     this.loadInstances(projectId);
 
+    // Start polling interval
     this.pollingIntervalId = setInterval(() => {
       this.loadInstances(projectId);
     }, this.POLLING_INTERVAL);
@@ -341,6 +349,22 @@ describe('InstanceService', () => {
       service.startPolling();
 
       expect(mockApi.listInstances).toHaveBeenCalled();
+    });
+
+    it('should clear instances immediately before loading', async () => {
+      // Pre-populate with some instances
+      service.instances.set([createMockInstance({ instance_id: 'old-instance' })]);
+      service.totalInstances.set(5);
+
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0 })
+      );
+
+      service.startPolling();
+
+      // Instances should be cleared immediately (before API call completes)
+      expect(service.instances()).toHaveLength(0);
+      expect(service.totalInstances()).toBe(0);
     });
 
     it('should start an interval', () => {

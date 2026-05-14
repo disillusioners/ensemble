@@ -38,11 +38,22 @@ class TestableTabStateService {
       return;
     }
 
+    const currentTabs = this.openTabs();
+    const tabIndex = currentTabs.findIndex(t => t.id === tabId);
+    if (tabIndex === -1) return;
+
     const wasActive = this.activeTab().id === tabId;
+
+    // Remove the tab
     this.openTabs.update((tabs) => tabs.filter((tab) => tab.id !== tabId));
 
+    // If the removed tab was active, switch to adjacent tab
     if (wasActive) {
-      this.activeTab.set(ALL_TAB);
+      const remainingTabs = this.openTabs();
+      // Prefer the tab to the right, then left, then "All"
+      const adjacentIndex = Math.min(tabIndex, remainingTabs.length - 1);
+      const adjacentTab = remainingTabs[adjacentIndex] || ALL_TAB;
+      this.activeTab.set(adjacentTab);
     }
 
     this.saveState();
@@ -194,10 +205,34 @@ describe('TabStateService', () => {
       expect(service.openTabs().find(t => t.id === 'project-1')).toBeUndefined();
     });
 
-    it('should switch to All tab when removing active tab', () => {
+    it('should switch to adjacent tab when active tab is removed', () => {
+      // Tabs: [All, project-1, project-2], active = project-1
       service.activeTab.set(service.openTabs().find(t => t.id === 'project-1')!);
       service.removeTab('project-1');
 
+      // Should switch to adjacent (project-2, since it was to the right)
+      expect(service.activeTab().id).toBe('project-2');
+    });
+
+    it('should switch to previous tab when last project tab is removed', () => {
+      // Tabs: [All, project-1, project-2], active = project-2 (last)
+      service.activeTab.set(service.openTabs().find(t => t.id === 'project-2')!);
+      service.removeTab('project-2');
+
+      // Should switch to adjacent (project-1, since it was to the left)
+      expect(service.activeTab().id).toBe('project-1');
+    });
+
+    it('should switch to All tab when only project tab is open and removed', () => {
+      // Remove project-2, leaving only [All, project-1]
+      service.activeTab.set(service.openTabs().find(t => t.id === 'project-2')!);
+      service.removeTab('project-2');
+
+      // Now remove project-1 (only project tab remaining)
+      service.activeTab.set(service.openTabs().find(t => t.id === 'project-1')!);
+      service.removeTab('project-1');
+
+      // Should switch to All tab since no other project tab exists
       expect(service.activeTab().id).toBe('all');
     });
 

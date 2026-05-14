@@ -44,19 +44,28 @@ export class TabStateService {
   }
 
   /**
-   * Remove a tab and switch to All if the removed tab was active.
+   * Remove a tab and switch to adjacent tab if the removed tab was active.
    * Cannot remove the 'all' tab.
    */
   removeTab(tabId: string): void {
-    if (tabId === ALL_TAB.id) {
-      return;
-    }
+    if (tabId === ALL_TAB.id) return; // Cannot close "All"
+
+    const currentTabs = this.openTabs();
+    const tabIndex = currentTabs.findIndex(t => t.id === tabId);
+    if (tabIndex === -1) return;
 
     const wasActive = this.activeTab().id === tabId;
-    this.openTabs.update((tabs) => tabs.filter((tab) => tab.id !== tabId));
 
+    // Remove the tab
+    this.openTabs.update(tabs => tabs.filter(t => t.id !== tabId));
+
+    // If the removed tab was active, switch to adjacent tab
     if (wasActive) {
-      this.activeTab.set(ALL_TAB);
+      const remainingTabs = this.openTabs();
+      // Prefer the tab to the right, then left, then "All"
+      const adjacentIndex = Math.min(tabIndex, remainingTabs.length - 1);
+      const adjacentTab = remainingTabs[adjacentIndex] || ALL_TAB;
+      this.activeTab.set(adjacentTab);
     }
 
     this.saveState();

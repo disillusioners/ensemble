@@ -19,11 +19,22 @@ $accent-cyan: #10a7f7;
   overflow-y: hidden;
   flex-shrink: 0;
 
-  // Hide scrollbar but keep functionality
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  // Thin scrollbar for Firefox
+  scrollbar-width: thin;
+  scrollbar-color: $border-color transparent;
+
+  // Thin scrollbar for Chrome/Safari/Edge
   &::-webkit-scrollbar {
-    display: none;
+    height: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background-color: $border-color;
+    border-radius: 2px;
   }
 }
 
@@ -41,9 +52,12 @@ $accent-cyan: #10a7f7;
   border: none;
   border-radius: 6px 6px 0 0;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.15s ease-out;
+  overflow: hidden;
   white-space: nowrap;
   flex-shrink: 0;
+  position: relative;
+  min-width: 0;
 
   &:hover {
     color: $text-secondary;
@@ -58,6 +72,7 @@ $accent-cyan: #10a7f7;
     color: $text-primary;
     background-color: $bg-card;
 
+    // Bottom border highlight for active tab
     &::after {
       content: '';
       position: absolute;
@@ -66,6 +81,7 @@ $accent-cyan: #10a7f7;
       right: 0;
       height: 2px;
       background-color: $accent-cyan;
+      border-radius: 2px 2px 0 0;
     }
 
     .tab-close {
@@ -78,6 +94,9 @@ $accent-cyan: #10a7f7;
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .tab-close {
@@ -94,11 +113,12 @@ $accent-cyan: #10a7f7;
   border-radius: 3px;
   cursor: pointer;
   opacity: 0;
-  transition: all 0.15s ease;
+  transition: opacity 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  flex-shrink: 0;
 
   &:hover {
     color: $text-primary;
-    background-color: rgba($text-primary, 0.1);
+    background-color: rgba($text-primary, 0.15);
   }
 
   .close-icon {
@@ -122,12 +142,18 @@ $accent-cyan: #10a7f7;
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.15s ease-out;
   flex-shrink: 0;
+  opacity: 0.7;
 
   &:hover {
     color: $accent-cyan;
     background-color: rgba($accent-cyan, 0.1);
+    opacity: 1;
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 
   mat-icon {

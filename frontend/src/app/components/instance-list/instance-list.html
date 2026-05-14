@@ -32,8 +32,8 @@
       </div>
     } @else if (instances().length === 0) {
       <div class="empty-state">
-        <p>No active instances</p>
-        <a routerLink="/" class="new-chat-link">Start a new chat</a>
+        <mat-icon class="empty-icon">inbox</mat-icon>
+        <p class="empty-text">No instances in this project</p>
       </div>
     } @else {
       <div class="instances">

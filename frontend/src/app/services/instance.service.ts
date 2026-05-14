@@ -85,8 +85,16 @@ export class InstanceService {
   startPolling(projectId?: string): void {
     this.stopPolling();
     this.currentProjectId = projectId ?? null;
+
+    // Clear old instances immediately to avoid showing stale data
+    this.instances.set([]);
+    this.totalInstances.set(0);
+    this.currentOffset = 0;
+
+    // Immediate load
     this.loadInstances(projectId);
 
+    // Start polling interval
     this.pollingIntervalId = setInterval(() => {
       this.loadInstances(projectId);
     }, this.POLLING_INTERVAL);

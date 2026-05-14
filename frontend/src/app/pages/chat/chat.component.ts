@@ -9,6 +9,7 @@ import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
+import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
@@ -41,6 +42,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly sseService = inject(SseService);
   protected readonly tabStateService = inject(TabStateService);
   protected readonly instanceService = inject(InstanceService);
+  private readonly projectService = inject(ProjectService);
   private routeSubscription: Subscription | null = null;
   private processedSseMessageIds = new Set<string>();
 
@@ -159,9 +161,23 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.tabStateService.restoreState();
-    this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
-    this.loadInitialData();
+    // Load projects first, then restore tab state with valid project IDs
+    this.projectService.listProjects().subscribe({
+      next: (response) => {
+        const projectIds = response.projects.map(p => p.project_id);
+        this.tabStateService.restoreState(projectIds);
+        
+        // Continue with normal initialization after tab state is restored
+        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        this.loadInitialData();
+      },
+      error: (err) => {
+        console.error('[Chat] Failed to load projects:', err);
+        // Still start polling even if project load fails
+        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        this.loadInitialData();
+      }
+    });
     
     // Subscribe to route parameter changes
     this.routeSubscription = this.route.params.subscribe(params => {
