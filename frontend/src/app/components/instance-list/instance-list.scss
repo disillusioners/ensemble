@@ -99,6 +99,16 @@
   }
 }
 
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 16px;
+  color: #64748b;
+  font-size: 14px;
+}
+
 .new-chat-link {
   color: #10a7f7;
   font-size: 14px;

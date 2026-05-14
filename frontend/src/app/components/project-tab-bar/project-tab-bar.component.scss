@@ -1,0 +1,166 @@
+// Theme colors from app.scss
+$bg-primary: #0f172a;
+$bg-card: #1e293b;
+$bg-card-hover: #283548;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$text-muted: #64748b;
+$border-color: #334155;
+$accent-cyan: #10a7f7;
+
+.tab-bar {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 0.5rem;
+  background-color: $bg-primary;
+  border-bottom: 1px solid $border-color;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+
+  // Hide scrollbar but keep functionality
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 28px;
+  padding: 0 0.75rem;
+  margin-right: 2px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: $text-muted;
+  background-color: transparent;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+
+  &:hover {
+    color: $text-secondary;
+    background-color: rgba($bg-card-hover, 0.5);
+
+    .tab-close {
+      opacity: 1;
+    }
+  }
+
+  &.active {
+    color: $text-primary;
+    background-color: $bg-card;
+
+    &::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background-color: $accent-cyan;
+    }
+
+    .tab-close {
+      opacity: 1;
+    }
+  }
+}
+
+.tab-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  margin-left: 2px;
+  color: $text-muted;
+  background: none;
+  border: none;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.15s ease;
+
+  &:hover {
+    color: $text-primary;
+    background-color: rgba($text-primary, 0.1);
+  }
+
+  .close-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+  }
+}
+
+.tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  margin-left: 0.25rem;
+  color: $text-muted;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+
+  &:hover {
+    color: $accent-cyan;
+    background-color: rgba($accent-cyan, 0.1);
+  }
+
+  mat-icon {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+  }
+}
+
+// MatMenu styling
+::ng-deep .project-menu {
+  .mat-mdc-menu-content {
+    padding: 0.25rem 0;
+    background-color: $bg-card;
+  }
+
+  .mat-mdc-menu-item {
+    font-size: 0.875rem;
+    color: $text-primary;
+    min-height: 36px;
+
+    &:hover:not([disabled]) {
+      background-color: $bg-card-hover;
+    }
+
+    &[disabled] {
+      color: $text-muted;
+      opacity: 0.6;
+    }
+  }
+
+  .empty-message {
+    color: $text-muted;
+    font-style: italic;
+  }
+}

@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import type { 
   InstanceInfo, 
@@ -57,10 +57,14 @@ export class ApiService {
     });
   }
 
-  listInstances(limit: number = 100, offset: number = 0): Observable<InstanceListResponse> {
-    return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, {
-      params: { limit: limit.toString(), offset: offset.toString() }
-    });
+  listInstances(limit: number = 100, offset: number = 0, projectId?: string): Observable<InstanceListResponse> {
+    let params = new HttpParams()
+      .set('limit', limit.toString())
+      .set('offset', offset.toString());
+    if (projectId) {
+      params = params.set('project_id', projectId);
+    }
+    return this.http.get<InstanceListResponse>(`${this.API_BASE}/instances`, { params });
   }
 
   getInstance(instanceId: string): Observable<InstanceInfo> {

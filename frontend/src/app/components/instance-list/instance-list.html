@@ -25,7 +25,12 @@
 
   <!-- Instance Tree -->
   <div class="instance-list">
-    @if (instances().length === 0) {
+    @if (instanceService.loading()) {
+      <div class="loading-state">
+        <span class="loading-spinner"></span>
+        <span>Loading instances...</span>
+      </div>
+    } @else if (instances().length === 0) {
       <div class="empty-state">
         <p>No active instances</p>
         <a routerLink="/" class="new-chat-link">Start a new chat</a>

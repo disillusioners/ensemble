@@ -7,7 +7,10 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import { TabStateService } from '../../services/tab-state.service';
+import { InstanceService } from '../../services/instance.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
+import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { MessageInputComponent, MessagePayload } from '../../components/message-input/message-input.component';
 import type { Agent, InstanceInfo, Message } from '../../models';
@@ -24,6 +27,7 @@ const NEXT_AGENT_STORAGE_KEY = 'ensemble-next-instance-agent';
     MatIconModule,
     MatProgressSpinnerModule,
     InstanceListComponent,
+    ProjectTabBarComponent,
     ChatInterfaceComponent,
     MessageInputComponent
   ],
@@ -35,21 +39,23 @@ export class ChatComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
-  private pollInterval: ReturnType<typeof setInterval> | null = null;
+  protected readonly tabStateService = inject(TabStateService);
+  protected readonly instanceService = inject(InstanceService);
   private routeSubscription: Subscription | null = null;
   private processedSseMessageIds = new Set<string>();
 
   readonly agents = signal<Agent[]>([]);
-  readonly instances = signal<InstanceInfo[]>([]);
   readonly currentInstance = signal<InstanceInfo | null>(null);
   readonly messages = signal<Message[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
   readonly sendError = signal<string | null>(null);
-  readonly totalInstances = signal(0);
-  readonly hasMoreInstances = signal(false);
-  readonly isLoadingMore = signal(false);
   readonly instanceNotFound = signal<string | null>(null);
+
+  private tabEffect = effect(() => {
+    const projectId = this.tabStateService.debouncedActiveProjectId();
+    this.instanceService.startPolling(projectId ?? undefined);
+  });
 
   // LocalStorage preferences
   readonly showThinking = signal(localStorage.getItem('ensemble-show-thinking') === 'true');
@@ -142,7 +148,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.stopPolling();
+    this.instanceService.stopPolling();
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
@@ -153,8 +159,9 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.tabStateService.restoreState();
+    this.instanceService.startPolling(this.tabStateService.debouncedActiveProjectId() ?? undefined);
     this.loadInitialData();
-    this.startPolling();
     
     // Subscribe to route parameter changes
     this.routeSubscription = this.route.params.subscribe(params => {
@@ -176,83 +183,9 @@ export class ChatComponent implements OnInit, OnDestroy {
             this.selectedAgent.set(savedAgent);
           }
         }
-
-        this.loadInstances();
       },
       error: (err) => console.error('Failed to load agents:', err)
     });
-  }
-
-  private loadInstances(append: boolean = false): void {
-    if (append) {
-      this.isLoadingMore.set(true);
-    }
-    
-    const currentInstances = this.instances();
-    const offset = append ? currentInstances.length : 0;
-    
-    this.api.listInstances(100, offset).subscribe({
-      next: (response) => {
-        if (append) {
-          // Deduplicate when appending - filter out instances we already have
-          const existingIds = new Set(currentInstances.map(i => i.instance_id));
-          const newInstances = response.instances.filter(i => !existingIds.has(i.instance_id));
-          this.instances.update(prev => [...prev, ...newInstances]);
-        } else {
-          // When not appending (polling refresh), merge intelligently
-          // Keep any instances we've loaded beyond the first page that still exist
-          const responseInstanceIds = new Set(response.instances.map(i => i.instance_id));
-          
-          // Always preserve instances from loaded pages not in this response
-          // (e.g., page 2+ instances when polling only refreshes page 1)
-          const extraInstances = currentInstances.filter(
-            i => !responseInstanceIds.has(i.instance_id)
-          );
-          
-          if (extraInstances.length > 0) {
-            // User has loaded more pages - preserve those instances
-            this.instances.set([...response.instances, ...extraInstances]);
-            // Recalculate has_more based on what we have vs total
-            this.hasMoreInstances.set((response.instances.length + extraInstances.length) < response.total);
-          } else {
-            // No extra pages loaded - just use the response
-            this.instances.set(response.instances);
-            this.hasMoreInstances.set(response.has_more);
-          }
-        }
-        this.totalInstances.set(response.total);
-        this.isLoadingMore.set(false);
-        
-        // Check if current instance still exists when instances are loaded
-        const currentInstance = this.currentInstance();
-        if (currentInstance && !append) {
-          const allInstances = this.instances();
-          const found = allInstances.find(i => i.instance_id === currentInstance.instance_id);
-          if (!found) {
-            // Instance not found in list - mark as not found instead of redirecting
-            console.warn('[Chat] Current instance not found in instances list:', currentInstance.instance_id);
-            this.instanceNotFound.set(currentInstance.instance_id);
-          }
-        }
-      },
-      error: (err) => {
-        console.error('Failed to load instances:', err);
-        this.isLoadingMore.set(false);
-      }
-    });
-  }
-
-  private startPolling(): void {
-    this.pollInterval = setInterval(() => {
-      this.loadInstances();
-    }, 10000);
-  }
-
-  private stopPolling(): void {
-    if (this.pollInterval) {
-      clearInterval(this.pollInterval);
-      this.pollInterval = null;
-    }
   }
 
   private handleInstanceIdChange(instanceId: string | undefined): void {
@@ -271,8 +204,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
 
     // Find instance in existing list or load it
-    const instance = this.instances().find(i => i.instance_id === instanceId);
-    console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instances().length);
+    const instance = this.instanceService.instances().find(i => i.instance_id === instanceId);
+    console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instanceService.instances().length);
     if (instance) {
       console.log('[Chat] Using instance from list, connecting SSE');
       this.currentInstance.set(instance);
@@ -328,8 +261,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected onDeleteInstance(instanceId: string): void {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
-        this.instances.update(prev => prev.filter(i => i.instance_id !== instanceId));
-        
+        // Instance is removed from instanceService via its polling
         if (this.currentInstance()?.instance_id === instanceId) {
           this.currentInstance.set(null);
           this.router.navigate(['/']);
@@ -359,7 +291,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     
     this.api.createInstance(agentPath).subscribe({
       next: (instance) => {
-        this.instances.update(prev => [instance, ...prev]);
+        // Instance will appear in instanceService via polling
         this.router.navigate(['/instances', instance.instance_id]);
       },
       error: (err) => {
@@ -412,9 +344,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   protected onLoadMoreInstances(): void {
-    if (this.hasMoreInstances() && !this.isLoadingMore()) {
-      this.loadInstances(true);
-    }
+    this.instanceService.loadMore();
   }
 
   protected onStopInstance(): void {

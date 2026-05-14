@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, input } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, input, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -6,6 +6,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatListModule } from '@angular/material/list';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
+import { InstanceService } from '../../services/instance.service';
 
 export interface InstanceTreeNode {
   instance: InstanceInfo;
@@ -20,6 +21,8 @@ export interface InstanceTreeNode {
   styleUrl: './instance-list.scss'
 })
 export class InstanceListComponent {
+  protected readonly instanceService = inject(InstanceService);
+
   readonly agents = input<Agent[]>([]);
   readonly instances = input<InstanceInfo[]>([]);
   readonly currentInstanceId = input<string | null>(null);

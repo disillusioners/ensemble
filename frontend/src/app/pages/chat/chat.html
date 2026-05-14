@@ -1,13 +1,14 @@
 <div class="chat-container">
   <!-- Instance sidebar -->
   <div class="instance-sidebar">
+    <app-project-tab-bar />
     <app-instance-list
       [agents]="agents()"
-      [instances]="instances()"
+      [instances]="instanceService.instances()"
       [currentInstanceId]="currentInstance()?.instance_id || null"
       [selectedAgent]="selectedAgent()"
-      [hasMore]="hasMoreInstances()"
-      [isLoadingMore]="isLoadingMore()"
+      [hasMore]="instanceService.hasMoreInstances()"
+      [isLoadingMore]="instanceService.isLoadingMore()"
       (deleteInstance)="onDeleteInstance($event)"
       (newInstance)="onNewInstance()"
       (agentChange)="onAgentChange($event)"

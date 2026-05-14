@@ -1,0 +1,45 @@
+<div class="tab-bar">
+  @for (tab of tabStateService.openTabs(); track tab.id) {
+    <button
+      class="tab"
+      [class.active]="tab.id === tabStateService.activeTab().id"
+      (click)="tabStateService.setActiveTab(tab.id)"
+      [matTooltip]="tab.name"
+      [matTooltipDisabled]="tab.name.length <= 20"
+    >
+      <span class="tab-name">{{ tab.name }}</span>
+      @if (tab.type === 'project') {
+        <button
+          class="tab-close"
+          (click)="onCloseTab($event, tab.id)"
+          mat-icon-button
+          [attr.aria-label]="'Close ' + tab.name + ' tab'"
+        >
+          <mat-icon class="close-icon">close</mat-icon>
+        </button>
+      }
+    </button>
+  }
+
+  <button
+    class="tab-add"
+    [matMenuTriggerFor]="projectMenu"
+    mat-icon-button
+    matTooltip="Open project"
+    [matTooltipDisabled]="unopenedProjects().length === 0"
+  >
+    <mat-icon>add</mat-icon>
+  </button>
+</div>
+
+<mat-menu #projectMenu="matMenu" class="project-menu">
+  @for (project of unopenedProjects(); track project.project_id) {
+    <button mat-menu-item (click)="tabStateService.addTab(project)">
+      {{ project.name }}
+    </button>
+  } @empty {
+    <button mat-menu-item disabled>
+      <span class="empty-message">All projects are open</span>
+    </button>
+  }
+</mat-menu>
