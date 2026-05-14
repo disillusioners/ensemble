@@ -133,11 +133,9 @@ def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | 
     try:
         instance_meta = manager._instance_repository.get(instance_id)
         if instance_meta and instance_meta.project_id:
-            project_id = instance_meta.project_id
-            if project_id:
-                project = manager._project_repository.get(project_id)
-                if project and project.main_directory:
-                    return project.main_directory
+            project = manager._project_repository.get(instance_meta.project_id)
+            if project and project.main_directory:
+                return project.main_directory
     except Exception:
         pass
     return None
