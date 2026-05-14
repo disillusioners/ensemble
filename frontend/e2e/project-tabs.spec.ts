@@ -35,8 +35,8 @@ test.describe('Project Tabs Feature', () => {
     await page?.close();
   });
 
-  test.afterEach(async () => {
-    // Clear localStorage between tests to reset tab state
+  test.beforeEach(async () => {
+    // Clear localStorage before each test to reset tab state
     await page.evaluate(() => localStorage.removeItem('ensemble-project-tabs'));
   });
 
@@ -129,28 +129,29 @@ test.describe('Project Tabs Feature', () => {
     await page.locator('.project-menu button[mat-menu-item]', { hasText: project2.name }).click();
 
     // Verify only project 1's instance shows
-    let instanceLinks = page.locator('a[href^="/instances/"]');
-    const count1 = await instanceLinks.count();
-    expect(count1).toBeGreaterThanOrEqual(1);
+    await expect(page.locator(`a[href="/instances/${instance1.instance_id}"]`)).toBeVisible();
+    await expect(page.locator(`a[href="/instances/${instance2.instance_id}"]`)).not.toBeVisible();
 
     // Switch to project 2 tab
     const project2Tab = page.locator('.tab', { hasText: project2.name });
     await project2Tab.click();
 
+    // Wait for API response after switching tabs
+    await page.waitForResponse(resp => resp.url().includes('/api/instances'));
+
     // Verify only project 2's instance shows
-    instanceLinks = page.locator('a[href^="/instances/"]');
-    const count2 = await instanceLinks.count();
-    expect(count2).toBeGreaterThanOrEqual(1);
+    await expect(page.locator(`a[href="/instances/${instance2.instance_id}"]`)).toBeVisible();
+    await expect(page.locator(`a[href="/instances/${instance1.instance_id}"]`)).not.toBeVisible();
 
     // Switch back to "All" tab
     const allTab = page.locator('.tab').first();
     await allTab.click();
 
-    // Wait for instances to load
-    await page.waitForTimeout(500);
+    // Wait for the API response instead of fixed timeout
+    await page.waitForResponse(resp => resp.url().includes('/api/instances'));
 
     // Verify all instances show (should show both)
-    instanceLinks = page.locator('a[href^="/instances/"]');
+    const instanceLinks = page.locator('a[href^="/instances/"]');
     await expect(instanceLinks.first()).toBeVisible();
     const totalCount = await instanceLinks.count();
     expect(totalCount).toBeGreaterThanOrEqual(2);
@@ -338,5 +339,76 @@ test.describe('Project Tabs Feature', () => {
     const emptyText = emptyState.locator('.empty-text');
     await expect(emptyText).toBeVisible();
     await expect(emptyText).toContainText('No instances in this project');
+  });
+
+  // ==========================================================================
+  // Test 9: Background tabs do NOT poll the API
+  // ==========================================================================
+  test('Background tabs do not poll the API', async () => {
+    // Create a project and instance
+    const pollingProject = await createTestProject(`Test Project ${timestamp}-poll`);
+    testProjects.push(pollingProject);
+    trackProject(pollingProject.project_id);
+
+    const pollingInstance = await createTestInstance('leader', pollingProject.project_id);
+    trackInstance(pollingInstance.instance_id);
+
+    // Refresh and add the project tab
+    await page.reload();
+    await page.waitForSelector('.tab-bar', { timeout: 10000 });
+
+    await page.locator('.tab-add').click();
+    await page.locator('.project-menu button[mat-menu-item]', { hasText: pollingProject.name }).click();
+
+    // Switch to the project tab (make it active)
+    const projectTab = page.locator('.tab', { hasText: pollingProject.name });
+    await projectTab.click();
+
+    // Wait for the tab to be active and instance to load
+    await page.waitForTimeout(1000);
+
+    // Intercept all /api/instances requests
+    const requests: string[] = [];
+    const requestHandler = (request: { url: () => string }) => {
+      if (request.url().includes('/api/instances')) {
+        requests.push(request.url());
+      }
+    };
+    page.on('request', requestHandler);
+
+    // Wait ~12 seconds (slightly more than 10s polling interval)
+    await page.waitForTimeout(12000);
+
+    // Remove the listener
+    page.off('request', requestHandler);
+
+    // Verify ALL intercepted requests have the correct project_id
+    for (const url of requests) {
+      const hasCorrectProjectId = url.includes(`project_id=${pollingProject.project_id}`);
+      const hasNoProjectId = !url.includes('project_id=');
+      expect(hasCorrectProjectId || hasNoProjectId).toBe(true);
+    }
+
+    // Clear requests and switch back to "All" tab
+    requests.length = 0;
+
+    const allTab = page.locator('.tab').first();
+    await allTab.click();
+
+    // Wait for tab switch to take effect
+    await page.waitForTimeout(1000);
+
+    // Intercept requests on "All" tab
+    page.on('request', requestHandler);
+
+    // Wait another ~12 seconds
+    await page.waitForTimeout(12000);
+
+    page.off('request', requestHandler);
+
+    // Verify ALL requests on "All" tab have NO project_id
+    for (const url of requests) {
+      expect(url).not.toContain('project_id=');
+    }
   });
 });
