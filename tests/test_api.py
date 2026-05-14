@@ -43,6 +43,7 @@ async def mock_manager():
         "status": "running",
         "parent_id": None,
         "children": [],
+        "project_id": None,
         "created_at": "2024-01-01T00:00:00",
         "updated_at": "2024-01-01T00:00:00"
     })
@@ -205,6 +206,99 @@ async def test_create_instance_success(client, mock_manager):
         instance_id="550e8400-e29b-41d4-a716-446655440000",
         project_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_instance_with_project_id(client, mock_manager):
+    """Test POST /instances with project_id is passed through correctly."""
+    response = await client.post(
+        "/instances",
+        json={
+            "agent_id": "coder",
+            "project_id": "test-project-123"
+        }
+    )
+    
+    assert response.status_code == 201
+    data = response.json()
+    assert data["instance_id"] == "test-instance-id"
+    mock_manager.spawn_instance.assert_called_once_with(
+        agent_id="coder",
+        instance_id=None,
+        project_id="test-project-123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_instance_returns_project_id(client, mock_manager):
+    """Test GET /instances/{id} returns project_id in response."""
+    # Configure mock to return project_id
+    mock_manager.get_instance_info.return_value = {
+        "instance_id": "test-instance-id",
+        "agent_id": "coder",
+        "agent_dir": "/path/to/agent",
+        "status": "running",
+        "parent_id": None,
+        "children": [],
+        "project_id": "test-project-123",
+        "created_at": "2024-01-01T00:00:00",
+        "updated_at": "2024-01-01T00:00:00"
+    }
+    
+    response = await client.get("/instances/test-instance-id")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["instance_id"] == "test-instance-id"
+    assert data["project_id"] == "test-project-123"
+
+
+@pytest.mark.asyncio
+async def test_project_id_roundtrip(client, mock_manager):
+    """Test full roundtrip: POST with project_id -> GET returns same project_id."""
+    # Configure mock to echo back the project_id from spawn call
+    created_instance_id = None
+    
+    def mock_spawn(agent_id, instance_id, project_id):
+        nonlocal created_instance_id
+        created_instance_id = instance_id or "generated-instance-id"
+        return created_instance_id
+    
+    def mock_get_info(instance_id):
+        return {
+            "instance_id": created_instance_id,
+            "agent_id": "coder",
+            "agent_dir": "/path/to/agent",
+            "status": "running",
+            "parent_id": None,
+            "children": [],
+            "project_id": "test-project-123",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00"
+        }
+    
+    mock_manager.spawn_instance.side_effect = mock_spawn
+    mock_manager.get_instance_info.side_effect = mock_get_info
+    
+    # Create instance with project_id
+    create_response = await client.post(
+        "/instances",
+        json={
+            "agent_id": "coder",
+            "project_id": "test-project-123"
+        }
+    )
+    
+    assert create_response.status_code == 201
+    create_data = create_response.json()
+    assert create_data["project_id"] == "test-project-123"
+    
+    # Get instance by ID
+    get_response = await client.get(f"/instances/{created_instance_id}")
+    
+    assert get_response.status_code == 200
+    get_data = get_response.json()
+    assert get_data["project_id"] == "test-project-123"
 
 
 @pytest.mark.asyncio

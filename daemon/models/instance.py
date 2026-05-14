@@ -21,7 +21,7 @@ class InstanceCreate(BaseModel):
 
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     instance_id: str | None = Field(default=None, description="Optional instance ID")
-    project_id: str | None = None
+    project_id: str | None = Field(default=None, description="Optional project ID for associating instance with a project")
 
     @model_validator(mode='after')
     def validate_agent(self):

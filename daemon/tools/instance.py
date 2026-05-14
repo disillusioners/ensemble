@@ -113,8 +113,8 @@ def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> st
     """
     try:
         instance_meta = manager._instance_repository.get(instance_id)
-        if instance_meta and instance_meta.instance_metadata:
-            return instance_meta.instance_metadata.get("project_id")
+        if instance_meta and instance_meta.project_id:
+            return instance_meta.project_id
     except Exception:
         pass
     return None
@@ -132,8 +132,8 @@ def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | 
     """
     try:
         instance_meta = manager._instance_repository.get(instance_id)
-        if instance_meta and instance_meta.instance_metadata:
-            project_id = instance_meta.instance_metadata.get("project_id")
+        if instance_meta and instance_meta.project_id:
+            project_id = instance_meta.project_id
             if project_id:
                 project = manager._project_repository.get(project_id)
                 if project and project.main_directory:

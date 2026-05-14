@@ -81,6 +81,7 @@ async def create_instance(
         children=instance_meta.get("children", []),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
+        project_id=instance_meta.get("project_id"),
     )
 
 
@@ -117,6 +118,7 @@ async def list_instances(
             title=inst.get("title"),
             created_at=parse_utc_datetime(inst["created_at"]),
             updated_at=parse_utc_datetime(inst.get("updated_at")),
+            project_id=inst.get("project_id"),
         ))
     
     has_more = (offset + limit) < total
@@ -160,6 +162,7 @@ async def get_instance(
         title=instance_meta.get("title"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
+        project_id=instance_meta.get("project_id"),
     )
 
 

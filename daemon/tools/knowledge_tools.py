@@ -207,8 +207,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         try:
             # Use _instance_repository directly - get_instance() returns CompiledStateGraph, not metadata
             instance_meta = manager._instance_repository.get(current_instance_id)
-            if instance_meta and instance_meta.instance_metadata:
-                return instance_meta.instance_metadata.get("project_id")
+            if instance_meta and instance_meta.project_id:
+                return instance_meta.project_id
         except Exception:
             pass
         return None

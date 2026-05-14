@@ -46,8 +46,8 @@ def _get_project_workspace(manager: Any, current_instance_id: str) -> str | None
     """
     try:
         instance = manager._instance_repository.get(current_instance_id)
-        if instance and instance.instance_metadata:
-            project_id = instance.instance_metadata.get("project_id")
+        if instance and instance.project_id:
+            project_id = instance.project_id
             if project_id:
                 project = manager._project_repository.get(project_id)
                 if project and project.name:
@@ -109,8 +109,8 @@ def _get_project_name_from_instance(manager: Any, instance_id: str) -> str | Non
     """
     try:
         instance_meta = manager._instance_repository.get(instance_id)
-        if instance_meta and instance_meta.instance_metadata:
-            project_id = instance_meta.instance_metadata.get("project_id")
+        if instance_meta and instance_meta.project_id:
+            project_id = instance_meta.project_id
             if project_id:
                 project = manager._project_repository.get(project_id)
                 if project:

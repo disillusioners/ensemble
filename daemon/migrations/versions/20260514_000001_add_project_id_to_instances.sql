@@ -11,6 +11,9 @@ ALTER TABLE instances ADD COLUMN project_id VARCHAR;
 UPDATE instances SET project_id = json_extract(metadata, '$.project_id')
 WHERE json_extract(metadata, '$.project_id') IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS ix_instances_project_id ON instances(project_id);
+
 -- DOWN
 
+DROP INDEX IF EXISTS ix_instances_project_id;
 ALTER TABLE instances DROP COLUMN project_id;
