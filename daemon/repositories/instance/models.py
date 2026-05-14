@@ -11,7 +11,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column
+from sqlalchemy import Column, String
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
@@ -47,6 +47,7 @@ class Instance(SQLModel, table=True):
     __tablename__ = "instances"
 
     instance_id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, sa_column=Column("project_id", String, nullable=True))
     agent_id: str = Field(index=True)
     agent_dir: str = Field(index=True)
     agent_name: str | None = Field(default=None, index=True)
@@ -79,6 +80,7 @@ class Instance(SQLModel, table=True):
         """Convert to dictionary for serialization."""
         return {
             "instance_id": self.instance_id,
+            "project_id": self.project_id,
             "agent_id": self.agent_id,
             "agent_dir": self.agent_dir,
             "agent_name": self.agent_name,

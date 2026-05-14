@@ -21,6 +21,7 @@ class InstanceCreate(BaseModel):
 
     agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
     instance_id: str | None = Field(default=None, description="Optional instance ID")
+    project_id: str | None = None
 
     @model_validator(mode='after')
     def validate_agent(self):
@@ -43,6 +44,7 @@ class InstanceInfo(BaseModel):
 
     instance_id: str = Field(..., description="Unique instance identifier")
     agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder')")
+    project_id: str | None = None
     agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
     status: InstanceStatus = Field(..., description="Current instance status")
     title: str | None = Field(default=None, description="Auto-generated instance title from first message")

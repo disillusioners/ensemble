@@ -232,6 +232,7 @@ class InstanceLifecycleService:
             agent_dir=resolved_agent_dir,
             parent_id=parent_id,
             metadata=instance_metadata if instance_metadata else None,
+            project_id=project_id,
         )
         
         # Verify instance was created in DB

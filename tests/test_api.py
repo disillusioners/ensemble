@@ -202,7 +202,8 @@ async def test_create_instance_success(client, mock_manager):
     assert data["agent_id"] == "coder"
     mock_manager.spawn_instance.assert_called_once_with(
         agent_id="coder",
-        instance_id="550e8400-e29b-41d4-a716-446655440000"
+        instance_id="550e8400-e29b-41d4-a716-446655440000",
+        project_id=None,
     )
 
 

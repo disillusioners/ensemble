@@ -73,6 +73,7 @@ class SQLModelInstanceRepository:
         parent_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         status: str = "idle",
+        project_id: str | None = None,
     ) -> Instance:
         """Create a new instance.
         
@@ -83,6 +84,7 @@ class SQLModelInstanceRepository:
             parent_id: Optional parent instance ID for hierarchical instances.
             metadata: Optional metadata dictionary.
             status: Instance status (default: "idle").
+            project_id: Optional project ID for project context.
             
         Returns:
             Created Instance object.
@@ -101,6 +103,7 @@ class SQLModelInstanceRepository:
                 instance_metadata=metadata or {},
                 created_at=now,
                 updated_at=now,
+                project_id=project_id,
             )
 
             db_session.add(instance)

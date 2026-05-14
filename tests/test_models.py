@@ -402,3 +402,133 @@ class TestModelValidation:
         
         assert "agent_id" in json_str
         assert "coder" in json_str
+
+
+class TestInstanceCreateProjectId:
+    """Tests for InstanceCreate project_id field."""
+
+    def test_instance_create_with_project_id(self):
+        """Test InstanceCreate accepts project_id."""
+        instance = InstanceCreate(agent_id="coder", project_id="proj-123")
+        assert instance.project_id == "proj-123"
+
+    def test_instance_create_project_id_defaults_to_none(self):
+        """Test InstanceCreate project_id defaults to None."""
+        instance = InstanceCreate(agent_id="coder")
+        assert instance.project_id is None
+
+    def test_instance_create_serialization_includes_project_id(self):
+        """Test InstanceCreate model_dump includes project_id."""
+        instance = InstanceCreate(agent_id="coder", project_id="proj-456")
+        data = instance.model_dump()
+        assert data["project_id"] == "proj-456"
+
+    def test_instance_create_serialization_project_id_none(self):
+        """Test InstanceCreate model_dump includes project_id as None."""
+        instance = InstanceCreate(agent_id="coder")
+        data = instance.model_dump()
+        assert "project_id" in data
+        assert data["project_id"] is None
+
+
+class TestInstanceInfoProjectId:
+    """Tests for InstanceInfo project_id field."""
+
+    def test_instance_info_with_project_id(self):
+        """Test InstanceInfo accepts project_id."""
+        instance = InstanceInfo(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+            status=InstanceStatus.running,
+            project_id="proj-123",
+            created_at=datetime(2024, 1, 1, 0, 0, 0),
+        )
+        assert instance.project_id == "proj-123"
+
+    def test_instance_info_project_id_defaults_to_none(self):
+        """Test InstanceInfo project_id defaults to None."""
+        instance = InstanceInfo(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+            status=InstanceStatus.running,
+            created_at=datetime(2024, 1, 1, 0, 0, 0),
+        )
+        assert instance.project_id is None
+
+    def test_instance_info_serialization_includes_project_id(self):
+        """Test InstanceInfo model_dump includes project_id."""
+        instance = InstanceInfo(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+            status=InstanceStatus.running,
+            project_id="proj-789",
+            created_at=datetime(2024, 1, 1, 0, 0, 0),
+        )
+        data = instance.model_dump()
+        assert data["project_id"] == "proj-789"
+
+    def test_instance_info_serialization_project_id_none(self):
+        """Test InstanceInfo model_dump includes project_id as None."""
+        instance = InstanceInfo(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+            status=InstanceStatus.running,
+            created_at=datetime(2024, 1, 1, 0, 0, 0),
+        )
+        data = instance.model_dump()
+        assert "project_id" in data
+        assert data["project_id"] is None
+
+
+class TestInstanceModelProjectId:
+    """Tests for SQLModel Instance project_id field."""
+
+    def test_instance_with_project_id(self):
+        """Test Instance accepts project_id in constructor."""
+        from daemon.repositories.instance.models import Instance
+        instance = Instance(
+            instance_id="test-instance",
+            project_id="proj-123",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+        )
+        assert instance.project_id == "proj-123"
+
+    def test_instance_project_id_defaults_to_none(self):
+        """Test Instance project_id defaults to None."""
+        from daemon.repositories.instance.models import Instance
+        instance = Instance(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+        )
+        assert instance.project_id is None
+
+    def test_instance_to_dict_includes_project_id(self):
+        """Test Instance to_dict includes project_id."""
+        from daemon.repositories.instance.models import Instance
+        instance = Instance(
+            instance_id="test-instance",
+            project_id="proj-456",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+        )
+        data = instance.to_dict()
+        assert "project_id" in data
+        assert data["project_id"] == "proj-456"
+
+    def test_instance_to_dict_project_id_none(self):
+        """Test Instance to_dict includes project_id as None."""
+        from daemon.repositories.instance.models import Instance
+        instance = Instance(
+            instance_id="test-instance",
+            agent_id="coder",
+            agent_dir="/path/to/agent",
+        )
+        data = instance.to_dict()
+        assert "project_id" in data
+        assert data["project_id"] is None

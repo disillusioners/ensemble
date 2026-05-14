@@ -49,6 +49,7 @@ async def create_instance(
         instance_id = manager.spawn_instance(
             agent_id=instance_create.agent_id,
             instance_id=instance_create.instance_id,
+            project_id=instance_create.project_id,
         )
     except ValueError as e:
         error_msg = str(e)
