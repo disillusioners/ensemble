@@ -311,6 +311,9 @@ Provide a concise summary:"""
         instance.last_activity_at = datetime.now(timezone.utc)
         instance.version = (instance.version or 1) + 1
         
+        # Capture instance_id for SSE emit (after session closes)
+        completed_instance_id = instance.instance_id
+        
         # Create completion report message for parent
         # Include message_id in source for per-message idempotency
         report_message_id = str(uuid.uuid4())
@@ -429,6 +432,12 @@ Provide a concise summary:"""
                     f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
                     f"pending messages, status=WAITING_CHILDREN"
                 )
+                # Emit status_change SSE event for parent waiting_children
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children")
+                    except Exception as e:
+                        logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
                 return True, None, None
         
         return False, None, None
@@ -555,6 +564,12 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... completed message but waiting for "
                         f"{instance.waiting_for} children, status=WAITING_CHILDREN"
                     )
+                    # Emit status_change SSE event
+                    if self._manager._live_hub:
+                        try:
+                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children")
+                        except Exception as e:
+                            logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
                 
                 # waiting_for == 0, but check for pending messages before completing.
@@ -579,6 +594,12 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... waiting_for=0 but has {pending_count} "
                         f"pending messages, status=WAITING_CHILDREN"
                     )
+                    # Emit status_change SSE event
+                    if self._manager._live_hub:
+                        try:
+                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children")
+                        except Exception as e:
+                            logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
                 
                 # No children, no pending messages - safe to complete
@@ -621,6 +642,13 @@ Provide a concise summary:"""
                 parent_id = instance.parent_id
 
                 session.commit()
+                
+                # Emit status_change SSE event for tool invocation completed
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(instance_id, "completed")
+                    except Exception as e:
+                        logger.warning(f"Failed to emit status_change for completed tool invocation: {e}")
 
                 # Signal CompletionRegistry for explore() callers
                 from .completion_registry import get_completion_registry
@@ -675,7 +703,14 @@ Provide a concise summary:"""
         # After commit (DB consistent), before SSE broadcast (non-critical)
         from .completion_registry import get_completion_registry
         get_completion_registry().complete(instance_id, result=last_content)
-
+        
+        # Emit status_change SSE event for child completed
+        if self._manager._live_hub:
+            try:
+                await self._manager._live_hub.stream_status_change(completed_instance_id, "completed")
+            except Exception as e:
+                logger.warning(f"Failed to emit status_change for completed instance: {e}")
+        
         # Broadcast child completion event asynchronously (using captured parent_id)
         try:
             await self._manager._live_hub.stream_lifecycle(
@@ -691,6 +726,13 @@ Provide a concise summary:"""
         
         # If parent completed (all children done), publish lifecycle event to mark job as completed
         if completed_parent_id:
+            try:
+                # Emit status_change SSE event for parent completed
+                if self._manager._live_hub:
+                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed")
+            except Exception as e:
+                logger.warning(f"Failed to emit status_change for completed parent: {e}")
+            
             try:
                 if self._events_service:
                     await self._events_service._publish_instance_lifecycle_event(

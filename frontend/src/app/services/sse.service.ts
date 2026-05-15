@@ -236,5 +236,6 @@ export class SseService {
     this.events.set([]);
     this.latestError.set(null);
     this.messages.set([]);
+    this.statusChange.set(null);
   }
 }

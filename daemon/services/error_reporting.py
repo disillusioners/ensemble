@@ -166,6 +166,9 @@ class ErrorReportingService:
                 instance.status = InstanceStatus.ERROR.value
                 instance.updated_at = datetime.now(timezone.utc).isoformat()
                 
+                # Capture instance_id before session closes
+                error_instance_id = instance.instance_id
+                
                 # c) Fail associated message if provided
                 if message_id:
                     message = session.get(MessageQueue, message_id)
@@ -224,6 +227,13 @@ class ErrorReportingService:
                             
                             session.commit()
                             
+                            # Emit status_change SSE event for parent completed
+                            if self._manager._live_hub:
+                                try:
+                                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed")
+                                except Exception as e:
+                                    logger.warning(f"Failed to emit status_change for completed parent: {e}")
+                            
                             # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
                             if self._events_service:
                                 await self._events_service._publish_instance_lifecycle_event(
@@ -237,10 +247,17 @@ class ErrorReportingService:
                             # Parent should wait for its message processing to complete
                             parent.status = InstanceStatus.WAITING_CHILDREN.value
                             parent.updated_at = datetime.now(timezone.utc).isoformat()
+                            session.commit()  # Commit the WAITING_CHILDREN status change
                             logger.info(
                                 f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
                                 f"pending messages, status=WAITING_CHILDREN after child error"
                             )
+                            # Emit status_change SSE event for parent waiting_children
+                            if self._manager._live_hub:
+                                try:
+                                    await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children")
+                                except Exception as e:
+                                    logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
             
             # Signal CompletionRegistry for invoke_agent_and_wait() callers
             # After session commit — instance is in ERROR state in DB
@@ -250,6 +267,13 @@ class ErrorReportingService:
                 result=f"Agent error: {truncated_error}",
                 is_error=True,
             )
+            
+            # Emit status_change SSE event for child error
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(error_instance_id, "error")
+                except Exception as e:
+                    logger.warning(f"Failed to emit status_change for error instance: {e}")
             
             # Step 4: Enqueue error report message to parent (outside transaction)
             error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"

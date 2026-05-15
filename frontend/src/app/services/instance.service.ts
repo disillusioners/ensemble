@@ -35,6 +35,7 @@ export class InstanceService {
       const statusChange = this.sseService.statusChange();
       if (statusChange) {
         this.updateInstanceStatus(statusChange.instance_id, statusChange.status as InstanceStatus);
+        this.sseService.statusChange.set(null);  // Reset for re-trigger
       }
     });
   }
