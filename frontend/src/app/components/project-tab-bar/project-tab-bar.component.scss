@@ -62,7 +62,7 @@ $accent-cyan: #10a7f7;
 }
 
 .tab-name {
-  max-width: 180px;
+  max-width: 300px;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
@@ -72,6 +72,7 @@ $accent-cyan: #10a7f7;
   flex: 1 1 auto;
   min-width: 0;
   line-height: 1.2;
+  text-align: center;
 }
 
 .tab-close {
