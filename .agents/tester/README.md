@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-15 Send/Stop Button Toggle E2E)
+## Test Results (Latest: 2026-05-15 SSE Real-Time Status E2E)
+
+### SSE Real-Time Status Updates E2E (2026-05-15)
+- **E2E Tests**: 7/7 PASSED (Playwright, timing-measurement tests)
+- **Critical finding**: Backend SSE events emitted correctly (7ms latency) but **Stop button never appears in UI**
+- **Root cause**: Frontend `ChatComponent.currentInstance` computed doesn't propagate SSE status changes
+- **SSE streaming**: ✅ No regression (3 messages visible)
+- **Fix needed**: Frontend architecture change (NOT quick-fixable)
+- **Commit**: `9250a52`
+- **Test file**: `frontend/e2e/send-stop-button.spec.ts` (rewritten for SSE timing)
+- See `.agents/tester/RESULTS/2026-05-15-sse-realtime-status-e2e.md` for full report
+
+### SSE Real-Time Status Status: ❌ NOT READY (frontend bug — Stop button doesn't react to SSE events)
 
 ### Send/Stop Button UX Fix — Instance-Status-Based (2026-05-15)
 - **E2E Tests**: 4/6 PASSED (2 PARTIAL due to 10s polling interval timing)

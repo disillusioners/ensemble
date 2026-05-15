@@ -1,6 +1,6 @@
 import { signal, computed } from '@angular/core';
 import { Observable, of, firstValueFrom } from 'rxjs';
-import { InstanceInfo } from '../models';
+import { InstanceInfo, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 100;
 
@@ -101,6 +101,29 @@ class TestableInstanceService {
       clearInterval(this.pollingIntervalId);
       this.pollingIntervalId = null;
     }
+  }
+
+  updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): void {
+    this.instances.update(instances => {
+      const existingIdx = instances.findIndex(i => i.instance_id === instanceId);
+      if (existingIdx >= 0) {
+        return instances.map((instance, idx) =>
+          idx === existingIdx ? { ...instance, status: newStatus } : instance
+        );
+      } else {
+        const minimalInstance: InstanceInfo = {
+          instance_id: instanceId,
+          agent_id: '',
+          project_id: null,
+          status: newStatus,
+          parent_id: null,
+          children: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        return [...instances, minimalInstance];
+      }
+    });
   }
 }
 
@@ -470,6 +493,44 @@ describe('InstanceService', () => {
       service.loadMore();
 
       expect(mockApi.listInstances).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateInstanceStatus', () => {
+    it('should update existing instance status', () => {
+      const instance = createMockInstance({ instance_id: 'test-123', status: 'running' });
+      service.instances.set([instance]);
+
+      service.updateInstanceStatus('test-123', 'completed');
+
+      expect(service.instances()).toHaveLength(1);
+      expect(service.instances()[0].status).toBe('completed');
+      expect(service.instances()[0].instance_id).toBe('test-123');
+    });
+
+    it('should add minimal instance when not found', () => {
+      service.instances.set([]);
+
+      service.updateInstanceStatus('new-instance-456', 'running');
+
+      expect(service.instances()).toHaveLength(1);
+      expect(service.instances()[0].instance_id).toBe('new-instance-456');
+      expect(service.instances()[0].status).toBe('running');
+      expect(service.instances()[0].agent_id).toBe('');
+      expect(service.instances()[0].project_id).toBe(null);
+    });
+
+    it('should update status without duplicating instance', () => {
+      const instance = createMockInstance({ instance_id: 'test-789', status: 'queued' });
+      service.instances.set([instance]);
+
+      // Update multiple times
+      service.updateInstanceStatus('test-789', 'running');
+      service.updateInstanceStatus('test-789', 'paused');
+      service.updateInstanceStatus('test-789', 'completed');
+
+      expect(service.instances()).toHaveLength(1);
+      expect(service.instances()[0].status).toBe('completed');
     });
   });
 });

@@ -42,16 +42,34 @@ export class InstanceService {
 
   /**
    * Optimistically update instance status locally.
-   * Polling will correct any inconsistencies.
+   * If the instance is not in the list (e.g., direct navigation), creates a minimal entry
+   * so computed signals like currentInstance can pick it up. Polling will correct any inconsistencies.
    */
   updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): void {
-    this.instances.update(instances =>
-      instances.map(instance =>
-        instance.instance_id === instanceId
-          ? { ...instance, status: newStatus }
-          : instance
-      )
-    );
+    this.instances.update(instances => {
+      const existingIdx = instances.findIndex(i => i.instance_id === instanceId);
+      if (existingIdx >= 0) {
+        // Update existing instance
+        return instances.map((instance, idx) =>
+          idx === existingIdx ? { ...instance, status: newStatus } : instance
+        );
+      } else {
+        // Instance not in list - create minimal entry for direct navigation support
+        // Required fields for InstanceInfo: instance_id, agent_id, project_id, status, parent_id, children, created_at
+        const minimalInstance: InstanceInfo = {
+          instance_id: instanceId,
+          agent_id: '',           // Will be filled by polling
+          project_id: null,       // Will be filled by polling
+          status: newStatus,
+          parent_id: null,
+          children: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+        console.log('[InstanceService] Added minimal instance for SSE update:', instanceId);
+        return [...instances, minimalInstance];
+      }
+    });
   }
 
   /**
