@@ -1,121 +1,125 @@
 <div class="chat-container">
-  <!-- Instance sidebar -->
-  <div class="instance-sidebar">
-    <app-project-tab-bar />
-    <app-instance-list
-      [agents]="agents()"
-      [instances]="instanceService.instances()"
-      [currentInstanceId]="currentInstance()?.instance_id || null"
-      [selectedAgent]="selectedAgent()"
-      [hasMore]="instanceService.hasMoreInstances()"
-      [isLoadingMore]="instanceService.isLoadingMore()"
-      (deleteInstance)="onDeleteInstance($event)"
-      (newInstance)="onNewInstance()"
-      (agentChange)="onAgentChange($event)"
-      (loadMore)="onLoadMoreInstances()"
-    ></app-instance-list>
-  </div>
+  <!-- Project tab bar (positioned under header, above main content) -->
+  <app-project-tab-bar />
 
-  <!-- Chat area -->
-  <div class="chat-area">
-    <!-- Chat header with agent info -->
-    <div class="chat-header">
-      <div class="header-left">
-        <!-- Back to home button -->
-        <button
-          mat-icon-button
-          (click)="onBackToHome()"
-          title="Back to home"
-          class="back-button"
-        >
-          <mat-icon>arrow_back</mat-icon>
-        </button>
-        
-        <!-- Instance info -->
-        @if (currentInstance()) {
-          <div class="instance-info">
-            <span class="agent-icon">{{ instanceAgent()?.icon || '🤖' }}</span>
-            <span class="agent-name">{{ instanceAgent()?.name || 'Agent' }}</span>
-          </div>
-        }
-      </div>
-      
-      <!-- Breadcrumb / Instance info -->
-      <div class="header-right">
-        <!-- Toggle buttons -->
-        <div class="toggle-buttons">
+  <div class="main-content">
+    <!-- Instance sidebar -->
+    <div class="instance-sidebar">
+      <app-instance-list
+        [agents]="agents()"
+        [instances]="instanceService.instances()"
+        [currentInstanceId]="currentInstance()?.instance_id || null"
+        [selectedAgent]="selectedAgent()"
+        [hasMore]="instanceService.hasMoreInstances()"
+        [isLoadingMore]="instanceService.isLoadingMore()"
+        (deleteInstance)="onDeleteInstance($event)"
+        (newInstance)="onNewInstance()"
+        (agentChange)="onAgentChange($event)"
+        (loadMore)="onLoadMoreInstances()"
+      ></app-instance-list>
+    </div>
+
+    <!-- Chat area -->
+    <div class="chat-area">
+      <!-- Chat header with agent info -->
+      <div class="chat-header">
+        <div class="header-left">
+          <!-- Back to home button -->
           <button
-            (click)="onToggleThinking()"
-            [class.active]="showThinking()"
-            class="toggle-btn think-btn"
-            title="Toggle thinking visibility"
+            mat-icon-button
+            (click)="onBackToHome()"
+            title="Back to home"
+            class="back-button"
           >
-            💭 Think
+            <mat-icon>arrow_back</mat-icon>
           </button>
+
+          <!-- Instance info -->
+          @if (currentInstance()) {
+            <div class="instance-info">
+              <span class="agent-icon">{{ instanceAgent()?.icon || '🤖' }}</span>
+              <span class="agent-name">{{ instanceAgent()?.name || 'Agent' }}</span>
+            </div>
+          }
+        </div>
+
+        <!-- Breadcrumb / Instance info -->
+        <div class="header-right">
+          <!-- Toggle buttons -->
+          <div class="toggle-buttons">
+            <button
+              (click)="onToggleThinking()"
+              [class.active]="showThinking()"
+              class="toggle-btn think-btn"
+              title="Toggle thinking visibility"
+            >
+              💭 Think
+            </button>
+            <button
+              (click)="onToggleToolCalls()"
+              [class.active]="showToolCalls()"
+              class="toggle-btn tools-btn"
+              title="Toggle tool calls visibility"
+            >
+              🔧 Tools
+            </button>
+          </div>
+          @if (currentInstance()) {
+            <span class="instance-id">
+              {{ currentInstance()!.instance_id.slice(0, 8) }}...
+            </span>
+          }
+        </div>
+      </div>
+
+      <!-- Error banner -->
+      @if (sendError()) {
+        <div class="error-banner">
+          <span class="error-message">{{ sendError() }}</span>
           <button
-            (click)="onToggleToolCalls()"
-            [class.active]="showToolCalls()"
-            class="toggle-btn tools-btn"
-            title="Toggle tool calls visibility"
+            (click)="onClearError()"
+            class="error-close"
           >
-            🔧 Tools
+            ✕
           </button>
         </div>
-        @if (currentInstance()) {
-          <span class="instance-id">
-            {{ currentInstance()!.instance_id.slice(0, 8) }}...
-          </span>
-        }
-      </div>
+      }
+
+      <!-- Instance not found message -->
+      @if (instanceNotFound()) {
+        <div class="instance-not-found">
+          <div class="not-found-icon">⚠️</div>
+          <h2>Instance Not Found</h2>
+          <p>The instance <code>{{ instanceNotFound() }}</code> could not be found.</p>
+          <p class="hint">This may happen if the instance was created by a job and has since been removed, or if the instance ID is invalid.</p>
+          <button mat-flat-button color="primary" (click)="onBackToHome()">
+            <mat-icon>home</mat-icon>
+            Back to Home
+          </button>
+        </div>
+      }
+
+      <!-- Chat interface (only show when instance is loaded) -->
+      @if (currentInstance() && !instanceNotFound()) {
+        <app-chat-interface
+          [messages]="messages()"
+          [isLoading]="isSending() && messages().length === 0"
+          [agent]="instanceAgent()"
+          [instanceId]="currentInstance()?.instance_id || null"
+          [showThinking]="showThinking()"
+          [showToolCalls]="showToolCalls()"
+        ></app-chat-interface>
+      }
+
+      @if (currentInstance() && !instanceNotFound()) {
+        <app-message-input
+          (sendMessage)="onSendMessage($event)"
+          [disabled]="isSending()"
+          [agentColor]="instanceAgent()?.id || 'coder'"
+          [isStreaming]="isStreaming()"
+          (stopInstance)="onStopInstance()"
+        ></app-message-input>
+      }
     </div>
-    
-    <!-- Error banner -->
-    @if (sendError()) {
-      <div class="error-banner">
-        <span class="error-message">{{ sendError() }}</span>
-        <button 
-          (click)="onClearError()"
-          class="error-close"
-        >
-          ✕
-        </button>
-      </div>
-    }
-    
-    <!-- Instance not found message -->
-    @if (instanceNotFound()) {
-      <div class="instance-not-found">
-        <div class="not-found-icon">⚠️</div>
-        <h2>Instance Not Found</h2>
-        <p>The instance <code>{{ instanceNotFound() }}</code> could not be found.</p>
-        <p class="hint">This may happen if the instance was created by a job and has since been removed, or if the instance ID is invalid.</p>
-        <button mat-flat-button color="primary" (click)="onBackToHome()">
-          <mat-icon>home</mat-icon>
-          Back to Home
-        </button>
-      </div>
-    }
-    
-    <!-- Chat interface (only show when instance is loaded) -->
-    @if (currentInstance() && !instanceNotFound()) {
-      <app-chat-interface
-        [messages]="messages()"
-        [isLoading]="isSending() && messages().length === 0"
-        [agent]="instanceAgent()"
-        [instanceId]="currentInstance()?.instance_id || null"
-        [showThinking]="showThinking()"
-        [showToolCalls]="showToolCalls()"
-      ></app-chat-interface>
-    }
-    
-    @if (currentInstance() && !instanceNotFound()) {
-      <app-message-input
-        (sendMessage)="onSendMessage($event)"
-        [disabled]="isSending()"
-        [agentColor]="instanceAgent()?.id || 'coder'"
-        [isStreaming]="isStreaming()"
-        (stopInstance)="onStopInstance()"
-      ></app-message-input>
-    }
   </div>
 </div>

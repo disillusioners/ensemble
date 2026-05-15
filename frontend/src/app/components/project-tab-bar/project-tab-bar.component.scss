@@ -2,6 +2,7 @@
 $bg-primary: #0f172a;
 $bg-card: #1e293b;
 $bg-card-hover: #283548;
+$bg-tab-bar: #1e293b; // Slightly lighter than header for visual distinction
 $text-primary: #f1f5f9;
 $text-secondary: #94a3b8;
 $text-muted: #64748b;
@@ -13,8 +14,9 @@ $accent-cyan: #10a7f7;
   align-items: center;
   height: 36px;
   padding: 0 0.5rem;
-  background-color: $bg-primary;
+  background-color: $bg-tab-bar;
   border-bottom: 1px solid $border-color;
+  border-top: 1px solid rgba($bg-primary, 0.5); // Subtle top border for separation from header
   overflow-x: auto;
   overflow-y: hidden;
   flex-shrink: 0;
@@ -47,7 +49,7 @@ $accent-cyan: #10a7f7;
   margin-right: 2px;
   font-size: 0.8125rem;
   font-weight: 500;
-  color: $text-muted;
+  color: $text-secondary; // Better contrast than $text-muted
   background-color: transparent;
   border: none;
   border-radius: 6px 6px 0 0;
@@ -137,14 +139,14 @@ $accent-cyan: #10a7f7;
   height: 28px;
   padding: 0;
   margin-left: 0.25rem;
-  color: $text-muted;
+  color: $text-secondary; // More visible than $text-muted
   background: none;
   border: none;
   border-radius: 6px;
   cursor: pointer;
   transition: all 0.15s ease-out;
   flex-shrink: 0;
-  opacity: 0.7;
+  opacity: 0.85; // Slightly more visible
 
   &:hover {
     color: $accent-cyan;
