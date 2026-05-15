@@ -36,9 +36,11 @@ export class MessageInputComponent {
   isDragOver = signal(false);
   validationError = signal<string | null>(null);
 
-  // Instance is running when status is 'running' or 'waiting_children'
+  // Instance is running when status is 'running', 'waiting_children', or 'queued'
   protected get isInstanceRunning(): boolean {
-    return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children';
+    return this.instanceStatus === 'running' 
+        || this.instanceStatus === 'waiting_children'
+        || this.instanceStatus === 'queued';
   }
 
   protected readonly MAX_IMAGES = 3;

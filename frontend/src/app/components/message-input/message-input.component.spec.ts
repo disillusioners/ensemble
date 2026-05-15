@@ -45,7 +45,7 @@ class TestMessageInputComponent {
   }
 
   protected get isInstanceRunning(): boolean {
-    return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children';
+    return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children' || this.instanceStatus === 'queued';
   }
 
   handleSubmit(): void {
@@ -184,9 +184,9 @@ describe('MessageInputComponent', () => {
       expect(component.isInstanceRunning).toBe(false);
     });
 
-    it('should return false for queued status', () => {
+    it('should return true for queued status', () => {
       component.instanceStatus = 'queued';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning).toBe(true);
     });
 
     it('should return false for failed status', () => {
