@@ -1,9 +1,19 @@
+// Host element fills parent container
+:host {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .instance-list-container {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  max-height: 100%;
   background-color: #0f172a;
   border-right: 1px solid #334155;
 }
@@ -86,6 +96,8 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: visible;
+  max-height: 100%; // Constrain to container height
+  min-height: 0; // Allow shrinking in flexbox
 }
 
 .empty-state {
