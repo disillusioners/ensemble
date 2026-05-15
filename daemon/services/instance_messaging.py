@@ -385,16 +385,34 @@ class InstanceMessagingService:
         # Get instance graph (will lazy-load from DB if needed)
         graph = self._manager.get_instance(instance_id)
 
+        # Register current task for cancellation tracking
+        current_task = asyncio.current_task()
+        task_registered = False
+        if current_task:
+            self._manager._graph_tasks[instance_id] = current_task
+            task_registered = True
+            logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
+
         # Invoke with message
         config = {
             "configurable": {"thread_id": instance_id},
             "recursion_limit": self._config.limits.graph_recursion_limit,
         }
         
-        # Compact context before processing (non-blocking)
-        await self._maybe_compact_context(instance_id, graph, config)
-        
-        result = await graph.ainvoke({"messages": [message]}, config)
+        try:
+            # Compact context before processing (non-blocking)
+            await self._maybe_compact_context(instance_id, graph, config)
+            
+            result = await graph.ainvoke({"messages": [message]}, config)
+        except asyncio.CancelledError:
+            logger.info(f"Graph execution cancelled for instance {instance_id}")
+            # Don't re-raise - we want clean stop
+            return MessageResult(content="")
+        finally:
+            # Always unregister the task if it was registered
+            if task_registered:
+                self._manager._graph_tasks.pop(instance_id, None)
+                logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
 
         # Extract message data from the current turn
         messages = result.get("messages", [])
@@ -645,6 +663,15 @@ class InstanceMessagingService:
         from ..manager import MessageResult
         
         graph = self._manager.get_instance(instance_id)
+        
+        # Register current task for cancellation tracking
+        # This allows stop_instance_cascade to cancel the running graph
+        current_task = asyncio.current_task()
+        task_registered = False
+        if current_task:
+            self._manager._graph_tasks[instance_id] = current_task
+            task_registered = True
+            logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
         
         # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
@@ -939,6 +966,14 @@ class InstanceMessagingService:
                                         final_content = content or ""
                                 last_ai_message = msg
                                 break
+
+        except asyncio.CancelledError:
+            # Graph was cancelled by stop_instance_cascade
+            # Don't re-raise - stop was intentional, status already set to IDLE
+            # Return empty result to prevent crashing the worker (CancelledError is BaseException, not Exception)
+            logger.info(f"Graph execution cancelled for instance {instance_id[:8]}... (message_id={message_id[:8]}...)")
+            return MessageResult(content="")
+
         except Exception as e:
             logger.error(f"Streaming failed for message {message_id}: {e}")
             await self._manager._live_hub.stream_error(
@@ -946,6 +981,12 @@ class InstanceMessagingService:
                 error={"error": str(e), "stage": "streaming", "message_id": message_id},
             )
             raise
+
+        finally:
+            # Always unregister the task
+            if task_registered:
+                self._manager._graph_tasks.pop(instance_id, None)
+                logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
 
         # Parse <think/> tags from final content
         content, thinking_extracted = parse_think_tags(final_content)

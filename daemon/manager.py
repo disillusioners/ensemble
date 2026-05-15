@@ -351,6 +351,10 @@ class InstanceManager:
         # Maps instance_id to tuple of (graph, agent_dir)
         self.instances: dict[str, tuple[CompiledStateGraph, str]] = {}
 
+        # Maps instance_id to the asyncio.Task currently running the graph for that instance
+        # Used to cancel graph execution when stop is called
+        self._graph_tasks: dict[str, asyncio.Task] = {}
+
         # Maps (instance_id, msg_id) to the created_at timestamp from first emission.
         # Persists across _process_message_internal calls so re-emitted messages
         # keep their original timestamp instead of getting a fresh one.
@@ -1221,6 +1225,32 @@ class InstanceManager:
     def cancel_instance_requests(self, instance_id: str, reason: CancellationReason) -> int:
         """Cancel all active requests for an instance. Returns count of cancelled."""
         return self._cancellation_service.cancel_instance_requests(instance_id, reason)
+
+    def cancel_graph_task(self, instance_id: str) -> bool:
+        """Cancel the running graph task for an instance.
+
+        This sends asyncio.CancelledError to interrupt the streaming loop.
+        Does NOT remove the instance from memory (unlike terminate).
+
+        Args:
+            instance_id: The instance whose graph task should be cancelled.
+
+        Returns:
+            True if a task was found and cancelled, False otherwise.
+        """
+        task = self._graph_tasks.get(instance_id)
+        if task is None:
+            logger.debug(f"No graph task to cancel for instance {instance_id[:8]}...")
+            return False
+
+        if task.done():
+            logger.debug(f"Graph task already done for instance {instance_id[:8]}...")
+            del self._graph_tasks[instance_id]
+            return False
+
+        logger.info(f"Cancelling graph task for instance {instance_id[:8]}...")
+        task.cancel()
+        return True
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an instance.

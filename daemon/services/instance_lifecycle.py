@@ -310,7 +310,13 @@ class InstanceLifecycleService:
         
         # 1. Cancel active requests for this instance
         self._manager._request_registry.cancel_by_instance(instance_id)
-        
+
+        # 1.5. Cancel any running graph task for this instance
+        graph_task = self._manager._graph_tasks.pop(instance_id, None)
+        if graph_task and not graph_task.done():
+            graph_task.cancel()
+            logger.info(f"Cancelled graph task for instance {instance_id[:8]}...")
+
         # 2. Clean up live hub connections for this instance
         await self._manager._live_hub.cleanup_instance(instance_id)
 
@@ -431,15 +437,28 @@ class InstanceLifecycleService:
                 logger.info(f"Instance {target_id[:8]}... is already idle, skipping")
                 return False
 
-            # Cancel active LLM requests
+            # 1. Cancel active LLM requests (via cancellation callbacks)
             self._manager._request_registry.cancel_by_instance(
                 target_id, CancellationReason.USER_STOPPED
             )
 
-            # Update DB status to idle
+            # 2. Cancel the running graph task (interrupts astream/ainvoke loop)
+            # This raises asyncio.CancelledError in the streaming coroutine
+            graph_task = self._manager._graph_tasks.get(target_id)
+            if graph_task and not graph_task.done():
+                graph_task.cancel()
+                logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
+
+            # 3. Update DB status to idle
             self._manager._instance_repository.update_status(
                 target_id, InstanceStatus.IDLE.value
             )
+
+            # NOTE: Unlike terminate_instance, we do NOT:
+            # - Remove from instances dict (instance stays in memory, resumable)
+            # - Release project locks (job continues)
+            # - Mark jobs as cancelled
+            # - Clean up live hub connections
 
             logger.info(f"Stopped instance {target_id[:8]}...")
             return True
