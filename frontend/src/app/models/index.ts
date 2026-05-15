@@ -210,5 +210,12 @@ export interface DeleteResponse {
   terminated?: boolean;
 }
 
+// Stop instance response
+export interface StopResponse {
+  stopped: boolean;
+  stopped_ids: string[];
+  skipped_ids: string[];
+}
+
 // Job Queue types
 export * from './job-queue.model';

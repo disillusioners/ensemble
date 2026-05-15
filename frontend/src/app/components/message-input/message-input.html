@@ -67,8 +67,10 @@
     </button>
     
     @if (isStreaming) {
-        <button class="stop-button" (click)="stopInstance.emit()" title="Stop">
-            <i class="fa-solid fa-stop"></i>
+        <button class="stop-button" (click)="stopInstance.emit()" title="Stop" aria-label="Stop">
+            <svg class="stop-icon" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
         </button>
     } @else {
         <button
