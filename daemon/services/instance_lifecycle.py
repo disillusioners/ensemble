@@ -276,7 +276,10 @@ class InstanceLifecycleService:
         self._manager.instances[instance_id] = (graph, resolved_agent_dir)
 
         # Emit status_change event for idle status (fire-and-forget)
-        asyncio.create_task(
+        # Use MainLoopBridge.run_async_no_wait to handle thread context safely
+        # (sync tools run via run_in_executor which doesn't have an event loop)
+        from .main_loop_bridge import MainLoopBridge
+        MainLoopBridge.run_async_no_wait(
             self._manager._live_hub.stream_status_change(instance_id, "idle")
         )
 
