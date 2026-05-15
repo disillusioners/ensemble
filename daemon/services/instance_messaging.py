@@ -561,10 +561,12 @@ class InstanceMessagingService:
             session.add(task)
             
             # 3. Update instance status if IDLE (don't override WAITING_CHILDREN, etc.)
+            status_changed_to_running = False
             instance = session.get(Instance, instance_id)
             if instance:
                 if instance.status == InstanceStatus.IDLE.value:
                     instance.status = InstanceStatus.RUNNING.value
+                    status_changed_to_running = True
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:
@@ -592,6 +594,10 @@ class InstanceMessagingService:
             session.add(event)
             
             session.commit()
+        
+        # Emit status_change event if status was changed to running
+        if status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value)
         
         # After commit — task is now visible in DB
         if self._manager._worker_pool is not None:

@@ -412,6 +412,67 @@ class TestLifecycleEvents:
         assert event1["event_type"] == "completed"
         assert event2["event_type"] == "completed"
 
+    @pytest.mark.asyncio
+    async def test_stream_status_change(self):
+        """Status change events are delivered with correct structure."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="running")
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "status_change"
+        assert event["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_terminated(self):
+        """Status change to terminated is delivered correctly."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="terminated")
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "status_change"
+        assert event["status"] == "terminated"
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_idle(self):
+        """Status change to idle is delivered correctly."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="idle")
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "status_change"
+        assert event["status"] == "idle"
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_to_multiple_connections(self):
+        """Status change events reach all registered connections."""
+        hub = LiveEventHub()
+        queue1 = asyncio.Queue()
+        queue2 = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue1)
+        await hub.add_connection("instance-1", queue2)
+        await hub.stream_status_change("instance-1", status="running")
+
+        event1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
+        event2 = await asyncio.wait_for(queue2.get(), timeout=1.0)
+
+        assert event1["status"] == "running"
+        assert event2["status"] == "running"
+        assert event1["event_type"] == "status_change"
+        assert event2["event_type"] == "status_change"
+
 
 # ============================================================================
 # Test Cleanup

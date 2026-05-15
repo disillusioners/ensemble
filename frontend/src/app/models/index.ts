@@ -116,14 +116,15 @@ export interface AgentCreate {
 }
 
 // Simplified SSE Event types (from checkpoint-based backend)
-export type SseEventType = 
-  | 'connected' 
-  | 'error' 
+export type SseEventType =
+  | 'connected'
+  | 'error'
   | 'keepalive'
   | 'user_message'
   | 'assistant_message'
   | 'thinking'
-  | 'tool_call';
+  | 'tool_call'
+  | 'status_change';
 
 export interface SSEEvent {
   type: SseEventType;

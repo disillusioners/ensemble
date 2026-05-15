@@ -1,6 +1,6 @@
 """Unit tests for per-agent LLM model override functionality."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from pathlib import Path
 
 import pytest
@@ -56,6 +56,7 @@ def create_mock_manager(config: Config | None = None) -> MagicMock:
     manager._engine = MagicMock()
     manager._request_registry = MagicMock()
     manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
     return manager
 
 

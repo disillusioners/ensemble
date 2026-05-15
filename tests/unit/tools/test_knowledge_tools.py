@@ -85,6 +85,10 @@ def mock_manager():
 
     manager._job_queue_service = mock_job_service
 
+    # Mock live_hub for status_change emission in spawn_instance
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
+
     return manager
 
 

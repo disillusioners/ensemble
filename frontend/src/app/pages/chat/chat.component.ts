@@ -1,4 +1,4 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, ViewChild, Signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -47,7 +47,12 @@ export class ChatComponent implements OnInit, OnDestroy {
   private processedSseMessageIds = new Set<string>();
 
   readonly agents = signal<Agent[]>([]);
-  readonly currentInstance = signal<InstanceInfo | null>(null);
+  readonly currentInstanceId = signal<string | null>(null);
+  readonly currentInstance: Signal<InstanceInfo | null> = computed(() => {
+    const id = this.currentInstanceId();
+    if (!id) return null;
+    return this.instanceService.instances().find(i => i.instance_id === id) ?? null;
+  });
   readonly messages = signal<Message[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
   readonly isSending = signal(false);
@@ -152,7 +157,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sseService.clearEvents();
     this.sseService.disconnect();
     this.messages.set([]);
-    this.currentInstance.set(null);
+    this.currentInstanceId.set(null);
     if (this.routeSubscription) {
       this.routeSubscription.unsubscribe();
     }
@@ -210,19 +215,21 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     if (!instanceId) {
       console.log('[Chat] No instanceId, disconnecting SSE');
-      this.currentInstance.set(null);
+      this.currentInstanceId.set(null);
       this.messages.set([]);
       this.sseService.disconnect();
       this.sseService.clearEvents();
       return;
     }
 
+    // Set current instance ID - currentInstance computed will derive from instances list
+    this.currentInstanceId.set(instanceId);
+
     // Find instance in existing list or load it
     const instance = this.instanceService.instances().find(i => i.instance_id === instanceId);
     console.log('[Chat] Instance found in list:', !!instance, 'instances count:', this.instanceService.instances().length);
     if (instance) {
       console.log('[Chat] Using instance from list, connecting SSE');
-      this.currentInstance.set(instance);
       this.loadInstanceMessages(instanceId);
     } else {
       // Try to get instance from API
@@ -231,13 +238,12 @@ export class ChatComponent implements OnInit, OnDestroy {
         next: (instanceData) => {
           console.log('[Chat] Got instance from API, connecting SSE');
           this.instanceNotFound.set(null);
-          this.currentInstance.set(instanceData);
           this.loadInstanceMessages(instanceId);
         },
         error: (err) => {
           console.warn('[Chat] Instance not found:', instanceId, 'error:', err);
           this.instanceNotFound.set(instanceId);
-          this.currentInstance.set(null);
+          this.currentInstanceId.set(null);
           this.messages.set([]);
           this.sseService.disconnect();
           this.sseService.clearEvents();
@@ -276,8 +282,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
         // Instance is removed from instanceService via its polling
-        if (this.currentInstance()?.instance_id === instanceId) {
-          this.currentInstance.set(null);
+        if (this.currentInstanceId() === instanceId) {
+          this.currentInstanceId.set(null);
           this.router.navigate(['/']);
         }
       },
@@ -295,7 +301,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     // Reset state when creating new instance
     this.isSending.set(false);
     this.sendError.set(null);
-    this.currentInstance.set(null);
+    this.currentInstanceId.set(null);
     this.messages.set([]);
     this.processedSseMessageIds.clear();
     this.sseService.disconnect();
@@ -303,7 +309,7 @@ export class ChatComponent implements OnInit, OnDestroy {
 
     const agentPath = `./agents/${agent.id}`;
     const projectId = this.tabStateService.activeProjectId() ?? undefined;
-    
+
     this.api.createInstance(agentPath, undefined, projectId).subscribe({
       next: (instance) => {
         // Instance will appear in instanceService via polling
@@ -363,7 +369,7 @@ export class ChatComponent implements OnInit, OnDestroy {
   }
 
   protected onStopInstance(): void {
-    const instanceId = this.currentInstance()?.instance_id;
+    const instanceId = this.currentInstanceId();
     if (instanceId) {
       this.api.stopInstance(instanceId).subscribe({ error: (err: any) => console.error('Stop failed:', err) });
     }

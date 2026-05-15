@@ -38,6 +38,9 @@ class TestStopInstanceCascade:
         manager = MagicMock()
         manager._instance_repository = mock_repo
         manager._request_registry = mock_registry
+        # Mock live_hub with async stream_status_change
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
         return manager
 
     @pytest.fixture

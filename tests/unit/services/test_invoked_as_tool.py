@@ -45,6 +45,9 @@ def mock_manager():
     manager.enqueue_message = AsyncMock()
     manager.terminate_instance = AsyncMock()
     manager.get_instance = MagicMock()
+    # Mock live_hub for status_change emission in spawn_instance
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
     return manager
 
 

@@ -182,6 +182,20 @@ class LiveEventHub:
         }
         await self._stream_to_connections(instance_id, event)
     
+    async def stream_status_change(self, instance_id: str, status: str) -> None:
+        """Stream status change event to all active connections.
+
+        Args:
+            instance_id: The instance ID.
+            status: The new status value.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "status_change",
+            "status": status,
+        }
+        await self._stream_to_connections(instance_id, event)
+
     async def stream_lifecycle(
         self,
         instance_id: str,
@@ -189,7 +203,7 @@ class LiveEventHub:
         data: dict[str, Any] | None = None,
     ) -> None:
         """Stream lifecycle event to active connections.
-        
+
         Args:
             instance_id: The instance ID.
             event_type: Lifecycle event type (completed, failed, etc.).

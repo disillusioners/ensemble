@@ -275,6 +275,11 @@ class InstanceLifecycleService:
         # Store in instances dict
         self._manager.instances[instance_id] = (graph, resolved_agent_dir)
 
+        # Emit status_change event for idle status (fire-and-forget)
+        asyncio.create_task(
+            self._manager._live_hub.stream_status_change(instance_id, "idle")
+        )
+
         return instance_id
 
     async def terminate_instance(self, instance_id: str) -> bool:
@@ -329,6 +334,9 @@ class InstanceLifecycleService:
         # 5. Update DB status to terminated using repository
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
             self._manager._instance_repository.update_status(instance_id, "terminated")
+
+        # 5.5. Emit status_change event
+        await self._manager._live_hub.stream_status_change(instance_id, "terminated")
 
         # 6. Release project lock if JobQueueService is connected (async)
         if self._job_queue_service is not None:
@@ -460,6 +468,8 @@ class InstanceLifecycleService:
         # Stop self (pass prefetched meta to avoid redundant DB lookup)
         if _stop_single(instance_id, prefetched_meta=meta):
             stopped_ids.append(instance_id)
+            # Emit status_change event for idle status
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.IDLE.value)
         else:
             skipped_ids.append(instance_id)
 

@@ -1,7 +1,8 @@
-import { Injectable, inject, signal, computed, WritableSignal, Signal } from '@angular/core';
+import { Injectable, inject, signal, computed, WritableSignal, Signal, effect } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from './api.service';
-import type { InstanceInfo } from '../models';
+import { SseService } from './sse.service';
+import type { InstanceInfo, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 100;
 
@@ -10,6 +11,7 @@ const PAGE_SIZE = 100;
 })
 export class InstanceService {
   private readonly api = inject(ApiService);
+  private readonly sseService = inject(SseService);
 
   // Polling interval: 10 seconds
   private readonly POLLING_INTERVAL = 10_000;
@@ -26,6 +28,30 @@ export class InstanceService {
   readonly hasMoreInstances: Signal<boolean> = computed(
     () => this.instances().length < this.totalInstances()
   );
+
+  constructor() {
+    // Subscribe to SSE status change events for optimistic updates
+    effect(() => {
+      const statusChange = this.sseService.statusChange();
+      if (statusChange) {
+        this.updateInstanceStatus(statusChange.instance_id, statusChange.status as InstanceStatus);
+      }
+    });
+  }
+
+  /**
+   * Optimistically update instance status locally.
+   * Polling will correct any inconsistencies.
+   */
+  updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): void {
+    this.instances.update(instances =>
+      instances.map(instance =>
+        instance.instance_id === instanceId
+          ? { ...instance, status: newStatus }
+          : instance
+      )
+    );
+  }
 
   /**
    * Load instances from the API.

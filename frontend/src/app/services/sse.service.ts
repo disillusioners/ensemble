@@ -18,6 +18,9 @@ export class SseService {
   // Messages from checkpoint events - replaces messageDeltas
   messages = signal<Message[]>([]);
 
+  // Status change events for instance updates
+  statusChange = signal<{ instance_id: string; status: string } | null>(null);
+
   constructor(private ngZone: NgZone) {}
 
   /**
@@ -147,8 +150,26 @@ export class SseService {
           const data = JSON.parse(e.data);
           const message = this.mapToMessage(data.message);
           this.upsertMessage(message);
+          this.events.update(evts => [...evts, { type: 'tool_call', data }]);
         } catch (err) {
           console.error('[SSE] Failed to parse tool_call:', err);
+        }
+      });
+    });
+
+    // Status change event
+    eventSource.addEventListener('status_change', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          console.log('[SSE] status_change event:', data);
+          this.events.update(evts => [...evts, { type: 'status_change', data }]);
+          this.statusChange.set({
+            instance_id: data.instance_id as string,
+            status: data.status as string,
+          });
+        } catch (err) {
+          console.error('[SSE] Failed to parse status_change:', err);
         }
       });
     });
