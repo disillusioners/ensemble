@@ -66,7 +66,6 @@ export class InstanceService {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
-        console.log('[InstanceService] Added minimal instance for SSE update:', instanceId);
         return [...instances, minimalInstance];
       }
     });

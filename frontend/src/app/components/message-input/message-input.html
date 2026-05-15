@@ -46,11 +46,11 @@
       [value]="message()"
       (input)="onInput($event)"
       (keydown.enter)="onKeydownEnter($event)"
-      [disabled]="disabled"
+      [disabled]="disabled()"
       placeholder="Type your message or drag images here..."
       rows="1"
       class="input-textarea"
-      [class.active]="canSend"
+      [class.active]="canSend()"
     ></textarea>
 
     <button 
@@ -75,11 +75,11 @@
     } @else {
         <button
             type="button"
-            [disabled]="!canSend"
+            [disabled]="!canSend()"
             class="send-button"
-            [style.backgroundColor]="canSend ? color : '#343541'"
-            [style.color]="canSend ? 'white' : '#6e6e80'"
-            [style.cursor]="canSend ? 'pointer' : 'not-allowed'"
+            [style.backgroundColor]="canSend() ? color() : '#343541'"
+            [style.color]="canSend() ? 'white' : '#6e6e80'"
+            [style.cursor]="canSend() ? 'pointer' : 'not-allowed'"
             (click)="handleSubmit()"
         >
             <svg class="send-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">

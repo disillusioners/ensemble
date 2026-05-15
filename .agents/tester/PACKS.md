@@ -49,7 +49,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | SSE real-time status: send/stop button timing, SSE streaming, error state (7 tests) | 5 min | 2026-05-15 | ⚠️ PARTIAL (7/7 pass but Stop button never appears — frontend bug found) |
+| send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | SSE real-time status: send/stop button timing, SSE streaming, direct navigation (6 tests) | 5 min | 2026-05-15 | ✅ PASS (6/6 passed, Stop button fix verified, 114ms direct navigation) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
 
 ---

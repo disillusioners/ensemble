@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed, input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import type { InstanceStatus } from '../../models';
 
@@ -24,10 +24,11 @@ interface FilePreview {
 export class MessageInputComponent {
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
-  
-  @Input() disabled = false;
-  @Input() agentColor = 'coder';
-  @Input() instanceStatus: InstanceStatus | null = null;
+
+  // Use input() for reactive signal-based inputs
+  readonly disabled = input(false);
+  readonly agentColor = input('coder');
+  readonly instanceStatus = input<InstanceStatus | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() stopInstance = new EventEmitter<void>();
 
@@ -41,7 +42,7 @@ export class MessageInputComponent {
    * Show Stop for 'running', 'waiting_children', or 'queued' states.
    */
   readonly isInstanceRunning = computed(() => {
-    const status = this.instanceStatus;
+    const status = this.instanceStatus();
     return status === 'running' || status === 'waiting_children' || status === 'queued';
   });
 
@@ -62,17 +63,17 @@ export class MessageInputComponent {
     'reviewer': '#8b5cf6',
   };
 
-  get color(): string {
-    return this.agentColorMap[this.agentColor] || '#10a7f7';
-  }
+  readonly color = computed(() => {
+    return this.agentColorMap[this.agentColor()] || '#10a7f7';
+  });
 
-  get canSend(): boolean {
-    return (!!this.message().trim() || this.images().length > 0) && !this.disabled;
-  }
+  readonly canSend = computed(() => {
+    return (!!this.message().trim() || this.images().length > 0) && !this.disabled();
+  });
 
   handleSubmit(): void {
     const trimmedMessage = this.message().trim();
-    if ((!trimmedMessage && this.images().length === 0) || this.disabled) return;
+    if ((!trimmedMessage && this.images().length === 0) || this.disabled()) return;
 
     const payload: MessagePayload = {
       content: trimmedMessage,
