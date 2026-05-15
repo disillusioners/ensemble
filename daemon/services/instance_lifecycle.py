@@ -371,7 +371,7 @@ class InstanceLifecycleService:
         return True
 
     async def stop_instance_cascade(
-        self, instance_id: str, *, prefetched_meta=None, _visited: set[str] | None = None, _depth: int = 0
+        self, instance_id: str, *, _visited: set[str] | None = None, _depth: int = 0
     ) -> dict:
         """Stop an instance and cascade to all children (soft stop).
 
@@ -381,7 +381,6 @@ class InstanceLifecycleService:
 
         Args:
             instance_id: The ID of the instance to stop.
-            prefetched_meta: Pre-fetched metadata (for internal recursion).
             _visited: Internal set for circular reference detection.
             _depth: Internal counter for depth limit protection.
 
@@ -406,35 +405,35 @@ class InstanceLifecycleService:
         skipped_ids: list[str] = []
 
         # Helper function to stop a single instance (non-recursive)
-        def _stop_single(instance_id: str, prefetched_meta: Instance | None = None) -> bool:
+        def _stop_single(target_id: str, prefetched_meta: Instance | None = None) -> bool:
             """Stop a single instance. Returns True if stopped, False if skipped.
-            
+
             Args:
-                instance_id: The ID of the instance to stop.
+                target_id: The ID of the instance to stop.
                 prefetched_meta: Pre-fetched metadata (avoids redundant DB lookup).
             """
-            meta = prefetched_meta or self._manager._instance_repository.get(instance_id)
+            meta = prefetched_meta or self._manager._instance_repository.get(target_id)
 
             if meta is None:
-                logger.warning(f"Instance {instance_id[:8]}... not found in DB, skipping stop")
+                logger.warning(f"Instance {target_id[:8]}... not found in DB, skipping stop")
                 return False
 
             # Skip if already idle
             if meta.status == InstanceStatus.IDLE.value:
-                logger.info(f"Instance {instance_id[:8]}... is already idle, skipping")
+                logger.info(f"Instance {target_id[:8]}... is already idle, skipping")
                 return False
 
             # Cancel active LLM requests
             self._manager._request_registry.cancel_by_instance(
-                instance_id, CancellationReason.USER_STOPPED
+                target_id, CancellationReason.USER_STOPPED
             )
 
             # Update DB status to idle
             self._manager._instance_repository.update_status(
-                instance_id, InstanceStatus.IDLE.value
+                target_id, InstanceStatus.IDLE.value
             )
 
-            logger.info(f"Stopped instance {instance_id[:8]}...")
+            logger.info(f"Stopped instance {target_id[:8]}...")
             return True
 
         # Get instance metadata for cascade
@@ -445,7 +444,7 @@ class InstanceLifecycleService:
             return {"stopped_ids": stopped_ids, "skipped_ids": skipped_ids}
 
         # Cascade to children first (DFS)
-        if meta and meta.children:
+        if meta.children:
             for child_id in list(meta.children):
                 try:
                     logger.info(f"Cascading stop to child instance: {child_id[:8]}...")
