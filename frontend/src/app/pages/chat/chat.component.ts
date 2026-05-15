@@ -371,6 +371,10 @@ export class ChatComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected onStopInstanceFromList(instanceId: string): void {
+    this.api.stopInstance(instanceId).subscribe({ error: (err: any) => console.error('Stop failed:', err) });
+  }
+
   // Expose for template
   protected readonly localStorage = localStorage;
 }
