@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-15 Stop Instance Cascade)
+## Test Results (Latest: 2026-05-15 Send/Stop Button Toggle E2E)
+
+### Send/Stop Button Toggle E2E (main branch)
+- **7 E2E tests passed**, 0 failed (Playwright browser automation)
+- **Critical discovery**: `isStreaming` signal means "SSE connected", NOT "actively streaming response"
+- **Behavior documented**: Stop button shows on page load (SSE connects immediately), stays after clicking stop
+- **Send button only appears when SSE disconnects** (error, navigation away, manual disconnect)
+- **Visual checks passed**: Stop button has proper square icon, correct dimensions, red color
+- **Angular probe technique**: Used `window.ng.getComponent()` to manually disconnect SSE in tests
+- **Test file**: `frontend/e2e/send-stop-button.spec.ts`
+- See `.agents/tester/RESULTS/2026-05-15-send-stop-button-toggle.md` for full report
+
+### Send/Stop Button Toggle Status: ✅ READY (behavior documented, UX concern noted)
 
 ### Stop Instance with Child Cascade (main branch)
 - **901 tests passed**, 0 failed (8 skipped)

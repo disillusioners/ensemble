@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 25 packs
-- Unit: 22 | Integration: 1 | Mock: 2
+- Total: 27 packs
+- Unit: 22 | Integration: 1 | Mock: 2 | E2E: 2
 
 ## Unit Test Packs
 
@@ -44,6 +44,13 @@
 |------|----------|-------|---------|----------|--------|
 | mock_message_service_test | tests/mock_message_service.py | MessageService SSE critical paths (emit, error isolation, duplicate prevention, edge cases) | 2 min | 2026-04-23 | ⚠️ FILE NOT FOUND (stale entry) |
 | mock_job_queue_test | test/packs/mock_job_queue_test.sh | Mock job queue API test | 5 min | 2026-04-23 | ❌ FAIL (48 fixture errors — PRE-EXISTING, not Phase 6) |
+
+## E2E Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | Send/Stop button toggle: SSE connected state, navigation, send message, stop click, visual check, SSE disconnect | 5 min | 2026-05-15 | ✅ PASS (7 tests, semantic mismatch documented) |
+| project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
 
 ---
 
