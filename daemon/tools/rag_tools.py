@@ -1211,4 +1211,3 @@ def create_rag_tools(
         rag_list_docs,
         rag_track_status,
     ]
-   ]

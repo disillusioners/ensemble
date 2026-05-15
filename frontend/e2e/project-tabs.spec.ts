@@ -120,6 +120,9 @@ test.describe('Project Tabs Feature', () => {
     await page.reload();
     await page.waitForSelector('.tab-bar', { timeout: 10000 });
 
+    // Wait for instances to load (wait for API response)
+    await page.waitForResponse(resp => resp.url().includes('/api/instances'));
+
     // Open project 1 tab
     await page.locator('.tab-add').click();
     await page.locator('.project-menu button[mat-menu-item]', { hasText: project1.name }).click();

@@ -1,6 +1,6 @@
 import { request, APIRequestContext } from '@playwright/test';
 
-const BASE_URL = 'http://localhost:8088';
+const BASE_URL = 'http://localhost:8079';
 
 /**
  * Create an API request context for making HTTP requests to the backend.
