@@ -370,17 +370,38 @@ class InstanceLifecycleService:
 
         return True
 
-    async def stop_instance_cascade(self, instance_id: str) -> dict:
+    async def stop_instance_cascade(
+        self, instance_id: str, *, prefetched_meta=None, _visited: set[str] | None = None, _depth: int = 0
+    ) -> dict:
         """Stop an instance and cascade to all children (soft stop).
 
         Recursively stops the target instance and all its descendants.
         Cancels active requests and sets status to idle (resumable).
         Does NOT remove instances from memory or release locks.
 
+        Args:
+            instance_id: The ID of the instance to stop.
+            prefetched_meta: Pre-fetched metadata (for internal recursion).
+            _visited: Internal set for circular reference detection.
+            _depth: Internal counter for depth limit protection.
+
         Returns dict with:
           - stopped_ids: list of all instance IDs that were stopped
           - skipped_ids: list of instance IDs that were already idle (skipped)
         """
+        # Depth guard
+        if _depth > 256:
+            logger.error(f"Max cascade depth exceeded at {instance_id[:8]}...")
+            return {"stopped_ids": [], "skipped_ids": [instance_id]}
+
+        # Circular reference guard
+        if _visited is None:
+            _visited = set()
+        if instance_id in _visited:
+            logger.warning(f"Circular reference detected: {instance_id[:8]}..., skipping")
+            return {"stopped_ids": [], "skipped_ids": [instance_id]}
+        _visited.add(instance_id)
+
         stopped_ids: list[str] = []
         skipped_ids: list[str] = []
 
@@ -426,10 +447,16 @@ class InstanceLifecycleService:
         # Cascade to children first (DFS)
         if meta and meta.children:
             for child_id in list(meta.children):
-                logger.info(f"Cascading stop to child instance: {child_id[:8]}...")
-                child_result = await self.stop_instance_cascade(child_id)
-                stopped_ids.extend(child_result["stopped_ids"])
-                skipped_ids.extend(child_result["skipped_ids"])
+                try:
+                    logger.info(f"Cascading stop to child instance: {child_id[:8]}...")
+                    child_result = await self.stop_instance_cascade(
+                        child_id, _visited=_visited, _depth=_depth + 1
+                    )
+                    stopped_ids.extend(child_result["stopped_ids"])
+                    skipped_ids.extend(child_result["skipped_ids"])
+                except Exception as e:
+                    logger.error(f"Failed to stop child {child_id[:8]}...: {e}")
+                    skipped_ids.append(child_id)
 
         # Stop self (pass prefetched meta to avoid redundant DB lookup)
         if _stop_single(instance_id, prefetched_meta=meta):

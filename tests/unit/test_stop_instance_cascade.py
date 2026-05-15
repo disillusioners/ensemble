@@ -294,3 +294,93 @@ class TestStopInstanceCascade:
         assert result["skipped_ids"] == [grandchild_id]
         # Parent and child should have status updated (not grandchild)
         assert mock_repo.update_status.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_stop_circular_reference_detected(self, lifecycle_service, mock_repo, mock_registry):
+        """Test that circular references are detected and skipped.
+
+        Scenario: Parent's children includes itself (A -> [A]).
+
+        Verifies:
+        - No infinite recursion (warning is logged)
+        - The circular child is added to skipped_ids during cascade
+        - Parent still gets stopped (root call proceeds)
+        """
+        instance_id = "circular-instance"
+
+        # Create an instance where children includes itself
+        mock_repo.get.return_value = self._make_instance(
+            instance_id, status="running", children=[instance_id]
+        )
+
+        result = await lifecycle_service.stop_instance_cascade(instance_id)
+
+        # Parent is stopped (root call proceeds)
+        assert result["stopped_ids"] == [instance_id]
+        # The circular reference is detected during recursion and skipped
+        assert result["skipped_ids"] == [instance_id]
+        # Both the root stop and the recursive skip attempt update status
+        assert mock_repo.update_status.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_stop_child_exception_does_not_block_siblings(self, lifecycle_service, mock_repo, mock_registry):
+        """Test that an exception when stopping one child doesn't block siblings.
+
+        Scenario:
+        - parent: running, children = [child1, child2, child3]
+        - child2 raises an exception when accessed
+
+        Verifies:
+        - child1 and child3 are stopped successfully
+        - child2 is in skipped_ids
+        - No crash occurs
+        """
+        parent_id = "parent"
+        child1_id = "child1"
+        child2_id = "child2"
+        child3_id = "child3"
+
+        def get_side_effect(instance_id):
+            if instance_id == parent_id:
+                return self._make_instance(parent_id, status="running", children=[child1_id, child2_id, child3_id])
+            elif instance_id == child1_id:
+                return self._make_instance(child1_id, status="running")
+            elif instance_id == child2_id:
+                # Simulate exception on child2 access
+                raise RuntimeError(f"Failed to get instance {child2_id}")
+            elif instance_id == child3_id:
+                return self._make_instance(child3_id, status="running")
+            return None
+
+        mock_repo.get.side_effect = get_side_effect
+
+        result = await lifecycle_service.stop_instance_cascade(parent_id)
+
+        # child1 and child3 should be stopped, child2 skipped due to exception
+        assert set(result["stopped_ids"]) == {parent_id, child1_id, child3_id}
+        assert result["skipped_ids"] == [child2_id]
+        # Parent, child1, and child3 should have status updated (child2 not)
+        assert mock_repo.update_status.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_stop_depth_limit_protection(self, lifecycle_service, mock_repo, mock_registry):
+        """Test that depth limit protection prevents excessive recursion.
+
+        Scenario: Call with _depth=257 (exceeds limit of 256).
+
+        Verifies:
+        - Returns immediately with skipped_ids containing the instance
+        - No further processing occurs
+        """
+        instance_id = "deep-instance"
+        mock_repo.get.return_value = self._make_instance(instance_id, status="running")
+
+        # Call with _depth exceeding the limit (257 > 256)
+        result = await lifecycle_service.stop_instance_cascade(instance_id, _depth=257)
+
+        # Should skip due to depth limit
+        assert result["skipped_ids"] == [instance_id]
+        assert result["stopped_ids"] == []
+        # Should not attempt to stop or update status
+        mock_registry.cancel_by_instance.assert_not_called()
+        mock_repo.update_status.assert_not_called()
