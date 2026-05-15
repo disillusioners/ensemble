@@ -55,10 +55,10 @@ export class ApiService {
       agent_id: agentId, 
     };
     if (instanceId) {
-      body.instance_id = instanceId;
+      body['instance_id'] = instanceId;
     }
     if (projectId) {
-      body.project_id = projectId;
+      body['project_id'] = projectId;
     }
     return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, body);
   }
