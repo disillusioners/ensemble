@@ -304,8 +304,9 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sseService.clearEvents();
 
     const agentPath = `./agents/${agent.id}`;
+    const projectId = this.tabStateService.activeProjectId() ?? undefined;
     
-    this.api.createInstance(agentPath).subscribe({
+    this.api.createInstance(agentPath, undefined, projectId).subscribe({
       next: (instance) => {
         // Instance will appear in instanceService via polling
         this.router.navigate(['/instances', instance.instance_id]);

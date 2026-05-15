@@ -50,11 +50,17 @@ export class ApiService {
   }
 
   // Instances
-  createInstance(agentId: string, instanceId?: string): Observable<InstanceInfo> {
-    return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, { 
+  createInstance(agentId: string, instanceId?: string, projectId?: string): Observable<InstanceInfo> {
+    const body: Record<string, string> = { 
       agent_id: agentId, 
-      instance_id: instanceId 
-    });
+    };
+    if (instanceId) {
+      body.instance_id = instanceId;
+    }
+    if (projectId) {
+      body.project_id = projectId;
+    }
+    return this.http.post<InstanceInfo>(`${this.API_BASE}/instances`, body);
   }
 
   listInstances(limit: number = 100, offset: number = 0, projectId?: string): Observable<InstanceListResponse> {

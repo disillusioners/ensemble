@@ -55,11 +55,15 @@ class TestApiService {
     return this.http.delete(`${this.API_BASE}/agents/${agentId}`);
   }
 
-  createInstance(agentId: string, instanceId?: string): Observable<any> {
-    return this.http.post(`${this.API_BASE}/instances`, { 
-      agent_id: agentId, 
-      instance_id: instanceId 
-    });
+  createInstance(agentId: string, instanceId?: string, projectId?: string): Observable<any> {
+    const body: Record<string, string> = { agent_id: agentId };
+    if (instanceId) {
+      body.instance_id = instanceId;
+    }
+    if (projectId) {
+      body.project_id = projectId;
+    }
+    return this.http.post(`${this.API_BASE}/instances`, body);
   }
 
   listInstances(limit: number = 100, offset: number = 0): Observable<any> {
@@ -227,7 +231,28 @@ describe('ApiService', () => {
       const request = httpMock.getRequests()[0];
       expect(request.method).toBe('POST');
       expect(request.url).toBe('/api/instances');
-      expect(request.body).toEqual({ agent_id: agentId, instance_id: undefined });
+      expect(request.body).toEqual({ agent_id: agentId });
+    });
+
+    it('createInstance() should include project_id when provided', () => {
+      const agentId = 'test-agent';
+      const projectId = 'project-123';
+
+      service.createInstance(agentId, undefined, projectId);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.method).toBe('POST');
+      expect(request.url).toBe('/api/instances');
+      expect(request.body).toEqual({ agent_id: agentId, project_id: projectId });
+    });
+
+    it('createInstance() should not include project_id when not provided', () => {
+      const agentId = 'test-agent';
+
+      service.createInstance(agentId);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.body).not.toHaveProperty('project_id');
     });
 
     it('deleteInstance() should make DELETE request', () => {
