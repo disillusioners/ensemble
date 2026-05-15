@@ -60,7 +60,24 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-07 KB Tools Conditional Disabling)
+## Test Results (Latest: 2026-05-15 Stop Instance Cascade)
+
+### Stop Instance with Child Cascade (main branch)
+- **901 tests passed**, 0 failed (8 skipped)
+- **14 stop-cascade tests** — ALL PASS (11 unit + 2 API + 1 delegation)
+- **Mock accuracy verified** — All test mocks match real service/repository interfaces
+- **Integration testing** — Daemon spun up, API endpoint tested end-to-end:
+  - Stop parent with children → all cascade to idle ✅
+  - Stop non-existent instance → 404 ✅
+  - Already-idle → graceful no-op ✅
+  - Response format correct ✅
+- **Edge cases verified in real code**: circular refs, exceptions during child stop, depth limit, resumability
+- **dev.sh validated** — runs for 30 seconds without crash ✅
+- **0 quick fixes needed** — Clean implementation
+- **Minor findings** (non-blocking): mutual circular ref not tested, no try/except around update_status in real code
+- See `.agents/tester/RESULTS/2026-05-15-stop-instance-cascade.md` for full report
+
+### Stop Instance with Child Cascade Status: ✅ READY
 
 ### KB Tools Conditional Disabling (branch feature/kb-disable-when-no-lightrag)
 - **1,029 tests passed**, 0 failed (2 pre-existing unrelated failures)
