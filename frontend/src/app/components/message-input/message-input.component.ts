@@ -45,6 +45,27 @@ export class MessageInputComponent {
     return status === 'running' || status === 'waiting_children' || status === 'queued';
   });
 
+  protected readonly MAX_IMAGES = 3;
+  protected readonly MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+  private readonly ACCEPTED_TYPES = [
+    'image/png',
+    'image/jpeg',
+    'image/gif',
+    'image/webp',
+    'image/bmp',
+    'image/tiff'
+  ];
+
+  agentColorMap: Record<string, string> = {
+    'leader': '#f59e0b',
+    'coder': '#10a7f7',
+    'reviewer': '#8b5cf6',
+  };
+
+  get color(): string {
+    return this.agentColorMap[this.agentColor] || '#10a7f7';
+  }
+
   get canSend(): boolean {
     return (!!this.message().trim() || this.images().length > 0) && !this.disabled;
   }
