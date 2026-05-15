@@ -49,7 +49,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | Send/Stop button toggle: SSE connected state, navigation, send message, stop click, visual check, SSE disconnect | 5 min | 2026-05-15 | ✅ PASS (7 tests, semantic mismatch documented) |
+| send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | Send/Stop button toggle: instance-status-based (idle→send, running→stop), SSE streaming, visual check | 5 min | 2026-05-15 | ⚠️ PARTIAL (4/6 pass — Tests 2,4 timing-limited by 10s polling interval) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
 
 ---

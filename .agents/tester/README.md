@@ -62,14 +62,26 @@ tests/
 
 ## Test Results (Latest: 2026-05-15 Send/Stop Button Toggle E2E)
 
-### Send/Stop Button Toggle E2E (main branch)
+### Send/Stop Button UX Fix — Instance-Status-Based (2026-05-15)
+- **E2E Tests**: 4/6 PASSED (2 PARTIAL due to 10s polling interval timing)
+- **Unit Tests**: 28 passed, 0 failed (all `isInstanceRunning` statuses tested)
+- **Behavior verified**: Idle → Send button, Running → Stop button (correct toggle)
+- **Known limitation**: If LLM responds within 10s polling cycle, Stop button may not appear in UI
+- **Bug found & fixed**: Accidentally removed properties restored (MAX_IMAGES, color, etc.)
+- **Commits**: `8e25a22` (e2e rewrite), `781a5c2` (fix)
+- **Test file**: `frontend/e2e/send-stop-button.spec.ts`
+- See `.agents/tester/RESULTS/2026-05-15-send-stop-button-ux-fix.md` for full report
+
+### Send/Stop Button UX Fix Status: ✅ READY (core behavior verified, timing limitation documented)
+
+### Send/Stop Button Toggle E2E (OLD — SSE-based, pre-fix)
 - **7 E2E tests passed**, 0 failed (Playwright browser automation)
 - **Critical discovery**: `isStreaming` signal means "SSE connected", NOT "actively streaming response"
 - **Behavior documented**: Stop button shows on page load (SSE connects immediately), stays after clicking stop
 - **Send button only appears when SSE disconnects** (error, navigation away, manual disconnect)
 - **Visual checks passed**: Stop button has proper square icon, correct dimensions, red color
 - **Angular probe technique**: Used `window.ng.getComponent()` to manually disconnect SSE in tests
-- **Test file**: `frontend/e2e/send-stop-button.spec.ts`
+- **Test file**: `frontend/e2e/send-stop-button.spec.ts` (now superseded by instance-status-based version)
 - See `.agents/tester/RESULTS/2026-05-15-send-stop-button-toggle.md` for full report
 
 ### Send/Stop Button Toggle Status: ✅ READY (behavior documented, UX concern noted)
