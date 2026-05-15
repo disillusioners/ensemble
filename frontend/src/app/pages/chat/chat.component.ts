@@ -237,6 +237,13 @@ export class ChatComponent implements OnInit, OnDestroy {
       this.api.getInstance(instanceId).subscribe({
         next: (instanceData) => {
           console.log('[Chat] Got instance from API, connecting SSE');
+          // Add to instanceService list so currentInstance computed can find it
+          this.instanceService.instances.update(list => {
+            if (!list.find(i => i.instance_id === instanceId)) {
+              return [...list, instanceData];
+            }
+            return list;
+          });
           this.instanceNotFound.set(null);
           this.loadInstanceMessages(instanceId);
         },
