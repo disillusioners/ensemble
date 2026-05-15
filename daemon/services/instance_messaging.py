@@ -409,10 +409,13 @@ class InstanceMessagingService:
             # Don't re-raise - we want clean stop
             return MessageResult(content="")
         finally:
-            # Always unregister the task if it was registered
-            if task_registered:
-                self._manager._graph_tasks.pop(instance_id, None)
-                logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
+            # Always unregister the task, but only if we're still the registered task
+            # (handles race condition where new execution starts before our finally runs)
+            if task_registered and current_task:
+                existing = self._manager._graph_tasks.get(instance_id)
+                if existing is current_task:
+                    self._manager._graph_tasks.pop(instance_id, None)
+                    logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
 
         # Extract message data from the current turn
         messages = result.get("messages", [])
@@ -664,15 +667,6 @@ class InstanceMessagingService:
         
         graph = self._manager.get_instance(instance_id)
         
-        # Register current task for cancellation tracking
-        # This allows stop_instance_cascade to cancel the running graph
-        current_task = asyncio.current_task()
-        task_registered = False
-        if current_task:
-            self._manager._graph_tasks[instance_id] = current_task
-            task_registered = True
-            logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
-        
         # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
             self._queue_repository, 
@@ -836,7 +830,17 @@ class InstanceMessagingService:
         _dispatched_msg_ids: set[str] = set()  # Track dispatched message IDs for dedup
 
         # Stream through graph execution
+        # Register task for cancellation tracking INSIDE try block to prevent leaks
+        # if CancelledError is raised during _maybe_compact_context
+        current_task = asyncio.current_task()
+        task_registered = False
         try:
+            # Register current task for cancellation tracking
+            if current_task:
+                self._manager._graph_tasks[instance_id] = current_task
+                task_registered = True
+                logger.debug(f"Registered graph task for instance {instance_id[:8]}...")
+            
             async with self._llm_semaphore:
                 async for event in graph.astream(graph_input, config, stream_mode=["updates"]):
                     # Unpack tuple: (mode, data)
@@ -983,10 +987,13 @@ class InstanceMessagingService:
             raise
 
         finally:
-            # Always unregister the task
-            if task_registered:
-                self._manager._graph_tasks.pop(instance_id, None)
-                logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
+            # Always unregister the task, but only if we're still the registered task
+            # (handles race condition where new execution starts before our finally runs)
+            if task_registered and current_task:
+                existing = self._manager._graph_tasks.get(instance_id)
+                if existing is current_task:
+                    self._manager._graph_tasks.pop(instance_id, None)
+                    logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
 
         # Parse <think/> tags from final content
         content, thinking_extracted = parse_think_tags(final_content)

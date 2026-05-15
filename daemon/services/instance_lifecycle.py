@@ -444,7 +444,8 @@ class InstanceLifecycleService:
 
             # 2. Cancel the running graph task (interrupts astream/ainvoke loop)
             # This raises asyncio.CancelledError in the streaming coroutine
-            graph_task = self._manager._graph_tasks.get(target_id)
+            # Use pop() to prevent stale references after cancellation (consistent with terminate_instance)
+            graph_task = self._manager._graph_tasks.pop(target_id, None)
             if graph_task and not graph_task.done():
                 graph_task.cancel()
                 logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
