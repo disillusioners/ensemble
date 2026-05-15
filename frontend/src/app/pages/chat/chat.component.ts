@@ -65,8 +65,6 @@ export class ChatComponent implements OnInit, OnDestroy {
 
   @ViewChild(MessageInputComponent) messageInputRef!: MessageInputComponent;
 
-  readonly isStreaming = this.sseService.isStreaming;
-
   // Computed instance agent
   readonly instanceAgent = computed(() => {
     const instance = this.currentInstance();

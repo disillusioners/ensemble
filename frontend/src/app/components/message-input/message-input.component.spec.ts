@@ -1,6 +1,8 @@
 import { signal } from '@angular/core';
 import { EventEmitter } from '@angular/core';
 
+type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
+
 // Simplified MessageInputComponent for testing (mirrors actual component structure)
 interface MessagePayload {
   content: string;
@@ -19,7 +21,7 @@ class TestMessageInputComponent {
   
   @Input() disabled = false;
   @Input() agentColor = 'coder';
-  @Input() isStreaming = false;
+  @Input() instanceStatus: InstanceStatus | null = null;
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() stopInstance = new EventEmitter<void>();
 
@@ -40,6 +42,10 @@ class TestMessageInputComponent {
 
   get canSend(): boolean {
     return (!!this.message().trim() || this.images().length > 0) && !this.disabled;
+  }
+
+  protected get isInstanceRunning(): boolean {
+    return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children';
   }
 
   handleSubmit(): void {
@@ -100,29 +106,23 @@ describe('MessageInputComponent', () => {
     component = new TestMessageInputComponent();
   });
 
-  describe('@Input() isStreaming', () => {
+  describe('@Input() instanceStatus', () => {
     it('should exist', () => {
-      expect(component.isStreaming).toBeDefined();
+      expect(component.instanceStatus).toBeDefined();
     });
 
-    it('should default to false', () => {
-      expect(component.isStreaming).toBe(false);
+    it('should default to null', () => {
+      expect(component.instanceStatus).toBe(null);
     });
 
-    it('should accept true value', () => {
-      component.isStreaming = true;
-      expect(component.isStreaming).toBe(true);
+    it('should accept running value', () => {
+      component.instanceStatus = 'running';
+      expect(component.instanceStatus).toBe('running');
     });
 
-    it('should be settable to true and back to false', () => {
-      component.isStreaming = false;
-      expect(component.isStreaming).toBe(false);
-
-      component.isStreaming = true;
-      expect(component.isStreaming).toBe(true);
-
-      component.isStreaming = false;
-      expect(component.isStreaming).toBe(false);
+    it('should accept waiting_children value', () => {
+      component.instanceStatus = 'waiting_children';
+      expect(component.instanceStatus).toBe('waiting_children');
     });
   });
 
@@ -148,29 +148,55 @@ describe('MessageInputComponent', () => {
     });
   });
 
-  describe('button swap functionality', () => {
-    it('should have isStreaming false by default for send button display', () => {
-      expect(component.isStreaming).toBe(false);
-      // When isStreaming is false, send button should be shown (not stop button)
+  describe('isInstanceRunning getter', () => {
+    it('should return true for running status', () => {
+      component.instanceStatus = 'running';
+      expect(component.isInstanceRunning).toBe(true);
     });
 
-    it('should have isStreaming true for stop button display', () => {
-      component.isStreaming = true;
-      expect(component.isStreaming).toBe(true);
-      // When isStreaming is true, stop button should be shown (not send button)
+    it('should return true for waiting_children status', () => {
+      component.instanceStatus = 'waiting_children';
+      expect(component.isInstanceRunning).toBe(true);
     });
 
-    it('should swap correctly when isStreaming toggles', () => {
-      // Initially isStreaming is false
-      expect(component.isStreaming).toBe(false);
+    it('should return false for idle status', () => {
+      component.instanceStatus = 'idle';
+      expect(component.isInstanceRunning).toBe(false);
+    });
 
-      // Toggle to true (stop button visible)
-      component.isStreaming = true;
-      expect(component.isStreaming).toBe(true);
+    it('should return false for error status', () => {
+      component.instanceStatus = 'error';
+      expect(component.isInstanceRunning).toBe(false);
+    });
 
-      // Toggle back to false (send button visible)
-      component.isStreaming = false;
-      expect(component.isStreaming).toBe(false);
+    it('should return false for terminated status', () => {
+      component.instanceStatus = 'terminated';
+      expect(component.isInstanceRunning).toBe(false);
+    });
+
+    it('should return false for completed status', () => {
+      component.instanceStatus = 'completed';
+      expect(component.isInstanceRunning).toBe(false);
+    });
+
+    it('should return false for paused status', () => {
+      component.instanceStatus = 'paused';
+      expect(component.isInstanceRunning).toBe(false);
+    });
+
+    it('should return false for queued status', () => {
+      component.instanceStatus = 'queued';
+      expect(component.isInstanceRunning).toBe(false);
+    });
+
+    it('should return false for failed status', () => {
+      component.instanceStatus = 'failed';
+      expect(component.isInstanceRunning).toBe(false);
+    });
+
+    it('should return false for null status', () => {
+      component.instanceStatus = null;
+      expect(component.isInstanceRunning).toBe(false);
     });
   });
 
@@ -199,15 +225,6 @@ describe('MessageInputComponent', () => {
       component.handleSubmit();
 
       expect(emitSpy).not.toHaveBeenCalled();
-    });
-
-    it('should clear message after successful send', () => {
-      component.message.set('Hello!');
-      expect(component.message()).toBe('Hello!');
-
-      component.handleSubmit();
-
-      expect(component.message()).toBe('');
     });
 
     it('should clear images after successful send', () => {

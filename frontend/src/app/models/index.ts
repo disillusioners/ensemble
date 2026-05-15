@@ -1,5 +1,5 @@
 // Instance types
-export type InstanceStatus = 'idle' | 'running' | 'waiting' | 'error' | 'terminated';
+export type InstanceStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed';
 
 export interface InstanceInfo {
   instance_id: string;

@@ -117,7 +117,7 @@
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"
           [agentColor]="instanceAgent()?.id || 'coder'"
-          [isStreaming]="isStreaming()"
+          [instanceStatus]="currentInstance()?.status ?? null"
           (stopInstance)="onStopInstance()"
         ></app-message-input>
       }

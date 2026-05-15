@@ -1,5 +1,6 @@
-import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal } from '@angular/core';
+import { Component, Input, Output, EventEmitter, ViewChild, ElementRef, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import type { InstanceStatus } from '../../models';
 
 export interface MessagePayload {
   content: string;
@@ -26,7 +27,7 @@ export class MessageInputComponent {
   
   @Input() disabled = false;
   @Input() agentColor = 'coder';
-  @Input() isStreaming = false;
+  @Input() instanceStatus: InstanceStatus | null = null;
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() stopInstance = new EventEmitter<void>();
 
@@ -34,6 +35,11 @@ export class MessageInputComponent {
   images = signal<FilePreview[]>([]);
   isDragOver = signal(false);
   validationError = signal<string | null>(null);
+
+  // Instance is running when status is 'running' or 'waiting_children'
+  protected get isInstanceRunning(): boolean {
+    return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children';
+  }
 
   protected readonly MAX_IMAGES = 3;
   protected readonly MAX_IMAGE_SIZE = 10 * 1024 * 1024;
