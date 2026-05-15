@@ -1239,6 +1239,23 @@ class InstanceManager:
         """
         return await self._lifecycle_service.terminate_instance(instance_id)
 
+    async def stop_instance_cascade(self, instance_id: str) -> dict:
+        """Stop an instance and cascade to all children (soft stop).
+
+        Recursively stops the target instance and all its descendants.
+        Cancels active requests and sets status to idle (resumable).
+        Does NOT remove instances from memory or release locks.
+
+        Args:
+            instance_id: The ID of the instance to stop.
+
+        Returns:
+            Dict with:
+              - stopped_ids: list of all instance IDs that were stopped
+              - skipped_ids: list of instance IDs that were already idle (skipped)
+        """
+        return await self._lifecycle_service.stop_instance_cascade(instance_id)
+
     async def _publish_instance_lifecycle_event(
         self,
         instance_id: str,

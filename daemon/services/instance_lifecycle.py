@@ -370,6 +370,75 @@ class InstanceLifecycleService:
 
         return True
 
+    async def stop_instance_cascade(self, instance_id: str) -> dict:
+        """Stop an instance and cascade to all children (soft stop).
+
+        Recursively stops the target instance and all its descendants.
+        Cancels active requests and sets status to idle (resumable).
+        Does NOT remove instances from memory or release locks.
+
+        Returns dict with:
+          - stopped_ids: list of all instance IDs that were stopped
+          - skipped_ids: list of instance IDs that were already idle (skipped)
+        """
+        stopped_ids: list[str] = []
+        skipped_ids: list[str] = []
+
+        # Helper function to stop a single instance (non-recursive)
+        def _stop_single(instance_id: str, prefetched_meta: Instance | None = None) -> bool:
+            """Stop a single instance. Returns True if stopped, False if skipped.
+            
+            Args:
+                instance_id: The ID of the instance to stop.
+                prefetched_meta: Pre-fetched metadata (avoids redundant DB lookup).
+            """
+            meta = prefetched_meta or self._manager._instance_repository.get(instance_id)
+
+            if meta is None:
+                logger.warning(f"Instance {instance_id[:8]}... not found in DB, skipping stop")
+                return False
+
+            # Skip if already idle
+            if meta.status == InstanceStatus.IDLE.value:
+                logger.info(f"Instance {instance_id[:8]}... is already idle, skipping")
+                return False
+
+            # Cancel active LLM requests
+            self._manager._request_registry.cancel_by_instance(
+                instance_id, CancellationReason.USER_STOPPED
+            )
+
+            # Update DB status to idle
+            self._manager._instance_repository.update_status(
+                instance_id, InstanceStatus.IDLE.value
+            )
+
+            logger.info(f"Stopped instance {instance_id[:8]}...")
+            return True
+
+        # Get instance metadata for cascade
+        meta = self._manager._instance_repository.get(instance_id)
+
+        if meta is None:
+            logger.warning(f"Root instance {instance_id[:8]}... not found in DB")
+            return {"stopped_ids": stopped_ids, "skipped_ids": skipped_ids}
+
+        # Cascade to children first (DFS)
+        if meta and meta.children:
+            for child_id in list(meta.children):
+                logger.info(f"Cascading stop to child instance: {child_id[:8]}...")
+                child_result = await self.stop_instance_cascade(child_id)
+                stopped_ids.extend(child_result["stopped_ids"])
+                skipped_ids.extend(child_result["skipped_ids"])
+
+        # Stop self (pass prefetched meta to avoid redundant DB lookup)
+        if _stop_single(instance_id, prefetched_meta=meta):
+            stopped_ids.append(instance_id)
+        else:
+            skipped_ids.append(instance_id)
+
+        return {"stopped_ids": stopped_ids, "skipped_ids": skipped_ids}
+
     def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.
 

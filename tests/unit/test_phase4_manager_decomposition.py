@@ -825,6 +825,30 @@ class TestFacadeDelegationPattern:
         import asyncio
         asyncio.run(test())
 
+    def test_manager_stop_instance_cascade_delegates_to_lifecycle_service(self):
+        """stop_instance_cascade should delegate to _lifecycle_service."""
+        from daemon.manager import InstanceManager
+
+        manager = InstanceManager.__new__(InstanceManager)
+        manager._lifecycle_service = AsyncMock()
+        manager._lifecycle_service.stop_instance_cascade = AsyncMock(
+            return_value={
+                "stopped_ids": ["instance-123", "child-1"],
+                "skipped_ids": ["child-2"]
+            }
+        )
+
+        async def test():
+            result = await manager.stop_instance_cascade("instance-123")
+            assert result["stopped_ids"] == ["instance-123", "child-1"]
+            assert result["skipped_ids"] == ["child-2"]
+            manager._lifecycle_service.stop_instance_cascade.assert_called_once_with(
+                "instance-123"
+            )
+
+        import asyncio
+        asyncio.run(test())
+
     def test_manager_cancel_delegates_to_cancellation_service(self):
         """cancel should delegate to _cancellation_service."""
         from daemon.manager import InstanceManager

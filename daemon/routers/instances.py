@@ -5,7 +5,6 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from daemon.cancellation import CancellationReason
 from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
 from daemon.models import (
     ErrorCodes,
@@ -202,19 +201,27 @@ async def stop_instance(
     instance_id: str,
     request: Request,
 ) -> dict:
-    """Stop an instance by cancelling pending requests."""
+    """Stop an instance and cascade to children."""
     manager = _get_manager(request)
     
+    # Check instance exists
     try:
         manager.get_instance(instance_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Instance not found")
-    
-    cancelled_count = manager.cancel_instance_requests(
-        instance_id, 
-        CancellationReason.USER_STOPPED
-    )
-    return {"stopped": True, "cancelled_requests": cancelled_count}
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}"
+            ).model_dump()
+        )
+
+    result = await manager.stop_instance_cascade(instance_id)
+    return {
+        "stopped": True,
+        "stopped_ids": result["stopped_ids"],
+        "skipped_ids": result["skipped_ids"],
+    }
 
 
 # 6. GET /instances/{instance_id}/messages - Get message history
