@@ -44,9 +44,10 @@ class TestMessageInputComponent {
     return (!!this.message().trim() || this.images().length > 0) && !this.disabled;
   }
 
-  protected get isInstanceRunning(): boolean {
+  // Computed signal: returns true when instance is actively running
+  readonly isInstanceRunning = (): boolean => {
     return this.instanceStatus === 'running' || this.instanceStatus === 'waiting_children' || this.instanceStatus === 'queued';
-  }
+  };
 
   handleSubmit(): void {
     const trimmedMessage = this.message().trim();
@@ -148,55 +149,55 @@ describe('MessageInputComponent', () => {
     });
   });
 
-  describe('isInstanceRunning getter', () => {
+  describe('isInstanceRunning', () => {
     it('should return true for running status', () => {
       component.instanceStatus = 'running';
-      expect(component.isInstanceRunning).toBe(true);
+      expect(component.isInstanceRunning()).toBe(true);
     });
 
     it('should return true for waiting_children status', () => {
       component.instanceStatus = 'waiting_children';
-      expect(component.isInstanceRunning).toBe(true);
+      expect(component.isInstanceRunning()).toBe(true);
     });
 
     it('should return false for idle status', () => {
       component.instanceStatus = 'idle';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return false for error status', () => {
       component.instanceStatus = 'error';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return false for terminated status', () => {
       component.instanceStatus = 'terminated';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return false for completed status', () => {
       component.instanceStatus = 'completed';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return false for paused status', () => {
       component.instanceStatus = 'paused';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return true for queued status', () => {
       component.instanceStatus = 'queued';
-      expect(component.isInstanceRunning).toBe(true);
+      expect(component.isInstanceRunning()).toBe(true);
     });
 
     it('should return false for failed status', () => {
       component.instanceStatus = 'failed';
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
 
     it('should return false for null status', () => {
       component.instanceStatus = null;
-      expect(component.isInstanceRunning).toBe(false);
+      expect(component.isInstanceRunning()).toBe(false);
     });
   });
 
