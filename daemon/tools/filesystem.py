@@ -25,6 +25,15 @@ Example read_file:
 ```
 """
 
+def _normed_contains(base: Path, target: Path) -> bool:
+    """Check if target is within base using OS-appropriate case normalization."""
+    try:
+        Path(os.path.normcase(str(target))).relative_to(Path(os.path.normcase(str(base))))
+        return True
+    except ValueError:
+        return False
+
+
 def _is_within_workdir(workdir: Path, target: Path) -> bool:
     """Check if target path is within workdir boundary or a temp directory.
     
@@ -32,34 +41,30 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
     1. Within the workdir, OR
     2. Within the system temp directory or common temp directories
     """
-    try:
-        target.relative_to(workdir)
+    if _normed_contains(workdir, target):
         return True
-    except ValueError:
-        pass
     
     # Allow access to system temp directories
     # Check multiple common temp locations (handles macOS /tmp -> /private/tmp symlink)
     temp_dirs = [
-        Path(tempfile.gettempdir()).resolve(),  # System temp (e.g., /var/folders/...)
-        Path("/tmp").resolve(),                  # Common Unix temp
-        Path("/private/tmp").resolve(),          # macOS symlink target
-        Path("/var/tmp").resolve(),              # Unix persistent temp
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path("/var/tmp").resolve(),
     ]
     
     # On Windows, also check common Windows temp locations
     if os.name == 'nt':
+        system_drive = os.environ.get("SystemDrive", "C:")
         temp_dirs.extend([
             Path(os.environ.get("TEMP", "")).resolve(),
             Path(os.environ.get("TMP", "")).resolve(),
+            Path(f"{system_drive}\\tmp").resolve(),
         ])
     
     for temp_dir in temp_dirs:
-        try:
-            target.relative_to(temp_dir)
+        if _normed_contains(temp_dir, target):
             return True
-        except (ValueError, OSError):
-            continue
     
     return False
 
