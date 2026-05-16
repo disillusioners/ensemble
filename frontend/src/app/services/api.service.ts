@@ -21,7 +21,7 @@ import type {
   InstanceMappingCreate,
   InstanceMappingListResponse,
   DeleteResponse,
-  StopResponse
+  PauseResponse
 } from '../models';
 
 @Injectable({
@@ -82,8 +82,8 @@ export class ApiService {
     return this.http.delete<{ terminated: boolean }>(`${this.API_BASE}/instances/${instanceId}`);
   }
 
-  stopInstance(instanceId: string): Observable<StopResponse> {
-    return this.http.post<StopResponse>(`${this.API_BASE}/instances/${instanceId}/stop`, {});
+  pauseInstance(instanceId: string): Observable<PauseResponse> {
+    return this.http.post<PauseResponse>(`${this.API_BASE}/instances/${instanceId}/pause`, {});
   }
 
   // Messages

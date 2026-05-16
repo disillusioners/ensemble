@@ -33,7 +33,7 @@ export class InstanceListComponent {
   @Output() newInstance = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
   @Output() loadMore = new EventEmitter<void>();
-  @Output() stopInstance = new EventEmitter<string>();
+  @Output() pauseInstance = new EventEmitter<string>();
 
   // Track expanded/collapsed state per instance
   readonly expandedInstances = signal<Set<string>>(new Set());
@@ -109,11 +109,11 @@ export class InstanceListComponent {
     }
   }
 
-  onStopInstance(instanceId: string, event: Event): void {
+  onPauseInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Stop this running instance?')) {
-      this.stopInstance.emit(instanceId);
+    if (confirm('Pause this running instance?')) {
+      this.pauseInstance.emit(instanceId);
     }
   }
 

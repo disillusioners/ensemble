@@ -211,10 +211,10 @@ export interface DeleteResponse {
   terminated?: boolean;
 }
 
-// Stop instance response
-export interface StopResponse {
-  stopped: boolean;
-  stopped_ids: string[];
+// Pause instance response
+export interface PauseResponse {
+  paused: boolean;
+  paused_ids: string[];
   skipped_ids: string[];
 }
 

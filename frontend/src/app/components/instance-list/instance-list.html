@@ -112,14 +112,14 @@
       </div>
     </div>
     
-    <!-- Stop button (only for running instances) -->
+    <!-- Pause button (only for running instances) -->
     @if (instance.status === 'running') {
       <button
-        class="stop-btn"
-        (click)="onStopInstance(instance.instance_id, $event)"
-        title="Stop instance"
+        class="pause-btn"
+        (click)="onPauseInstance(instance.instance_id, $event)"
+        title="Pause instance"
       >
-        <mat-icon>stop</mat-icon>
+        <mat-icon>pause</mat-icon>
       </button>
     }
     

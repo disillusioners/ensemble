@@ -972,8 +972,8 @@ class InstanceMessagingService:
                                 break
 
         except asyncio.CancelledError:
-            # Graph was cancelled by stop_instance_cascade
-            # Don't re-raise - stop was intentional, status already set to IDLE
+            # Graph was cancelled by pause_instance_cascade
+            # Don't re-raise - pause was intentional, status already set to PAUSED
             # Return empty result to prevent crashing the worker (CancelledError is BaseException, not Exception)
             logger.info(f"Graph execution cancelled for instance {instance_id[:8]}... (message_id={message_id[:8]}...)")
             return MessageResult(content="")

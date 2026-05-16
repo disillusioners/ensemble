@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""E2E test for Stop -> Resume -> Spawn Instance fix.
+"""E2E test for Pause -> Resume -> Spawn Instance fix.
 
-This test verifies that after stopping an instance and resuming with "continue",
+This test verifies that after pausing an instance and resuming with "continue",
 the spawn_instance tool works correctly without "no running event loop" errors.
 
 Expected behavior:
-- After stopping an instance and sending "continue", spawning a child instance should work
+- After pausing an instance and sending "continue", spawning a child instance should work
 - No RuntimeWarning about unawaited coroutines
 - No "no running event loop" errors in logs
 """
@@ -150,15 +150,15 @@ def send_message(instance_id, content):
     return False
 
 
-def stop_instance(instance_id):
-    """Stop an instance."""
-    log(f"STOP: Stopping instance {instance_id}...")
-    resp = requests.post(f"{BASE_URL}/instances/{instance_id}/stop", timeout=10)
+def pause_instance(instance_id):
+    """Pause an instance."""
+    log(f"PAUSE: Pausing instance {instance_id}...")
+    resp = requests.post(f"{BASE_URL}/instances/{instance_id}/pause", timeout=10)
     if resp.status_code == 200:
         data = resp.json()
-        log(f"STOP: SUCCESS - stopped_ids={data.get('stopped_ids')}")
+        log(f"PAUSE: SUCCESS - paused_ids={data.get('paused_ids')}")
         return True
-    log(f"STOP: FAILED - {resp.status_code} {resp.text}")
+    log(f"PAUSE: FAILED - {resp.status_code} {resp.text}")
     return False
 
 
@@ -223,7 +223,7 @@ def run_test():
     global test_passed
 
     log("=" * 60)
-    log("E2E TEST: Stop -> Resume -> Spawn Instance Fix Verification")
+    log("E2E TEST: Pause -> Resume -> Spawn Instance Fix Verification")
     log("=" * 60)
 
     # Step 1: Start daemon
@@ -262,24 +262,24 @@ def run_test():
         time.sleep(7)
         log("STEP 4: Done waiting")
 
-        # Step 5: Stop the instance
-        log("\n--- STEP 5: Stop Instance ---")
-        if not stop_instance(leader_id):
-            log("STEP 5: FAIL - Could not stop instance")
+        # Step 5: Pause the instance
+        log("\n--- STEP 5: Pause Instance ---")
+        if not pause_instance(leader_id):
+            log("STEP 5: FAIL - Could not pause instance")
             return False
-        log("STEP 5: PASS - Instance stopped")
+        log("STEP 5: PASS - Instance paused")
 
-        # Step 6: Verify instance status is idle
+        # Step 6: Verify instance status is paused
         log("\n--- STEP 6: Verify Instance Status ---")
         time.sleep(1)  # Give it a moment
         instance_info = check_instance_status(leader_id)
         if instance_info:
             status = instance_info.get("status")
-            log(f"STEP 6: Instance status after stop: {status}")
-            if status == "idle":
-                log("STEP 6: PASS - Instance status is 'idle'")
+            log(f"STEP 6: Instance status after pause: {status}")
+            if status == "paused":
+                log("STEP 6: PASS - Instance status is 'paused'")
             else:
-                log(f"STEP 6: WARNING - Expected 'idle', got '{status}'")
+                log(f"STEP 6: WARNING - Expected 'paused', got '{status}'")
         else:
             log("STEP 6: WARNING - Could not get instance info")
 
@@ -300,22 +300,22 @@ def run_test():
         log("\n--- STEP 9: Check Daemon Logs ---")
         check_logs_for_errors()
 
-        # Step 10: Stop instance again (cleanup)
-        log("\n--- STEP 10: Stop Instance (Cleanup) ---")
-        stop_instance(leader_id)
+        # Step 10: Pause instance again (cleanup)
+        log("\n--- STEP 10: Pause Instance (Cleanup) ---")
+        pause_instance(leader_id)
         time.sleep(1)
 
-        # Step 11: Bonus - Second stop/resume cycle
-        log("\n--- STEP 11: Second Stop/Resume Cycle (Bonus) ---")
+        # Step 11: Bonus - Second pause/resume cycle
+        log("\n--- STEP 11: Second Pause/Resume Cycle (Bonus) ---")
         if send_message(leader_id, "Tell me a joke"):
             log("STEP 11a: Sent second message")
             time.sleep(3)
-            if stop_instance(leader_id):
-                log("STEP 11b: Stopped again")
+            if pause_instance(leader_id):
+                log("STEP 11b: Paused again")
                 time.sleep(1)
                 instance_info = check_instance_status(leader_id)
-                if instance_info and instance_info.get("status") == "idle":
-                    log("STEP 11c: Status verified as 'idle'")
+                if instance_info and instance_info.get("status") == "paused":
+                    log("STEP 11c: Status verified as 'paused'")
                 if send_message(leader_id, "continue"):
                     log("STEP 11d: Resumed again - no crash expected")
                     time.sleep(5)
@@ -323,7 +323,7 @@ def run_test():
                 else:
                     log("STEP 11: FAIL - Could not resume second time")
             else:
-                log("STEP 11: FAIL - Could not stop second time")
+                log("STEP 11: FAIL - Could not pause second time")
         else:
             log("STEP 11: SKIP - Could not send second message")
 

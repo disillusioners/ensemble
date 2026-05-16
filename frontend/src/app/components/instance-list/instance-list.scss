@@ -158,7 +158,7 @@
   &:hover {
     background-color: rgba(30, 41, 59, 0.5);
 
-    .stop-btn,
+    .pause-btn,
     .delete-btn {
       opacity: 1;
     }
@@ -314,7 +314,7 @@
   }
 }
 
-.stop-btn {
+.pause-btn {
   position: absolute;
   bottom: 8px;
   right: 40px;

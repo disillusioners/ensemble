@@ -1,9 +1,9 @@
-"""Tests for graph task cancellation in stop_instance_cascade.
+"""Tests for graph task cancellation in pause_instance_cascade.
 
 These tests verify that:
 1. Graph tasks are properly registered when message processing starts
 2. Graph tasks are properly unregistered when message processing ends
-3. Graph tasks are cancelled when stop_instance_cascade is called
+3. Graph tasks are cancelled when pause_instance_cascade is called
 4. CancelledError is handled cleanly in the streaming loop
 """
 
@@ -29,10 +29,10 @@ class TestGraphTaskRegistration:
 
 
 class TestGraphTaskCancellation:
-    """Tests for graph task cancellation on stop."""
+    """Tests for graph task cancellation on pause."""
 
-    def test_stop_single_cancels_graph_task(self):
-        """_stop_single should cancel the running graph task."""
+    def test_pause_single_cancels_graph_task(self):
+        """_pause_single should cancel the running graph task."""
         from unittest.mock import MagicMock, patch
         from daemon.cancellation import CancellationReason
         
@@ -62,7 +62,7 @@ class TestGraphTaskCancellation:
         )
         
         # Test the cancellation logic directly
-        # The logic in _stop_single is:
+        # The logic in _pause_single is:
         graph_task = mock_manager._graph_tasks.get('test-instance')
         if graph_task and not graph_task.done():
             graph_task.cancel()
@@ -107,35 +107,35 @@ class TestCancelledErrorHandling:
         assert exception is False
 
 
-class TestStopInstanceCascadeIntegration:
-    """Integration tests for stop_instance_cascade with graph task cancellation."""
+class TestPauseInstanceCascadeIntegration:
+    """Integration tests for pause_instance_cascade with graph task cancellation."""
 
-    def test_stop_keeps_instance_in_memory(self):
-        """After stop, instance should remain in instances dict (resumable)."""
+    def test_pause_keeps_instance_in_memory(self):
+        """After pause, instance should remain in instances dict (resumable)."""
         # This would require full integration testing with actual graph
         # For now, we verify the logic through mocking
         pass
 
-    def test_stop_sets_status_to_idle(self):
-        """After stop, instance status should be set to idle."""
+    def test_pause_sets_status_to_paused(self):
+        """After pause, instance status should be set to paused."""
         from unittest.mock import MagicMock
-        
+
         mock_manager = MagicMock()
         mock_manager._graph_tasks = {}
         mock_manager._request_registry = MagicMock()
         mock_manager._instance_repository = MagicMock()
         mock_manager._live_hub = MagicMock()
-        
+
         # Create mock metadata
         mock_meta = MagicMock()
         mock_meta.status = 'running'
         mock_manager._instance_repository.get.return_value = mock_meta
-        
-        # Verify that status update will be called with 'idle'
+
+        # Verify that status update will be called with 'paused'
         from daemon.repositories.instance.models import InstanceStatus
-        mock_manager._instance_repository.update_status('test-id', InstanceStatus.IDLE.value)
-        
-        mock_manager._instance_repository.update_status.assert_called_with('test-id', 'idle')
+        mock_manager._instance_repository.update_status('test-id', InstanceStatus.PAUSED.value)
+
+        mock_manager._instance_repository.update_status.assert_called_with('test-id', 'paused')
 
     def test_graph_task_unregistered_after_processing(self):
         """Graph task should be unregistered after processing completes."""

@@ -109,7 +109,7 @@ class TestRouteRegistration:
         expected_paths = [
             "/api/instances",           # GET list, POST create
             "/api/instances/{instance_id}",  # GET, DELETE
-            "/api/instances/{instance_id}/stop",  # POST
+            "/api/instances/{instance_id}/pause",  # POST
             "/api/instances/{instance_id}/messages",  # GET
             "/api/instances/{instance_id}/events",  # SSE
         ]
@@ -258,7 +258,7 @@ class TestRouteRegistration:
             "/api/agents/{agent_id}": {"DELETE"},
             "/api/instances": {"POST", "GET"},
             "/api/instances/{instance_id}": {"GET", "DELETE"},
-            "/api/instances/{instance_id}/stop": {"POST"},
+            "/api/instances/{instance_id}/pause": {"POST"},
             "/api/sources": {"POST", "GET"},
             "/api/sources/test": {"POST"},
             "/api/schedules": {"GET"},

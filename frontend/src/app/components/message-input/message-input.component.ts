@@ -30,7 +30,7 @@ export class MessageInputComponent {
   readonly agentColor = input('coder');
   readonly instanceStatus = input<InstanceStatus | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
-  @Output() stopInstance = new EventEmitter<void>();
+  @Output() pauseInstance = new EventEmitter<void>();
 
   message = signal('');
   images = signal<FilePreview[]>([]);
@@ -38,8 +38,8 @@ export class MessageInputComponent {
   validationError = signal<string | null>(null);
 
   /**
-   * Returns true when the instance is actively running and should show a Stop button.
-   * Show Stop for 'running', 'waiting_children', or 'queued' states.
+   * Returns true when the instance is actively running and should show a Pause button.
+   * Show Pause for 'running', 'waiting_children', or 'queued' states.
    */
   readonly isInstanceRunning = computed(() => {
     const status = this.instanceStatus();

@@ -195,15 +195,15 @@ async def terminate_instance(
     return {"terminated": True}
 
 
-# 5. POST /instances/{instance_id}/stop - Stop instance
-@router.post("/{instance_id}/stop")
-async def stop_instance(
+# 5. POST /instances/{instance_id}/pause - Pause instance
+@router.post("/{instance_id}/pause")
+async def pause_instance(
     instance_id: str,
     request: Request,
 ) -> dict:
-    """Stop an instance and cascade to children."""
+    """Pause an instance and cascade to children."""
     manager = _get_manager(request)
-    
+
     # Check instance exists
     try:
         manager.get_instance(instance_id)
@@ -216,12 +216,22 @@ async def stop_instance(
             ).model_dump()
         )
 
-    result = await manager.stop_instance_cascade(instance_id)
+    result = await manager.pause_instance_cascade(instance_id)
     return {
-        "stopped": True,
-        "stopped_ids": result["stopped_ids"],
+        "paused": True,
+        "paused_ids": result["paused_ids"],
         "skipped_ids": result["skipped_ids"],
     }
+
+
+# 5b. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
+@router.post("/{instance_id}/stop", deprecated=True)
+async def stop_instance_deprecated(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Deprecated: Use POST /pause instead."""
+    return await pause_instance(instance_id, request)
 
 
 # 6. GET /instances/{instance_id}/messages - Get message history

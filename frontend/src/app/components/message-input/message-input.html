@@ -67,9 +67,10 @@
     </button>
     
     @if (isInstanceRunning()) {
-        <button type="button" class="stop-button" (click)="stopInstance.emit()" title="Stop" aria-label="Stop">
-            <svg class="stop-icon" fill="currentColor" viewBox="0 0 24 24">
-                <rect x="6" y="6" width="12" height="12" rx="2" />
+        <button type="button" class="pause-button" (click)="pauseInstance.emit()" title="Pause" aria-label="Pause">
+            <svg class="pause-icon" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="5" width="4" height="14" rx="1" />
+                <rect x="14" y="5" width="4" height="14" rx="1" />
             </svg>
         </button>
     } @else {

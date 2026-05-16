@@ -24,8 +24,8 @@ async def mock_manager():
     manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_instance = AsyncMock(return_value=True)
-    manager.stop_instance_cascade = AsyncMock(return_value={
-        "stopped_ids": ["test-instance"],
+    manager.pause_instance_cascade = AsyncMock(return_value={
+        "paused_ids": ["test-instance"],
         "skipped_ids": []
     })
     manager.list_instances = Mock(return_value=([
@@ -485,37 +485,37 @@ async def test_terminate_instance_not_found(client, mock_manager):
 
 
 @pytest.mark.asyncio
-async def test_stop_instance_endpoint_exists(client, mock_manager):
-    """Test that POST /instances/{instance_id}/stop endpoint works."""
+async def test_pause_instance_endpoint_exists(client, mock_manager):
+    """Test that POST /instances/{instance_id}/pause endpoint works."""
     # Test 1: Instance not found
     mock_manager.get_instance.side_effect = KeyError("Instance not found")
 
-    response = await client.post("/instances/nonexistent/stop")
+    response = await client.post("/instances/nonexistent/pause")
     assert response.status_code == 404
     data = response.json()
     assert data["detail"]["code"] == "INSTANCE_NOT_FOUND"
 
-    # Test 2: Instance exists - should return cascade stop result
+    # Test 2: Instance exists - should return cascade pause result
     mock_manager.get_instance.side_effect = None
     mock_manager.get_instance.return_value = Mock()
 
-    # Mock cascade stop with children
-    mock_manager.stop_instance_cascade = AsyncMock(return_value={
-        "stopped_ids": ["test-instance", "child-1", "child-2"],
+    # Mock cascade pause with children
+    mock_manager.pause_instance_cascade = AsyncMock(return_value={
+        "paused_ids": ["test-instance", "child-1", "child-2"],
         "skipped_ids": []
     })
 
-    response = await client.post("/instances/test-instance/stop")
+    response = await client.post("/instances/test-instance/pause")
     assert response.status_code == 200
     data = response.json()
-    assert data["stopped"] == True
-    assert "stopped_ids" in data
+    assert data["paused"] == True
+    assert "paused_ids" in data
     assert "skipped_ids" in data
-    assert data["stopped_ids"] == ["test-instance", "child-1", "child-2"]
+    assert data["paused_ids"] == ["test-instance", "child-1", "child-2"]
     assert data["skipped_ids"] == []
 
-    # Verify stop_instance_cascade was called
-    mock_manager.stop_instance_cascade.assert_called_once_with("test-instance")
+    # Verify pause_instance_cascade was called
+    mock_manager.pause_instance_cascade.assert_called_once_with("test-instance")
 
 
 @pytest.mark.asyncio

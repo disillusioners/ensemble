@@ -23,7 +23,7 @@ class TestMessageInputComponent {
   @Input() agentColor = 'coder';
   @Input() instanceStatus: InstanceStatus | null = null;
   @Output() sendMessage = new EventEmitter<MessagePayload>();
-  @Output() stopInstance = new EventEmitter<void>();
+  @Output() pauseInstance = new EventEmitter<void>();
 
   message = signal('');
   images = signal<FilePreview[]>([]);
@@ -127,24 +127,24 @@ describe('MessageInputComponent', () => {
     });
   });
 
-  describe('@Output() stopInstance', () => {
+  describe('@Output() pauseInstance', () => {
     it('should exist as EventEmitter', () => {
-      expect(component.stopInstance).toBeDefined();
-      expect(typeof component.stopInstance.emit).toBe('function');
+      expect(component.pauseInstance).toBeDefined();
+      expect(typeof component.pauseInstance.emit).toBe('function');
     });
 
     it('should emit event when called', () => {
-      const emitSpy = jest.spyOn(component.stopInstance, 'emit');
-      component.stopInstance.emit();
+      const emitSpy = jest.spyOn(component.pauseInstance, 'emit');
+      component.pauseInstance.emit();
       expect(emitSpy).toHaveBeenCalled();
     });
 
     it('should emit undefined (void) when called', () => {
       let emittedValue: void | undefined;
-      component.stopInstance.subscribe((value) => {
+      component.pauseInstance.subscribe((value) => {
         emittedValue = value;
       });
-      component.stopInstance.emit();
+      component.pauseInstance.emit();
       expect(emittedValue).toBeUndefined();
     });
   });

@@ -387,57 +387,57 @@ class InstanceLifecycleService:
 
         return True
 
-    async def stop_instance_cascade(
+    async def pause_instance_cascade(
         self, instance_id: str, *, _visited: set[str] | None = None, _depth: int = 0
     ) -> dict:
-        """Stop an instance and cascade to all children (soft stop).
+        """Pause an instance and cascade to all children (soft pause).
 
-        Recursively stops the target instance and all its descendants.
-        Cancels active requests and sets status to idle (resumable).
+        Recursively pauses the target instance and all its descendants.
+        Cancels active requests and sets status to paused (resumable).
         Does NOT remove instances from memory or release locks.
 
         Args:
-            instance_id: The ID of the instance to stop.
+            instance_id: The ID of the instance to pause.
             _visited: Internal set for circular reference detection.
             _depth: Internal counter for depth limit protection.
 
         Returns dict with:
-          - stopped_ids: list of all instance IDs that were stopped
-          - skipped_ids: list of instance IDs that were already idle (skipped)
+          - paused_ids: list of all instance IDs that were paused
+          - skipped_ids: list of instance IDs that were already paused (skipped)
         """
         # Depth guard
         if _depth > 256:
             logger.error(f"Max cascade depth exceeded at {instance_id[:8]}...")
-            return {"stopped_ids": [], "skipped_ids": [instance_id]}
+            return {"paused_ids": [], "skipped_ids": [instance_id]}
 
         # Circular reference guard
         if _visited is None:
             _visited = set()
         if instance_id in _visited:
             logger.warning(f"Circular reference detected: {instance_id[:8]}..., skipping")
-            return {"stopped_ids": [], "skipped_ids": [instance_id]}
+            return {"paused_ids": [], "skipped_ids": [instance_id]}
         _visited.add(instance_id)
 
-        stopped_ids: list[str] = []
+        paused_ids: list[str] = []
         skipped_ids: list[str] = []
 
-        # Helper function to stop a single instance (non-recursive)
-        def _stop_single(target_id: str, prefetched_meta: Instance | None = None) -> bool:
-            """Stop a single instance. Returns True if stopped, False if skipped.
+        # Helper function to pause a single instance (non-recursive)
+        def _pause_single(target_id: str, prefetched_meta: Instance | None = None) -> bool:
+            """Pause a single instance. Returns True if paused, False if skipped.
 
             Args:
-                target_id: The ID of the instance to stop.
+                target_id: The ID of the instance to pause.
                 prefetched_meta: Pre-fetched metadata (avoids redundant DB lookup).
             """
             meta = prefetched_meta or self._manager._instance_repository.get(target_id)
 
             if meta is None:
-                logger.warning(f"Instance {target_id[:8]}... not found in DB, skipping stop")
+                logger.warning(f"Instance {target_id[:8]}... not found in DB, skipping pause")
                 return False
 
-            # Skip if already idle
-            if meta.status == InstanceStatus.IDLE.value:
-                logger.info(f"Instance {target_id[:8]}... is already idle, skipping")
+            # Skip if already paused
+            if meta.status == InstanceStatus.PAUSED.value:
+                logger.info(f"Instance {target_id[:8]}... is already paused, skipping")
                 return False
 
             # 1. Cancel active LLM requests (via cancellation callbacks)
@@ -453,9 +453,9 @@ class InstanceLifecycleService:
                 graph_task.cancel()
                 logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
 
-            # 3. Update DB status to idle
+            # 3. Update DB status to paused
             self._manager._instance_repository.update_status(
-                target_id, InstanceStatus.IDLE.value
+                target_id, InstanceStatus.PAUSED.value
             )
 
             # NOTE: Unlike terminate_instance, we do NOT:
@@ -464,7 +464,7 @@ class InstanceLifecycleService:
             # - Mark jobs as cancelled
             # - Clean up live hub connections
 
-            logger.info(f"Stopped instance {target_id[:8]}...")
+            logger.info(f"Paused instance {target_id[:8]}...")
             return True
 
         # Get instance metadata for cascade
@@ -472,31 +472,31 @@ class InstanceLifecycleService:
 
         if meta is None:
             logger.warning(f"Root instance {instance_id[:8]}... not found in DB")
-            return {"stopped_ids": stopped_ids, "skipped_ids": skipped_ids}
+            return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
         # Cascade to children first (DFS)
         if meta.children:
             for child_id in list(meta.children):
                 try:
-                    logger.info(f"Cascading stop to child instance: {child_id[:8]}...")
-                    child_result = await self.stop_instance_cascade(
+                    logger.info(f"Cascading pause to child instance: {child_id[:8]}...")
+                    child_result = await self.pause_instance_cascade(
                         child_id, _visited=_visited, _depth=_depth + 1
                     )
-                    stopped_ids.extend(child_result["stopped_ids"])
+                    paused_ids.extend(child_result["paused_ids"])
                     skipped_ids.extend(child_result["skipped_ids"])
                 except Exception as e:
-                    logger.error(f"Failed to stop child {child_id[:8]}...: {e}")
+                    logger.error(f"Failed to pause child {child_id[:8]}...: {e}")
                     skipped_ids.append(child_id)
 
-        # Stop self (pass prefetched meta to avoid redundant DB lookup)
-        if _stop_single(instance_id, prefetched_meta=meta):
-            stopped_ids.append(instance_id)
-            # Emit status_change event for idle status
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.IDLE.value)
+        # Pause self (pass prefetched meta to avoid redundant DB lookup)
+        if _pause_single(instance_id, prefetched_meta=meta):
+            paused_ids.append(instance_id)
+            # Emit status_change event for paused status
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.PAUSED.value)
         else:
             skipped_ids.append(instance_id)
 
-        return {"stopped_ids": stopped_ids, "skipped_ids": skipped_ids}
+        return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
     def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.

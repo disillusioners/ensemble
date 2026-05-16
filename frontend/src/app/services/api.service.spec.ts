@@ -78,8 +78,8 @@ class TestApiService {
     return this.http.delete(`${this.API_BASE}/instances/${instanceId}`);
   }
 
-  stopInstance(instanceId: string): Observable<any> {
-    return this.http.post(`${this.API_BASE}/instances/${instanceId}/stop`, {});
+  pauseInstance(instanceId: string): Observable<any> {
+    return this.http.post(`${this.API_BASE}/instances/${instanceId}/pause`, {});
   }
 
   sendMessage(instanceId: string, content: string, images?: string[]): Observable<any> {
@@ -101,37 +101,37 @@ describe('ApiService', () => {
     service = new TestApiService(httpMock);
   });
 
-  describe('stopInstance', () => {
-    it('should make POST request to /api/instances/{instanceId}/stop', () => {
+  describe('pauseInstance', () => {
+    it('should make POST request to /api/instances/{instanceId}/pause', () => {
       const testInstanceId = 'test-instance-123';
 
-      service.stopInstance(testInstanceId);
+      service.pauseInstance(testInstanceId);
 
       const requests = httpMock.getRequests();
       expect(requests.length).toBe(1);
       
       const request = requests[0];
       expect(request.method).toBe('POST');
-      expect(request.url).toBe(`/api/instances/${testInstanceId}/stop`);
+      expect(request.url).toBe(`/api/instances/${testInstanceId}/pause`);
     });
 
-    it('should send empty body for stop request', () => {
+    it('should send empty body for pause request', () => {
       const testInstanceId = 'test-instance-123';
 
-      service.stopInstance(testInstanceId);
+      service.pauseInstance(testInstanceId);
 
       const request = httpMock.getRequests()[0];
       expect(request.body).toEqual({});
     });
 
     it('should handle different instance IDs correctly', () => {
-      service.stopInstance('instance-abc');
-      service.stopInstance('instance-xyz');
+      service.pauseInstance('instance-abc');
+      service.pauseInstance('instance-xyz');
 
       const requests = httpMock.getRequests();
       expect(requests.length).toBe(2);
-      expect(requests[0].url).toBe('/api/instances/instance-abc/stop');
-      expect(requests[1].url).toBe('/api/instances/instance-xyz/stop');
+      expect(requests[0].url).toBe('/api/instances/instance-abc/pause');
+      expect(requests[1].url).toBe('/api/instances/instance-xyz/pause');
     });
   });
 

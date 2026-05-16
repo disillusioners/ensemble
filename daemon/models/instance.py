@@ -14,6 +14,7 @@ class InstanceStatus(str, Enum):
     error = "error"
     terminated = "terminated"
     completed = "completed"
+    paused = "paused"
 
 
 class InstanceCreate(BaseModel):

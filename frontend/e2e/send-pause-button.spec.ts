@@ -3,18 +3,18 @@ import { createTestInstance } from './fixtures/test-helpers';
 import { trackInstance, cleanupAll } from './fixtures/cleanup';
 
 /**
- * E2E tests for the Send/Stop button toggle functionality with SSE real-time updates.
+ * E2E tests for the Send/Pause button toggle functionality with SSE real-time updates.
  *
  * NEW BEHAVIOR (SSE Real-Time):
  * - Status changes emit `status_change` SSE events in real-time
  * - Frontend reacts within 1-2 seconds of status changes (not 10 seconds)
- * - Stop button visible when: status === 'running' || 'waiting_children' || 'queued'
+ * - Pause button visible when: status === 'running' || 'waiting_children' || 'queued'
  * - Send button visible when: status === 'idle' || 'completed' || 'error' || 'paused' || 'terminated' || 'failed'
  *
  * Instance statuses: 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'terminated' | 'queued' | 'waiting_children' | 'failed'
  *
  * KEY FIX: Direct navigation to instance now properly creates minimal instance entry
- * so Stop button appears within 1-2 seconds (not 10+ seconds polling).
+ * so Pause button appears within 1-2 seconds (not 10+ seconds polling).
  */
 
 const BASE_URL = 'http://localhost:8079';
@@ -82,9 +82,9 @@ async function waitForInstanceNotRunning(
 
 test.describe.configure({ mode: 'serial' });
 
-const screenshotsDir = 'test-results/send-stop';
+const screenshotsDir = 'test-results/send-pause';
 
-test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
+test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
   let page: Page;
   let instanceId: string;
   let instanceIdForTest6: string;
@@ -155,7 +155,7 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     // Try to find the message input with a reasonable timeout
     const textarea = page.locator('app-message-input .input-textarea');
     const sendButton = page.locator('app-message-input .send-button');
-    const stopButton = page.locator('app-message-input .stop-button');
+    const pauseButton = page.locator('app-message-input .pause-button');
 
     // Wait for the textarea to appear
     try {
@@ -190,11 +190,11 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 2: Send message → Stop button appears quickly (via SSE)
+  // Test 2: Send message → Pause button appears quickly (via SSE)
   // ==========================================================================
-  test('Send message → Stop button appears quickly (via SSE)', async () => {
+  test('Send message → Pause button appears quickly (via SSE)', async () => {
     const textarea = page.locator('app-message-input .input-textarea');
-    const stopButton = page.locator('app-message-input .stop-button');
+    const pauseButton = page.locator('app-message-input .pause-button');
     const sendButton = page.locator('app-message-input .send-button');
 
     // Ensure textarea is visible
@@ -205,9 +205,9 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     await textarea.press('Enter');
     console.log('[Test 2] Message sent');
     console.log('[Test 2] NOTE: Backend timing: LLM responds in ~10-15 seconds, status changes likely happen AFTER processing completes, not DURING');
-    console.log('[Test 2] Expected behavior: Stop button may never appear because backend completes too fast');
+    console.log('[Test 2] Expected behavior: Pause button may never appear because backend completes too fast');
     console.log('[Test 2] Key metric: SSE events arrive AFTER LLM response, not DURING');
-    console.log('[Test 2] The STOP button appears when status is running|queued|waiting_children');
+    console.log('[Test 2] The PAUSE button appears when status is running|queued|waiting_children');
     console.log('[Test 2] The SEND button appears when status is idle|completed|error');
     console.log('[Test 2] Backend does NOT emit running status during LLM processing - only emits COMPLETED at the end');
 
@@ -215,22 +215,22 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     await page.waitForTimeout(20000);
     
     // Take screenshot
-    await page.screenshot({ path: `${screenshotsDir}/02-stop-button-appears.png` });
-    console.log('[Test 2] Screenshot saved: 02-stop-button-appears.png');
+    await page.screenshot({ path: `${screenshotsDir}/02-pause-button-appears.png` });
+    console.log('[Test 2] Screenshot saved: 02-pause-button-appears.png');
 
-    // Check final state - Stop button should NOT appear because backend completes too fast
-    const stopVisible = await stopButton.isVisible().catch(() => false);
+    // Check final state - Pause button should NOT appear because backend completes too fast
+    const pauseVisible = await pauseButton.isVisible().catch(() => false);
     const sendVisible = await sendButton.isVisible().catch(() => false);
     
-    console.log(`[Test 2] Final state - Stop: ${stopVisible}, Send: ${sendVisible}`);
+    console.log(`[Test 2] Final state - Pause: ${pauseVisible}, Send: ${sendVisible}`);
     
-    if (stopVisible) {
+    if (pauseVisible) {
       // This would be the ideal case
-      console.log('[Test 2] PASS: Stop button appeared (unexpected but good!)');
+      console.log('[Test 2] PASS: Pause button appeared (unexpected but good!)');
     } else if (sendVisible) {
-      // Expected - instance completed before Stop button could appear
-      console.log('[Test 2] INFO: Send button visible (instance completed before Stop could appear)');
-      console.log('[Test 2] This is EXPECTED - LLM completes in ~10-15s, too fast for Stop button');
+      // Expected - instance completed before Pause button could appear
+      console.log('[Test 2] INFO: Send button visible (instance completed before Pause could appear)');
+      console.log('[Test 2] This is EXPECTED - LLM completes in ~10-15s, too fast for Pause button');
     } else {
       console.log('[Test 2] INFO: Neither button visible');
     }
@@ -241,7 +241,7 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
   // ==========================================================================
   test('Response completes → Send button returns quickly', async () => {
     const sendButton = page.locator('app-message-input .send-button');
-    const stopButton = page.locator('app-message-input .stop-button');
+    const pauseButton = page.locator('app-message-input .pause-button');
 
     // Wait for backend to be idle
     let finalStatus: string;
@@ -279,7 +279,7 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     // Verify
     if (sendButtonAppeared) {
       await expect(sendButton).toBeVisible({ timeout: 1000 });
-      await expect(stopButton).toHaveCount(0);
+      await expect(pauseButton).toHaveCount(0);
       console.log(`[Test 3] PASSED: Send button returned in ${timingResult.delta}ms`);
     } else {
       console.log('[Test 3] WARNING: Send button did not appear within 5s');
@@ -287,45 +287,45 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 4: Click Stop → Send button returns quickly
+  // Test 4: Click Pause → Send button returns quickly
   // ==========================================================================
-  test('Click Stop → Send button returns quickly', async () => {
+  test('Click Pause → Send button returns quickly', async () => {
     const textarea = page.locator('app-message-input .input-textarea');
-    const stopButton = page.locator('app-message-input .stop-button');
+    const pauseButton = page.locator('app-message-input .pause-button');
     const sendButton = page.locator('app-message-input .send-button');
 
     // Send a message to get into running state
-    await textarea.fill('Test stop button click');
+    await textarea.fill('Test pause button click');
     await textarea.press('Enter');
     console.log('[Test 4] Message sent');
 
-    // Wait for stop button to appear
-    let stopButtonVisible = false;
+    // Wait for pause button to appear
+    let pauseButtonVisible = false;
     try {
       await page.waitForFunction(
-        () => document.querySelector('app-message-input .stop-button') !== null,
+        () => document.querySelector('app-message-input .pause-button') !== null,
         { timeout: 10000 }
       );
-      stopButtonVisible = true;
-      console.log('[Test 4] Stop button appeared');
+      pauseButtonVisible = true;
+      console.log('[Test 4] Pause button appeared');
     } catch (e) {
-      console.log('[Test 4] Note: Stop button did not appear, instance may have completed fast');
+      console.log('[Test 4] Note: Pause button did not appear, instance may have completed fast');
     }
 
     // Take screenshot before clicking
-    await page.screenshot({ path: `${screenshotsDir}/04-stop-click-send-returns.png` });
+    await page.screenshot({ path: `${screenshotsDir}/04-pause-click-send-returns.png` });
 
-    if (!stopButtonVisible) {
+    if (!pauseButtonVisible) {
       // Skip test if instance completed too fast
-      console.log('[Test 4] SKIPPED: Stop button was not visible to click');
+      console.log('[Test 4] SKIPPED: Pause button was not visible to click');
       return;
     }
 
-    // Click the stop button
-    await stopButton.click();
-    console.log('[Test 4] Stop button clicked');
+    // Click the pause button
+    await pauseButton.click();
+    console.log('[Test 4] Pause button clicked');
 
-    // Wait for instance to stop
+    // Wait for instance to pause
     try {
       await waitForInstanceNotRunning(instanceId, 10000);
     } catch (e) {
@@ -349,14 +349,14 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     }
 
     const timingResult = endTiming(timing);
-    logTiming('Click stop → Send button visible', timingResult);
+    logTiming('Click pause → Send button visible', timingResult);
 
     // Final screenshot
-    await page.screenshot({ path: `${screenshotsDir}/04-stop-click-send-returns.png` });
+    await page.screenshot({ path: `${screenshotsDir}/04-pause-click-send-returns.png` });
 
     if (sendButtonReturned) {
       await expect(sendButton).toBeVisible({ timeout: 1000 });
-      await expect(stopButton).toHaveCount(0);
+      await expect(pauseButton).toHaveCount(0);
       console.log(`[Test 4] PASSED: Send button returned in ${timingResult.delta}ms`);
     } else {
       console.log('[Test 4] WARNING: Send button did not return within 5s');
@@ -430,9 +430,9 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 6: Direct navigation → Stop button works (THE KEY FIX TEST)
+  // Test 6: Direct navigation → Pause button works (THE KEY FIX TEST)
   // ==========================================================================
-  test('Direct navigation → Stop button works (THE KEY FIX TEST)', async () => {
+  test('Direct navigation → Pause button works (THE KEY FIX TEST)', async () => {
     // This is the KEY test for the fix!
     // Previously, navigating directly to /instances/{id} would not create the instance
     // in the local list, so SSE status_change events had no effect.
@@ -462,7 +462,7 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
 
     // Wait for message input
     const textarea = page.locator('app-message-input .input-textarea');
-    const stopButton = page.locator('app-message-input .stop-button');
+    const pauseButton = page.locator('app-message-input .pause-button');
     const sendButton = page.locator('app-message-input .send-button');
 
     // Wait for the textarea to appear
@@ -481,21 +481,21 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     }
 
     // Send a message
-    await textarea.fill('Testing direct navigation stop button fix');
+    await textarea.fill('Testing direct navigation pause button fix');
     await textarea.press('Enter');
     console.log('[Test 6] Message sent');
 
     // Start timing - this is the KEY measurement
     const timing = startTiming();
 
-    // Wait for stop button to appear (should be within 2 seconds with SSE fix)
-    let stopButtonAppeared = false;
+    // Wait for pause button to appear (should be within 2 seconds with SSE fix)
+    let pauseButtonAppeared = false;
     const maxWait = 25000; // Extended timeout
 
     while (Date.now() - timing.startTime < maxWait) {
-      const visible = await stopButton.isVisible().catch(() => false);
+      const visible = await pauseButton.isVisible().catch(() => false);
       if (visible) {
-        stopButtonAppeared = true;
+        pauseButtonAppeared = true;
         break;
       }
       // Also check if instance completed
@@ -508,32 +508,32 @@ test.describe('Send/Stop Button (SSE Real-Time Updates)', () => {
     }
 
     const timingResult = endTiming(timing);
-    logTiming('Direct navigation: Send → Stop button visible', timingResult);
+    logTiming('Direct navigation: Send → Pause button visible', timingResult);
 
     // Take screenshot
-    await page.screenshot({ path: `${screenshotsDir}/06-direct-navigation-stop-button.png` });
-    console.log('[Test 6] Screenshot saved: 06-direct-navigation-stop-button.png');
+    await page.screenshot({ path: `${screenshotsDir}/06-direct-navigation-pause-button.png` });
+    console.log('[Test 6] Screenshot saved: 06-direct-navigation-pause-button.png');
 
     // Verify the fix works
-    if (stopButtonAppeared) {
-      await expect(stopButton).toBeVisible();
+    if (pauseButtonAppeared) {
+      await expect(pauseButton).toBeVisible();
       await expect(sendButton).toHaveCount(0);
-      console.log(`[Test 6] PASSED: Stop button appeared in ${timingResult.delta}ms`);
+      console.log(`[Test 6] PASSED: Pause button appeared in ${timingResult.delta}ms`);
 
       // KEY ASSERTION: Must be within 2 seconds (SSE-driven, not polling)
       if (timingResult.delta < 2000) {
-        console.log('[Test 6] PASSED: Stop button appeared within 2000ms (SSE fix working!)');
+        console.log('[Test 6] PASSED: Pause button appeared within 2000ms (SSE fix working!)');
       } else {
-        console.log(`[Test 6] WARNING: Stop button took ${timingResult.delta}ms (expected < 2000ms)`);
+        console.log(`[Test 6] WARNING: Pause button took ${timingResult.delta}ms (expected < 2000ms)`);
       }
     } else {
       // Check if instance completed too fast
       const currentStatus = await getInstanceStatus(instanceIdForTest6);
       if (currentStatus !== 'running' && currentStatus !== 'queued' && currentStatus !== 'waiting_children') {
         console.log(`[Test 6] INFO: Instance completed too fast (status: ${currentStatus})`);
-        console.log('[Test 6] This is acceptable — instance responded before Stop button could appear');
+        console.log('[Test 6] This is acceptable — instance responded before Pause button could appear');
       } else {
-        throw new Error('[Test 6] FAIL: Stop button did not appear within timeout (SSE fix not working)');
+        throw new Error('[Test 6] FAIL: Pause button did not appear within timeout (SSE fix not working)');
       }
     }
   });

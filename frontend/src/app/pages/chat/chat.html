@@ -16,7 +16,7 @@
         (newInstance)="onNewInstance()"
         (agentChange)="onAgentChange($event)"
         (loadMore)="onLoadMoreInstances()"
-        (stopInstance)="onStopInstanceFromList($event)"
+        (pauseInstance)="onPauseInstanceFromList($event)"
       ></app-instance-list>
     </div>
 
@@ -118,7 +118,7 @@
           [disabled]="isSending()"
           [agentColor]="instanceAgent()?.id || 'coder'"
           [instanceStatus]="currentInstance()?.status ?? null"
-          (stopInstance)="onStopInstance()"
+          (pauseInstance)="onPauseInstance()"
         ></app-message-input>
       }
     </div>
