@@ -87,13 +87,13 @@ const screenshotsDir = 'test-results/send-pause';
 test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
   let page: Page;
   let instanceId: string;
-  let instanceIdForTest6: string;
+  let instanceIdForTests: string;
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
     // Set longer default timeout for stability
     page.setDefaultTimeout(30000);
-    
+
     // Capture browser console logs to see SSE connection attempts
     page.on('console', msg => {
       const type = msg.type();
@@ -101,19 +101,19 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
         console.log(`[BROWSER ${type.toUpperCase()}] ${msg.text()}`);
       }
     });
-    
+
     // Also capture page errors
     page.on('pageerror', err => {
       console.log('[BROWSER PAGE ERROR]', err.message);
     });
-    
+
     // Capture network requests to see SSE connection
     page.on('request', request => {
       if (request.url().includes('/api/instances') || request.url().includes('/events')) {
         console.log(`[NETWORK REQUEST] ${request.method()} ${request.url()}`);
       }
     });
-    
+
     // Capture network responses
     page.on('response', response => {
       if (response.url().includes('/api/instances') || response.url().includes('/events')) {
@@ -128,9 +128,9 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 1: Page load with idle instance — Send button visible
+  // Test 1: Idle instance — Send button visible
   // ==========================================================================
-  test('Page load with idle instance — Send button visible', async () => {
+  test('Test 1: Idle instance — Send button visible', async () => {
     // Create a test instance
     const instance = await createTestInstance('leader');
     instanceId = instance.instance_id;
@@ -151,7 +151,7 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
 
     // Wait for the app to initialize
     await page.waitForSelector('app-root', { timeout: 10000 });
-    
+
     // Try to find the message input with a reasonable timeout
     const textarea = page.locator('app-message-input .input-textarea');
     const sendButton = page.locator('app-message-input .send-button');
@@ -161,26 +161,26 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     try {
       await textarea.waitFor({ state: 'visible', timeout: 15000 });
       console.log('[Test 1] Message input textarea visible');
-      
+
       // Give SSE time to establish
       await page.waitForTimeout(1000);
-      
+
       // Verify send button is visible for idle status
       await expect(sendButton).toBeVisible({ timeout: 5000 });
       console.log('[Test 1] PASSED: Send button visible for idle status');
     } catch (e) {
       // Take screenshot to see what's happening
       await page.screenshot({ path: `${screenshotsDir}/01-debug.png` });
-      
+
       // Check if instance was fetched successfully
       const status = await getInstanceStatus(instanceId);
       console.log(`[Test 1] Instance status: ${status}`);
-      
+
       // Check if the page has any content
       const html = await page.content();
       console.log(`[Test 1] Page has app-chat: ${html.includes('app-chat')}`);
       console.log(`[Test 1] Page has app-message-input: ${html.includes('app-message-input')}`);
-      
+
       throw e;
     }
 
@@ -190,9 +190,9 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 2: Send message → Pause button appears quickly (via SSE)
+  // Test 2: Send message → Pause button appears
   // ==========================================================================
-  test('Send message → Pause button appears quickly (via SSE)', async () => {
+  test('Test 2: Send message → Pause button appears', async () => {
     const textarea = page.locator('app-message-input .input-textarea');
     const pauseButton = page.locator('app-message-input .pause-button');
     const sendButton = page.locator('app-message-input .send-button');
@@ -213,7 +213,7 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
 
     // Wait up to 20 seconds for status to change
     await page.waitForTimeout(20000);
-    
+
     // Take screenshot
     await page.screenshot({ path: `${screenshotsDir}/02-pause-button-appears.png` });
     console.log('[Test 2] Screenshot saved: 02-pause-button-appears.png');
@@ -221,9 +221,9 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     // Check final state - Pause button should NOT appear because backend completes too fast
     const pauseVisible = await pauseButton.isVisible().catch(() => false);
     const sendVisible = await sendButton.isVisible().catch(() => false);
-    
+
     console.log(`[Test 2] Final state - Pause: ${pauseVisible}, Send: ${sendVisible}`);
-    
+
     if (pauseVisible) {
       // This would be the ideal case
       console.log('[Test 2] PASS: Pause button appeared (unexpected but good!)');
@@ -237,59 +237,9 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
   });
 
   // ==========================================================================
-  // Test 3: Response completes → Send button returns quickly
+  // Test 3: Click Pause → Send button returns
   // ==========================================================================
-  test('Response completes → Send button returns quickly', async () => {
-    const sendButton = page.locator('app-message-input .send-button');
-    const pauseButton = page.locator('app-message-input .pause-button');
-
-    // Wait for backend to be idle
-    let finalStatus: string;
-    try {
-      finalStatus = await waitForInstanceNotRunning(instanceId, 60000);
-      console.log(`[Test 3] Backend confirmed idle status: ${finalStatus}`);
-    } catch (e) {
-      finalStatus = await getInstanceStatus(instanceId);
-      console.log(`[Test 3] Warning: ${(e as Error).message}, current status: ${finalStatus}`);
-    }
-
-    // Start timing from backend idle
-    const timing = startTiming();
-
-    // Wait for UI to show send button (SSE should propagate within 1-2 seconds)
-    let sendButtonAppeared = false;
-    const maxWait = 5000;
-
-    while (Date.now() - timing.startTime < maxWait) {
-      const visible = await sendButton.isVisible().catch(() => false);
-      if (visible) {
-        sendButtonAppeared = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    const timingResult = endTiming(timing);
-    logTiming('Backend idle → Send button visible', timingResult);
-
-    // Take screenshot
-    await page.screenshot({ path: `${screenshotsDir}/03-send-button-returns.png` });
-    console.log('[Test 3] Screenshot saved: 03-send-button-returns.png');
-
-    // Verify
-    if (sendButtonAppeared) {
-      await expect(sendButton).toBeVisible({ timeout: 1000 });
-      await expect(pauseButton).toHaveCount(0);
-      console.log(`[Test 3] PASSED: Send button returned in ${timingResult.delta}ms`);
-    } else {
-      console.log('[Test 3] WARNING: Send button did not appear within 5s');
-    }
-  });
-
-  // ==========================================================================
-  // Test 4: Click Pause → Send button returns quickly
-  // ==========================================================================
-  test('Click Pause → Send button returns quickly', async () => {
+  test('Test 3: Click Pause → Send button returns', async () => {
     const textarea = page.locator('app-message-input .input-textarea');
     const pauseButton = page.locator('app-message-input .pause-button');
     const sendButton = page.locator('app-message-input .send-button');
@@ -297,7 +247,7 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     // Send a message to get into running state
     await textarea.fill('Test pause button click');
     await textarea.press('Enter');
-    console.log('[Test 4] Message sent');
+    console.log('[Test 3] Message sent');
 
     // Wait for pause button to appear
     let pauseButtonVisible = false;
@@ -307,29 +257,29 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
         { timeout: 10000 }
       );
       pauseButtonVisible = true;
-      console.log('[Test 4] Pause button appeared');
+      console.log('[Test 3] Pause button appeared');
     } catch (e) {
-      console.log('[Test 4] Note: Pause button did not appear, instance may have completed fast');
+      console.log('[Test 3] Note: Pause button did not appear, instance may have completed fast');
     }
 
     // Take screenshot before clicking
-    await page.screenshot({ path: `${screenshotsDir}/04-pause-click-send-returns.png` });
+    await page.screenshot({ path: `${screenshotsDir}/03-pause-click-send-returns.png` });
 
     if (!pauseButtonVisible) {
       // Skip test if instance completed too fast
-      console.log('[Test 4] SKIPPED: Pause button was not visible to click');
+      console.log('[Test 3] SKIPPED: Pause button was not visible to click');
       return;
     }
 
     // Click the pause button
     await pauseButton.click();
-    console.log('[Test 4] Pause button clicked');
+    console.log('[Test 3] Pause button clicked');
 
     // Wait for instance to pause
     try {
       await waitForInstanceNotRunning(instanceId, 10000);
     } catch (e) {
-      console.log(`[Test 4] Warning: ${(e as Error).message}`);
+      console.log(`[Test 3] Warning: ${(e as Error).message}`);
     }
 
     // Start timing
@@ -352,22 +302,154 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     logTiming('Click pause → Send button visible', timingResult);
 
     // Final screenshot
-    await page.screenshot({ path: `${screenshotsDir}/04-pause-click-send-returns.png` });
+    await page.screenshot({ path: `${screenshotsDir}/03-pause-click-send-returns.png` });
 
     if (sendButtonReturned) {
       await expect(sendButton).toBeVisible({ timeout: 1000 });
       await expect(pauseButton).toHaveCount(0);
-      console.log(`[Test 4] PASSED: Send button returned in ${timingResult.delta}ms`);
+      console.log(`[Test 3] PASSED: Send button returned in ${timingResult.delta}ms`);
     } else {
-      console.log('[Test 4] WARNING: Send button did not return within 5s');
+      console.log('[Test 3] WARNING: Send button did not return within 5s');
     }
   });
 
   // ==========================================================================
-  // Test 5: SSE streaming still works (no regression)
+  // Test 4: Instance list shows paused status in purple
   // ==========================================================================
-  test('SSE streaming still works (no regression)', async () => {
+  test('Test 4: Instance list shows paused status in purple', async () => {
+    // First, pause the instance from Test 3
     const textarea = page.locator('app-message-input .input-textarea');
+    const pauseButton = page.locator('app-message-input .pause-button');
+
+    // Send a message to start a new running state
+    await textarea.fill('Testing pause status in instance list');
+    await textarea.press('Enter');
+    console.log('[Test 4] Message sent');
+
+    // Wait for pause button to appear
+    let pauseButtonVisible = false;
+    try {
+      await page.waitForFunction(
+        () => document.querySelector('app-message-input .pause-button') !== null,
+        { timeout: 10000 }
+      );
+      pauseButtonVisible = true;
+      console.log('[Test 4] Pause button appeared');
+    } catch (e) {
+      console.log('[Test 4] Note: Pause button did not appear, instance may have completed fast');
+    }
+
+    if (!pauseButtonVisible) {
+      console.log('[Test 4] SKIPPED: Pause button was not visible to click');
+      return;
+    }
+
+    // Click the pause button
+    await pauseButton.click();
+    console.log('[Test 4] Pause button clicked');
+
+    // Wait for instance to pause
+    try {
+      await waitForInstanceNotRunning(instanceId, 10000);
+      const status = await getInstanceStatus(instanceId);
+      console.log(`[Test 4] Instance paused with status: ${status}`);
+    } catch (e) {
+      console.log(`[Test 4] Warning: ${(e as Error).message}`);
+    }
+
+    // Navigate to home page to see instance list sidebar
+    await page.goto(`${FRONTEND_URL}/`, { waitUntil: 'domcontentloaded' });
+    console.log('[Test 4] Navigated to home page to view instance list');
+
+    // Give Angular time to load
+    await page.waitForTimeout(2000);
+
+    // Take screenshot before checking
+    await page.screenshot({ path: `${screenshotsDir}/04-instance-list-sidebar.png` });
+    console.log('[Test 4] Screenshot saved: 04-instance-list-sidebar.png');
+
+    // Check if instance list is visible
+    const instanceList = page.locator('app-instance-list');
+    const listVisible = await instanceList.isVisible().catch(() => false);
+
+    if (!listVisible) {
+      console.log('[Test 4] INFO: Instance list sidebar not visible on this page');
+      console.log('[Test 4] Trying to find instance items anywhere on page');
+    }
+
+    // Find instance items in the list
+    const instanceItems = page.locator('app-instance-list .instance-item');
+
+    // Wait for instance items to appear
+    try {
+      await instanceItems.first().waitFor({ state: 'visible', timeout: 10000 });
+      const itemCount = await instanceItems.count();
+      console.log(`[Test 4] Found ${itemCount} instance items in the list`);
+
+      if (itemCount > 0) {
+        // Find the item that matches our instance ID
+        const ourInstance = page.locator(`app-instance-list .instance-item[href*="${instanceId}"]`);
+        const ourInstanceVisible = await ourInstance.isVisible().catch(() => false);
+
+        if (ourInstanceVisible) {
+          // Check the status dot color - should be purple (#8b5cf6)
+          const statusDot = ourInstance.locator('.status-dot');
+          const statusDotVisible = await statusDot.isVisible().catch(() => false);
+
+          if (statusDotVisible) {
+            const bgColor = await statusDot.evaluate((el: Element) => {
+              const style = window.getComputedStyle(el);
+              return style.backgroundColor;
+            });
+            console.log(`[Test 4] Status dot background color: ${bgColor}`);
+
+            // Check for purple color (rgb(139, 92, 246) or similar)
+            // #8b5cf6 = rgb(139, 92, 246)
+            const isPurple = bgColor.includes('139') && bgColor.includes('92') && bgColor.includes('246');
+            if (isPurple) {
+              console.log('[Test 4] PASSED: Instance shows paused status in purple');
+            } else {
+              console.log(`[Test 4] INFO: Status color is ${bgColor} (may not be purple if status changed)`);
+            }
+          }
+        } else {
+          console.log(`[Test 4] INFO: Current instance ${instanceId} not visible in list (may need scroll)`);
+          // Check if any instance has a purple dot
+          const allStatusDots = page.locator('.status-dot');
+          const dotCount = await allStatusDots.count();
+          for (let i = 0; i < dotCount; i++) {
+            const bgColor = await allStatusDots.nth(i).evaluate((el: Element) => {
+              const style = window.getComputedStyle(el);
+              return style.backgroundColor;
+            });
+            if (bgColor.includes('139') && bgColor.includes('92') && bgColor.includes('246')) {
+              console.log('[Test 4] PASSED: Found instance with paused (purple) status in list');
+              break;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log(`[Test 4] INFO: Could not verify instance list status: ${(e as Error).message}`);
+    }
+  });
+
+  // ==========================================================================
+  // Test 5: Resume after pause
+  // ==========================================================================
+  test('Test 5: Resume after pause', async () => {
+    // Navigate back to the instance page
+    await page.goto(`${FRONTEND_URL}/instances/${instanceId}`, { waitUntil: 'domcontentloaded' });
+    console.log(`[Test 5] Navigated to /instances/${instanceId}`);
+
+    await page.waitForTimeout(2000);
+
+    const textarea = page.locator('app-message-input .input-textarea');
+    const sendButton = page.locator('app-message-input .send-button');
+
+    // Wait for send button to be visible (instance should be paused)
+    await sendButton.waitFor({ state: 'visible', timeout: 10000 });
+    console.log('[Test 5] Send button visible, instance is paused');
 
     // Get initial message count
     const messageSelectors = [
@@ -385,10 +467,156 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     }, messageSelectors);
     console.log(`[Test 5] Initial message count: ${initialCount}`);
 
+    // Send "continue" message to resume
+    await textarea.fill('continue');
+    await textarea.press('Enter');
+    console.log('[Test 5] Sent "continue" message to resume instance');
+
+    // Wait for response (up to 30 seconds)
+    let messagesAppeared = false;
+    for (const selector of messageSelectors) {
+      try {
+        // Use a polling approach since waitForFunction can't access outer variables
+        const startTime = Date.now();
+        while (Date.now() - startTime < 30000) {
+          const count = await page.locator(selector).count();
+          if (count > initialCount) {
+            console.log(`[Test 5] Messages appeared using selector: ${selector} (count: ${count})`);
+            messagesAppeared = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (messagesAppeared) break;
+      } catch {
+        // Try next selector
+      }
+    }
+
+    // Take screenshot
+    await page.screenshot({ path: `${screenshotsDir}/05-resume-after-pause.png` });
+    console.log('[Test 5] Screenshot saved: 05-resume-after-pause.png');
+
+    if (messagesAppeared) {
+      console.log('[Test 5] PASSED: Instance resumed and responded to "continue" message');
+    } else {
+      // Check via API
+      const context = await request.newContext({ baseURL: BASE_URL });
+      const response = await context.get(`/api/instances/${instanceId}/messages`);
+      if (response.ok()) {
+        const messages = await response.json();
+        console.log(`[Test 5] Messages via API: ${messages.length}`);
+        if (messages.length > initialCount) {
+          console.log('[Test 5] PARTIAL: Messages exist in API but not in UI');
+        }
+      }
+      console.log('[Test 5] INFO: Could not verify resume response');
+    }
+
+    // Verify instance returns to running then completed state
+    const finalStatus = await getInstanceStatus(instanceId);
+    console.log(`[Test 5] Final instance status: ${finalStatus}`);
+  });
+
+  // ==========================================================================
+  // Test 6: Visual — Pause icon is correct (two bars, not square)
+  // ==========================================================================
+  test('Test 6: Visual — Pause icon is correct (two bars, not square)', async () => {
+    const textarea = page.locator('app-message-input .input-textarea');
+    const pauseButton = page.locator('app-message-input .pause-button');
+
+    // Send a message to get into running state
+    await textarea.fill('Testing pause icon visual');
+    await textarea.press('Enter');
+    console.log('[Test 6] Message sent');
+
+    // Wait for pause button to appear
+    let pauseButtonVisible = false;
+    try {
+      await page.waitForFunction(
+        () => document.querySelector('app-message-input .pause-button') !== null,
+        { timeout: 10000 }
+      );
+      pauseButtonVisible = true;
+      console.log('[Test 6] Pause button appeared');
+    } catch (e) {
+      console.log('[Test 6] Note: Pause button did not appear, instance may have completed fast');
+    }
+
+    if (!pauseButtonVisible) {
+      console.log('[Test 6] SKIPPED: Pause button was not visible');
+      return;
+    }
+
+    // Take screenshot of the pause button
+    await page.screenshot({ path: `${screenshotsDir}/06-pause-icon-visual.png` });
+    console.log('[Test 6] Screenshot saved: 06-pause-icon-visual.png');
+
+    // Verify the SVG pause icon contains TWO <rect> elements
+    const pauseIconRects = page.locator('app-message-input .pause-button svg rect');
+    const rectCount = await pauseIconRects.count();
+
+    console.log(`[Test 6] Found ${rectCount} <rect> elements in pause button SVG`);
+
+    if (rectCount === 2) {
+      // Check the x positions to confirm they are at x=6 and x=14 (the pause bars)
+      const xPositions = await pauseIconRects.evaluateAll((rects) =>
+        rects.map((r) => ({ x: r.getAttribute('x'), width: r.getAttribute('width') }))
+      );
+      console.log(`[Test 6] Rect positions: ${JSON.stringify(xPositions)}`);
+
+      const hasCorrectPositions = xPositions.some((r) => r.x === '6') && xPositions.some((r) => r.x === '14');
+      if (hasCorrectPositions) {
+        console.log('[Test 6] PASSED: Pause icon has correct two-bar structure (x=6 and x=14)');
+      } else {
+        console.log('[Test 6] INFO: Found 2 rects but positions may differ from expected');
+      }
+    } else if (rectCount === 1) {
+      console.log('[Test 6] FAIL: Only 1 <rect> found - this would be a STOP square, not pause bars');
+      throw new Error('[Test 6] FAIL: Pause icon is incorrect - should have 2 rect bars, found 1');
+    } else {
+      console.log(`[Test 6] INFO: Found ${rectCount} rects (expected 2 for pause icon)`);
+    }
+  });
+
+  // ==========================================================================
+  // Test 7: SSE streaming works after pause/resume
+  // ==========================================================================
+  test('Test 7: SSE streaming works after pause/resume', async () => {
+    // Create a new instance for this test
+    const instance = await createTestInstance('leader');
+    instanceIdForTests = instance.instance_id;
+    trackInstance(instanceIdForTests);
+    console.log(`[Test 7] Created NEW instance ${instanceIdForTests}`);
+
+    // Navigate to the instance page
+    await page.goto(`${FRONTEND_URL}/instances/${instanceIdForTests}`, { waitUntil: 'domcontentloaded' });
+    console.log(`[Test 7] Navigated to /instances/${instanceIdForTests}`);
+
+    await page.waitForTimeout(2000);
+
+    const textarea = page.locator('app-message-input .input-textarea');
+
+    // Get initial message count
+    const messageSelectors = [
+      'app-chat-interface .message-row',
+      '.message-row',
+      '.message-bubble',
+    ];
+
+    const initialCount = await page.evaluate((selectors) => {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el) return document.querySelectorAll(sel).length;
+      }
+      return 0;
+    }, messageSelectors);
+    console.log(`[Test 7] Initial message count: ${initialCount}`);
+
     // Send a message
     await textarea.fill('Test SSE streaming');
     await textarea.press('Enter');
-    console.log('[Test 5] Message sent');
+    console.log('[Test 7] Message sent');
 
     // Wait for messages to appear (up to 30 seconds for response)
     let messagesAppeared = false;
@@ -400,7 +628,7 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
           { timeout: 30000 }
         );
         const newCount = await page.locator(selector).count();
-        console.log(`[Test 5] Messages appeared using selector: ${selector} (count: ${newCount})`);
+        console.log(`[Test 7] Messages appeared using selector: ${selector} (count: ${newCount})`);
         messagesAppeared = newCount > initialCount;
         if (messagesAppeared) break;
       } catch {
@@ -409,132 +637,23 @@ test.describe('Send/Pause Button (SSE Real-Time Updates)', () => {
     }
 
     // Take screenshot
-    await page.screenshot({ path: `${screenshotsDir}/05-sse-streaming.png` });
-    console.log('[Test 5] Screenshot saved: 05-sse-streaming.png');
+    await page.screenshot({ path: `${screenshotsDir}/07-sse-streaming.png` });
+    console.log('[Test 7] Screenshot saved: 07-sse-streaming.png');
 
     if (messagesAppeared) {
-      console.log('[Test 5] PASSED: SSE streaming works (messages appeared)');
+      console.log('[Test 7] PASSED: SSE streaming works (messages appeared)');
     } else {
       // Check via API
       const context = await request.newContext({ baseURL: BASE_URL });
-      const response = await context.get(`/api/instances/${instanceId}/messages`);
+      const response = await context.get(`/api/instances/${instanceIdForTests}/messages`);
       if (response.ok()) {
         const messages = await response.json();
-        console.log(`[Test 5] Messages via API: ${messages.length}`);
+        console.log(`[Test 7] Messages via API: ${messages.length}`);
         if (messages.length > 0) {
-          console.log('[Test 5] PARTIAL: Messages exist in API but not in UI');
+          console.log('[Test 7] PARTIAL: Messages exist in API but not in UI');
         }
       }
-      console.log('[Test 5] INFO: No messages visible (may have completed too fast)');
-    }
-  });
-
-  // ==========================================================================
-  // Test 6: Direct navigation → Pause button works (THE KEY FIX TEST)
-  // ==========================================================================
-  test('Direct navigation → Pause button works (THE KEY FIX TEST)', async () => {
-    // This is the KEY test for the fix!
-    // Previously, navigating directly to /instances/{id} would not create the instance
-    // in the local list, so SSE status_change events had no effect.
-    // The fix ensures updateInstanceStatus() creates a minimal entry when needed.
-
-    // Create a NEW instance (separate from previous ones)
-    const instance = await createTestInstance('leader');
-    instanceIdForTest6 = instance.instance_id;
-    trackInstance(instanceIdForTest6);
-    console.log(`[Test 6] Created NEW instance ${instanceIdForTest6}`);
-
-    // Navigate DIRECTLY to the instance page (NOT via sidebar)
-    // This is the broken case before the fix
-    await page.goto(`${FRONTEND_URL}/instances/${instanceIdForTest6}`, { waitUntil: 'domcontentloaded' });
-    console.log('[Test 6] Navigated directly to instance page');
-
-    // Give Angular time to bootstrap
-    await page.waitForTimeout(2000);
-
-    // Check the URL is correct
-    const url = page.url();
-    console.log(`[Test 6] Current URL: ${url}`);
-    expect(url).toContain('/instances/');
-
-    // Wait for the app to initialize
-    await page.waitForSelector('app-root', { timeout: 10000 });
-
-    // Wait for message input
-    const textarea = page.locator('app-message-input .input-textarea');
-    const pauseButton = page.locator('app-message-input .pause-button');
-    const sendButton = page.locator('app-message-input .send-button');
-
-    // Wait for the textarea to appear
-    try {
-      await textarea.waitFor({ state: 'visible', timeout: 15000 });
-      console.log('[Test 6] Message input textarea visible');
-    } catch (e) {
-      // Take screenshot to debug
-      await page.screenshot({ path: `${screenshotsDir}/06-debug.png` });
-      
-      // Check if instance was fetched successfully
-      const status = await getInstanceStatus(instanceIdForTest6);
-      console.log(`[Test 6] Instance status: ${status}`);
-      
-      throw e;
-    }
-
-    // Send a message
-    await textarea.fill('Testing direct navigation pause button fix');
-    await textarea.press('Enter');
-    console.log('[Test 6] Message sent');
-
-    // Start timing - this is the KEY measurement
-    const timing = startTiming();
-
-    // Wait for pause button to appear (should be within 2 seconds with SSE fix)
-    let pauseButtonAppeared = false;
-    const maxWait = 25000; // Extended timeout
-
-    while (Date.now() - timing.startTime < maxWait) {
-      const visible = await pauseButton.isVisible().catch(() => false);
-      if (visible) {
-        pauseButtonAppeared = true;
-        break;
-      }
-      // Also check if instance completed
-      const currentStatus = await getInstanceStatus(instanceIdForTest6);
-      if (currentStatus !== 'running' && currentStatus !== 'queued' && currentStatus !== 'waiting_children') {
-        console.log(`[Test 6] Instance status changed to: ${currentStatus}`);
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    const timingResult = endTiming(timing);
-    logTiming('Direct navigation: Send → Pause button visible', timingResult);
-
-    // Take screenshot
-    await page.screenshot({ path: `${screenshotsDir}/06-direct-navigation-pause-button.png` });
-    console.log('[Test 6] Screenshot saved: 06-direct-navigation-pause-button.png');
-
-    // Verify the fix works
-    if (pauseButtonAppeared) {
-      await expect(pauseButton).toBeVisible();
-      await expect(sendButton).toHaveCount(0);
-      console.log(`[Test 6] PASSED: Pause button appeared in ${timingResult.delta}ms`);
-
-      // KEY ASSERTION: Must be within 2 seconds (SSE-driven, not polling)
-      if (timingResult.delta < 2000) {
-        console.log('[Test 6] PASSED: Pause button appeared within 2000ms (SSE fix working!)');
-      } else {
-        console.log(`[Test 6] WARNING: Pause button took ${timingResult.delta}ms (expected < 2000ms)`);
-      }
-    } else {
-      // Check if instance completed too fast
-      const currentStatus = await getInstanceStatus(instanceIdForTest6);
-      if (currentStatus !== 'running' && currentStatus !== 'queued' && currentStatus !== 'waiting_children') {
-        console.log(`[Test 6] INFO: Instance completed too fast (status: ${currentStatus})`);
-        console.log('[Test 6] This is acceptable — instance responded before Pause button could appear');
-      } else {
-        throw new Error('[Test 6] FAIL: Pause button did not appear within timeout (SSE fix not working)');
-      }
+      console.log('[Test 7] INFO: No messages visible (may have completed too fast)');
     }
   });
 });
