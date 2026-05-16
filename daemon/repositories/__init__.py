@@ -43,6 +43,7 @@ from .factory import (
     create_source_repository,
     create_job_repository,
     create_job_queue_repository,
+    create_mcp_server_repository,
     run_migrations,
 )
 
@@ -96,5 +97,6 @@ __all__ = [
     "create_source_repository",
     "create_job_repository",
     "create_job_queue_repository",
+    "create_mcp_server_repository",
     "run_migrations",
 ]
