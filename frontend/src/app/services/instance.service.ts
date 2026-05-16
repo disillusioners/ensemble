@@ -6,6 +6,14 @@ import type { InstanceInfo, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 100;
 
+// Terminal statuses are final states that should not be overwritten by polling
+const TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
+  'completed',
+  'error',
+  'terminated',
+  'failed',
+]);
+
 @Injectable({
   providedIn: 'root'
 })
@@ -72,6 +80,31 @@ export class InstanceService {
   }
 
   /**
+   * Merge API instances with local instances, preserving terminal local statuses.
+   * This prevents polling from overwriting SSE updates to final states.
+   */
+  private mergeInstances(local: InstanceInfo[], apiInstances: InstanceInfo[]): InstanceInfo[] {
+    const localById = new Map(local.map(i => [i.instance_id, i]));
+    const result: InstanceInfo[] = [];
+
+    for (const apiInstance of apiInstances) {
+      const localInstance = localById.get(apiInstance.instance_id);
+      if (localInstance && TERMINAL_STATUSES.has(localInstance.status)) {
+        // Preserve local terminal status - SSE already updated it to a final state
+        result.push({ ...apiInstance, status: localInstance.status });
+        localById.delete(apiInstance.instance_id);
+      } else {
+        result.push(apiInstance);
+        localById.delete(apiInstance.instance_id);
+      }
+    }
+
+    // Append any local-only instances that weren't in the API response
+    // (e.g., instances created via direct navigation)
+    return [...result, ...localById.values()];
+  }
+
+  /**
    * Load instances from the API.
    * @param projectId Optional project filter
    * @param append If true, append to existing instances; otherwise replace
@@ -96,7 +129,11 @@ export class InstanceService {
         this.instances.update((prev: InstanceInfo[]) => [...prev, ...newInstances]);
         this.currentOffset += response.instances.length;
       } else {
-        this.instances.set(response.instances);
+        // Merge with existing instances to avoid overwriting SSE updates
+        // For instances already in our list, preserve local status if it's terminal
+        // (SSE may have already updated to a final state like 'completed')
+        const merged = this.mergeInstances(this.instances(), response.instances);
+        this.instances.set(merged);
         this.currentOffset = response.instances.length;
       }
 

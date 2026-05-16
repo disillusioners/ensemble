@@ -27,6 +27,14 @@ class TestableInstanceService {
   private currentProjectId: string | null = null;
   private currentOffset: number = 0;
 
+  // Terminal statuses - same as actual service
+  private readonly TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
+    'completed',
+    'error',
+    'terminated',
+    'failed',
+  ]);
+
   // Public signals
   readonly instances = signal<InstanceInfo[]>([]);
   readonly totalInstances = signal<number>(0);
@@ -38,6 +46,27 @@ class TestableInstanceService {
   );
 
   constructor(private api: MockApiService) {}
+
+  /**
+   * Merge API instances with local instances, preserving terminal local statuses.
+   */
+  mergeInstances(local: InstanceInfo[], apiInstances: InstanceInfo[]): InstanceInfo[] {
+    const localById = new Map(local.map(i => [i.instance_id, i]));
+    const result: InstanceInfo[] = [];
+
+    for (const apiInstance of apiInstances) {
+      const localInstance = localById.get(apiInstance.instance_id);
+      if (localInstance && this.TERMINAL_STATUSES.has(localInstance.status)) {
+        result.push({ ...apiInstance, status: localInstance.status });
+        localById.delete(apiInstance.instance_id);
+      } else {
+        result.push(apiInstance);
+        localById.delete(apiInstance.instance_id);
+      }
+    }
+
+    return [...result, ...localById.values()];
+  }
 
   async loadInstances(projectId?: string, append = false): Promise<void> {
     if (append) {
@@ -531,6 +560,79 @@ describe('InstanceService', () => {
 
       expect(service.instances()).toHaveLength(1);
       expect(service.instances()[0].status).toBe('completed');
+    });
+  });
+
+  describe('mergeInstances', () => {
+    it('should preserve local terminal status when API returns different state', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'completed' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'running' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].status).toBe('completed');
+    });
+
+    it('should use API status when local is non-terminal', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'running' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'completed' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].status).toBe('completed');
+    });
+
+    it('should use API status when local has paused status (not terminal)', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'paused' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'running' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].status).toBe('running');
+    });
+
+    it('should preserve all terminal statuses (error, terminated, failed)', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'error' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'running' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].status).toBe('error');
+    });
+
+    it('should preserve local-only instances not in API response', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'local-only', status: 'running' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'inst-1', status: 'completed' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(2);
+      expect(result.find(i => i.instance_id === 'local-only')).toBeDefined();
+      expect(result.find(i => i.instance_id === 'inst-1')).toBeDefined();
     });
   });
 });
