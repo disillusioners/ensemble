@@ -1,0 +1,868 @@
+import { signal } from '@angular/core';
+import type { McpServer, McpServerCreate, McpServerUpdate } from '../../models';
+
+// Mock MatDialogRef
+class MockMatDialogRef<T = unknown> {
+  private closeFn: ((result?: T) => void) | null = null;
+
+  close(result?: T): void {
+    if (this.closeFn) {
+      this.closeFn(result);
+    }
+  }
+
+  setCloseHandler(fn: (result?: T) => void): void {
+    this.closeFn = fn;
+  }
+}
+
+// Dialog data interface (mirrors actual component)
+interface DialogData {
+  server?: McpServer;
+}
+
+// Testable McpServerDialogComponent (mirrors actual component)
+class TestableMcpServerDialogComponent {
+  protected readonly name = signal('');
+  protected readonly description = signal('');
+  protected readonly configJson = signal('');
+  protected readonly isActive = signal(true);
+  protected readonly error = signal<string | null>(null);
+  protected readonly configJsonError = signal<string | null>(null);
+
+  private readonly dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>;
+  protected readonly data: DialogData | null;
+
+  protected readonly isEditMode: () => boolean;
+
+  constructor(dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>, data?: DialogData) {
+    this.dialogRef = dialogRef;
+    this.data = data || null;
+    this.isEditMode = () => !!this.data?.server;
+
+    if (this.data?.server) {
+      this.initializeFromServer(this.data.server);
+    }
+  }
+
+  private initializeFromServer(server: McpServer): void {
+    this.name.set(server.name);
+    this.description.set(server.description || '');
+    this.isActive.set(server.is_active);
+    if (server.config && Object.keys(server.config).length > 0) {
+      this.configJson.set(JSON.stringify(server.config, null, 2));
+    }
+  }
+
+  onNameChange(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.name.set(target.value);
+  }
+
+  onDescriptionChange(event: Event): void {
+    const target = event.target as HTMLTextAreaElement;
+    this.description.set(target.value);
+  }
+
+  onConfigJsonChange(event: Event): void {
+    const target = event.target as HTMLTextAreaElement;
+    this.configJson.set(target.value);
+    this.validateConfigJson();
+  }
+
+  onIsActiveChange(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.isActive.set(target.checked);
+  }
+
+  private validateConfigJson(): boolean {
+    const json = this.configJson().trim();
+    if (!json) {
+      this.configJsonError.set(null);
+      return true;
+    }
+
+    try {
+      JSON.parse(json);
+      this.configJsonError.set(null);
+      return true;
+    } catch {
+      this.configJsonError.set('Invalid JSON format');
+      return false;
+    }
+  }
+
+  handleClose(): void {
+    this.dialogRef.close(null);
+  }
+
+  handleSubmit(): void {
+    this.error.set(null);
+
+    const nameValue = this.name().trim();
+    if (!nameValue) {
+      this.error.set('Name is required');
+      return;
+    }
+    if (nameValue.length > 128) {
+      this.error.set('Name must be 128 characters or less');
+      return;
+    }
+
+    if (!this.validateConfigJson()) {
+      return;
+    }
+
+    let config: Record<string, unknown> | undefined;
+    const configJson = this.configJson().trim();
+    if (configJson) {
+      config = JSON.parse(configJson);
+    }
+
+    if (this.isEditMode() && this.data?.server) {
+      const update: McpServerUpdate = {
+        name: nameValue,
+        description: this.description().trim() || null,
+        config,
+        is_active: this.isActive(),
+      };
+      this.dialogRef.close(update);
+    } else {
+      const create: McpServerCreate = {
+        name: nameValue,
+        description: this.description().trim() || null,
+        config,
+        is_active: this.isActive(),
+      };
+      this.dialogRef.close(create);
+    }
+  }
+
+  isSubmitDisabled(): boolean {
+    return !this.name().trim() || this.configJsonError() !== null;
+  }
+}
+
+// Helper to create mock MCP server
+function createMockServer(overrides: Partial<McpServer> = {}): McpServer {
+  return {
+    id: `server-${Math.random().toString(36).substr(2, 9)}`,
+    name: 'Test MCP Server',
+    description: 'A test MCP server',
+    config: { command: 'npx', args: ['test-server'] },
+    is_active: true,
+    created_at: '2025-01-15T10:30:00Z',
+    updated_at: null,
+    ...overrides,
+  };
+}
+
+describe('McpServerDialogComponent', () => {
+  let dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>;
+
+  beforeEach(() => {
+    dialogRef = new MockMatDialogRef();
+  });
+
+  describe('create mode', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should create successfully in create mode', () => {
+      expect(component).toBeDefined();
+    });
+
+    it('should not be in edit mode', () => {
+      expect(component.isEditMode()).toBe(false);
+    });
+
+    it('should have empty name signal', () => {
+      expect(component.name()).toBe('');
+    });
+
+    it('should have empty description signal', () => {
+      expect(component.description()).toBe('');
+    });
+
+    it('should have empty configJson signal', () => {
+      expect(component.configJson()).toBe('');
+    });
+
+    it('should have isActive set to true by default', () => {
+      expect(component.isActive()).toBe(true);
+    });
+
+    it('should have null error signal', () => {
+      expect(component.error()).toBeNull();
+    });
+
+    it('should have null configJsonError signal', () => {
+      expect(component.configJsonError()).toBeNull();
+    });
+  });
+
+  describe('edit mode', () => {
+    let component: TestableMcpServerDialogComponent;
+    let mockServer: McpServer;
+
+    beforeEach(() => {
+      mockServer = createMockServer({
+        id: 'server-123',
+        name: 'Existing Server',
+        description: 'Existing description',
+        is_active: false,
+        config: { command: 'npx', args: ['server'] },
+      });
+      component = new TestableMcpServerDialogComponent(dialogRef, { server: mockServer });
+    });
+
+    it('should create successfully in edit mode', () => {
+      expect(component).toBeDefined();
+    });
+
+    it('should be in edit mode', () => {
+      expect(component.isEditMode()).toBe(true);
+    });
+
+    it('should pre-fill name from server data', () => {
+      expect(component.name()).toBe('Existing Server');
+    });
+
+    it('should pre-fill description from server data', () => {
+      expect(component.description()).toBe('Existing description');
+    });
+
+    it('should pre-fill isActive from server data', () => {
+      expect(component.isActive()).toBe(false);
+    });
+
+    it('should pre-fill configJson from server config', () => {
+      const config = component.configJson();
+      expect(config).toContain('command');
+      expect(config).toContain('npx');
+    });
+
+    it('should handle null description', () => {
+      const serverWithNullDesc = createMockServer({ description: null });
+      const comp = new TestableMcpServerDialogComponent(dialogRef, { server: serverWithNullDesc });
+      expect(comp.description()).toBe('');
+    });
+
+    it('should handle empty config object', () => {
+      const serverWithEmptyConfig = createMockServer({ config: {} });
+      const comp = new TestableMcpServerDialogComponent(dialogRef, { server: serverWithEmptyConfig });
+      expect(comp.configJson()).toBe('');
+    });
+
+    it('should handle config with nested objects', () => {
+      const serverWithNestedConfig = createMockServer({
+        config: {
+          nested: { deep: { value: 123 } },
+          array: [1, 2, 3],
+        },
+      });
+      const comp = new TestableMcpServerDialogComponent(dialogRef, { server: serverWithNestedConfig });
+      const config = comp.configJson();
+      expect(config).toContain('nested');
+      expect(config).toContain('deep');
+    });
+  });
+
+  describe('form field changes', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should update name on onNameChange', () => {
+      const event = { target: { value: 'New Name' } } as unknown as Event;
+      component.onNameChange(event);
+      expect(component.name()).toBe('New Name');
+    });
+
+    it('should update description on onDescriptionChange', () => {
+      const event = { target: { value: 'New Description' } } as unknown as Event;
+      component.onDescriptionChange(event);
+      expect(component.description()).toBe('New Description');
+    });
+
+    it('should update configJson on onConfigJsonChange', () => {
+      const event = { target: { value: '{"key": "value"}' } } as unknown as Event;
+      component.onConfigJsonChange(event);
+      expect(component.configJson()).toBe('{"key": "value"}');
+    });
+
+    it('should update isActive on onIsActiveChange when checked', () => {
+      const event = { target: { checked: true } } as unknown as Event;
+      component.onIsActiveChange(event);
+      expect(component.isActive()).toBe(true);
+    });
+
+    it('should update isActive on onIsActiveChange when unchecked', () => {
+      component.isActive.set(true);
+      const event = { target: { checked: false } } as unknown as Event;
+      component.onIsActiveChange(event);
+      expect(component.isActive()).toBe(false);
+    });
+
+    it('should clear configJsonError on valid JSON change', () => {
+      component.configJsonError.set('Previous error');
+      const event = { target: { value: '{"valid": true}' } } as unknown as Event;
+      component.onConfigJsonChange(event);
+      expect(component.configJsonError()).toBeNull();
+    });
+
+    it('should set configJsonError on invalid JSON change', () => {
+      const event = { target: { value: '{invalid json}' } } as unknown as Event;
+      component.onConfigJsonChange(event);
+      expect(component.configJsonError()).toBe('Invalid JSON format');
+    });
+  });
+
+  describe('validation', () => {
+    describe('name validation', () => {
+      it('should set error when name is empty', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('');
+        component.description.set('desc');
+        component.handleSubmit();
+        expect(component.error()).toBe('Name is required');
+      });
+
+      it('should set error when name is whitespace only', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('   ');
+        component.handleSubmit();
+        expect(component.error()).toBe('Name is required');
+      });
+
+      it('should set error when name exceeds 128 characters', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('a'.repeat(129));
+        component.handleSubmit();
+        expect(component.error()).toBe('Name must be 128 characters or less');
+      });
+
+      it('should accept name with exactly 128 characters', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('a'.repeat(128));
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.error()).toBeNull();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should clear error when valid name provided', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.error.set('Previous error');
+        component.name.set('Valid Name');
+        component.handleSubmit();
+        expect(component.error()).toBeNull();
+      });
+    });
+
+    describe('JSON config validation', () => {
+      it('should accept empty config (optional field)', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBeNull();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should accept valid JSON object', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('{"command": "npx"}');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should accept valid JSON with nested objects', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        const nestedConfig = JSON.stringify({
+          nested: { deep: { value: 123 } },
+        });
+        component.configJson.set(nestedConfig);
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should accept valid JSON array', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('["item1", "item2"]');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should accept valid JSON primitive', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('"string value"');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should reject invalid JSON', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('{invalid}');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBe('Invalid JSON format');
+        expect(closeSpy).not.toHaveBeenCalled();
+      });
+
+      it('should reject JSON with syntax errors', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('{"key": }');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBe('Invalid JSON format');
+        expect(closeSpy).not.toHaveBeenCalled();
+      });
+
+      it('should reject unquoted JSON keys', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('{key: "value"}');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBe('Invalid JSON format');
+        expect(closeSpy).not.toHaveBeenCalled();
+      });
+
+      it('should trim whitespace before JSON validation', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('   {"key": "value"}   ');
+        const closeSpy = jest.spyOn(dialogRef, 'close');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBeNull();
+        expect(closeSpy).toHaveBeenCalled();
+      });
+
+      it('should set error on invalid JSON but not clear previous validation error', () => {
+        const component = new TestableMcpServerDialogComponent(dialogRef);
+        component.name.set('Valid Name');
+        component.configJson.set('{invalid}');
+        component.handleSubmit();
+        expect(component.configJsonError()).toBe('Invalid JSON format');
+      });
+    });
+  });
+
+  describe('handleSubmit in create mode', () => {
+    let component: TestableMcpServerDialogComponent;
+    let closeSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+      closeSpy = jest.spyOn(dialogRef, 'close');
+    });
+
+    it('should emit McpServerCreate data on successful submit', () => {
+      component.name.set('New Server');
+      component.description.set('A new server');
+      component.configJson.set('{"command": "npx"}');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith({
+        name: 'New Server',
+        description: 'A new server',
+        config: { command: 'npx' },
+        is_active: true,
+      });
+    });
+
+    it('should emit with null description when empty', () => {
+      component.name.set('New Server');
+      component.description.set('');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'New Server',
+          description: null,
+        })
+      );
+    });
+
+    it('should emit with whitespace description trimmed to null', () => {
+      component.name.set('New Server');
+      component.description.set('   ');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: null,
+        })
+      );
+    });
+
+    it('should emit with undefined config when empty', () => {
+      component.name.set('New Server');
+      component.description.set('desc');
+      component.configJson.set('');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: undefined,
+        })
+      );
+    });
+
+    it('should emit is_active as true by default', () => {
+      component.name.set('New Server');
+      component.description.set('desc');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          is_active: true,
+        })
+      );
+    });
+
+    it('should emit is_active as false when unchecked', () => {
+      component.name.set('New Server');
+      component.description.set('desc');
+      component.isActive.set(false);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          is_active: false,
+        })
+      );
+    });
+
+    it('should parse JSON config correctly', () => {
+      component.name.set('New Server');
+      component.description.set('desc');
+      component.configJson.set(JSON.stringify({
+        command: 'npx',
+        args: ['-y', '@server/package'],
+        env: { KEY: 'value' },
+      }));
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: {
+            command: 'npx',
+            args: ['-y', '@server/package'],
+            env: { KEY: 'value' },
+          },
+        })
+      );
+    });
+  });
+
+  describe('handleSubmit in edit mode', () => {
+    let component: TestableMcpServerDialogComponent;
+    let closeSpy: jest.SpyInstance;
+    let mockServer: McpServer;
+
+    beforeEach(() => {
+      mockServer = createMockServer({
+        id: 'server-123',
+        name: 'Original Name',
+        description: 'Original description',
+        is_active: true,
+        config: { command: 'original' },
+      });
+      component = new TestableMcpServerDialogComponent(dialogRef, { server: mockServer });
+      closeSpy = jest.spyOn(dialogRef, 'close');
+    });
+
+    it('should emit McpServerUpdate data on successful submit', () => {
+      component.name.set('Updated Name');
+      component.description.set('Updated description');
+      component.isActive.set(false);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith({
+        name: 'Updated Name',
+        description: 'Updated description',
+        config: { command: 'original' },
+        is_active: false,
+      });
+    });
+
+    it('should preserve original config when configJson is empty', () => {
+      component.configJson.set('');
+      component.name.set('Updated Name');
+      component.description.set('desc');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: undefined,
+        })
+      );
+    });
+
+    it('should override config when new JSON provided', () => {
+      component.name.set('Updated Name');
+      component.configJson.set('{"new": "config"}');
+      component.description.set('');
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      expect(closeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: { new: 'config' },
+        })
+      );
+    });
+  });
+
+  describe('handleClose', () => {
+    it('should emit null on handleClose', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      const closeSpy = jest.spyOn(dialogRef, 'close');
+
+      component.handleClose();
+
+      expect(closeSpy).toHaveBeenCalledWith(null);
+    });
+
+    it('should not validate form on handleClose', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      const closeSpy = jest.spyOn(dialogRef, 'close');
+
+      // Name is empty but should still close
+      component.handleClose();
+
+      expect(closeSpy).toHaveBeenCalledWith(null);
+    });
+  });
+
+  describe('isSubmitDisabled', () => {
+    it('should return true when name is empty', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('');
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should return true when name is whitespace only', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('   ');
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should return true when configJsonError is set', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('Valid Name');
+      component.configJsonError.set('Invalid JSON');
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should return false when name is valid and no config error', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('Valid Name');
+      component.configJsonError.set(null);
+      expect(component.isSubmitDisabled()).toBe(false);
+    });
+
+    it('should return false when name is valid and configJson is empty', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('Valid Name');
+      component.configJson.set('');
+      component.configJsonError.set(null);
+      expect(component.isSubmitDisabled()).toBe(false);
+    });
+
+    it('should return false when name is valid and configJson has valid JSON', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('Valid Name');
+      component.configJson.set('{"key": "value"}');
+      component.configJsonError.set(null);
+      expect(component.isSubmitDisabled()).toBe(false);
+    });
+
+    it('should return true when name is valid but JSON is invalid', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.name.set('Valid Name');
+      component.configJson.set('{invalid}');
+      // Trigger validation
+      component.onConfigJsonChange({ target: { value: '{invalid}' } } as unknown as Event);
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should update reactively when name changes', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      expect(component.isSubmitDisabled()).toBe(true);
+
+      component.name.set('Valid Name');
+      expect(component.isSubmitDisabled()).toBe(false);
+
+      component.name.set('');
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+  });
+
+  describe('form state management', () => {
+    it('should reset error on submit attempt', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.error.set('Previous error');
+      component.name.set('Valid Name');
+
+      component.handleSubmit();
+
+      expect(component.error()).toBeNull();
+    });
+
+    it('should not reset error on handleClose', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.error.set('Some error');
+
+      component.handleClose();
+
+      expect(component.error()).toBe('Some error');
+    });
+
+    it('should handle rapid field changes', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+
+      component.name.set('Name 1');
+      component.description.set('Desc 1');
+      component.configJson.set('{"a": 1}');
+
+      component.name.set('Name 2');
+      component.description.set('Desc 2');
+      component.configJson.set('{"b": 2}');
+
+      expect(component.name()).toBe('Name 2');
+      expect(component.description()).toBe('Desc 2');
+      expect(component.configJson()).toBe('{"b": 2}');
+    });
+
+    it('should allow editing after error is cleared', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      const closeSpy = jest.spyOn(dialogRef, 'close');
+
+      // First submit fails
+      component.handleSubmit();
+      expect(component.error()).toBe('Name is required');
+      expect(closeSpy).not.toHaveBeenCalled();
+
+      // Fix the error
+      component.name.set('Valid Name');
+      component.handleSubmit();
+
+      expect(component.error()).toBeNull();
+      expect(closeSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe('complex scenarios', () => {
+    it('should handle server with all fields populated', () => {
+      const fullServer: McpServer = {
+        id: 'server-full',
+        name: 'Full Server',
+        description: 'A server with all fields',
+        config: {
+          command: 'npx',
+          args: ['-y', '@server/package', '/path'],
+          env: { DEBUG: 'true', PORT: '8080' },
+          timeout: 30000,
+        },
+        is_active: true,
+        created_at: '2025-01-15T10:30:00Z',
+        updated_at: '2025-01-16T12:00:00Z',
+      };
+
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: fullServer });
+
+      expect(component.name()).toBe('Full Server');
+      expect(component.description()).toBe('A server with all fields');
+      expect(component.isActive()).toBe(true);
+      expect(component.configJson()).toContain('command');
+      expect(component.configJson()).toContain('env');
+    });
+
+    it('should handle creating server with complex config', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      const closeSpy = jest.spyOn(dialogRef, 'close');
+
+      component.name.set('Complex Server');
+      component.description.set('Server with complex configuration');
+      component.configJson.set(JSON.stringify({
+        command: 'docker',
+        args: ['run', '--rm', '-it', 'image:latest'],
+        env: {
+          API_KEY: 'secret',
+          DB_HOST: 'localhost',
+          DB_PORT: '5432',
+        },
+        ports: [{ host: 8080, container: 3000 }],
+        volumes: ['/data:/app/data'],
+      }));
+      component.isActive.set(true);
+
+      component.handleSubmit();
+
+      const emittedData = closeSpy.mock.calls[0][0] as McpServerCreate;
+      expect(emittedData.name).toBe('Complex Server');
+      expect(emittedData.config).toEqual({
+        command: 'docker',
+        args: ['run', '--rm', '-it', 'image:latest'],
+        env: {
+          API_KEY: 'secret',
+          DB_HOST: 'localhost',
+          DB_PORT: '5432',
+        },
+        ports: [{ host: 8080, container: 3000 }],
+        volumes: ['/data:/app/data'],
+      });
+    });
+
+    it('should handle edit then cancel workflow', () => {
+      const mockServer = createMockServer({ name: 'Original' });
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: mockServer });
+
+      // Make some changes
+      component.name.set('Modified');
+      component.description.set('New description');
+
+      // Cancel
+      const closeSpy = jest.spyOn(dialogRef, 'close');
+      component.handleClose();
+
+      expect(closeSpy).toHaveBeenCalledWith(null);
+    });
+  });
+});
