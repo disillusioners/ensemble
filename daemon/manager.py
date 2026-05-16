@@ -7,6 +7,7 @@ import re
 import time
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,9 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# TTL for releasing in-memory graph for paused instances (in minutes)
+PAUSED_INSTANCE_TTL_MINUTES = 30
 
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
@@ -544,6 +548,8 @@ class InstanceManager:
         self._completion_registry.set_event_loop(self._loop)
         # NEW: Schedule periodic stale cleanup (every 10 minutes)
         asyncio.create_task(self._cleanup_stale_completions())
+        # NEW: Schedule periodic cleanup of paused instances exceeding TTL
+        asyncio.create_task(self._cleanup_paused_instances())
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     async def _cleanup_stale_completions(self) -> None:
@@ -556,6 +562,75 @@ class InstanceManager:
                 break
             except Exception as e:
                 logger.warning(f"Stale completion cleanup failed: {e}")
+
+    def release_paused_instance(self, instance_id: str) -> None:
+        """Release in-memory graph for a paused instance after TTL expires.
+        
+        This removes the graph from memory while keeping the database record intact.
+        The instance can be "hot resumed" if under TTL (graph still in memory),
+        or "cold resumed" if over TTL (graph reloaded from checkpoint on next use).
+        
+        Args:
+            instance_id: The ID of the paused instance to release.
+        """
+        # Remove from instances dict if present
+        if instance_id in self.instances:
+            del self.instances[instance_id]
+            logger.info(f"Released in-memory graph for paused instance {instance_id[:8]}...")
+        
+        # Cancel any lingering graph task
+        task = self._graph_tasks.pop(instance_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            logger.debug(f"Cancelled lingering graph task for {instance_id[:8]}...")
+        
+        # Cancel any active requests (shouldn't exist for paused instance but safety first)
+        self._request_registry.cancel_by_instance(
+            instance_id, 
+            CancellationReason.SESSION_TERMINATED
+        )
+    
+    async def _cleanup_paused_instances(self) -> None:
+        """Background task to release in-memory graphs for paused instances exceeding TTL."""
+        while not self._shutting_down:
+            try:
+                await asyncio.sleep(600)  # Every 10 minutes
+                if not self._instance_repository:
+                    continue
+                
+                # List paused instances
+                paused_instances, _ = self._instance_repository.list(status=InstanceStatus.PAUSED.value)
+                now = datetime.utcnow()
+                
+                released_count = 0
+                for instance in paused_instances:
+                    # Only release if graph is in memory
+                    if instance.instance_id not in self.instances:
+                        continue
+                    
+                    # Skip if updated_at is missing or invalid
+                    if not instance.updated_at:
+                        continue
+                    
+                    # Parse the pause timestamp from updated_at
+                    try:
+                        paused_at = datetime.fromisoformat(instance.updated_at)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid updated_at for paused instance {instance.instance_id[:8]}..., skipping")
+                        continue
+                    
+                    ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
+                    
+                    if (now - paused_at).total_seconds() > ttl_seconds:
+                        self.release_paused_instance(instance.instance_id)
+                        released_count += 1
+                
+                if released_count > 0:
+                    logger.info(f"Released {released_count} paused instance(s) exceeding {PAUSED_INSTANCE_TTL_MINUTES}min TTL")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Paused instance cleanup failed: {e}")
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
