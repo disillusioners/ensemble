@@ -69,6 +69,7 @@ export class InstanceListComponent {
     idle: { bg: '#4d4d5c', text: '#c5c5d2' },
     running: { bg: '#10b98120', text: '#10b981' },
     waiting: { bg: '#f59e0b20', text: '#f59e0b' },
+    paused: { bg: '#8b5cf620', text: '#8b5cf6' },
     error: { bg: '#f43f5e20', text: '#f43f5e' },
     terminated: { bg: '#343541', text: '#6e6e80' },
   };

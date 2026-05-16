@@ -519,6 +519,32 @@ async def test_pause_instance_endpoint_exists(client, mock_manager):
 
 
 @pytest.mark.asyncio
+async def test_stop_instance_deprecated_alias(client, mock_manager):
+    """Test that deprecated POST /instances/{instance_id}/stop delegates to pause logic."""
+    # Instance exists - should return same result as /pause endpoint
+    mock_manager.get_instance.return_value = Mock()
+
+    # Mock cascade pause with children
+    mock_manager.pause_instance_cascade = AsyncMock(return_value={
+        "paused_ids": ["test-instance", "child-1"],
+        "skipped_ids": []
+    })
+
+    response = await client.post("/instances/test-instance/stop")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["paused"] == True
+    assert "paused_ids" in data
+    assert "skipped_ids" in data
+    assert data["paused_ids"] == ["test-instance", "child-1"]
+    assert data["skipped_ids"] == []
+
+    # Verify pause_instance_cascade was called (proves delegation to pause logic)
+    mock_manager.pause_instance_cascade.assert_called_once_with("test-instance")
+
+
+@pytest.mark.asyncio
 async def test_send_message_success(client, mock_manager):
     """Test POST /instances/{id}/messages."""
     response = await client.post(

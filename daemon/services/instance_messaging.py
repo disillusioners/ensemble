@@ -581,6 +581,8 @@ class InstanceMessagingService:
             )
             session.add(task)
             
+            # NOTE: PAUSED→RUNNING transition is implicit via message processing.
+            # When the worker processes the queued message, status becomes RUNNING.
             # 3. Update instance status if IDLE (don't override WAITING_CHILDREN, etc.)
             status_changed_to_running = False
             instance = session.get(Instance, instance_id)
