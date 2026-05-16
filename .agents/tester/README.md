@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-15 SSE Stop Button Fix E2E)
+## Test Results (Latest: 2026-05-16 Pause TTL + Cold Resume E2E)
+
+### Pause TTL + Cold Resume — E2E (2026-05-16)
+- **E2E Tests**: 9/9 PASSED (daemon restart, DB checks, API calls)
+- **Pause**: ✅ `paused_at` correctly set in SQLite DB
+- **Cold Resume**: ✅ Graph rebuilt from checkpoint after daemon restart (new PID confirmed)
+- **Status Transitions**: ✅ paused → running → completed (not stuck at paused)
+- **paused_at Clearing**: ✅ Set to NULL after resume
+- **Test script**: `test/packs/pause_ttl_cold_resume_e2e_test.py`
+- See `.agents/tester/RESULTS/2026-05-16-pause-ttl-cold-resume-e2e.md` for full report
+
+### Pause TTL + Cold Resume Status: ✅ READY (cold resume works correctly)
 
 ### SSE Stop Button Fix — E2E Browser Automation (2026-05-15)
 - **E2E Tests**: 6/6 PASSED (Playwright, browser automation with timing measurements)

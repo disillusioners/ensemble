@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 28 packs
-- Unit: 22 | Integration: 1 | Mock: 2 | E2E: 3
+- Total: 29 packs
+- Unit: 22 | Integration: 1 | Mock: 2 | E2E: 4
 
 ## Unit Test Packs
 
@@ -51,6 +51,7 @@
 |------|----------|-------|---------|----------|--------|
 | send_stop_button_e2e_test | frontend/e2e/send-stop-button.spec.ts | SSE real-time status: send/stop button timing, SSE streaming, direct navigation (6 tests) | 5 min | 2026-05-15 | ✅ PASS (6/6 passed, Stop button fix verified, 114ms direct navigation) |
 | stop_resume_spawn_e2e_test | test/packs/stop_resume_spawn_e2e_test.py | Stop→Resume→Spawn Instance: verify spawn_instance works after stop/resume, multiple cycles, no "no running event loop" | 5 min | 2026-05-15 | ✅ PASS (async def fix verified, spawn works after resume, 2 cycles, no errors) |
+| pause_ttl_cold_resume_e2e_test | test/packs/pause_ttl_cold_resume_e2e_test.py | Pause TTL + Cold Resume: pause→paused_at set→daemon restart→cold resume→completed, status transitions | 5 min | 2026-05-16 | ✅ PASS (9/9 steps, cold resume from checkpoint verified) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
 
 ---
