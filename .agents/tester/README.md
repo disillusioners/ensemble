@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-16 Pause TTL + Cold Resume E2E)
+## Test Results (Latest: 2026-05-16 MCP Server CRUD Feature)
+
+### MCP Server CRUD Feature (2026-05-16)
+- **Backend Tests**: 55/55 PASSED (models, schemas, repository, router, integration)
+- **Frontend Tests**: 134/134 PASSED (service, list component, dialog component)
+- **ensure.md**: ✅ dev.sh runs 30s without crash
+- **Quick Fix**: Exported missing `create_mcp_server_repository` from `daemon/repositories/__init__.py` (commit `60390b4`)
+- **Commits**: `3b9723a` (backend tests), `6af7750` (frontend tests), `60390b4` (fix)
+- See `.agents/tester/RESULTS/2026-05-16-mcp-server-crud-tests.md` for full report
+
+### MCP Server CRUD Status: ✅ READY (189 tests, all passing)
 
 ### Pause TTL + Cold Resume — E2E (2026-05-16)
 - **E2E Tests**: 9/9 PASSED (daemon restart, DB checks, API calls)
