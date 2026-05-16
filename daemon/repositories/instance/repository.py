@@ -260,6 +260,18 @@ class SQLModelInstanceRepository:
         """Update instance status."""
         return self.update(instance_id, status=status)
 
+    def update_waiting_for(self, instance_id: str, waiting_for: int) -> Instance | None:
+        """Update instance waiting_for counter.
+
+        Args:
+            instance_id: The instance ID to update.
+            waiting_for: New waiting_for value.
+
+        Returns:
+            Updated Instance or None if not found.
+        """
+        return self.update(instance_id, waiting_for=waiting_for)
+
     def update_title(self, instance_id: str, title: str) -> Instance | None:
         """Update instance title in instance_metadata."""
         with SQLModelSession(self.engine) as db_session:

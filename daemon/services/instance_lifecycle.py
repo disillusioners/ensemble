@@ -454,9 +454,18 @@ class InstanceLifecycleService:
                 logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
 
             # 3. Update DB status to paused
-            self._manager._instance_repository.update_status(
-                target_id, InstanceStatus.PAUSED.value
-            )
+            # Reset waiting_for to 0 if instance was waiting for children
+            # to prevent deadlock on resume (children are paused too)
+            if meta.waiting_for and meta.waiting_for > 0:
+                self._manager._instance_repository.update(
+                    target_id,
+                    status=InstanceStatus.PAUSED.value,
+                    waiting_for=0,
+                )
+            else:
+                self._manager._instance_repository.update_status(
+                    target_id, InstanceStatus.PAUSED.value
+                )
 
             # NOTE: Unlike terminate_instance, we do NOT:
             # - Remove from instances dict (instance stays in memory, resumable)
