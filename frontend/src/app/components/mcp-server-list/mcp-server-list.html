@@ -11,8 +11,8 @@
       <h1 class="page-title">MCP Servers</h1>
     </div>
     <div class="header-right">
-      <button class="refresh-btn" (click)="loadServers()" [disabled]="isLoading()">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" [class.spinning]="isLoading()">
+      <button class="refresh-btn" (click)="loadServers()" [disabled]="loading()">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" [class.spinning]="loading()">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
         </svg>
       </button>
@@ -26,14 +26,14 @@
   </div>
 
   <!-- Loading -->
-  @if (isLoading() && servers().length === 0) {
+  @if (loading() && servers().length === 0) {
     <div class="loading-container">
       <mat-spinner diameter="48"></mat-spinner>
     </div>
   }
 
   <!-- Empty State -->
-  @if (!isLoading() && servers().length === 0) {
+  @if (!loading() && servers().length === 0) {
     <div class="empty-state">
       <div class="empty-icon">
         <svg class="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">

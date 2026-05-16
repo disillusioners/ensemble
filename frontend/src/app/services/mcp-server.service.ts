@@ -1,6 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, tap, catchError, map, of, finalize } from 'rxjs';
+import { Observable, tap, catchError, map, finalize, throwError } from 'rxjs';
 import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse } from '../models';
 
 @Injectable({
@@ -20,14 +20,9 @@ export class McpServerService {
    */
   listServers(): Observable<McpServer[]> {
     this.loading.set(true);
-    this.error.set(null);
     return this.http.get<McpServerListResponse>(this.API_BASE).pipe(
       tap(response => this.servers.set(response.mcp_servers)),
       map(response => response.mcp_servers),
-      catchError(err => {
-        this.error.set(err.message || 'Failed to fetch MCP servers');
-        return of([] as McpServer[]);
-      }),
       finalize(() => this.loading.set(false))
     );
   }

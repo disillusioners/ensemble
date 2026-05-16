@@ -69,7 +69,7 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
         raise HTTPException(
             status_code=409,
             detail=ErrorResponse(
-                code=ErrorCodes.SOURCE_ALREADY_EXISTS,  # Reuse existing error code
+                code=ErrorCodes.MCP_SERVER_ALREADY_EXISTS,  # Reuse existing error code
                 message=f"MCP server with name already exists: {mcp_server_create.name}"
             ).model_dump()
         )
@@ -99,7 +99,7 @@ async def get_mcp_server(server_id: str, request: Request):
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.SOURCE_NOT_FOUND,  # Reuse existing error code
+                code=ErrorCodes.MCP_SERVER_NOT_FOUND,  # Reuse existing error code
                 message=f"MCP server not found: {server_id}"
             ).model_dump()
         )
@@ -125,7 +125,7 @@ async def update_mcp_server(
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.SOURCE_NOT_FOUND,
+                code=ErrorCodes.MCP_SERVER_NOT_FOUND,
                 message=f"MCP server not found: {server_id}"
             ).model_dump()
         )
@@ -140,7 +140,7 @@ async def update_mcp_server(
             raise HTTPException(
                 status_code=409,
                 detail=ErrorResponse(
-                    code=ErrorCodes.SOURCE_ALREADY_EXISTS,
+                    code=ErrorCodes.MCP_SERVER_ALREADY_EXISTS,
                     message=f"MCP server with name already exists: {mcp_server_update.name}"
                 ).model_dump()
             )
@@ -172,7 +172,7 @@ async def delete_mcp_server(server_id: str, request: Request):
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
-                code=ErrorCodes.SOURCE_NOT_FOUND,
+                code=ErrorCodes.MCP_SERVER_NOT_FOUND,
                 message=f"MCP server not found: {server_id}"
             ).model_dump()
         )

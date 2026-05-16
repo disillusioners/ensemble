@@ -29,14 +29,6 @@ $accent-blue: #3b82f6;
   justify-content: center;
 }
 
-// Backdrop
-.modal-backdrop {
-  position: absolute;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(4px);
-}
-
 // Modal content
 .modal-content {
   position: relative;

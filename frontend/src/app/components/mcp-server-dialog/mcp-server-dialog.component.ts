@@ -121,7 +121,6 @@ export class McpServerDialogComponent implements OnInit {
         config,
         is_active: this.isActive()
       };
-      console.log('Closing dialog with update:', update);
       this.dialogRef.close(update);
     } else {
       // Create mode
@@ -131,7 +130,6 @@ export class McpServerDialogComponent implements OnInit {
         config,
         is_active: this.isActive()
       };
-      console.log('Closing dialog with create:', create);
       this.dialogRef.close(create);
     }
   }

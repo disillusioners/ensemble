@@ -1,4 +1,4 @@
-import { Component, signal, inject, OnInit, DestroyRef } from '@angular/core';
+import { Component, inject, OnInit, DestroyRef } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -33,23 +33,18 @@ export class McpServerListComponent implements OnInit {
   private readonly destroyRef = inject(DestroyRef);
 
   readonly servers = this.mcpServerService.servers;
-  readonly isLoading = signal(false);
+  readonly loading = this.mcpServerService.loading;
 
   ngOnInit(): void {
     this.loadServers();
   }
 
   protected loadServers(): void {
-    this.isLoading.set(true);
-
     this.mcpServerService.listServers().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: () => {
-        this.isLoading.set(false);
-      },
+      next: () => {},
       error: (err) => {
         console.error('Failed to load MCP servers:', err);
         this.showError('Failed to load MCP servers');
-        this.isLoading.set(false);
       }
     });
   }
@@ -61,7 +56,6 @@ export class McpServerListComponent implements OnInit {
     });
 
     dialogRef.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result?: McpServerCreate) => {
-      console.log('Dialog closed with result:', result);
       if (result) {
         this.createServer(result);
       }
@@ -76,7 +70,6 @@ export class McpServerListComponent implements OnInit {
     });
 
     dialogRef.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result?: McpServerUpdate) => {
-      console.log('Edit dialog closed with result:', result);
       if (result) {
         this.updateServer(server.id, result);
       }
@@ -91,49 +84,37 @@ export class McpServerListComponent implements OnInit {
       return;
     }
 
-    this.isLoading.set(true);
-
     this.mcpServerService.deleteServer(id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.showSuccess('MCP server deleted successfully');
-        this.isLoading.set(false);
       },
       error: (err) => {
         console.error('Failed to delete MCP server:', err);
         this.showError('Failed to delete MCP server');
-        this.isLoading.set(false);
       }
     });
   }
 
   private createServer(data: McpServerCreate): void {
-    this.isLoading.set(true);
-
     this.mcpServerService.createServer(data).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (newServer) => {
         this.showSuccess(`MCP server "${newServer.name}" created successfully`);
-        this.isLoading.set(false);
       },
       error: (err) => {
         console.error('Failed to create MCP server:', err);
         this.showError('Failed to create MCP server');
-        this.isLoading.set(false);
       }
     });
   }
 
   private updateServer(id: string, data: McpServerUpdate): void {
-    this.isLoading.set(true);
-
     this.mcpServerService.updateServer(id, data).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
         this.showSuccess('MCP server updated successfully');
-        this.isLoading.set(false);
       },
       error: (err) => {
         console.error('Failed to update MCP server:', err);
         this.showError('Failed to update MCP server');
-        this.isLoading.set(false);
       }
     });
   }
