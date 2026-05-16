@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 29 packs
-- Unit: 22 | Integration: 1 | Mock: 2 | E2E: 4
+- Total: 30 packs
+- Unit: 23 | Integration: 1 | Mock: 2 | E2E: 4
 
 ## Unit Test Packs
 
@@ -31,6 +31,7 @@
 | reasoning_content_roundtrip_test | tests/unit/test_reasoning_content_roundtrip.py | reasoning_content passback: _get_request_payload preserves reasoning in AIMessages, empty strings, mixed types, tool messages | 2 min | 2026-05-04 | ✅ PASS (8 tests, 0 failures) |
 | reasoning_content_edge_cases_test | tests/unit/test_reasoning_content_edge_cases.py | reasoning_content edge cases: SystemMessage, multi-turn, human-only, reasoning alternate key gap | 2 min | 2026-05-04 | ✅ PASS (6 tests, 0 failures) |
 | reasoning_content_fallback_test | tests/unit/test_reasoning_content_fallback.py | reasoning_content fallback chain: empty string preserved, reasoning key fallback, response_metadata fallback, streaming fallbacks, non-string logging safety | 2 min | 2026-05-05 | ✅ PASS (7 tests, 0 failures, fix/reasoning-content-bugs) |
+| windows_path_workdir_test | tests/unit/test_filesystem_workdir.py | Windows path compatibility: _normed_contains, _is_within_workdir, symlink escape, empty TEMP/TMP bypass, mocked Windows behavior | 2 min | 2026-05-16 | ✅ PASS (21 tests, 0 failures, feature/windows-path-fix) |
 
 ## Integration Test Packs
 
