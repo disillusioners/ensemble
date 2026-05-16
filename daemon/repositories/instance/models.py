@@ -70,6 +70,7 @@ class Instance(SQLModel, table=True):
     
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    paused_at: str | None = Field(default=None, index=True)
     
     @property
     def title(self) -> str | None:
@@ -94,4 +95,5 @@ class Instance(SQLModel, table=True):
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "paused_at": self.paused_at,
         }

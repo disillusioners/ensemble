@@ -583,12 +583,14 @@ class InstanceMessagingService:
             
             # NOTE: PAUSED→RUNNING transition is implicit via message processing.
             # When the worker processes the queued message, status becomes RUNNING.
-            # 3. Update instance status if IDLE (don't override WAITING_CHILDREN, etc.)
+            # 3. Update instance status if IDLE or PAUSED (resuming from pause)
+            # Also clear paused_at when transitioning away from PAUSED status
             status_changed_to_running = False
             instance = session.get(Instance, instance_id)
             if instance:
-                if instance.status == InstanceStatus.IDLE.value:
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
                     instance.status = InstanceStatus.RUNNING.value
+                    instance.paused_at = None  # Clear paused_at on resume
                     status_changed_to_running = True
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1

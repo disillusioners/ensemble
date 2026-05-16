@@ -463,6 +463,9 @@ class InstanceManager:
         # Shutdown flag for graceful shutdown
         self._shutting_down = False
 
+        # Background tasks for cleanup operations (tracked for cancellation on shutdown)
+        self._background_tasks: list[asyncio.Task] = []
+
         # ── Initialize Services ──────────────────────────────────────────────────
         # Services are initialized after all internal state is set up.
         # They receive references to the manager facade and required state.
@@ -547,9 +550,9 @@ class InstanceManager:
         # NEW: Set event loop for CompletionRegistry (thread-safe notification)
         self._completion_registry.set_event_loop(self._loop)
         # NEW: Schedule periodic stale cleanup (every 10 minutes)
-        asyncio.create_task(self._cleanup_stale_completions())
+        self._background_tasks.append(asyncio.create_task(self._cleanup_stale_completions()))
         # NEW: Schedule periodic cleanup of paused instances exceeding TTL
-        asyncio.create_task(self._cleanup_paused_instances())
+        self._background_tasks.append(asyncio.create_task(self._cleanup_paused_instances()))
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     async def _cleanup_stale_completions(self) -> None:
@@ -585,6 +588,8 @@ class InstanceManager:
             logger.debug(f"Cancelled lingering graph task for {instance_id[:8]}...")
         
         # Cancel any active requests (shouldn't exist for paused instance but safety first)
+        # Using SESSION_TERMINATED since this is a TTL-based eviction - the session
+        # is being terminated due to inactivity/paused duration exceeding the limit
         self._request_registry.cancel_by_instance(
             instance_id, 
             CancellationReason.SESSION_TERMINATED
@@ -608,15 +613,18 @@ class InstanceManager:
                     if instance.instance_id not in self.instances:
                         continue
                     
-                    # Skip if updated_at is missing or invalid
-                    if not instance.updated_at:
+                    # Use paused_at field for TTL check, fallback to updated_at for migration
+                    pause_timestamp = instance.paused_at or instance.updated_at
+                    
+                    # Skip if timestamp is missing or invalid
+                    if not pause_timestamp:
                         continue
                     
-                    # Parse the pause timestamp from updated_at
+                    # Parse the pause timestamp
                     try:
-                        paused_at = datetime.fromisoformat(instance.updated_at)
+                        paused_at = datetime.fromisoformat(pause_timestamp)
                     except (ValueError, TypeError):
-                        logger.warning(f"Invalid updated_at for paused instance {instance.instance_id[:8]}..., skipping")
+                        logger.warning(f"Invalid paused_at/updated_at for paused instance {instance.instance_id[:8]}..., skipping")
                         continue
                     
                     ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
@@ -1565,6 +1573,12 @@ class InstanceManager:
         
         self._shutting_down = True
         logger.info("Starting graceful shutdown...")
+        
+        # Cancel all background cleanup tasks first
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+        self._background_tasks.clear()
         
         steps = [
             ("stop_sources", self.stop_sources(timeout=grace_period)),

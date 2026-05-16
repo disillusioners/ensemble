@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -456,15 +457,19 @@ class InstanceLifecycleService:
             # 3. Update DB status to paused
             # Reset waiting_for to 0 if instance was waiting for children
             # to prevent deadlock on resume (children are paused too)
+            paused_at = datetime.utcnow().isoformat()
             if meta.waiting_for and meta.waiting_for > 0:
                 self._manager._instance_repository.update(
                     target_id,
                     status=InstanceStatus.PAUSED.value,
                     waiting_for=0,
+                    paused_at=paused_at,
                 )
             else:
-                self._manager._instance_repository.update_status(
-                    target_id, InstanceStatus.PAUSED.value
+                self._manager._instance_repository.update(
+                    target_id,
+                    status=InstanceStatus.PAUSED.value,
+                    paused_at=paused_at,
                 )
 
             # NOTE: Unlike terminate_instance, we do NOT:
@@ -570,6 +575,8 @@ class InstanceLifecycleService:
         # Build LLM config
         registry = get_registry()
         metadata = registry.get(meta.agent_id)
+        if metadata is None:
+            raise ValueError(f"Agent not found: {meta.agent_id}")
         llm_config = self._build_llm_config(metadata)
 
         # Build retry config from queue settings

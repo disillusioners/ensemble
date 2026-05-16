@@ -78,11 +78,11 @@ class TestPauseInstanceCascade:
         - paused_ids contains the instance
         - skipped_ids is empty
         - cancel_by_instance called with USER_STOPPED
-        - update_status called with "paused"
+        - update called with status='paused' and paused_at
         """
         instance_id = "test-instance-123"
-        # First call: get instance at line 415
-        # Second call: _pause_single at line 390
+        # First call: get instance at line 485
+        # Second call: _pause_single at line 433
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -92,7 +92,12 @@ class TestPauseInstanceCascade:
         mock_registry.cancel_by_instance.assert_called_once_with(
             instance_id, CancellationReason.USER_STOPPED
         )
-        mock_repo.update_status.assert_called_once_with(instance_id, "paused")
+        # Now uses update() with paused_at instead of update_status()
+        mock_repo.update.assert_called_once()
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "paused"
+        assert "paused_at" in call_kwargs
+        assert call_kwargs["paused_at"] is not None
 
     @pytest.mark.asyncio
     async def test_pause_instance_with_children(self, lifecycle_service, mock_repo, mock_registry):
@@ -101,7 +106,7 @@ class TestPauseInstanceCascade:
         Verifies:
         - paused_ids contains parent and all children
         - DFS traversal pauses children first, then parent
-        - update_status called 3 times (once per instance)
+        - update called 3 times (once per instance) with paused_at
         """
         parent_id = "parent-instance"
         child1_id = "child-1"
@@ -123,7 +128,12 @@ class TestPauseInstanceCascade:
         # All instances should be paused (children first, then parent)
         assert set(result["paused_ids"]) == {parent_id, child1_id, child2_id}
         assert result["skipped_ids"] == []
-        assert mock_repo.update_status.call_count == 3
+        # Now uses update() with paused_at instead of update_status()
+        assert mock_repo.update.call_count == 3
+        # Verify all updates have paused_at
+        for call in mock_repo.update.call_args_list:
+            assert "paused_at" in call[1]
+            assert call[1]["status"] == "paused"
 
     @pytest.mark.asyncio
     async def test_pause_instance_with_nested_children(self, lifecycle_service, mock_repo, mock_registry):
@@ -138,6 +148,7 @@ class TestPauseInstanceCascade:
         Verifies:
         - All 4 instances are paused
         - DFS traversal: child1 → grandchild1 → child2 → parent
+        - All updates include paused_at
         """
         parent_id = "parent"
         child1_id = "child1"
@@ -161,7 +172,8 @@ class TestPauseInstanceCascade:
 
         assert set(result["paused_ids"]) == {parent_id, child1_id, child2_id, grandchild_id}
         assert result["skipped_ids"] == []
-        assert mock_repo.update_status.call_count == 4
+        # Now uses update() with paused_at
+        assert mock_repo.update.call_count == 4
 
     @pytest.mark.asyncio
     async def test_pause_already_paused_instance(self, lifecycle_service, mock_repo, mock_registry):
@@ -171,7 +183,7 @@ class TestPauseInstanceCascade:
         - paused_ids is empty
         - skipped_ids contains the instance
         - cancel_by_instance NOT called
-        - update_status NOT called
+        - update NOT called (no change needed)
         """
         instance_id = "paused-instance"
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
@@ -181,7 +193,8 @@ class TestPauseInstanceCascade:
         assert result["paused_ids"] == []
         assert result["skipped_ids"] == [instance_id]
         mock_registry.cancel_by_instance.assert_not_called()
-        mock_repo.update_status.assert_not_called()
+        # No update when already paused
+        mock_repo.update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pause_mixed_status_children(self, lifecycle_service, mock_repo, mock_registry):
@@ -215,8 +228,8 @@ class TestPauseInstanceCascade:
 
         assert set(result["paused_ids"]) == {parent_id, child1_id}
         assert result["skipped_ids"] == [child2_id]
-        # Only 2 instances should have update_status called
-        assert mock_repo.update_status.call_count == 2
+        # Only 2 instances should have update called with paused_at
+        assert mock_repo.update.call_count == 2
 
     @pytest.mark.asyncio
     async def test_pause_nonexistent_instance(self, lifecycle_service, mock_repo, mock_registry):
@@ -236,7 +249,7 @@ class TestPauseInstanceCascade:
         assert result["paused_ids"] == []
         assert result["skipped_ids"] == []
         mock_registry.cancel_by_instance.assert_not_called()
-        mock_repo.update_status.assert_not_called()
+        mock_repo.update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pause_child_becomes_paused_during_cascade(self, lifecycle_service, mock_repo, mock_registry):
@@ -262,8 +275,10 @@ class TestPauseInstanceCascade:
         assert result["paused_ids"] == [parent_id]
         assert result["skipped_ids"] == [child_id]
         # Only parent should have status updated
-        assert mock_repo.update_status.call_count == 1
-        mock_repo.update_status.assert_called_with(parent_id, "paused")
+        assert mock_repo.update.call_count == 1
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "paused"
+        assert "paused_at" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_pause_child_with_grandchildren_mixed_status(self, lifecycle_service, mock_repo, mock_registry):
@@ -298,7 +313,7 @@ class TestPauseInstanceCascade:
         assert set(result["paused_ids"]) == {parent_id, child_id}
         assert result["skipped_ids"] == [grandchild_id]
         # Parent and child should have status updated (not grandchild)
-        assert mock_repo.update_status.call_count == 2
+        assert mock_repo.update.call_count == 2
 
     @pytest.mark.asyncio
     async def test_pause_circular_reference_detected(self, lifecycle_service, mock_repo, mock_registry):
@@ -324,8 +339,8 @@ class TestPauseInstanceCascade:
         assert result["paused_ids"] == [instance_id]
         # The circular reference is detected during recursion and skipped
         assert result["skipped_ids"] == [instance_id]
-        # Both the root pause and the recursive skip attempt update status
-        assert mock_repo.update_status.call_count == 1
+        # Only one update should be called
+        assert mock_repo.update.call_count == 1
 
     @pytest.mark.asyncio
     async def test_pause_child_exception_does_not_block_siblings(self, lifecycle_service, mock_repo, mock_registry):
@@ -365,7 +380,7 @@ class TestPauseInstanceCascade:
         assert set(result["paused_ids"]) == {parent_id, child1_id, child3_id}
         assert result["skipped_ids"] == [child2_id]
         # Parent, child1, and child3 should have status updated (child2 not)
-        assert mock_repo.update_status.call_count == 3
+        assert mock_repo.update.call_count == 3
 
     @pytest.mark.asyncio
     async def test_pause_depth_limit_protection(self, lifecycle_service, mock_repo, mock_registry):
@@ -388,7 +403,7 @@ class TestPauseInstanceCascade:
         assert result["paused_ids"] == []
         # Should not attempt to pause or update status
         mock_registry.cancel_by_instance.assert_not_called()
-        mock_repo.update_status.assert_not_called()
+        mock_repo.update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pause_parent_with_waiting_for_resets_counter(self, lifecycle_service, mock_repo, mock_registry):
@@ -400,7 +415,7 @@ class TestPauseInstanceCascade:
 
         Verifies:
         - waiting_for is reset to 0 to prevent deadlock on resume
-        - update() is called with both status='paused' and waiting_for=0
+        - update() is called with status='paused', waiting_for=0, and paused_at
         """
         parent_id = "parent-waiting"
 
@@ -412,22 +427,22 @@ class TestPauseInstanceCascade:
 
         assert result["paused_ids"] == [parent_id]
         assert result["skipped_ids"] == []
-        # Should use update() with both status and waiting_for
-        mock_repo.update.assert_called_once_with(
-            parent_id, status="paused", waiting_for=0
-        )
-        # update_status should NOT be called (we use update() instead)
-        mock_repo.update_status.assert_not_called()
+        # Should use update() with status, waiting_for=0, and paused_at
+        mock_repo.update.assert_called_once()
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "paused"
+        assert call_kwargs["waiting_for"] == 0
+        assert "paused_at" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_pause_parent_with_waiting_for_zero_no_change(self, lifecycle_service, mock_repo, mock_registry):
-        """Test that pausing a parent with waiting_for=0 doesn't break.
+        """Test that pausing a parent with waiting_for=0 works correctly.
 
         Scenario:
         - parent: running, waiting_for=0 (not waiting for children)
 
         Verifies:
-        - update_status is called normally (no waiting_for change needed)
+        - update() is called with status='paused' and paused_at
         """
         parent_id = "parent-not-waiting"
 
@@ -439,9 +454,11 @@ class TestPauseInstanceCascade:
 
         assert result["paused_ids"] == [parent_id]
         assert result["skipped_ids"] == []
-        # Should use update_status since waiting_for is 0
-        mock_repo.update_status.assert_called_once_with(parent_id, "paused")
-        mock_repo.update.assert_not_called()
+        # Should use update() with status and paused_at
+        mock_repo.update.assert_called_once()
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "paused"
+        assert "paused_at" in call_kwargs
 
     @pytest.mark.asyncio
     async def test_pause_instance_without_children_no_change(self, lifecycle_service, mock_repo, mock_registry):
@@ -452,6 +469,7 @@ class TestPauseInstanceCascade:
 
         Verifies:
         - Normal pause behavior, no errors
+        - update() is called with status='paused' and paused_at
         """
         instance_id = "leaf-instance"
 
@@ -463,4 +481,8 @@ class TestPauseInstanceCascade:
 
         assert result["paused_ids"] == [instance_id]
         assert result["skipped_ids"] == []
-        mock_repo.update_status.assert_called_once_with(instance_id, "paused")
+        # Should use update() with status and paused_at
+        mock_repo.update.assert_called_once()
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "paused"
+        assert "paused_at" in call_kwargs
