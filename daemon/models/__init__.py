@@ -5,6 +5,7 @@ from daemon.models.agent import *
 from daemon.models.source import *
 from daemon.models.schedule import *
 from daemon.models.mapping import *
+from daemon.models.mcp_server import *
 
 __all__ = [
     # common
@@ -46,4 +47,10 @@ __all__ = [
     "InstanceMappingCreate",
     "InstanceMappingInfo",
     "InstanceMappingListResponse",
+    # mcp_server
+    "McpServerCreate",
+    "McpServerUpdate",
+    "McpServerInfo",
+    "McpServerListResponse",
+    "McpServerDeleteResponse",
 ]

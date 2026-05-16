@@ -220,3 +220,37 @@ export interface PauseResponse {
 
 // Job Queue types
 export * from './job-queue.model';
+
+// MCP Server types
+export interface McpServer {
+  id: string;
+  name: string;
+  description: string | null;
+  config: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface McpServerCreate {
+  name: string;
+  description: string | null;
+  config?: Record<string, unknown>;
+  is_active?: boolean;
+}
+
+export interface McpServerUpdate {
+  name?: string;
+  description?: string | null;
+  config?: Record<string, unknown>;
+  is_active?: boolean;
+}
+
+export interface McpServerListResponse {
+  mcp_servers: McpServer[];
+}
+
+export interface McpServerDeleteResponse {
+  deleted: boolean;
+  id: string;
+}

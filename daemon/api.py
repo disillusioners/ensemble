@@ -52,6 +52,7 @@ from daemon.routers import (
     projects_router,
     queues_router,
     dlq_router,
+    mcp_servers_router,
 )
 
 # Re-export validate_agent_id from utils for backward compatibility
@@ -474,6 +475,7 @@ def create_app() -> FastAPI:
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
     api_router.include_router(dlq_router)           # /api/dlq
+    api_router.include_router(mcp_servers_router)    # /api/mcp-servers
     
     app.include_router(api_router)
 

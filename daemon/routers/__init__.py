@@ -11,6 +11,7 @@ from .webhooks import router as webhooks_router
 from .projects import router as projects_router
 from .queues import router as queues_router
 from .dlq import router as dlq_router
+from .mcp_servers import router as mcp_servers_router
 
 __all__ = [
     "agents_router",
@@ -24,4 +25,5 @@ __all__ = [
     "projects_router",
     "queues_router",
     "dlq_router",
+    "mcp_servers_router",
 ]

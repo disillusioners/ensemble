@@ -16,6 +16,10 @@ from .message_queue.models import MessageQueue, MessageStatus
 from .source.repository import SQLModelSourceRepository
 from .source.models import SourceConfig, InstanceMapping, ProcessedMessage, SourceStatus
 
+# MCP Server repository
+from .mcp_server.repository import SQLModelMcpServerRepository
+from .mcp_server.models import McpServer
+
 # Job queue repository
 from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
@@ -63,6 +67,9 @@ __all__ = [
     "InstanceMapping",
     "ProcessedMessage",
     "SourceStatus",
+    # MCP Server
+    "SQLModelMcpServerRepository",
+    "McpServer",
     # Job queue
     "JobRepository",
     "JobQueueRepository",

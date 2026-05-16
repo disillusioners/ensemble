@@ -1,13 +1,13 @@
 import { Injectable } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import type { 
-  InstanceInfo, 
-  InstanceListResponse, 
-  MessageResponse, 
-  Message, 
-  HealthResponse, 
-  AgentListResponse, 
+import type {
+  InstanceInfo,
+  InstanceListResponse,
+  MessageResponse,
+  Message,
+  HealthResponse,
+  AgentListResponse,
   Agent,
   AgentCreate,
   Source,
@@ -21,7 +21,12 @@ import type {
   InstanceMappingCreate,
   InstanceMappingListResponse,
   DeleteResponse,
-  PauseResponse
+  PauseResponse,
+  McpServer,
+  McpServerCreate,
+  McpServerUpdate,
+  McpServerListResponse,
+  McpServerDeleteResponse
 } from '../models';
 
 @Injectable({
@@ -140,5 +145,26 @@ export class ApiService {
 
   deleteMapping(sourceId: string, mappingId: string): Observable<DeleteResponse> {
     return this.http.delete<DeleteResponse>(`${this.API_BASE}/sources/${sourceId}/mappings/${encodeURIComponent(mappingId)}`);
+  }
+
+  // MCP Servers
+  listMcpServers(): Observable<McpServerListResponse> {
+    return this.http.get<McpServerListResponse>(`${this.API_BASE}/mcp-servers`);
+  }
+
+  getMcpServer(id: string): Observable<McpServer> {
+    return this.http.get<McpServer>(`${this.API_BASE}/mcp-servers/${encodeURIComponent(id)}`);
+  }
+
+  createMcpServer(data: McpServerCreate): Observable<McpServer> {
+    return this.http.post<McpServer>(`${this.API_BASE}/mcp-servers`, data);
+  }
+
+  updateMcpServer(id: string, data: McpServerUpdate): Observable<McpServer> {
+    return this.http.put<McpServer>(`${this.API_BASE}/mcp-servers/${encodeURIComponent(id)}`, data);
+  }
+
+  deleteMcpServer(id: string): Observable<McpServerDeleteResponse> {
+    return this.http.delete<McpServerDeleteResponse>(`${this.API_BASE}/mcp-servers/${encodeURIComponent(id)}`);
   }
 }
