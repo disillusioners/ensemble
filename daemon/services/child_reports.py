@@ -605,6 +605,21 @@ Provide a concise summary:"""
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
 
+                # Update instance status to COMPLETED in DB
+                instance.status = InstanceStatus.COMPLETED.value
+                instance.updated_at = datetime.now(timezone.utc).isoformat()
+                instance.last_activity_at = datetime.now(timezone.utc)
+                instance.version = (instance.version or 1) + 1
+
+                session.commit()
+
+                # Emit status_change SSE event for root instance completed
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(instance_id, "completed")
+                    except Exception as e:
+                        logger.warning(f"Failed to emit status_change for completed root instance: {e}")
+
                 # Signal CompletionRegistry for invoke_agent_and_wait() callers
                 from .completion_registry import get_completion_registry
                 get_completion_registry().complete(instance_id, result=last_content)

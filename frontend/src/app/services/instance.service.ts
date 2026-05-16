@@ -80,8 +80,21 @@ export class InstanceService {
   }
 
   /**
-   * Merge API instances with local instances, preserving terminal local statuses.
-   * This prevents polling from overwriting SSE updates to final states.
+   * Merge API instances with local instances to handle timing between SSE and polling.
+   *
+   * Background: SSE delivers status updates asynchronously (event-driven), while polling
+   * reads from the DB on a 10-second interval. Due to network timing, SSE may arrive
+   * before the API's next poll sees the updated DB status.
+   *
+   * Example race condition this solves:
+   *   T=0: SSE arrives with status="completed"
+   *   T=1: User navigates or starts polling
+   *   T=2: Poll API returns status="running" (DB not yet updated)
+   *   Without merging: User sees "running" for ~8 more seconds
+   *   With merging: User sees "completed" immediately (SSE wins)
+   *
+   * This function also preserves local-only instances (e.g., created via direct
+   * navigation to a URL that doesn't appear in the paginated list response).
    */
   private mergeInstances(local: InstanceInfo[], apiInstances: InstanceInfo[]): InstanceInfo[] {
     const localById = new Map(local.map(i => [i.instance_id, i]));
@@ -129,9 +142,8 @@ export class InstanceService {
         this.instances.update((prev: InstanceInfo[]) => [...prev, ...newInstances]);
         this.currentOffset += response.instances.length;
       } else {
-        // Merge with existing instances to avoid overwriting SSE updates
-        // For instances already in our list, preserve local status if it's terminal
-        // (SSE may have already updated to a final state like 'completed')
+        // Merge with existing instances to avoid overwriting SSE updates.
+        // See mergeInstances() docstring for the SSE-vs-polling race condition it handles.
         const merged = this.mergeInstances(this.instances(), response.instances);
         this.instances.set(merged);
         this.currentOffset = response.instances.length;
