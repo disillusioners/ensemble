@@ -28,9 +28,11 @@ Example read_file:
 def _normed_contains(base: Path, target: Path) -> bool:
     """Check if target is within base using OS-appropriate case normalization."""
     try:
-        Path(os.path.normcase(str(target))).relative_to(Path(os.path.normcase(str(base))))
+        normed_target = Path(os.path.normcase(str(target.resolve())))
+        normed_base = Path(os.path.normcase(str(base.resolve())))
+        normed_target.relative_to(normed_base)
         return True
-    except ValueError:
+    except (ValueError, OSError):
         return False
 
 
@@ -57,8 +59,8 @@ def _is_within_workdir(workdir: Path, target: Path) -> bool:
     if os.name == 'nt':
         system_drive = os.environ.get("SystemDrive", "C:")
         temp_dirs.extend([
-            Path(os.environ.get("TEMP", "")).resolve(),
-            Path(os.environ.get("TMP", "")).resolve(),
+            Path(os.environ.get("TEMP") or tempfile.gettempdir()).resolve(),
+            Path(os.environ.get("TMP") or tempfile.gettempdir()).resolve(),
             Path(f"{system_drive}\\tmp").resolve(),
         ])
     
