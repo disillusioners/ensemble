@@ -1,6 +1,6 @@
 import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, tap, catchError, map, finalize, throwError } from 'rxjs';
+import { Observable, tap, map, finalize } from 'rxjs';
 import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse } from '../models';
 
 @Injectable({
@@ -13,7 +13,6 @@ export class McpServerService {
   // Signals for state
   readonly servers = signal<McpServer[]>([]);
   readonly loading = signal(false);
-  readonly error = signal<string | null>(null);
 
   /**
    * GET /api/mcp-servers
@@ -31,12 +30,7 @@ export class McpServerService {
    * GET /api/mcp-servers/{id}
    */
   getServer(id: string): Observable<McpServer> {
-    return this.http.get<McpServer>(`${this.API_BASE}/${encodeURIComponent(id)}`).pipe(
-      catchError(err => {
-        this.error.set(err.message || 'Failed to fetch MCP server');
-        throw err;
-      })
-    );
+    return this.http.get<McpServer>(`${this.API_BASE}/${encodeURIComponent(id)}`);
   }
 
   /**
@@ -46,10 +40,6 @@ export class McpServerService {
     return this.http.post<McpServer>(this.API_BASE, data).pipe(
       tap(server => {
         this.servers.update(servers => [server, ...servers]);
-      }),
-      catchError(err => {
-        this.error.set(err.message || 'Failed to create MCP server');
-        throw err;
       })
     );
   }
@@ -63,10 +53,6 @@ export class McpServerService {
         this.servers.update(servers =>
           servers.map(s => s.id === id ? updatedServer : s)
         );
-      }),
-      catchError(err => {
-        this.error.set(err.message || 'Failed to update MCP server');
-        throw err;
       })
     );
   }
@@ -78,18 +64,7 @@ export class McpServerService {
     return this.http.delete<McpServerDeleteResponse>(`${this.API_BASE}/${encodeURIComponent(id)}`).pipe(
       tap(() => {
         this.servers.update(servers => servers.filter(s => s.id !== id));
-      }),
-      catchError(err => {
-        this.error.set(err.message || 'Failed to delete MCP server');
-        throw err;
       })
     );
-  }
-
-  /**
-   * Helper to clear error
-   */
-  clearError(): void {
-    this.error.set(null);
   }
 }

@@ -28,13 +28,13 @@ from .repositories import (
     SQLModelProjectRepository,
     SQLModelSourceRepository,
     SQLModelMessageQueueRepository,
-    SQLModelMcpServerRepository,
     DatabaseConfig,
     create_engine_from_config,
     create_project_repository,
     create_instance_repository,
     create_source_repository,
     create_message_queue_repository,
+    create_mcp_server_repository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -420,7 +420,7 @@ class InstanceManager:
         self._source_repository = create_source_repository(engine=self._engine, create_tables=False)
 
         # NEW: MCP Server repository for MCP server configuration storage
-        self._mcp_server_repository = SQLModelMcpServerRepository(engine=self._engine)
+        self._mcp_server_repository = create_mcp_server_repository(engine=self._engine, create_tables=False)
 
         # NEW: Session repository for session management
         # Must be created before SourceRegistry for scheduler session mode

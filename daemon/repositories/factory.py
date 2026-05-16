@@ -15,6 +15,37 @@ from .message_queue.repository import SQLModelMessageQueueRepository
 from .source.repository import SQLModelSourceRepository
 from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
+from .mcp_server.repository import SQLModelMcpServerRepository
+
+
+def create_mcp_server_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SQLModelMcpServerRepository:
+    """Create an McpServerRepository from configuration or shared engine.
+    
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+    
+    Returns:
+        Configured SQLModelMcpServerRepository instance.
+    
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+    
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+    
+    return SQLModelMcpServerRepository(engine)
 
 
 @dataclass

@@ -25,15 +25,3 @@ class McpServer(SQLModel, table=True):
     is_active: bool = Field(default=True)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str | None = Field(default=None)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "description": self.description,
-            "config": dict(self.config),
-            "is_active": self.is_active,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
