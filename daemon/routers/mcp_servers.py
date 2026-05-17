@@ -15,6 +15,7 @@ from daemon.models import (
     ErrorResponse,
     ErrorCodes,
 )
+from daemon.mcp.config import validate_mcp_server_config
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,18 @@ async def list_mcp_servers(request: Request):
 async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request):
     """Create a new MCP server."""
     manager = _get_manager(request)
+
+    # Validate MCP server config
+    try:
+        validate_mcp_server_config(mcp_server_create.config)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=str(e)
+            ).model_dump()
+        )
 
     # Check if server with same name already exists
     existing = await asyncio.to_thread(
@@ -129,6 +142,19 @@ async def update_mcp_server(
                 message=f"MCP server not found: {server_id}"
             ).model_dump()
         )
+
+    # Validate MCP server config if provided
+    if mcp_server_update.config is not None:
+        try:
+            validate_mcp_server_config(mcp_server_update.config)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INVALID_REQUEST,
+                    message=str(e)
+                ).model_dump()
+            )
 
     # If updating name, check for conflicts
     if mcp_server_update.name is not None and mcp_server_update.name != existing.name:

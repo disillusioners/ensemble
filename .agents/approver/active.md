@@ -1,5 +1,5 @@
-Current Plan: Project-Based Tabs for Instance UI
-Tracking File: project-tabs-ui-tracking.md
+Current Plan: MCP Runtime Integration
+Tracking File: mcp-runtime-integration-tracking.md
 Iteration: 001
 Status: APPROVED
-Last Updated: 2026-05-14
+Last Updated: 2026-05-18

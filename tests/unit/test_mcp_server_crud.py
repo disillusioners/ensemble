@@ -629,7 +629,11 @@ class TestRouterCreate:
             json={
                 "name": "new-server",
                 "description": "Test server",
-                "config": {"port": 8080},
+                "config": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                },
                 "is_active": True,
             },
         )
@@ -638,37 +642,49 @@ class TestRouterCreate:
         data = response.json()
         assert data["name"] == "new-server"
         assert data["description"] == "Test server"
-        assert data["config"] == {"port": 8080}
+        assert data["config"]["transport"] == "stdio"
         assert data["is_active"] is True
         assert "id" in data
         assert "created_at" in data
 
     def test_create_server_minimal(self, client):
-        """Test creating with minimal required fields."""
+        """Test creating with minimal required fields and valid config."""
         response = client.post(
             "/api/mcp-servers",
-            json={"name": "minimal-server"},
+            json={
+                "name": "minimal-server",
+                "config": {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+                },
+            },
         )
 
         assert response.status_code == 201
         data = response.json()
         assert data["name"] == "minimal-server"
         assert data["description"] is None
-        assert data["config"] == {}
+        assert data["config"]["transport"] == "stdio"
         assert data["is_active"] is True
 
     def test_create_duplicate_name(self, client):
         """Test creating server with duplicate name returns 409."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create first server
         client.post(
             "/api/mcp-servers",
-            json={"name": "duplicate-server"},
+            json={"name": "duplicate-server", "config": valid_config},
         )
 
         # Try to create second with same name
         response = client.post(
             "/api/mcp-servers",
-            json={"name": "duplicate-server"},
+            json={"name": "duplicate-server", "config": valid_config},
         )
 
         assert response.status_code == 409
@@ -701,9 +717,14 @@ class TestRouterList:
 
     def test_list_servers(self, client):
         """Test listing servers returns all servers."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create some servers
-        client.post("/api/mcp-servers", json={"name": "server-1"})
-        client.post("/api/mcp-servers", json={"name": "server-2"})
+        client.post("/api/mcp-servers", json={"name": "server-1", "config": valid_config})
+        client.post("/api/mcp-servers", json={"name": "server-2", "config": valid_config})
 
         response = client.get("/api/mcp-servers")
 
@@ -719,10 +740,15 @@ class TestRouterGet:
 
     def test_get_server_success(self, client):
         """Test getting a specific server."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create server
         create_response = client.post(
             "/api/mcp-servers",
-            json={"name": "get-test-server"},
+            json={"name": "get-test-server", "config": valid_config},
         )
         server_id = create_response.json()["id"]
 
@@ -733,6 +759,7 @@ class TestRouterGet:
         data = response.json()
         assert data["id"] == server_id
         assert data["name"] == "get-test-server"
+        assert data["config"]["transport"] == "stdio"
 
     def test_get_nonexistent_server(self, client):
         """Test getting non-existent server returns 404."""
@@ -747,10 +774,15 @@ class TestRouterUpdate:
 
     def test_update_server_success(self, client):
         """Test updating a server successfully."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create server
         create_response = client.post(
             "/api/mcp-servers",
-            json={"name": "update-test-server", "is_active": True},
+            json={"name": "update-test-server", "config": valid_config, "is_active": True},
         )
         server_id = create_response.json()["id"]
 
@@ -772,10 +804,15 @@ class TestRouterUpdate:
 
     def test_update_partial(self, client):
         """Test partial update only changes specified fields."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create server
         create_response = client.post(
             "/api/mcp-servers",
-            json={"name": "partial-test", "description": "Original"},
+            json={"name": "partial-test", "config": valid_config, "description": "Original"},
         )
         server_id = create_response.json()["id"]
 
@@ -801,9 +838,17 @@ class TestRouterUpdate:
 
     def test_update_name_to_duplicate(self, client):
         """Test updating name to existing name returns 409."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create two servers
-        client.post("/api/mcp-servers", json={"name": "server-1"})
-        server2_response = client.post("/api/mcp-servers", json={"name": "server-2"})
+        client.post("/api/mcp-servers", json={"name": "server-1", "config": valid_config})
+        server2_response = client.post(
+            "/api/mcp-servers",
+            json={"name": "server-2", "config": valid_config},
+        )
         server2_id = server2_response.json()["id"]
 
         # Try to update server2's name to server1's name
@@ -820,10 +865,15 @@ class TestRouterDelete:
 
     def test_delete_server_success(self, client):
         """Test deleting a server successfully."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create server
         create_response = client.post(
             "/api/mcp-servers",
-            json={"name": "delete-test-server"},
+            json={"name": "delete-test-server", "config": valid_config},
         )
         server_id = create_response.json()["id"]
 
@@ -856,13 +906,18 @@ class TestFullCrudWorkflow:
 
     def test_create_read_update_delete_workflow(self, client):
         """Test complete CRUD workflow."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # CREATE
         create_response = client.post(
             "/api/mcp-servers",
             json={
                 "name": "workflow-test",
                 "description": "Initial description",
-                "config": {"step": "create"},
+                "config": {**valid_config, "step": "create"},
             },
         )
         assert create_response.status_code == 201
@@ -878,7 +933,7 @@ class TestFullCrudWorkflow:
             f"/api/mcp-servers/{server_id}",
             json={
                 "name": "workflow-test-updated",
-                "config": {"step": "update"},
+                "config": {**valid_config, "step": "update"},
             },
         )
         assert update_response.status_code == 200
@@ -894,9 +949,17 @@ class TestFullCrudWorkflow:
 
     def test_list_after_operations(self, client):
         """Test that list reflects all operations."""
+        valid_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+        }
         # Create multiple servers
         for i in range(3):
-            client.post("/api/mcp-servers", json={"name": f"list-test-{i}"})
+            client.post(
+                "/api/mcp-servers",
+                json={"name": f"list-test-{i}", "config": valid_config},
+            )
 
         # List should have 3
         list_response = client.get("/api/mcp-servers")
