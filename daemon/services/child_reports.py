@@ -311,9 +311,6 @@ Provide a concise summary:"""
         instance.last_activity_at = datetime.now(timezone.utc)
         instance.version = (instance.version or 1) + 1
         
-        # Capture instance_id for SSE emit (after session closes)
-        completed_instance_id = instance.instance_id
-        
         # Create completion report message for parent
         # Include message_id in source for per-message idempotency
         report_message_id = str(uuid.uuid4())
@@ -722,7 +719,7 @@ Provide a concise summary:"""
         # Emit status_change SSE event for child completed
         if self._manager._live_hub:
             try:
-                await self._manager._live_hub.stream_status_change(completed_instance_id, "completed")
+                await self._manager._live_hub.stream_status_change(instance_id, "completed")
             except Exception as e:
                 logger.warning(f"Failed to emit status_change for completed instance: {e}")
         
