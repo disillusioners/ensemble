@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-16 MCP Server CRUD Feature)
+## Test Results (Latest: 2026-05-17 MCP Runtime Integration)
+
+### MCP Runtime Integration (2026-05-17)
+- **MCP Tests**: 161/161 PASSED (145 existing + 16 new runtime integration tests)
+- **Unit Tests**: 2,362/2,362 PASSED (0 failures after fixes)
+- **ensure.md**: ✅ dev.sh runs 30s without crash
+- **Quick Fixes**: 5 issues fixed (spawn_instance mocks, project_id attributes, migration naming, runtime import, mapper update)
+- **Commits**: `d195b5a` (test fixes + new integration tests)
+- See `.agents/tester/RESULTS/2026-05-17-mcp-runtime-integration.md` for full report
+
+### MCP Runtime Integration Status: ✅ READY (161 MCP tests, all passing)
 
 ### MCP Server CRUD Feature (2026-05-16)
 - **Backend Tests**: 55/55 PASSED (models, schemas, repository, router, integration)
