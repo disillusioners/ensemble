@@ -28,6 +28,25 @@ from .filesystem import (
 )
 from .time import time
 from .inner_soul import create_inner_soul_tool
+
+from daemon.services.mcp_service import McpService
+
+
+def _load_mcp_tools(manager, instance_id: str) -> list:
+    """Load MCP tools from preloaded cache.
+
+    Returns:
+        List of LangChain tools from MCP servers. Empty list if
+        not preloaded or on error.
+    """
+    try:
+        if hasattr(manager, '_mcp_service') and manager._mcp_service:
+            return manager._mcp_service.get_mcp_tools(instance_id)
+    except Exception as e:
+        logger.warning(f"Failed to load MCP tools: {e}")
+    return []
+
+
 from .access_memory import create_access_memory_tool
 from .agent_mother import create_mother_tools
 from .project import create_project_tools
@@ -612,7 +631,16 @@ Returns:
     # Add help tool (must be last so it knows about all other tools)
     help_tool = create_help_tool(tools, agent_id)
     tools.append(help_tool)
-    
+
+    # ── MCP tools: injected BEFORE scan/filter so metadata is populated ──
+    # IMPORTANT: MCP tools MUST be injected BEFORE scan_tools_for_full_docs()
+    # because _apply_tool_filter() depends on _tool_metadata being populated
+    # by the scan, which must include MCP tools for correct category filtering.
+    mcp_tools = _load_mcp_tools(manager, current_instance_id)
+    if mcp_tools:
+        logger.info(f"Injecting {len(mcp_tools)} MCP tools for instance {current_instance_id[:8]}")
+        tools.extend(mcp_tools)
+
     # Scan tools to populate _tool_metadata before filtering
     # This enables category expansion in resolve_tool_filter()
     scan_tools_for_full_docs(tools)

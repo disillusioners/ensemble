@@ -382,6 +382,14 @@ class InstanceMessagingService:
         """
         from ..manager import MessageResult
         
+        # Only preload MCP if instance needs restore (not already in memory)
+        if instance_id not in self._manager.instances:
+            if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
+                try:
+                    await self._manager._mcp_service.preload_mcp_tools(instance_id)
+                except Exception as e:
+                    logger.warning(f"MCP preload failed for restore {instance_id[:8]}: {e}")
+        
         # Get instance graph (will lazy-load from DB if needed)
         graph = self._manager.get_instance(instance_id)
 
@@ -668,6 +676,14 @@ class InstanceMessagingService:
             OperationCancelledError: If cancellation is requested.
         """
         from ..manager import MessageResult
+        
+        # Only preload MCP if instance needs restore (not already in memory)
+        if instance_id not in self._manager.instances:
+            if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
+                try:
+                    await self._manager._mcp_service.preload_mcp_tools(instance_id)
+                except Exception as e:
+                    logger.warning(f"MCP preload failed for restore {instance_id[:8]}: {e}")
         
         graph = self._manager.get_instance(instance_id)
         

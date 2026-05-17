@@ -324,6 +324,13 @@ class InstanceLifecycleService:
         # 2. Clean up live hub connections for this instance
         await self._manager._live_hub.cleanup_instance(instance_id)
 
+        # 2.5. Close MCP connections for this instance
+        if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
+            try:
+                await self._manager._mcp_service.close_connections(instance_id)
+            except Exception as e:
+                logger.warning(f"MCP cleanup failed for {instance_id[:8]}: {e}")
+
         # 3. Remove from instances dict
         if instance_id in self._manager.instances:
             del self._manager.instances[instance_id]

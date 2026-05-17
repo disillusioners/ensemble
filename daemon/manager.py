@@ -1568,7 +1568,9 @@ class InstanceManager:
         3. Cancel active LLM streams via request registry
         4. Wait for in-flight processing to finish (grace period)
         5. Shutdown worker pool
-        6. Clean up resources
+        6. Shutdown event bus
+        7. Shutdown MCP service (close all connections)
+        8. Clean up resources (dispose database engine)
         
         Each step is wrapped in its own try/except so failures don't skip subsequent steps.
         
@@ -1603,9 +1605,9 @@ class InstanceManager:
             except Exception as e:
                 logger.error(f"Error during shutdown step '{name}': {e}", exc_info=True)
         
-        # Clean up resources (existing cleanup method) - also resilient
+        # Clean up resources (database disposal) - also resilient
         try:
-            logger.info("Step 6/6: Cleaning up resources...")
+            logger.info("Cleaning up resources...")
             self.cleanup()
         except Exception as e:
             logger.error(f"Error during shutdown step 'cleanup': {e}", exc_info=True)

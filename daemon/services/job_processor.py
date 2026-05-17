@@ -198,6 +198,12 @@ class JobProcessor:
                                     f"(instance {proc_job.instance_id[:8]}... missing)"
                                 )
                                 try:
+                                    # MCP preload — async, must complete before sync spawn
+                                    if hasattr(self._instance_manager, '_mcp_service') and self._instance_manager._mcp_service:
+                                        try:
+                                            await self._instance_manager._mcp_service.preload_mcp_tools(proc_job.instance_id)
+                                        except (Exception, TypeError) as e:
+                                            logger.warning(f"MCP preload failed for {proc_job.instance_id[:8]}: {e}")
                                     instance_id = self._instance_manager.spawn_instance(
                                         agent_id=proc_job.agent_id,
                                         instance_id=proc_job.instance_id,  # Reuse existing valid UUID
@@ -230,6 +236,12 @@ class JobProcessor:
                             f"on queue {queue.queue_name}"
                         )
                         try:
+                            # MCP preload — async, must complete before sync spawn
+                            if hasattr(self._instance_manager, '_mcp_service') and self._instance_manager._mcp_service:
+                                try:
+                                    await self._instance_manager._mcp_service.preload_mcp_tools(proc_job.instance_id)
+                                except (Exception, TypeError) as e:
+                                    logger.warning(f"MCP preload failed for {proc_job.instance_id[:8]}: {e}")
                             instance_id = self._instance_manager.spawn_instance(
                                 agent_id=proc_job.agent_id,
                                 instance_id=proc_job.instance_id,
@@ -262,6 +274,12 @@ class JobProcessor:
 
                     # Spawn instance for this job
                     try:
+                        # MCP preload — async, must complete before sync spawn
+                        if hasattr(self._instance_manager, '_mcp_service') and self._instance_manager._mcp_service:
+                            try:
+                                await self._instance_manager._mcp_service.preload_mcp_tools(started_job.instance_id)
+                            except (Exception, TypeError) as e:
+                                logger.warning(f"MCP preload failed for {started_job.instance_id[:8]}: {e}")
                         instance_id = self._instance_manager.spawn_instance(
                             agent_id=job.agent_id,
                             instance_id=started_job.instance_id,
