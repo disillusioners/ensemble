@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any, Union
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class McpConfigValidationError(ValueError):
 class McpStdioConfig(BaseModel):
     """Configuration for STDIO transport MCP servers."""
 
-    transport: str = Field(default="stdio", description="Transport type")
+    transport: Literal["stdio"] = Field(default="stdio", description="Transport type")
     command: str = Field(description="Command to execute for the MCP server")
     args: list[str] = Field(default_factory=list, description="Command-line arguments")
     env: dict[str, str] | None = Field(default=None, description="Environment variables")
@@ -28,7 +28,7 @@ class McpStdioConfig(BaseModel):
 class McpSseConfig(BaseModel):
     """Configuration for SSE (Server-Sent Events) transport MCP servers."""
 
-    transport: str = Field(default="sse", description="Transport type")
+    transport: Literal["sse"] = Field(default="sse", description="Transport type")
     url: str = Field(description="URL endpoint for the SSE MCP server")
     headers: dict[str, str] | None = Field(default=None, description="HTTP headers for the connection")
 
@@ -36,7 +36,7 @@ class McpSseConfig(BaseModel):
 class McpStreamableHttpConfig(BaseModel):
     """Configuration for Streamable HTTP transport MCP servers."""
 
-    transport: str = Field(default="streamable-http", description="Transport type")
+    transport: Literal["streamable-http"] = Field(default="streamable-http", description="Transport type")
     url: str = Field(description="URL endpoint for the Streamable HTTP MCP server")
     headers: dict[str, str] | None = Field(default=None, description="HTTP headers for the connection")
 
@@ -58,16 +58,22 @@ def validate_mcp_server_config(config: dict[str, Any]) -> McpStdioConfig | McpSs
         Validated config model for the appropriate transport type
 
     Raises:
-        ValueError: If transport type is unknown or validation fails
+        McpConfigValidationError: If validation fails
     """
-    transport = config.get("transport")
+    # Try individual models first (better error messages)
+    for model_cls in (McpStdioConfig, McpSseConfig, McpStreamableHttpConfig):
+        try:
+            return model_cls.model_validate(config)
+        except ValidationError:
+            continue
 
-    if transport == "stdio":
-        return McpStdioConfig(**config)
-    elif transport == "sse":
-        return McpSseConfig(**config)
-    elif transport == "streamable-http":
-        return McpStreamableHttpConfig(**config)
-    else:
-        logger.warning(f"Unknown MCP transport type: {transport}")
-        raise McpConfigValidationError(f"Unknown MCP transport type: {transport}")
+    # Fallback to discriminated union for best error message
+    try:
+        from pydantic import TypeAdapter
+
+        adapter = TypeAdapter(McpServerConfig)
+        return adapter.validate_python(config)
+    except ValidationError as e:
+        raise McpConfigValidationError(f"Invalid MCP server config: {e}") from e
+    except Exception as e:
+        raise McpConfigValidationError(f"Invalid MCP server config: {e}") from e

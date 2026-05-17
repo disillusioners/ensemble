@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import mcp
 from mcp import ClientSession, StdioServerParameters
@@ -13,15 +13,11 @@ from mcp.client.streamable_http import streamablehttp_client
 
 from daemon.mcp.config import (
     McpSseConfig,
-    McpServerConfig,
     McpStdioConfig,
     McpStreamableHttpConfig,
     validate_mcp_server_config,
 )
 from daemon.repositories.mcp_server.models import McpServer
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +38,45 @@ class McpConnectionManager:
         self._connections: dict[str, dict[str, ClientSession]] = {}
         self._stream_contexts: dict[str, dict[str, Any]] = {}  # instance_id → server_name → stream_cm
         self._lock = asyncio.Lock()  # Eager initialization
+
+    async def _close_session_with_stream(
+        self, server_name: str, session: ClientSession, stream_cm: Any = None
+    ) -> None:
+        """Close a session and its associated stream context manager."""
+        try:
+            await session.close()
+        except Exception as e:
+            logger.warning(f"Error closing session for '{server_name}': {e}")
+        if stream_cm is not None:
+            try:
+                await stream_cm.__aexit__(None, None, None)
+            except Exception as e:
+                logger.warning(f"Error closing streams for '{server_name}': {e}")
+
+    async def _open_and_track_session(
+        self,
+        streams_cm: Any,
+        read_stream: Any,
+        write_stream: Any,
+        instance_id: str,
+        server_name: str,
+    ) -> ClientSession:
+        """Open a session from streams, track contexts, handle errors."""
+        try:
+            session = ClientSession(read_stream, write_stream)
+            await session.initialize()
+            # Track stream context manager for cleanup
+            if instance_id not in self._stream_contexts:
+                self._stream_contexts[instance_id] = {}
+            self._stream_contexts[instance_id][server_name] = streams_cm
+            return session
+        except Exception as e:
+            logger.error(f"Failed to create session for '{server_name}': {e}")
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
 
     async def connect_instance(
         self,
@@ -150,31 +185,15 @@ class McpConnectionManager:
             args=config.args,
             env=config.env,
         )
-
         streams_cm = mcp.stdio_client(server_params)
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream = await streams_cm.__aenter__()
-                session = ClientSession(read_stream, write_stream)
-                await session.initialize()
-                # Track stream context manager for cleanup
-                if instance_id not in self._stream_contexts:
-                    self._stream_contexts[instance_id] = {}
-                self._stream_contexts[instance_id][server_name] = streams_cm
-                return session
+                return await self._open_and_track_session(
+                    streams_cm, read_stream, write_stream, instance_id, server_name
+                )
         except asyncio.TimeoutError:
             logger.error(f"STDIO connection timed out for command: {config.command}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
-        except Exception as e:
-            logger.error(f"Failed to create STDIO session: {e}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
             raise
 
     async def _create_sse_session(
@@ -200,26 +219,11 @@ class McpConnectionManager:
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream = await streams_cm.__aenter__()
-                session = ClientSession(read_stream, write_stream)
-                await session.initialize()
-                # Track stream context manager for cleanup
-                if instance_id not in self._stream_contexts:
-                    self._stream_contexts[instance_id] = {}
-                self._stream_contexts[instance_id][server_name] = streams_cm
-                return session
+                return await self._open_and_track_session(
+                    streams_cm, read_stream, write_stream, instance_id, server_name
+                )
         except asyncio.TimeoutError:
             logger.error(f"SSE connection timed out for URL: {config.url}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
-        except Exception as e:
-            logger.error(f"Failed to create SSE session: {e}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
             raise
 
     async def _create_streamable_http_session(
@@ -245,26 +249,11 @@ class McpConnectionManager:
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream, _ = await streams_cm.__aenter__()
-                session = ClientSession(read_stream, write_stream)
-                await session.initialize()
-                # Track stream context manager for cleanup
-                if instance_id not in self._stream_contexts:
-                    self._stream_contexts[instance_id] = {}
-                self._stream_contexts[instance_id][server_name] = streams_cm
-                return session
+                return await self._open_and_track_session(
+                    streams_cm, read_stream, write_stream, instance_id, server_name
+                )
         except asyncio.TimeoutError:
             logger.error(f"Streamable HTTP connection timed out for URL: {config.url}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
-        except Exception as e:
-            logger.error(f"Failed to create Streamable HTTP session: {e}")
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
             raise
 
     def get_session(self, instance_id: str, server_name: str) -> ClientSession | None:
@@ -291,24 +280,11 @@ class McpConnectionManager:
             sessions = self._connections.pop(instance_id, {})
             streams = self._stream_contexts.pop(instance_id, {})
 
-        async def _close_one(server_name: str, session: ClientSession) -> None:
-            """Close a single session and its stream context manager."""
-            try:
-                await session.close()
-                logger.debug(f"Closed MCP session for {server_name}")
-            except Exception as e:
-                logger.warning(f"Error closing MCP session {server_name}: {e}")
-            # Close stream context manager if tracked
-            if server_name in streams:
-                streams_cm = streams[server_name]
-                try:
-                    await streams_cm.__aexit__(None, None, None)
-                    logger.debug(f"Closed stream context for {server_name}")
-                except Exception as e:
-                    logger.warning(f"Error closing stream context {server_name}: {e}")
-
         await asyncio.gather(
-            *[_close_one(name, sess) for name, sess in sessions.items()],
+            *[
+                self._close_session_with_stream(name, sess, streams.get(name))
+                for name, sess in sessions.items()
+            ],
             return_exceptions=True,
         )
 
@@ -321,28 +297,15 @@ class McpConnectionManager:
             self._connections.clear()
             self._stream_contexts.clear()
 
-        async def _close_session(server_name: str, session: ClientSession, streams: dict[str, Any]) -> None:
-            """Close a single session and its stream context manager."""
-            try:
-                await session.close()
-                logger.debug(f"Closed MCP session for {server_name}")
-            except Exception as e:
-                logger.warning(f"Error closing MCP session {server_name}: {e}")
-            if server_name in streams:
-                streams_cm = streams[server_name]
-                try:
-                    await streams_cm.__aexit__(None, None, None)
-                    logger.debug(f"Closed stream context for {server_name}")
-                except Exception as e:
-                    logger.warning(f"Error closing stream context {server_name}: {e}")
-
         # Collect all sessions and streams to close in parallel
         close_tasks = []
         for instance_id in all_instances:
             sessions = all_sessions.get(instance_id, {})
             streams = all_streams.get(instance_id, {})
             for server_name, session in sessions.items():
-                close_tasks.append(_close_session(server_name, session, streams))
+                close_tasks.append(
+                    self._close_session_with_stream(server_name, session, streams.get(server_name))
+                )
 
         await asyncio.gather(*close_tasks, return_exceptions=True)
 

@@ -135,7 +135,7 @@ class TestConcurrentMcpService:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await asyncio.gather(
@@ -155,7 +155,7 @@ class TestConcurrentMcpService:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await asyncio.gather(

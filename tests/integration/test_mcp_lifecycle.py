@@ -64,7 +64,7 @@ class TestSpawnWithMcp:
         mock_conn_mgr.get_session = MagicMock(return_value=MagicMock())
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -103,7 +103,7 @@ class TestSpawnWithMcp:
         )
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.preload_mcp_tools("inst-1")
@@ -133,7 +133,7 @@ class TestRestoreWithMcp:
         mock_conn_mgr.get_session = MagicMock(return_value=MagicMock())
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -160,7 +160,7 @@ class TestRestoreWithMcp:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -196,7 +196,7 @@ class TestCleanup:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.close_connections("inst-1")
@@ -214,7 +214,7 @@ class TestCleanup:
         mock_conn_mgr.close_all = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.close_all_connections()
@@ -231,7 +231,7 @@ class TestCleanup:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.close_connections("inst-1")
@@ -259,7 +259,7 @@ class TestResilience:
         mock_conn_mgr.get_session = MagicMock(return_value=None)  # Not connected
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.preload_mcp_tools("inst-1")
@@ -289,7 +289,7 @@ class TestResilience:
         mock_conn_mgr.get_session = MagicMock(side_effect=get_session)
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -313,7 +313,7 @@ class TestResilience:
         mock_conn_mgr.get_session = MagicMock(return_value=None)
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ):
             await manager._mcp_service.preload_mcp_tools("inst-1")
@@ -350,7 +350,7 @@ class TestResilience:
         mock_conn_mgr.get_session = MagicMock(return_value=MagicMock())
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr,
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",

@@ -28,11 +28,20 @@ from .filesystem import (
 )
 from .time import time
 from .inner_soul import create_inner_soul_tool
+from .access_memory import create_access_memory_tool
+from .agent_mother import create_mother_tools
+from .project import create_project_tools
+from .job_queue import create_job_tools
+from .help import create_help_tool
+from .knowledge_tools import create_knowledge_tools
+from .rag_tools import create_rag_tools
+from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
+from daemon.services.project_normalizer import normalize_project_id
+from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
+from daemon.rag.config import is_rag_enabled
 
-from daemon.services.mcp_service import McpService
 
-
-def _load_mcp_tools(manager, instance_id: str) -> list:
+def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
     """Load MCP tools from preloaded cache.
 
     Returns:
@@ -45,19 +54,6 @@ def _load_mcp_tools(manager, instance_id: str) -> list:
     except Exception as e:
         logger.warning(f"Failed to load MCP tools: {e}")
     return []
-
-
-from .access_memory import create_access_memory_tool
-from .agent_mother import create_mother_tools
-from .project import create_project_tools
-from .job_queue import create_job_tools
-from .help import create_help_tool
-from .knowledge_tools import create_knowledge_tools
-from .rag_tools import create_rag_tools
-from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
-from daemon.services.project_normalizer import normalize_project_id
-from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
-from daemon.rag.config import is_rag_enabled
 
 
 def resolve_tool_filter(

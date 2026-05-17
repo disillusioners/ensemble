@@ -54,7 +54,7 @@ class TestPreloadMcpTools:
         mock_conn_mgr.connect_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -90,7 +90,7 @@ class TestPreloadMcpTools:
         mock_conn_mgr.get_session.return_value = None  # No session = failed
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.preload_mcp_tools("inst-1")
@@ -116,7 +116,7 @@ class TestPreloadMcpTools:
         mock_conn_mgr.get_session.side_effect = get_session
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -142,7 +142,7 @@ class TestPreloadMcpTools:
         mock_conn_mgr.get_session.return_value = MagicMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ), patch(
             "langchain_mcp_adapters.tools.load_mcp_tools",
@@ -203,7 +203,7 @@ class TestCloseConnections:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_connections("inst-1")
@@ -221,7 +221,7 @@ class TestCloseConnections:
         mock_conn_mgr.close_instance = AsyncMock(side_effect=Exception("Close failed"))
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_connections("inst-1")
@@ -236,7 +236,7 @@ class TestCloseConnections:
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_connections("nonexistent")
@@ -258,7 +258,7 @@ class TestCloseAllConnections:
         mock_conn_mgr.close_all = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_all_connections()
@@ -275,7 +275,7 @@ class TestCloseAllConnections:
         mock_conn_mgr.close_all = AsyncMock(side_effect=Exception("Close failed"))
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_all_connections()
@@ -290,7 +290,7 @@ class TestCloseAllConnections:
         mock_conn_mgr.close_all = AsyncMock()
 
         with patch(
-            "daemon.mcp.get_mcp_connection_manager",
+            "daemon.services.mcp_service.get_mcp_connection_manager",
             return_value=mock_conn_mgr
         ):
             await service.close_all_connections()

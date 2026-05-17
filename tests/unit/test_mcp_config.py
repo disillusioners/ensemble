@@ -2,6 +2,7 @@
 import pytest
 from pydantic import ValidationError
 from daemon.mcp.config import (
+    McpConfigValidationError,
     McpStdioConfig,
     McpSseConfig,
     McpStreamableHttpConfig,
@@ -77,13 +78,15 @@ class TestValidateMcpServerConfig:
         assert isinstance(result, McpStreamableHttpConfig)
 
     def test_invalid_transport_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(McpConfigValidationError):
             validate_mcp_server_config({"transport": "websocket"})
 
-    def test_missing_transport_raises(self):
-        with pytest.raises(ValueError):
-            validate_mcp_server_config({"command": "python"})
+    def test_missing_transport_uses_stdio_default(self):
+        # Missing transport defaults to stdio (consistent with McpStdioConfig.test_defaults)
+        result = validate_mcp_server_config({"command": "python"})
+        assert isinstance(result, McpStdioConfig)
+        assert result.transport == "stdio"
 
     def test_empty_dict_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(McpConfigValidationError):
             validate_mcp_server_config({})

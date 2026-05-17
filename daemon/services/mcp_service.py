@@ -7,13 +7,19 @@ Consolidates all MCP business logic:
 - Cleans up MCP connections on instance termination
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+from daemon.mcp import get_mcp_connection_manager
+from daemon.mcp.tool_adapter import adapt_mcp_tools
+
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
     from daemon.manager import InstanceManager
+    from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +63,6 @@ class McpService:
                     logger.debug(f"No active MCP servers for instance {instance_id[:8]}")
                     self._tools_cache[instance_id] = []
                     return
-
-                # Connect to all servers (parallel, per-server timeout)
-                from daemon.mcp import get_mcp_connection_manager
 
                 conn_mgr = get_mcp_connection_manager()
                 await conn_mgr.connect_instance(instance_id, servers)
@@ -105,7 +108,7 @@ class McpService:
         return self._tools_cache.get(instance_id, [])
 
     async def _discover_server_tools(
-        self, instance_id: str, server
+        self, instance_id: str, server: McpServer
     ) -> list[BaseTool]:
         """Discover tools from a single MCP server and convert to LangChain tools.
 
@@ -119,8 +122,6 @@ class McpService:
         Returns:
             List of adapted MCP tools.
         """
-        from daemon.mcp import get_mcp_connection_manager
-
         conn_mgr = get_mcp_connection_manager()
         session = conn_mgr.get_session(instance_id, server.name)
         if session is None:
@@ -136,8 +137,6 @@ class McpService:
         mcp_tools = await load_mcp_tools(session)
 
         # Namespace tool names using adapt_mcp_tools from tool_adapter
-        from daemon.mcp.tool_adapter import adapt_mcp_tools
-
         return adapt_mcp_tools(server.name, mcp_tools)
 
     async def close_connections(self, instance_id: str) -> None:
@@ -152,8 +151,6 @@ class McpService:
         async with self._preload_lock:
             self._preload_locks.pop(instance_id, None)
         try:
-            from daemon.mcp import get_mcp_connection_manager
-
             conn_mgr = get_mcp_connection_manager()
             await conn_mgr.close_instance(instance_id)
             logger.debug(
@@ -170,8 +167,6 @@ class McpService:
         self._tools_cache.clear()
         self._preload_locks.clear()
         try:
-            from daemon.mcp import get_mcp_connection_manager
-
             conn_mgr = get_mcp_connection_manager()
             await conn_mgr.close_all()
         except Exception as e:
