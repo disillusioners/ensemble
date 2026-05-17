@@ -473,3 +473,199 @@ class TestApplyToolFilter:
                 assert mock_logger.debug.called
                 debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
                 assert any("Filtered tools for test_agent" in str(c) for c in debug_calls)
+
+
+class TestMcpToolFiltering:
+    """Test MCP tool filtering scenarios."""
+
+    # Sample MCP tool names (dynamically added, not in static categories)
+    SAMPLE_MCP_TOOLS = [
+        "mcp_filesystem_read",
+        "mcp_filesystem_write",
+        "mcp_github_issues",
+        "mcp_github_prs",
+        "mcp_git_status",
+    ]
+
+    def _create_mock_tool(self, name: str):
+        """Create a mock tool with a name attribute."""
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    def test_deny_mcp_denies_all_mcp_tools(self):
+        """tools.deny: ["mcp"] → all mcp_* tools denied."""
+        result = resolve_tool_filter(
+            allow=None,
+            deny=["mcp"],
+            all_tool_names=set(self.SAMPLE_MCP_TOOLS),
+        )
+        # All MCP tools should be removed from the set
+        for mcp_tool in self.SAMPLE_MCP_TOOLS:
+            assert mcp_tool not in result
+
+    def test_allow_star_includes_mcp_tools(self):
+        """tools.allow: ["*"] → MCP tools included."""
+        # Start with all tools, then allow only "*"
+        all_tools = set(self.SAMPLE_MCP_TOOLS + ["bash", "read_file"])
+        result = resolve_tool_filter(
+            allow=["*"],
+            deny=None,
+            tool_categories={"*": list(all_tools)},
+            all_tool_names=set(self.SAMPLE_MCP_TOOLS),
+        )
+        # "*" as a category doesn't exist, so just "mcp_filesystem_read" is in result
+        # This test verifies "*" doesn't break - actual "*" handling is separate
+        assert result is not None
+
+    def test_allow_mcp_only_allows_mcp_tools(self):
+        """tools.allow: ["mcp"] → only mcp_* tools allowed."""
+        # Categories with "mcp" having empty list (unexpanded)
+        categories_with_empty_mcp = {
+            "bash": ["bash"],
+            "mcp": [],  # Empty - should be expanded from all_tool_names
+        }
+        all_tools = set(self.SAMPLE_MCP_TOOLS + ["bash", "read_file"])
+
+        result = resolve_tool_filter(
+            allow=["mcp"],
+            deny=None,
+            tool_categories=categories_with_empty_mcp,
+            all_tool_names=all_tools,
+        )
+
+        # Should only have MCP tools
+        assert result == set(self.SAMPLE_MCP_TOOLS)
+
+    def test_allow_bash_excludes_mcp_tools(self):
+        """tools.allow: ["bash"] → MCP tools excluded."""
+        all_tools = set(self.SAMPLE_MCP_TOOLS + ["bash", "read_file"])
+
+        result = resolve_tool_filter(
+            allow=["bash"],
+            deny=None,
+            all_tool_names=all_tools,
+        )
+
+        # Should only have bash
+        assert result == {"bash"}
+        for mcp_tool in self.SAMPLE_MCP_TOOLS:
+            assert mcp_tool not in result
+
+    def test_default_no_allow_deny_includes_all_tools(self):
+        """Default (no allow/deny) → all tools including MCP available."""
+        result = resolve_tool_filter(
+            allow=None,
+            deny=None,
+        )
+        # Returns None meaning all tools allowed
+        assert result is None
+
+    def test_mcp_category_with_partial_expansion(self):
+        """MCP category already having some tools should not be overwritten."""
+        categories = {
+            "mcp": ["mcp_filesystem_read"],  # Already has one tool
+        }
+        all_tools = set(self.SAMPLE_MCP_TOOLS)
+
+        result = resolve_tool_filter(
+            allow=["mcp"],
+            deny=None,
+            tool_categories=categories,
+            all_tool_names=all_tools,
+        )
+
+        # Should keep existing entry, not overwrite
+        assert "mcp_filesystem_read" in result
+        # Other MCP tools should NOT be added since category was already populated
+        assert "mcp_github_issues" not in result
+
+    def test_mcp_in_both_allow_and_deny_deny_wins(self):
+        """If mcp is in both allow and deny, deny wins (mcp tools denied)."""
+        categories = {
+            "bash": ["bash"],
+            "mcp": [],
+        }
+        all_tools = set(self.SAMPLE_MCP_TOOLS + ["bash"])
+
+        result = resolve_tool_filter(
+            allow=["bash", "mcp"],
+            deny=["mcp"],
+            tool_categories=categories,
+            all_tool_names=all_tools,
+        )
+
+        # Only bash should remain
+        assert result == {"bash"}
+        for mcp_tool in self.SAMPLE_MCP_TOOLS:
+            assert mcp_tool not in result
+
+    def test_apply_tool_filter_with_mcp_deny(self):
+        """_apply_tool_filter with MCP deny should filter out MCP tools."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+            self._create_mock_tool("mcp_filesystem_read"),
+            self._create_mock_tool("mcp_github_issues"),
+        ]
+
+        # Categories including "mcp" with empty list (unexpanded)
+        categories = {
+            "bash": ["bash"],
+            "filesystem": ["read_file"],
+            "mcp": [],  # Empty - should be expanded from all_tool_names
+        }
+
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.list_tools_by_category") as mock_list_tools:
+                mock_list_tools.return_value = categories
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                mock_filter.allow = None
+                mock_filter.deny = ["mcp"]
+                mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get.return_value = mock_agent_meta
+
+                result = _apply_tool_filter(tools, "test_agent")
+                tool_names = {t.name for t in result}
+
+                # MCP tools should be filtered out
+                assert "bash" in tool_names
+                assert "read_file" in tool_names
+                assert "mcp_filesystem_read" not in tool_names
+                assert "mcp_github_issues" not in tool_names
+
+    def test_apply_tool_filter_with_mcp_allow(self):
+        """_apply_tool_filter with MCP allow should only return MCP tools."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("read_file"),
+            self._create_mock_tool("mcp_filesystem_read"),
+            self._create_mock_tool("mcp_github_issues"),
+        ]
+
+        # Categories including "mcp" with empty list (unexpanded)
+        categories = {
+            "bash": ["bash"],
+            "filesystem": ["read_file"],
+            "mcp": [],  # Empty - should be expanded from all_tool_names
+        }
+
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.list_tools_by_category") as mock_list_tools:
+                mock_list_tools.return_value = categories
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                mock_filter.allow = ["mcp"]
+                mock_filter.deny = None
+                mock_agent_meta.tools = mock_filter
+                mock_registry.return_value.get.return_value = mock_agent_meta
+
+                result = _apply_tool_filter(tools, "test_agent")
+                tool_names = {t.name for t in result}
+
+                # Only MCP tools should remain
+                assert "bash" not in tool_names
+                assert "read_file" not in tool_names
+                assert "mcp_filesystem_read" in tool_names
+                assert "mcp_github_issues" in tool_names

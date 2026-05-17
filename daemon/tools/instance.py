@@ -45,6 +45,7 @@ def resolve_tool_filter(
     allow: list[str] | None, 
     deny: list[str] | None,
     tool_categories: dict[str, list[str]] | None = None,
+    all_tool_names: set[str] | None = None,
 ) -> set[str] | None:
     """Resolve tool filter allow/deny lists into a final set of allowed tool names.
     
@@ -59,7 +60,10 @@ def resolve_tool_filter(
         deny: List of category names and/or individual tool names to deny
         tool_categories: Optional dict mapping category names to tool name lists.
             If None, uses the dynamic tool registry via list_tools_by_category().
-        
+        all_tool_names: Optional set of all available tool names. Used for dynamic
+            category expansion of MCP tools (tools starting with "mcp_" with at least
+            2 underscores in the name).
+    
     Returns:
         Set of allowed tool names, or None if all tools should be allowed
     """
@@ -72,7 +76,21 @@ def resolve_tool_filter(
     
     # Use provided categories or fetch from registry
     if tool_categories is None:
-        tool_categories = list_tools_by_category()
+        tool_categories = dict(list_tools_by_category())
+    else:
+        # Make a copy so we can modify it for MCP expansion
+        tool_categories = dict(tool_categories)
+    
+    # Expand MCP category dynamically if all_tool_names is provided
+    if all_tool_names is not None and "mcp" in tool_categories:
+        # Check if MCP category is empty (not yet expanded)
+        if len(tool_categories.get("mcp", [])) == 0:
+            # Find all MCP tools: names starting with "mcp_" and contain at least 2 underscores
+            mcp_tools = {
+                name for name in all_tool_names
+                if name.startswith("mcp_") and "_" in name[4:]
+            }
+            tool_categories["mcp"] = list(mcp_tools)
     if allow is None or len(allow) == 0:
         # No allow list means everything is potentially allowed
         # Start with all tools from all categories
@@ -627,10 +645,23 @@ def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
         # No tools config → all tools allowed (backward compatible)
         return tools
     
-    # Resolve the filter
+    # Collect all tool names for MCP category expansion
+    all_tool_names: set[str] = set()
+    for tool in tools:
+        tool_name = getattr(tool, 'name', None)
+        if tool_name is None:
+            # Fallback: try to get from func
+            func = getattr(tool, 'func', None) or getattr(tool, 'coroutine', None)
+            if func:
+                tool_name = getattr(func, '__name__', None)
+        if tool_name:
+            all_tool_names.add(tool_name)
+    
+    # Resolve the filter with MCP-aware category expansion
     allowed_tools = resolve_tool_filter(
         allow=agent_meta.tools.allow,
         deny=agent_meta.tools.deny,
+        all_tool_names=all_tool_names,
     )
     
     # If None returned, all tools are allowed

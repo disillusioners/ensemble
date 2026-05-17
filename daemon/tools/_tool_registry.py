@@ -193,6 +193,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "mother": "daemon.tools.agent_mother",
     "knowledge": "daemon.tools.knowledge_tools",
     "rag": "daemon.tools.rag_tools",
+    "mcp": "daemon.tools.mcp_tools",
 }
 
 

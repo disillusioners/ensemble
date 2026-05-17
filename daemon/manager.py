@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     from .services.worker_pool import WorkerPool
     from .services.task_processor import TaskProcessor
     from .services.stale_task_recovery import StaleTaskRecovery
+    from .services.mcp_service import McpService
 
 
 
@@ -527,6 +528,9 @@ class InstanceManager:
         # NEW: CompletionRegistry for synchronous agent invoke-and-wait
         from .services.completion_registry import get_completion_registry
         self._completion_registry = get_completion_registry()
+
+        # MCP service for managing MCP tool lifecycle
+        self._mcp_service = McpService(manager=self)
 
     @property
     def checkpointer(self):
@@ -1590,6 +1594,7 @@ class InstanceManager:
             ("wait_inflight", self._wait_for_inflight(grace_period)),
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
+            ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
         ]
         
         for name, step_coro in steps:
