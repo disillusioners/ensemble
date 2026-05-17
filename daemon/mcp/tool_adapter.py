@@ -102,16 +102,6 @@ def adapt_mcp_tools(server_name: str, tools: list[BaseTool]) -> list[BaseTool]:
         adapted_tool.name = new_name
         adapted_tool.description = new_description
 
-        # Update the function schema if it exists
-        if hasattr(adapted_tool, "args_schema") and adapted_tool.args_schema is not None:
-            schema = adapted_tool.args_schema
-            if hasattr(schema, "model_fields"):
-                # Pydantic v2 model
-                pass  # Schema inherits from tool, already copied
-            elif hasattr(schema, "__fields__"):
-                # Pydantic v1 model
-                pass  # Schema inherits from tool, already copied
-
         adapted_tools.append(adapted_tool)
         logger.debug(f"Adapted MCP tool: {tool.name} -> {new_name}")
 

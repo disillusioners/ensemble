@@ -10,35 +10,21 @@ from daemon.mcp.connection_manager import McpConnectionManager, get_mcp_connecti
 class TestMcpConnectionManagerInit:
     """Tests for McpConnectionManager initialization."""
 
-    def test_lock_not_created_in_init(self):
-        """Lock should be None after __init__ (lazy initialization)."""
+    def test_lock_created_eagerly_in_init(self):
+        """Lock should be created eagerly in __init__."""
         mgr = McpConnectionManager()
-        assert mgr._lock is None
+        assert mgr._lock is not None
+        assert isinstance(mgr._lock, asyncio.Lock)
 
     def test_connections_empty_after_init(self):
         """Connections dict should be empty after __init__."""
         mgr = McpConnectionManager()
         assert mgr._connections == {}
 
-
-class TestLazyLock:
-    """Tests for lazy lock initialization."""
-
-    @pytest.mark.asyncio
-    async def test_lock_created_on_first_use(self):
-        """Lock should be created on first access."""
+    def test_stream_contexts_empty_after_init(self):
+        """Stream contexts dict should be empty after __init__."""
         mgr = McpConnectionManager()
-        lock = mgr._get_lock()
-        assert lock is not None
-        assert isinstance(lock, asyncio.Lock)
-
-    @pytest.mark.asyncio
-    async def test_lock_reused_on_subsequent_calls(self):
-        """Same lock should be returned on subsequent calls."""
-        mgr = McpConnectionManager()
-        lock1 = mgr._get_lock()
-        lock2 = mgr._get_lock()
-        assert lock1 is lock2
+        assert mgr._stream_contexts == {}
 
 
 class TestGetSession:
@@ -77,7 +63,10 @@ class TestConnectInstance:
         server2 = MagicMock()
         server2.name = "server-2"
 
-        with patch.object(mgr, "_create_session", return_value=mock_session):
+        async def mock_create(server, instance_id=None, server_name=None, timeout=None):
+            return mock_session
+
+        with patch.object(mgr, "_create_session", side_effect=mock_create):
             await mgr.connect_instance("inst-1", [server1, server2])
 
         assert mgr.get_session("inst-1", "server-1") is mock_session
@@ -91,7 +80,10 @@ class TestConnectInstance:
         server = MagicMock()
         server.name = "bad-server"
 
-        with patch.object(mgr, "_create_session", side_effect=Exception("Connection refused")):
+        async def mock_create(server, instance_id=None, server_name=None, timeout=None):
+            raise Exception("Connection refused")
+
+        with patch.object(mgr, "_create_session", side_effect=mock_create):
             await mgr.connect_instance("inst-1", [server])
 
         assert mgr.get_session("inst-1", "bad-server") is None
@@ -107,7 +99,7 @@ class TestConnectInstance:
         bad_server = MagicMock()
         bad_server.name = "bad-server"
 
-        async def mock_create(server, timeout=None):
+        async def mock_create(server, instance_id=None, server_name=None, timeout=None):
             if server.name == "bad-server":
                 raise Exception("Failed")
             return good_session
@@ -131,16 +123,24 @@ class TestCloseInstance:
     """Tests for close_instance method."""
 
     @pytest.mark.asyncio
-    async def test_removes_sessions(self):
-        """Should remove all sessions for an instance."""
+    async def test_removes_sessions_and_streams(self):
+        """Should remove all sessions and stream contexts for an instance."""
         mgr = McpConnectionManager()
         mock_session = AsyncMock()
+        mock_session.close = AsyncMock()
         mgr._connections["inst-1"] = {"server-1": mock_session}
+
+        # Add stream context
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__aexit__ = AsyncMock()
+        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm}
 
         await mgr.close_instance("inst-1")
 
         assert "inst-1" not in mgr._connections
+        assert "inst-1" not in mgr._stream_contexts
         mock_session.close.assert_awaited_once()
+        mock_stream_cm.__aexit__.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_idempotent_close(self):
@@ -163,6 +163,23 @@ class TestCloseInstance:
         # Session should be removed even if close failed
         assert "inst-1" not in mgr._connections
 
+    @pytest.mark.asyncio
+    async def test_closes_streams_even_if_session_close_fails(self):
+        """Stream contexts should be closed even if session close fails."""
+        mgr = McpConnectionManager()
+        mock_session = AsyncMock()
+        mock_session.close.side_effect = Exception("Close failed")
+        mgr._connections["inst-1"] = {"server-1": mock_session}
+
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__aexit__ = AsyncMock()
+        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm}
+
+        await mgr.close_instance("inst-1")
+
+        # Stream should still be closed
+        mock_stream_cm.__aexit__.assert_awaited_once()
+
 
 class TestCloseAll:
     """Tests for close_all method."""
@@ -176,11 +193,22 @@ class TestCloseAll:
         mgr._connections["inst-1"] = {"server-1": s1}
         mgr._connections["inst-2"] = {"server-2": s2}
 
+        # Add stream contexts
+        mock_stream_cm1 = MagicMock()
+        mock_stream_cm1.__aexit__ = AsyncMock()
+        mock_stream_cm2 = MagicMock()
+        mock_stream_cm2.__aexit__ = AsyncMock()
+        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm1}
+        mgr._stream_contexts["inst-2"] = {"server-2": mock_stream_cm2}
+
         await mgr.close_all()
 
         assert mgr._connections == {}
+        assert mgr._stream_contexts == {}
         s1.close.assert_awaited_once()
         s2.close.assert_awaited_once()
+        mock_stream_cm1.__aexit__.assert_awaited_once()
+        mock_stream_cm2.__aexit__.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_handles_close_errors(self):
@@ -192,6 +220,7 @@ class TestCloseAll:
 
         await mgr.close_all()
         assert mgr._connections == {}
+        assert mgr._stream_contexts == {}
 
 
 class TestSingleton:

@@ -41,7 +41,7 @@ def reset_semaphore():
 def mock_manager():
     """Create a mock InstanceManager."""
     manager = MagicMock()
-    manager.spawn_instance = MagicMock(return_value="spawned-instance-123")
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="spawned-instance-123")
     manager.enqueue_message = AsyncMock()
     manager.terminate_instance = AsyncMock()
     manager.get_instance = MagicMock()
@@ -80,8 +80,8 @@ async def test_invoke_agent_and_wait_passes_invoked_as_tool_true(reset_semaphore
             project_id="test-project",
         )
 
-        mock_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_manager.spawn_instance.call_args.kwargs
+        mock_manager.spawn_instance_with_mcp.assert_called_once()
+        call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
         assert call_kwargs.get("invoked_as_tool") is True
 
 
@@ -90,13 +90,13 @@ async def test_invoke_agent_and_wait_passes_invoked_as_tool_false_by_default(res
     """Verify invoke_agent_and_wait spawns instance with invoked_as_tool=False when not specified."""
     from daemon.utils import invoke_agent_and_wait
 
-    # Directly call spawn_instance via the utils helper that wraps it
+    # Directly call spawn_instance_with_mcp via the utils helper that wraps it
     # This tests the default behavior without invoke_agent_and_wait's forced True
-    mock_manager.spawn_instance = MagicMock(return_value="instance-456")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="instance-456")
 
     # The actual spawn path - verify it defaults to False
     # When called directly (not via invoke_agent_and_wait), invoked_as_tool should be False
-    call_kwargs = mock_manager.spawn_instance.call_args.kwargs if mock_manager.spawn_instance.called else {}
+    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs if mock_manager.spawn_instance_with_mcp.called else {}
 
     # If spawn_instance wasn't called yet, we verify the signature allows False
     # The default in instance_lifecycle.py is False
@@ -149,8 +149,8 @@ async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manag
 
     await experience_tool.ainvoke({"text": "Test knowledge"})
 
-    mock_manager.spawn_instance.assert_called_once()
-    call_kwargs = mock_manager.spawn_instance.call_args.kwargs
+    mock_manager.spawn_instance_with_mcp.assert_called_once()
+    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
     assert call_kwargs.get("invoked_as_tool") is True
 
 
@@ -263,14 +263,14 @@ async def test_full_explore_flow_with_invoked_as_tool(configured_env, mock_manag
     mock_instance.instance_metadata = {"project_id": "test-project"}
     mock_manager.get_instance = MagicMock(return_value=mock_instance)
 
-    # Track what spawn_instance was called with
+    # Track what spawn_instance_with_mcp was called with
     spawn_calls = []
 
-    def track_spawn(*args, **kwargs):
+    async def track_spawn(*args, **kwargs):
         spawn_calls.append(kwargs)
         return "explorer-instance-xyz"
 
-    mock_manager.spawn_instance = MagicMock(side_effect=track_spawn)
+    mock_manager.spawn_instance_with_mcp = AsyncMock(side_effect=track_spawn)
 
     # Patch invoke_agent_and_wait to capture the call
     with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -285,7 +285,7 @@ async def test_full_explore_flow_with_invoked_as_tool(configured_env, mock_manag
         mock_invoke.assert_called_once()
         call_kwargs = mock_invoke.call_args.kwargs
 
-        # The call to spawn_instance (via invoke_agent_and_wait) should have invoked_as_tool=True
+        # The call to spawn_instance_with_mcp (via invoke_agent_and_wait) should have invoked_as_tool=True
         # But since we mocked invoke_agent_and_wait, we verify the call args instead
         assert call_kwargs.get("message") is not None
         assert "project structure" in call_kwargs.get("message", "")
@@ -305,9 +305,9 @@ async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_ma
 
     result = await experience_tool.ainvoke({"text": "Important knowledge to record"})
 
-    # Verify spawn_instance was called with invoked_as_tool=True
-    mock_manager.spawn_instance.assert_called_once()
-    call_kwargs = mock_manager.spawn_instance.call_args.kwargs
+    # Verify spawn_instance_with_mcp was called with invoked_as_tool=True
+    mock_manager.spawn_instance_with_mcp.assert_called_once()
+    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
 
     assert call_kwargs.get("invoked_as_tool") is True
     assert call_kwargs.get("agent_id") == "experiencer"

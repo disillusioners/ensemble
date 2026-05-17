@@ -10,6 +10,12 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class McpConfigValidationError(ValueError):
+    """Raised when MCP server configuration is invalid."""
+
+    pass
+
+
 class McpStdioConfig(BaseModel):
     """Configuration for STDIO transport MCP servers."""
 
@@ -64,4 +70,4 @@ def validate_mcp_server_config(config: dict[str, Any]) -> McpStdioConfig | McpSs
         return McpStreamableHttpConfig(**config)
     else:
         logger.warning(f"Unknown MCP transport type: {transport}")
-        raise ValueError(f"Unknown MCP transport type: {transport}")
+        raise McpConfigValidationError(f"Unknown MCP transport type: {transport}")

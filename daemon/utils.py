@@ -528,16 +528,9 @@ async def invoke_agent_and_wait(
     # Generate instance_id upfront so MCP preload can use it
     instance_id = str(uuid.uuid4())
     
-    # MCP preload — async, must complete before sync spawn
-    if hasattr(manager, '_mcp_service') and manager._mcp_service:
-        try:
-            await manager._mcp_service.preload_mcp_tools(instance_id)
-        except (Exception, TypeError) as e:
-            logger_utils.warning(f"MCP preload failed for {instance_id[:8]}: {e}")
-    
     try:
-        # 1. Spawn instance (synchronous — creates instance in DB)
-        instance_id = manager.spawn_instance(
+        # 1. Spawn instance with MCP preload + cleanup on failure (synchronous — creates instance in DB)
+        instance_id = await manager.spawn_instance_with_mcp(
             agent_id=agent_id,
             instance_id=instance_id,
             parent_id=parent_id,

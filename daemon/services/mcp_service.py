@@ -29,6 +29,8 @@ class McpService:
         """
         self._manager = manager
         self._tools_cache: dict[str, list[BaseTool]] = {}
+        self._preload_locks: dict[str, asyncio.Lock] = {}
+        self._preload_lock = asyncio.Lock()  # Protects _preload_locks dict
 
     async def preload_mcp_tools(self, instance_id: str) -> None:
         """Connect to MCP servers and discover tools for an instance.
@@ -37,54 +39,62 @@ class McpService:
         Results are cached for sync retrieval by get_mcp_tools().
 
         Non-fatal: logs errors and caches empty list on failure.
+        Uses per-instance locking to prevent concurrent preload races.
         """
-        try:
-            servers = self._manager._mcp_server_repository.list_mcp_servers(
-                is_active=True
-            )
+        # Get or create per-instance lock
+        async with self._preload_lock:
+            if instance_id not in self._preload_locks:
+                self._preload_locks[instance_id] = asyncio.Lock()
+            lock = self._preload_locks[instance_id]
 
-            if not servers:
-                logger.debug(f"No active MCP servers for instance {instance_id[:8]}")
+        async with lock:
+            try:
+                servers = self._manager._mcp_server_repository.list_mcp_servers(
+                    is_active=True
+                )
+
+                if not servers:
+                    logger.debug(f"No active MCP servers for instance {instance_id[:8]}")
+                    self._tools_cache[instance_id] = []
+                    return
+
+                # Connect to all servers (parallel, per-server timeout)
+                from daemon.mcp import get_mcp_connection_manager
+
+                conn_mgr = get_mcp_connection_manager()
+                await conn_mgr.connect_instance(instance_id, servers)
+
+                # Discover tools from all connected servers (parallel)
+                results = await asyncio.gather(
+                    *[
+                        self._discover_server_tools(instance_id, server)
+                        for server in servers
+                    ],
+                    return_exceptions=True,
+                )
+
+                tools = []
+                for server, result in zip(servers, results):
+                    if isinstance(result, Exception):
+                        logger.warning(
+                            f"Failed to discover tools from MCP server "
+                            f"'{server.name}': {result}"
+                        )
+                    else:
+                        tools.extend(result)
+
+                logger.info(
+                    f"Discovered {len(tools)} MCP tools from {len(servers)} "
+                    f"server(s) for instance {instance_id[:8]}"
+                )
+                self._tools_cache[instance_id] = tools
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to preload MCP tools for instance "
+                    f"{instance_id[:8]}: {e}"
+                )
                 self._tools_cache[instance_id] = []
-                return
-
-            # Connect to all servers (parallel, per-server timeout)
-            from daemon.mcp import get_mcp_connection_manager
-
-            conn_mgr = get_mcp_connection_manager()
-            await conn_mgr.connect_instance(instance_id, servers)
-
-            # Discover tools from all connected servers (parallel)
-            results = await asyncio.gather(
-                *[
-                    self._discover_server_tools(instance_id, server)
-                    for server in servers
-                ],
-                return_exceptions=True,
-            )
-
-            tools = []
-            for server, result in zip(servers, results):
-                if isinstance(result, Exception):
-                    logger.warning(
-                        f"Failed to discover tools from MCP server "
-                        f"'{server.name}': {result}"
-                    )
-                else:
-                    tools.extend(result)
-
-            logger.info(
-                f"Discovered {len(tools)} MCP tools from {len(servers)} "
-                f"server(s) for instance {instance_id[:8]}"
-            )
-            self._tools_cache[instance_id] = tools
-
-        except Exception as e:
-            logger.error(
-                f"Failed to preload MCP tools for instance "
-                f"{instance_id[:8]}: {e}"
-            )
-            self._tools_cache[instance_id] = []
 
     def get_mcp_tools(self, instance_id: str) -> list[BaseTool]:
         """Get cached MCP tools for an instance (sync).
@@ -135,8 +145,12 @@ class McpService:
 
         Pops cache FIRST, then closes connections.
         If close fails, cache is already removed — no orphan.
+        Cleans up per-instance lock to prevent memory leaks.
         """
         self._tools_cache.pop(instance_id, None)
+        # Clean up per-instance lock
+        async with self._preload_lock:
+            self._preload_locks.pop(instance_id, None)
         try:
             from daemon.mcp import get_mcp_connection_manager
 
@@ -154,6 +168,7 @@ class McpService:
     async def close_all_connections(self) -> None:
         """Close all MCP connections (shutdown cleanup)."""
         self._tools_cache.clear()
+        self._preload_locks.clear()
         try:
             from daemon.mcp import get_mcp_connection_manager
 

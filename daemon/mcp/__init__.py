@@ -5,6 +5,7 @@ from daemon.mcp.config import (
     McpSseConfig,
     McpStreamableHttpConfig,
     McpServerConfig,
+    McpConfigValidationError,
     validate_mcp_server_config,
 )
 from daemon.mcp.connection_manager import (
@@ -22,6 +23,7 @@ __all__ = [
     "McpSseConfig",
     "McpStreamableHttpConfig",
     "McpServerConfig",
+    "McpConfigValidationError",
     "validate_mcp_server_config",
     "McpConnectionManager",
     "get_mcp_connection_manager",

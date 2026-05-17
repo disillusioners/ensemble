@@ -842,6 +842,60 @@ class InstanceManager:
             invoked_as_tool=invoked_as_tool,
         )
 
+    async def ensure_mcp_preloaded(self, instance_id: str) -> None:
+        """Ensure MCP tools are preloaded for an instance.
+
+        Only preloads if the instance is NOT already in memory (avoids wasted work
+        for already-loaded instances). Also safe if _mcp_service doesn't exist yet.
+
+        This method is idempotent — safe to call multiple times for the same instance.
+
+        Args:
+            instance_id: The instance to preload MCP tools for.
+        """
+        # Skip if instance already loaded — no need to preload
+        if instance_id in self.instances:
+            return
+
+        # Skip if MCP service not initialized
+        if not hasattr(self, '_mcp_service') or not self._mcp_service:
+            return
+
+        try:
+            await self._mcp_service.preload_mcp_tools(instance_id)
+        except Exception as e:
+            logger.warning(f"MCP preload failed for {instance_id[:8]}: {e}")
+
+    async def spawn_instance_with_mcp(self, *, instance_id: str, **kwargs) -> str:
+        """Async spawn with MCP preload and cleanup on failure.
+
+        1. Preloads MCP tools
+        2. Calls sync spawn_instance()
+        3. On spawn failure, cleans up MCP connections
+
+        Args:
+            instance_id: The pre-generated instance ID.
+            **kwargs: Passed to spawn_instance().
+
+        Returns:
+            The instance_id.
+
+        Raises:
+            Whatever spawn_instance() raises.
+        """
+        await self.ensure_mcp_preloaded(instance_id)
+
+        try:
+            return self.spawn_instance(instance_id=instance_id, **kwargs)
+        except Exception:
+            # Clean up MCP connections on spawn failure
+            if hasattr(self, '_mcp_service') and self._mcp_service:
+                try:
+                    await self._mcp_service.close_connections(instance_id)
+                except Exception as cleanup_err:
+                    logger.warning(f"MCP cleanup after spawn failure failed: {cleanup_err}")
+            raise
+
     async def send_message(self, instance_id: str, message: str) -> MessageResult:
         """Send a message to an instance and get the response.
 

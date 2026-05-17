@@ -15,7 +15,7 @@ from daemon.models import (
     ErrorResponse,
     ErrorCodes,
 )
-from daemon.mcp.config import validate_mcp_server_config
+from daemon.mcp.config import validate_mcp_server_config, McpConfigValidationError
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
     # Validate MCP server config
     try:
         validate_mcp_server_config(mcp_server_create.config)
-    except ValueError as e:
+    except McpConfigValidationError as e:
         raise HTTPException(
             status_code=422,
             detail=ErrorResponse(
@@ -147,7 +147,7 @@ async def update_mcp_server(
     if mcp_server_update.config is not None:
         try:
             validate_mcp_server_config(mcp_server_update.config)
-        except ValueError as e:
+        except McpConfigValidationError as e:
             raise HTTPException(
                 status_code=422,
                 detail=ErrorResponse(

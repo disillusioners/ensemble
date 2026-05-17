@@ -14,6 +14,5 @@ Tools from external MCP (Model Context Protocol) servers.
 - Tool names and schemas vary by server implementation
 
 **Usage**:
-- Use `list_mcp_tools()` to see available MCP tools
 - Use `call_mcp_tool(name, arguments)` to invoke a specific tool
 """

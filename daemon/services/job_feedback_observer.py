@@ -341,14 +341,8 @@ class JobFeedbackObserver:
 
                 # Spawn the instance using the instance_id from start_job
                 instance_id = started_job.instance_id
-                # MCP preload — async, must complete before sync spawn
-                if hasattr(self._instance_manager, '_mcp_service') and self._instance_manager._mcp_service:
-                    try:
-                        await self._instance_manager._mcp_service.preload_mcp_tools(instance_id)
-                    except (Exception, TypeError) as e:
-                        logger.warning(f"MCP preload failed for {instance_id[:8]}: {e}")
                 try:
-                    self._instance_manager.spawn_instance(
+                    instance_id = await self._instance_manager.spawn_instance_with_mcp(
                         agent_id=started_job.agent_id,
                         instance_id=instance_id,
                         project_id=started_job.project_id,

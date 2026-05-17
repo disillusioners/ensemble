@@ -70,18 +70,20 @@ class TestConcurrentConnectionManager:
 
     @pytest.mark.asyncio
     async def test_lock_under_concurrent_access(self):
-        """Lazy lock should work correctly under concurrent access."""
+        """Lock should work correctly under concurrent access."""
         mgr = McpConnectionManager()
+
+        # Lock is eagerly initialized, verify it exists
+        assert mgr._lock is not None
 
         # Access lock from many concurrent coroutines
         async def access_lock():
-            lock = mgr._get_lock()
-            async with lock:
+            async with mgr._lock:
                 await asyncio.sleep(0.01)
 
         await asyncio.gather(*[access_lock() for _ in range(10)])
 
-        # Should have exactly one lock
+        # Should have exactly one lock (same instance)
         assert mgr._lock is not None
 
 
