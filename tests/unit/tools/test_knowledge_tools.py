@@ -64,11 +64,12 @@ def mock_manager():
     # (NOT get_instance which returns CompiledStateGraph)
     mock_instance_meta = MagicMock()
     mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+    mock_instance_meta.project_id = "test-project-123"
     manager._instance_repository = MagicMock()
     manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
-    # Configure spawn_instance to return a predictable ID (legacy, for backwards compat)
-    manager.spawn_instance = MagicMock(return_value="spawned-instance-abc123")
+    # Configure spawn_instance_with_mcp to return a predictable ID
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="spawned-instance-abc123")
 
     # Configure enqueue_message as async (legacy, for backwards compat)
     manager.enqueue_message = AsyncMock()
@@ -132,6 +133,7 @@ class TestExploreTool:
         """Verify explore returns result from explorer agent."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -162,6 +164,7 @@ class TestExploreTool:
         """Verify graceful error when agent times out."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -179,6 +182,7 @@ class TestExploreTool:
         """Verify project_id from instance context is used."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "auto-detected-project"}
+        mock_instance_meta.project_id = "auto-detected-project"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -196,6 +200,7 @@ class TestExploreTool:
         """Verify mode parameter is included in the message sent to explorer."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -229,6 +234,7 @@ class TestExperienceTool:
         """Verify experience returns confirmation after enqueuing job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -263,6 +269,7 @@ class TestExperienceTool:
         """Verify project_id from context is used when enqueuing job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -283,6 +290,7 @@ class TestExperienceTool:
         """Verify return value indicates recording has started (fire-and-forget)."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -302,6 +310,7 @@ class TestExperienceTool:
         """Verify the message sent to experiencer includes the knowledge text."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -325,6 +334,7 @@ class TestExperienceTool:
         """Verify project ID is included in the message when available."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -347,6 +357,7 @@ class TestExperienceTool:
         """Verify experiencer agent is targeted by the enqueued job."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -366,6 +377,7 @@ class TestExperienceTool:
         """Job service raises exception - experience() still returns normally."""
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         # Make enqueue raise an exception
@@ -388,6 +400,7 @@ class TestExperienceTool:
         # Override instance metadata to return no project (empty dict)
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
+        mock_instance_meta.project_id = None
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -565,6 +578,7 @@ class TestExperienceJobEnqueue:
         # Set up instance metadata
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         # Set up job queue service where KB queue returns None, FIFO queue returns valid queue
@@ -607,6 +621,7 @@ class TestExperienceJobEnqueue:
         # Set up instance metadata
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         # Remove _job_queue_service (or set to None)
@@ -634,6 +649,7 @@ class TestExperienceJobEnqueue:
         # Set up instance metadata
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         # Both queues return None
@@ -669,6 +685,7 @@ def mock_manager_with_job_queue(configured_env, mock_manager):
     # Set up instance metadata
     mock_instance_meta = MagicMock()
     mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+    mock_instance_meta.project_id = "test-project-123"
     mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
     # Set up job queue service
@@ -759,6 +776,7 @@ class TestExploreJobEnqueue:
         # Override instance metadata to return no project (empty dict)
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
+        mock_instance_meta.project_id = None
         mock_manager_with_job_queue._instance_repository.get = MagicMock(
             return_value=mock_instance_meta
         )
@@ -811,6 +829,7 @@ class TestExploreJobEnqueue:
         # Override instance metadata to return no project (empty dict)
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
+        mock_instance_meta.project_id = None
         mock_manager_with_job_queue._instance_repository.get = MagicMock(
             return_value=mock_instance_meta
         )

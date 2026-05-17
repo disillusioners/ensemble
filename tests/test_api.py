@@ -21,6 +21,7 @@ async def mock_manager():
     
     manager = Mock()
     manager.spawn_instance = Mock(return_value="test-instance-id")
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_instance = AsyncMock(return_value=True)
@@ -205,7 +206,7 @@ async def test_create_instance_success(client, mock_manager):
     data = response.json()
     assert data["instance_id"] == "test-instance-id"
     assert data["agent_id"] == "coder"
-    mock_manager.spawn_instance.assert_called_once_with(
+    mock_manager.spawn_instance_with_mcp.assert_called_once_with(
         agent_id="coder",
         instance_id="550e8400-e29b-41d4-a716-446655440000",
         project_id=None,
@@ -226,11 +227,11 @@ async def test_create_instance_with_project_id(client, mock_manager):
     assert response.status_code == 201
     data = response.json()
     assert data["instance_id"] == "test-instance-id"
-    mock_manager.spawn_instance.assert_called_once_with(
-        agent_id="coder",
-        instance_id=None,
-        project_id="test-project-123",
-    )
+    # Verify call: router generates instance_id when none provided
+    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
+    assert call_kwargs["agent_id"] == "coder"
+    assert call_kwargs["project_id"] == "test-project-123"
+    assert call_kwargs["instance_id"] is not None  # Router generates UUID
 
 
 @pytest.mark.asyncio
@@ -281,6 +282,7 @@ async def test_project_id_roundtrip(client, mock_manager):
             "updated_at": "2024-01-01T00:00:00"
         }
     
+    mock_manager.spawn_instance_with_mcp.side_effect = mock_spawn
     mock_manager.spawn_instance.side_effect = mock_spawn
     mock_manager.get_instance_info.side_effect = mock_get_info
     
@@ -309,6 +311,9 @@ async def test_project_id_roundtrip(client, mock_manager):
 async def test_create_instance_max_limit(client, mock_manager):
     """Test POST /instances with max instances exceeded."""
     # Configure mock to raise ValueError (as the real manager does)
+    mock_manager.spawn_instance_with_mcp.side_effect = ValueError(
+        "Max instances limit reached: 5"
+    )
     mock_manager.spawn_instance.side_effect = ValueError(
         "Max instances limit reached: 5"
     )

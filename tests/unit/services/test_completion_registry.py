@@ -367,7 +367,7 @@ async def test_invoke_agent_and_wait_success(reset_semaphore):
 
     # Create mock manager
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="spawned-instance-123")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="spawned-instance-123")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -389,7 +389,7 @@ async def test_invoke_agent_and_wait_success(reset_semaphore):
         )
 
         assert result == "Agent response"
-        mock_manager.spawn_instance.assert_called_once()
+        mock_manager.spawn_instance_with_mcp.assert_called_once()
         mock_manager.enqueue_message.assert_called_once()
 
 
@@ -400,7 +400,7 @@ async def test_invoke_agent_and_wait_timeout(reset_semaphore):
     from daemon.utils import invoke_agent_and_wait
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="timeout-instance-456")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="timeout-instance-456")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -431,7 +431,7 @@ async def test_invoke_agent_and_wait_error_propagation(reset_semaphore):
     from daemon.utils import invoke_agent_and_wait
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="error-instance-789")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="error-instance-789")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -461,7 +461,7 @@ async def test_invoke_agent_and_wait_exception(reset_semaphore):
     from daemon.utils import invoke_agent_and_wait
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(side_effect=RuntimeError("Spawn failed"))
+    mock_manager.spawn_instance_with_mcp = AsyncMock(side_effect=RuntimeError("Spawn failed"))
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -515,7 +515,7 @@ async def test_semaphore_blocks_at_cap(reset_semaphore):
         results = []
 
         async def call_invoke(idx):
-            mock_manager.spawn_instance = MagicMock(return_value=f"blocked-instance-{idx}")
+            mock_manager.spawn_instance_with_mcp = AsyncMock(return_value=f"blocked-instance-{idx}")
             task = asyncio.create_task(
                 invoke_agent_and_wait(
                     mock_manager,
@@ -560,7 +560,7 @@ async def test_semaphore_released_on_success_path(reset_semaphore):
             return super().release()
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="success-instance")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="success-instance")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -593,7 +593,7 @@ async def test_semaphore_released_on_error_path(reset_semaphore):
             return super().release()
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="error-instance")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="error-instance")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -626,7 +626,7 @@ async def test_semaphore_released_on_timeout_path(reset_semaphore):
             return super().release()
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(return_value="timeout-instance")
+    mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="timeout-instance")
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 
@@ -659,7 +659,7 @@ async def test_semaphore_released_on_exception_path(reset_semaphore):
             return super().release()
 
     mock_manager = MagicMock()
-    mock_manager.spawn_instance = MagicMock(side_effect=RuntimeError("Kaboom"))
+    mock_manager.spawn_instance_with_mcp = AsyncMock(side_effect=RuntimeError("Kaboom"))
     mock_manager.enqueue_message = AsyncMock()
     mock_manager.terminate_instance = AsyncMock()
 

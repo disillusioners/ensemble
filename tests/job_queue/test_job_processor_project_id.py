@@ -91,7 +91,7 @@ def mock_queue_service():
 def mock_instance_manager():
     """Create mock InstanceManager."""
     manager = MagicMock()
-    manager.spawn_instance.return_value = "instance-123"
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="instance-123")
     manager.enqueue_message = AsyncMock()
     return manager
 
@@ -153,9 +153,9 @@ class TestProjectIdAutoInjection:
         # Execute
         await processor._process_next_job()
 
-        # Verify spawn_instance was called with project_id
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
+        # Verify spawn_instance_with_mcp was called with project_id
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
+        call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args.kwargs
         assert call_kwargs.get("project_id") == SAMPLE_PROJECT_UUID, (
             f"Expected project_id={SAMPLE_PROJECT_UUID}, "
             f"got project_id={call_kwargs.get('project_id')}"
@@ -200,8 +200,8 @@ class TestProjectIdAutoInjection:
         # Execute - should complete without calling spawn_instance
         await processor._process_next_job()
 
-        # Verify spawn_instance was NOT called (orphan fallback was removed)
-        mock_instance_manager.spawn_instance.assert_not_called()
+        # Verify spawn_instance_with_mcp was NOT called (orphan fallback was removed)
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_spawn_instance_accepts_project_id_kwarg(
@@ -241,9 +241,9 @@ class TestProjectIdAutoInjection:
         # Execute
         await processor._process_next_job()
 
-        # Verify spawn_instance was called at all (implies it accepts the kwargs)
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_args = mock_instance_manager.spawn_instance.call_args
+        # Verify spawn_instance_with_mcp was called at all (implies it accepts the kwargs)
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
+        call_args = mock_instance_manager.spawn_instance_with_mcp.call_args
         
         # Verify it was called with keyword arguments
         assert "project_id" in call_args.kwargs or len(call_args.args) >= 3, (
@@ -290,8 +290,8 @@ class TestProjectIdAutoInjection:
         # Execute - should not raise
         await processor._process_next_job()
 
-        # Verify spawn_instance was still called (job was processed)
-        mock_instance_manager.spawn_instance.assert_called_once()
+        # Verify spawn_instance_with_mcp was still called (job was processed)
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
         # Verify enqueue_message was also called
         mock_instance_manager.enqueue_message.assert_called_once()
 
@@ -334,9 +334,9 @@ class TestProjectIdAutoInjection:
         # Execute
         await processor._process_next_job()
 
-        # Verify spawn_instance was called with project_id=None
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
+        # Verify spawn_instance_with_mcp was called with project_id=None
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
+        call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args.kwargs
         assert call_kwargs.get("project_id") is None
 
     @pytest.mark.asyncio
@@ -377,9 +377,9 @@ class TestProjectIdAutoInjection:
         # Execute
         await processor._process_next_job()
 
-        # Verify spawn_instance was called with the exact UUID
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
+        # Verify spawn_instance_with_mcp was called with the exact UUID
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
+        call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args.kwargs
         assert call_kwargs.get("project_id") == SAMPLE_PROJECT_UUID, (
             f"Expected project_id={SAMPLE_PROJECT_UUID}, "
             f"got project_id={call_kwargs.get('project_id')}"
@@ -423,14 +423,14 @@ class TestProjectIdAutoInjection:
             return_value=create_started_job("normal-job", "normal-project"),
         )
         mock_instance_manager.enqueue_message = AsyncMock()
-        mock_instance_manager.spawn_instance.reset_mock()
+        mock_instance_manager.spawn_instance_with_mcp.reset_mock()
 
         # Execute
         await processor._process_next_job()
 
         # Verify normal job spawned with correct project_id
-        assert mock_instance_manager.spawn_instance.call_count == 1
-        call_kwargs = mock_instance_manager.spawn_instance.call_args.kwargs
+        assert mock_instance_manager.spawn_instance_with_mcp.call_count == 1
+        call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args.kwargs
         assert call_kwargs.get("project_id") == "normal-project"
 
 

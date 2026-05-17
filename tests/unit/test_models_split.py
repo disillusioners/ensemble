@@ -53,6 +53,12 @@ class TestBackwardCompatibility:
             InstanceMappingCreate,
             InstanceMappingInfo,
             InstanceMappingListResponse,
+            # mcp_server
+            McpServerCreate,
+            McpServerUpdate,
+            McpServerInfo,
+            McpServerListResponse,
+            McpServerDeleteResponse,
             # common (also re-exported from agent module per __init__.py)
             HealthResponse,
         )
@@ -90,6 +96,11 @@ class TestBackwardCompatibility:
         assert InstanceMappingCreate is not None
         assert InstanceMappingInfo is not None
         assert InstanceMappingListResponse is not None
+        assert McpServerCreate is not None
+        assert McpServerUpdate is not None
+        assert McpServerInfo is not None
+        assert McpServerListResponse is not None
+        assert McpServerDeleteResponse is not None
 
 
 class TestAllCompleteness:
@@ -139,6 +150,12 @@ class TestAllCompleteness:
             "InstanceMappingCreate",
             "InstanceMappingInfo",
             "InstanceMappingListResponse",
+            # mcp_server
+            "McpServerCreate",
+            "McpServerUpdate",
+            "McpServerInfo",
+            "McpServerListResponse",
+            "McpServerDeleteResponse",
         ]
         
         actual_all = models.__all__
@@ -517,6 +534,54 @@ class TestHealthResponseSpecific:
         assert hr1.version == hr2.version
 
 
+class TestMcpServerModels:
+    """Test MCP Server models are properly defined and accessible."""
+
+    def test_import_mcp_server_models(self):
+        """Verify MCP server models can be imported from daemon.models.mcp_server."""
+        from daemon.models.mcp_server import (
+            McpServerCreate,
+            McpServerUpdate,
+            McpServerInfo,
+            McpServerListResponse,
+            McpServerDeleteResponse,
+        )
+        
+        assert McpServerCreate is not None
+        assert McpServerUpdate is not None
+        assert McpServerInfo is not None
+        assert McpServerListResponse is not None
+        assert McpServerDeleteResponse is not None
+
+    def test_mcp_server_create_instantiation(self):
+        """Test McpServerCreate creation."""
+        from daemon.models.mcp_server import McpServerCreate
+        
+        server = McpServerCreate(
+            name="test-server",
+            description="A test MCP server",
+        )
+        assert server.name == "test-server"
+        assert server.description == "A test MCP server"
+        assert server.is_active is True  # default
+
+    def test_mcp_server_info_instantiation(self):
+        """Test McpServerInfo creation."""
+        from daemon.models.mcp_server import McpServerInfo
+        from datetime import datetime
+        
+        info = McpServerInfo(
+            id="server-123",
+            name="test-server",
+            config={"command": "npx"},
+            is_active=True,
+            created_at=datetime.now(),
+        )
+        assert info.id == "server-123"
+        assert info.name == "test-server"
+        assert info.is_active is True
+
+
 class TestPydanticModelBehavior:
     """Test 7: Pydantic Model Behavior — verify models are still proper Pydantic models."""
 
@@ -532,6 +597,8 @@ class TestPydanticModelBehavior:
             ScheduleInfo, ScheduleListResponse, ScheduleUpdate,
             ScheduleExecutionInfo, ScheduleExecutionListResponse, ScheduleTriggerResponse,
             InstanceMappingCreate, InstanceMappingInfo, InstanceMappingListResponse,
+            McpServerCreate, McpServerUpdate, McpServerInfo, McpServerListResponse,
+            McpServerDeleteResponse,
         )
         
         # All should be subclasses of BaseModel
@@ -545,6 +612,8 @@ class TestPydanticModelBehavior:
             ScheduleInfo, ScheduleListResponse, ScheduleUpdate,
             ScheduleExecutionInfo, ScheduleExecutionListResponse, ScheduleTriggerResponse,
             InstanceMappingCreate, InstanceMappingInfo, InstanceMappingListResponse,
+            McpServerCreate, McpServerUpdate, McpServerInfo, McpServerListResponse,
+            McpServerDeleteResponse,
         ]
         
         for model in pydantic_models:

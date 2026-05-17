@@ -256,13 +256,15 @@ class TestInstanceStatus:
     def test_instance_status_values(self):
         """Test InstanceStatus has correct number of values."""
         values = [s.value for s in InstanceStatus]
-        assert len(values) == 7
+        assert len(values) == 8
         assert "idle" in values
         assert "running" in values
         assert "waiting" in values
         assert "waiting_children" in values
         assert "error" in values
         assert "terminated" in values
+        assert "completed" in values
+        assert "paused" in values
 
 
 class TestErrorCodes:
@@ -297,6 +299,8 @@ class TestErrorCodes:
             "INTERNAL_ERROR",
             "SOURCE_NOT_FOUND",
             "SOURCE_ALREADY_EXISTS",
+            "MCP_SERVER_NOT_FOUND",
+            "MCP_SERVER_ALREADY_EXISTS",
             "SOURCE_TYPE_NOT_SUPPORTED",
             "SCHEDULER_ENABLE_NOT_ALLOWED",
             "SCHEDULER_SOURCE_UPDATE_NOT_ALLOWED",

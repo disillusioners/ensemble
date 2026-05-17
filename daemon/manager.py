@@ -530,6 +530,7 @@ class InstanceManager:
         self._completion_registry = get_completion_registry()
 
         # MCP service for managing MCP tool lifecycle
+        from .services.mcp_service import McpService
         self._mcp_service = McpService(manager=self)
 
     @property

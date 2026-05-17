@@ -116,7 +116,7 @@ def mock_manager():
     """Create a mock InstanceManager."""
     manager = MagicMock()
     # Create a simple spawn that returns a UUID
-    manager.spawn_instance = MagicMock(return_value=str(uuid.uuid4()))
+    manager.spawn_instance_with_mcp = AsyncMock(return_value=str(uuid.uuid4()))
     return manager
 
 
@@ -264,9 +264,9 @@ class TestInstanceMapper:
     
     @pytest.mark.asyncio
     async def test_get_or_create_instance_spawns_agent(self, mock_source_repo, mock_manager, mock_registry):
-        """Should call manager.spawn_instance to create new agent."""
+        """Should call manager.spawn_instance_with_mcp to create new agent."""
         # Reset the mock to track calls
-        mock_manager.spawn_instance.reset_mock()
+        mock_manager.spawn_instance_with_mcp.reset_mock()
         
         with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
             mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
@@ -277,11 +277,11 @@ class TestInstanceMapper:
                 agent_id="test"
             )
             
-            # Should have called spawn_instance
-            mock_manager.spawn_instance.assert_called_once()
+            # Should have called spawn_instance_with_mcp
+            mock_manager.spawn_instance_with_mcp.assert_called_once()
             
             # Should return the spawned instance ID
-            assert instance_id == mock_manager.spawn_instance.return_value
+            assert instance_id == mock_manager.spawn_instance_with_mcp.return_value
     
     @pytest.mark.asyncio
     async def test_get_mapping_returns_mapping(self, mock_source_repo, instance_mapper):

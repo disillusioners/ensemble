@@ -25,7 +25,7 @@ async def mock_manager():
     manager = Mock()
     
     # Basic instance manager mocks
-    manager.spawn_instance = Mock(return_value="test-instance-id")
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.get_instance = Mock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_instance = Mock(return_value=True)

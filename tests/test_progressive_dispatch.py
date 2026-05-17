@@ -403,6 +403,10 @@ async def test_manager_streaming_extracts_string_content(
         manager = InstanceManager(mock_config)
         manager._instance_repository = mock_instance_repository
         manager.source_dispatcher = mock_dispatcher
+        # Mock spawn_instance to avoid calling real lifecycle service
+        manager.spawn_instance = Mock(return_value="test-instance")
+        # Add mock graph to instances so get_instance can find it
+        manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
         instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -457,6 +461,10 @@ async def test_manager_streaming_extracts_list_content(
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_dispatcher
+            # Mock spawn_instance to avoid calling real lifecycle service
+            manager.spawn_instance = Mock(return_value="test-instance")
+            # Add mock graph to instances so get_instance can find it
+            manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -510,6 +518,10 @@ async def test_manager_streaming_mixed_list_content_only_text_dispatched(
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_dispatcher
+            # Mock spawn_instance to avoid calling real lifecycle service
+            manager.spawn_instance = Mock(return_value="test-instance")
+            # Add mock graph to instances so get_instance can find it
+            manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -575,6 +587,10 @@ async def test_manager_streaming_deduplication_by_message_id(
         manager = InstanceManager(mock_config)
         manager._instance_repository = mock_instance_repository
         manager.source_dispatcher = mock_dispatcher
+        # Mock spawn_instance to avoid calling real lifecycle service
+        manager.spawn_instance = Mock(return_value="test-instance")
+        # Add mock graph to instances so get_instance can find it
+        manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
         instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -631,6 +647,10 @@ async def test_manager_streaming_multiple_messages_same_execution(
         manager = InstanceManager(mock_config)
         manager._instance_repository = mock_instance_repository
         manager.source_dispatcher = mock_dispatcher
+        # Mock spawn_instance to avoid calling real lifecycle service
+        manager.spawn_instance = Mock(return_value="test-instance")
+        # Add mock graph to instances so get_instance can find it
+        manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
         instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -702,6 +722,10 @@ async def test_manager_streaming_empty_content_not_dispatched(
         manager = InstanceManager(mock_config)
         manager._instance_repository = mock_instance_repository
         manager.source_dispatcher = mock_dispatcher
+        # Mock spawn_instance to avoid calling real lifecycle service
+        manager.spawn_instance = Mock(return_value="test-instance")
+        # Add mock graph to instances so get_instance can find it
+        manager.instances["test-instance"] = (mock_graph, "agents/coder")
 
         instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 

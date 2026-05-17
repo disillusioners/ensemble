@@ -67,7 +67,7 @@ def mock_queue_service():
 def mock_instance_manager():
     """Create mock InstanceManager."""
     manager = MagicMock()
-    manager.spawn_instance.return_value = "instance-123"
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="instance-123")
     manager.enqueue_message = AsyncMock()
     return manager
 
@@ -141,7 +141,7 @@ class TestJobProcessorTwoLevelPause:
         await processor._process_next_job()
 
         mock_queue_service.start_job.assert_called_once_with("job-1")
-        mock_instance_manager.spawn_instance.assert_called_once()
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
         mock_instance_manager.enqueue_message.assert_called_once()
 
     @pytest.mark.asyncio
@@ -161,7 +161,7 @@ class TestJobProcessorTwoLevelPause:
 
         # Job should not be started because queue is paused
         mock_queue_service.start_job.assert_not_called()
-        mock_instance_manager.spawn_instance.assert_not_called()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_project_paused_skips_all(
@@ -435,7 +435,7 @@ class TestJobProcessorErrorHandling:
         # Should not raise
         await processor._process_next_job()
 
-        mock_instance_manager.spawn_instance.assert_not_called()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_handles_spawn_instance_failure(
@@ -453,7 +453,7 @@ class TestJobProcessorErrorHandling:
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job.return_value = started_job
-        mock_instance_manager.spawn_instance.side_effect = Exception("Spawn failed")
+        mock_instance_manager.spawn_instance_with_mcp.side_effect = Exception("Spawn failed")
 
         # Should handle error and complete job as failed
         await processor._process_next_job()
@@ -478,7 +478,7 @@ class TestJobProcessorErrorHandling:
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         mock_queue_service.start_job.return_value = started_job
-        mock_instance_manager.spawn_instance.return_value = "instance-123"
+        mock_instance_manager.spawn_instance_with_mcp.return_value = "instance-123"
         mock_instance_manager.enqueue_message.side_effect = Exception("Enqueue failed")
 
         await processor._process_next_job()
@@ -538,14 +538,14 @@ class TestOrphanJobRecovery:
 
         # Instance doesn't exist - should raise KeyError
         mock_instance_manager.get_instance.side_effect = KeyError("Instance not found")
-        mock_instance_manager.spawn_instance.return_value = "missing-instance-id"
+        mock_instance_manager.spawn_instance_with_mcp.return_value = "missing-instance-id"
         mock_instance_manager.enqueue_message = AsyncMock()
 
         await processor._process_next_job()
 
         # Should have spawned the instance using the existing instance_id
-        mock_instance_manager.spawn_instance.assert_called_once()
-        call_kwargs = mock_instance_manager.spawn_instance.call_args[1]
+        mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
+        call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args[1]
         assert call_kwargs["instance_id"] == "missing-instance-id"
         assert call_kwargs["agent_id"] == "coder"
         assert call_kwargs["project_id"] == "project-1"
@@ -574,7 +574,7 @@ class TestOrphanJobRecovery:
         mock_queue_service._repository.list_by_queue.return_value = ([orphan_job], None)
 
         mock_instance_manager.get_instance.side_effect = KeyError("Instance not found")
-        mock_instance_manager.spawn_instance.side_effect = Exception("Max instances reached")
+        mock_instance_manager.spawn_instance_with_mcp.side_effect = Exception("Max instances reached")
 
         await processor._process_next_job()
 
@@ -609,7 +609,7 @@ class TestOrphanJobRecovery:
         await processor._process_next_job()
 
         # Should NOT have spawned a new instance
-        mock_instance_manager.spawn_instance.assert_not_called()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
 
 @pytest.fixture

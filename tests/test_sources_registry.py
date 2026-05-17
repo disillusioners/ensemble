@@ -125,8 +125,8 @@ def mock_manager():
     # Mock enqueue_message (async method called by registry)
     manager.enqueue_message = AsyncMock()
     
-    # Mock spawn_instance
-    manager.spawn_instance = MagicMock(return_value="test-instance-id")
+    # Mock spawn_instance_with_mcp
+    manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     
     # Mock _process_queue (called via asyncio.create_task)
     manager._process_queue = AsyncMock()
