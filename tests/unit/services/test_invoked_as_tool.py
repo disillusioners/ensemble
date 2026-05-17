@@ -135,23 +135,40 @@ async def test_explore_passes_invoked_as_tool_true(configured_env, mock_manager)
 # ─── experience Tool Tests ──────────────────────────────────────────────────────
 
 
+@pytest.fixture
+def mock_job_queue_service():
+    """Create a mock JobQueueService with required async methods."""
+    service = MagicMock()
+    service._queue_repo = MagicMock()
+    # Mock get_by_name to return a queue (used via asyncio.to_thread)
+    mock_queue = MagicMock()
+    mock_queue.queue_id = "test-queue-id"
+    service._queue_repo.get_by_name = MagicMock(return_value=mock_queue)
+    # Mock enqueue as async
+    service.enqueue = AsyncMock()
+    return service
+
+
 @pytest.mark.asyncio
-async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manager):
-    """Verify experience tool spawns instance with invoked_as_tool=True."""
+async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manager, mock_job_queue_service):
+    """Verify experience tool enqueues job with correct metadata."""
     from daemon.tools.knowledge_tools import create_knowledge_tools
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project-123"}
     mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager._job_queue_service = mock_job_queue_service
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
     experience_tool = next(t for t in tools if t.name == "experience")
 
-    await experience_tool.ainvoke({"text": "Test knowledge"})
+    result = await experience_tool.ainvoke({"text": "Test knowledge"})
 
-    mock_manager.spawn_instance_with_mcp.assert_called_once()
-    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
-    assert call_kwargs.get("invoked_as_tool") is True
+    # Verify enqueue was called (experience tool uses job enqueue, not spawn)
+    mock_job_queue_service.enqueue.assert_called_once()
+    call_kwargs = mock_job_queue_service.enqueue.call_args.kwargs
+    assert call_kwargs.get("agent_id") == "experiencer"
+    assert "Test knowledge" in call_kwargs.get("message", "")
 
 
 # ─── spawn_instance Metadata Tests ──────────────────────────────────────────────
@@ -292,29 +309,34 @@ async def test_full_explore_flow_with_invoked_as_tool(configured_env, mock_manag
 
 
 @pytest.mark.asyncio
-async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_manager):
-    """Integration test: verify experience tool flow with invoked_as_tool."""
+async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_manager, mock_job_queue_service):
+    """Integration test: verify experience tool flow enqueues job correctly."""
     from daemon.tools.knowledge_tools import create_knowledge_tools
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project-123"}
     mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager._job_queue_service = mock_job_queue_service
+    # Mock _instance_repository used by _get_project_id()
+    mock_repo_instance = MagicMock()
+    mock_repo_instance.project_id = "test-project-123"
+    mock_manager._instance_repository = MagicMock()
+    mock_manager._instance_repository.get = MagicMock(return_value=mock_repo_instance)
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
     experience_tool = next(t for t in tools if t.name == "experience")
 
     result = await experience_tool.ainvoke({"text": "Important knowledge to record"})
 
-    # Verify spawn_instance_with_mcp was called with invoked_as_tool=True
-    mock_manager.spawn_instance_with_mcp.assert_called_once()
-    call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
+    # Verify enqueue was called with correct parameters
+    mock_job_queue_service.enqueue.assert_called_once()
+    call_kwargs = mock_job_queue_service.enqueue.call_args.kwargs
 
-    assert call_kwargs.get("invoked_as_tool") is True
     assert call_kwargs.get("agent_id") == "experiencer"
-    assert call_kwargs.get("parent_id") == "parent-instance-id"
-
-    # Verify enqueue_message was called to send the knowledge to the child
-    mock_manager.enqueue_message.assert_called_once()
+    assert "Important knowledge to record" in call_kwargs.get("message", "")
+    assert call_kwargs.get("project_id") == "test-project-123"
+    assert call_kwargs.get("source") == "experience:parent-instance-id"
+    assert "text_preview" in call_kwargs.get("metadata", {})
 
 
 # ─── Regression Tests ──────────────────────────────────────────────────────────
