@@ -1,0 +1,165 @@
+"""Abstract base class for built-in MCP server definitions."""
+
+from __future__ import annotations
+
+import logging
+from abc import ABC, abstractmethod
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+class BuiltinServerDefinition(ABC):
+    """Abstract base class for built-in MCP server definitions."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Unique identifier for this built-in server."""
+        ...
+
+    @property
+    @abstractmethod
+    def display_name(self) -> str:
+        """Human-readable name for display."""
+        ...
+
+    @property
+    @abstractmethod
+    def description(self) -> str:
+        """Description of what this server does."""
+        ...
+
+    @property
+    @abstractmethod
+    def schema_version(self) -> str:
+        """Version of the config schema. Changes trigger schema drift detection."""
+        ...
+
+    @abstractmethod
+    def get_config_schema(self) -> list[dict[str, Any]]:
+        """Return the config schema as a list of ConfigSchemaField dicts."""
+        ...
+
+    def get_base_config(self) -> dict[str, Any]:
+        """Return base config with defaults applied (calls build_config({}))."""
+        return self.build_config({})
+
+    def build_config(self, user_values: dict[str, Any]) -> dict[str, Any]:
+        """
+        Generic config builder. Iterates schema fields and generates args/env.
+
+        Algorithm:
+        1. Get schema from get_config_schema()
+        2. For each field, resolve value: user_values[key] if present, else field['default']
+        3. Skip if resolved value is None or empty string ("")
+        4. If section == "args":
+           - arg_format == "key_value": append "--key-name" and str(value) to args list
+             (key should be converted: underscores to hyphens, e.g., "api_key" → "--api-key")
+           - arg_format == "flag": if value is truthy, append "--flag-name" to args list
+             (same key conversion)
+        5. If section == "env": set env dict key = field key uppercased, value = str(value)
+        6. Return {"args": args_list, "env": env_dict}
+
+        If any base args/env should always be present, subclasses can override to merge.
+        """
+        schema = self.get_config_schema()
+        args: list[str] = []
+        env: dict[str, str] = {}
+
+        for field in schema:
+            key = field["key"]
+            # Resolve value: user value takes priority over default
+            if key in user_values:
+                value = user_values[key]
+            elif field.get("default") is not None:
+                value = field["default"]
+            else:
+                continue  # skip fields with no value
+
+            # Skip None and empty string
+            if value is None or (isinstance(value, str) and value == ""):
+                continue
+
+            section = field.get("section", "args")
+            arg_format = field.get("arg_format", "key_value")
+
+            # Convert key for CLI: underscores to hyphens
+            cli_key = key.replace("_", "-")
+
+            if section == "env":
+                env[key.upper()] = str(value)
+            elif section == "args":
+                if arg_format == "flag":
+                    if value:  # Only emit flag if truthy
+                        args.append(f"--{cli_key}")
+                else:  # key_value
+                    args.append(f"--{cli_key}")
+                    args.append(str(value))
+
+        return {"args": args, "env": env}
+
+    def parse_config(self, stored_config: dict[str, Any]) -> dict[str, Any]:
+        """
+        Reverse-map stored MCP config back to user values for form pre-fill.
+
+        Algorithm:
+        1. Get schema from get_config_schema()
+        2. Get stored args list and env dict from stored_config
+        3. For each schema field:
+           - If section == "env": look up key.upper() in env dict, coerce to field type
+           - If section == "args" and arg_format == "flag": check if "--key-name" exists in args → True/False
+           - If section == "args" and arg_format == "key_value": find "--key-name" in args, take next element as value, coerce type
+        4. Type coercion: "number" → int/float, "boolean" → bool, "text"/"select" → str
+        5. Return dict of {key: coerced_value} for all fields found in stored config
+        """
+        schema = self.get_config_schema()
+        stored_args = stored_config.get("args", [])
+        stored_env = stored_config.get("env", {})
+        result: dict[str, Any] = {}
+
+        for field in schema:
+            key = field["key"]
+            field_type = field.get("type", "text")
+            section = field.get("section", "args")
+            arg_format = field.get("arg_format", "key_value")
+            cli_key = key.replace("_", "-")
+
+            if section == "env":
+                env_key = key.upper()
+                if env_key in stored_env:
+                    raw_value = stored_env[env_key]
+                    result[key] = self._coerce_value(raw_value, field_type)
+            elif section == "args":
+                if arg_format == "flag":
+                    flag_str = f"--{cli_key}"
+                    if flag_str in stored_args:
+                        result[key] = True
+                else:  # key_value
+                    key_str = f"--{cli_key}"
+                    try:
+                        idx = stored_args.index(key_str)
+                        if idx + 1 < len(stored_args):
+                            raw_value = stored_args[idx + 1]
+                            result[key] = self._coerce_value(raw_value, field_type)
+                    except ValueError:
+                        pass  # key not found in args
+
+        return result
+
+    @staticmethod
+    def _coerce_value(value: Any, field_type: str) -> Any:
+        """Coerce a value to the expected type based on schema field type."""
+        if field_type == "number":
+            try:
+                if "." in str(value):
+                    return float(value)
+                return int(value)
+            except (ValueError, TypeError):
+                return value
+        elif field_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            return str(value).lower() in ("true", "1", "yes")
+        else:  # text or select
+            return str(value)

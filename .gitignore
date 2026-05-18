@@ -58,7 +58,7 @@ agents-ensemble.db
 test-results/*
 frontend/playwright-report/
 test_e2e_queue.db
-tmp_test/*
 test_e2e_instance_title.db
+test_*.db
 .inspiration-projects/*
 data_dev/*

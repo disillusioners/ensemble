@@ -29,6 +29,9 @@ class SQLModelMcpServerRepository:
         description: str | None = None,
         config: dict[str, Any] | None = None,
         is_active: bool = True,
+        is_builtin: bool = False,
+        config_schema: list[dict[str, Any]] | None = None,
+        config_schema_version: str = "0",
     ) -> McpServer:
         """Create a new MCP server configuration.
 
@@ -37,6 +40,9 @@ class SQLModelMcpServerRepository:
             description: Optional description.
             config: Server configuration dictionary.
             is_active: Whether the server is active.
+            is_builtin: Whether this is a built-in server.
+            config_schema: JSON schema for configuration validation.
+            config_schema_version: Version of the config schema.
 
         Returns:
             Created McpServer instance.
@@ -50,6 +56,9 @@ class SQLModelMcpServerRepository:
                 description=description,
                 config=config or {},
                 is_active=is_active,
+                is_builtin=is_builtin,
+                config_schema=config_schema,
+                config_schema_version=config_schema_version,
                 created_at=now,
                 updated_at=None,
             )
@@ -91,6 +100,7 @@ class SQLModelMcpServerRepository:
         limit: int = 100,
         offset: int = 0,
         is_active: bool | None = None,
+        is_builtin: bool | None = None,
     ) -> list[McpServer]:
         """List MCP servers with optional filters.
 
@@ -98,6 +108,7 @@ class SQLModelMcpServerRepository:
             limit: Maximum number of results.
             offset: Number of results to skip.
             is_active: Optional filter by active status.
+            is_builtin: Optional filter by builtin status.
 
         Returns:
             List of McpServer instances.
@@ -107,6 +118,8 @@ class SQLModelMcpServerRepository:
 
             if is_active is not None:
                 stmt = stmt.where(McpServer.is_active == is_active)
+            if is_builtin is not None:
+                stmt = stmt.where(McpServer.is_builtin == is_builtin)
 
             stmt = stmt.order_by(col(McpServer.created_at).desc()).offset(offset).limit(limit)
             return list(session.exec(stmt))
@@ -118,6 +131,8 @@ class SQLModelMcpServerRepository:
         description: str | None = None,
         config: dict[str, Any] | None = None,
         is_active: bool | None = None,
+        config_schema: list[dict[str, Any]] | None = None,
+        config_schema_version: str | None = None,
     ) -> McpServer | None:
         """Update an MCP server configuration.
 
@@ -127,6 +142,8 @@ class SQLModelMcpServerRepository:
             description: New description (optional).
             config: New config dictionary (optional).
             is_active: New active status (optional).
+            config_schema: New config schema (optional).
+            config_schema_version: New config schema version (optional).
 
         Returns:
             Updated McpServer instance or None if not found.
@@ -144,6 +161,10 @@ class SQLModelMcpServerRepository:
                 mcp_server.config = config
             if is_active is not None:
                 mcp_server.is_active = is_active
+            if config_schema is not None:
+                mcp_server.config_schema = config_schema
+            if config_schema_version is not None:
+                mcp_server.config_schema_version = config_schema_version
 
             mcp_server.updated_at = datetime.now(timezone.utc).isoformat()
             session.commit()

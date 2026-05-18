@@ -23,5 +23,11 @@ class McpServer(SQLModel, table=True):
         sa_column=Column(JSON)
     )
     is_active: bool = Field(default=True)
+    is_builtin: bool = Field(default=False)
+    config_schema: list[dict[str, Any]] | None = Field(
+        default=None,
+        sa_column=Column(JSON)
+    )
+    config_schema_version: str = Field(default="0")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str | None = Field(default=None)

@@ -14,8 +14,14 @@ from daemon.models import (
     McpServerDeleteResponse,
     ErrorResponse,
     ErrorCodes,
+    ConfigSchemaField,
+    BuiltinServerTemplate,
+    BuiltinTemplateListResponse,
+    BuiltinServerConfigure,
 )
 from daemon.mcp.config import validate_mcp_server_config, McpConfigValidationError
+from daemon.mcp.builtin_servers import get_registry
+from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
 from daemon.utils import parse_utc_datetime
 
 logger = logging.getLogger(__name__)
@@ -31,12 +37,29 @@ def _get_manager(request: Request) -> Any:
 
 def _mcp_server_to_info(mcp_server) -> McpServerInfo:
     """Convert McpServer model to McpServerInfo response model."""
+    # Parse config_schema from DB (stored as list[dict]) to list[ConfigSchemaField]
+    config_schema: list[ConfigSchemaField] | None = None
+    if mcp_server.config_schema:
+        config_schema = [ConfigSchemaField(**field) for field in mcp_server.config_schema]
+
+    # For built-in servers, parse config to get initial_values for form pre-fill
+    initial_values: dict | None = None
+    if mcp_server.is_builtin:
+        registry = get_registry()
+        definition = registry.get_by_name(mcp_server.name)
+        if definition:
+            initial_values = definition.parse_config(mcp_server.config)
+
     return McpServerInfo(
         id=mcp_server.id,
         name=mcp_server.name,
         description=mcp_server.description,
         config=mcp_server.config,
         is_active=mcp_server.is_active,
+        is_builtin=mcp_server.is_builtin,
+        config_schema=config_schema,
+        config_schema_version=mcp_server.config_schema_version or "0",
+        initial_values=initial_values,
         created_at=parse_utc_datetime(mcp_server.created_at),
         updated_at=parse_utc_datetime(mcp_server.updated_at) if mcp_server.updated_at else None,
     )
@@ -99,6 +122,81 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
     return _mcp_server_to_info(mcp_server)
 
 
+@router.get("/builtin-templates", response_model=BuiltinTemplateListResponse)
+async def list_builtin_templates():
+    """List all available built-in server templates."""
+    registry = get_registry()
+    templates = []
+    for definition in registry.get_all():
+        templates.append(BuiltinServerTemplate(
+            name=definition.name,
+            display_name=definition.display_name,
+            description=definition.description,
+            config_schema=[ConfigSchemaField(**field) for field in definition.get_config_schema()]
+        ))
+    return BuiltinTemplateListResponse(templates=templates)
+
+
+@router.post("/configure-builtin", response_model=McpServerInfo, status_code=201)
+async def configure_builtin_server(request: Request, config_request: BuiltinServerConfigure):
+    """Configure a built-in MCP server from a template."""
+    manager = _get_manager(request)
+    registry = get_registry()
+
+    # Look up the template definition
+    definition = registry.get_by_name(config_request.template_name)
+    if not definition:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Built-in server template '{config_request.template_name}' not found"
+        )
+
+    # Validate config values
+    try:
+        validate_config_values(definition.get_config_schema(), config_request.values)
+    except BuiltinConfigValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"errors": e.errors}
+        )
+
+    # Build the final config from user values
+    generated_config = definition.build_config(config_request.values)
+    schema_as_dicts = definition.get_config_schema()
+
+    # Check if server already exists
+    existing = await asyncio.to_thread(
+        manager._mcp_server_repository.get_mcp_server_by_name,
+        definition.name
+    )
+
+    if existing:
+        if not existing.is_builtin:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A user-created MCP server with name '{definition.name}' already exists"
+            )
+        # Update existing built-in server
+        updated = await asyncio.to_thread(
+            manager._mcp_server_repository.update_mcp_server,
+            existing.id,
+            config=generated_config
+        )
+        return _mcp_server_to_info(updated)
+    else:
+        # Create new built-in server
+        created = await asyncio.to_thread(
+            manager._mcp_server_repository.create_mcp_server,
+            name=definition.name,
+            description=definition.description,
+            config=generated_config,
+            is_builtin=True,
+            config_schema=schema_as_dicts,
+            config_schema_version=definition.schema_version,
+        )
+        return _mcp_server_to_info(created)
+
+
 @router.get("/{server_id}", response_model=McpServerInfo)
 async def get_mcp_server(server_id: str, request: Request):
     """Get a specific MCP server."""
@@ -142,6 +240,17 @@ async def update_mcp_server(
                 message=f"MCP server not found: {server_id}"
             ).model_dump()
         )
+
+    # Built-in servers: only allow config and is_active updates
+    if existing.is_builtin:
+        if mcp_server_update.name is not None or mcp_server_update.description is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=ErrorResponse(
+                    code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                    message="Cannot modify name or description of a built-in MCP server"
+                ).model_dump()
+            )
 
     # Validate MCP server config if provided
     if mcp_server_update.config is not None:
@@ -203,6 +312,16 @@ async def delete_mcp_server(server_id: str, request: Request):
             ).model_dump()
         )
 
+    # Built-in servers are protected and cannot be deleted
+    if existing.is_builtin:
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(
+                code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                message="Cannot delete a built-in MCP server"
+            ).model_dump()
+        )
+
     # Delete MCP server
     result = await asyncio.to_thread(
         manager._mcp_server_repository.delete_mcp_server,
@@ -210,3 +329,49 @@ async def delete_mcp_server(server_id: str, request: Request):
     )
 
     return McpServerDeleteResponse(deleted=result["deleted"], id=server_id)
+
+
+@router.post("/{server_id}/reset-builtin", response_model=McpServerInfo)
+async def reset_builtin_server(server_id: str, request: Request):
+    """Reset a built-in MCP server to its default configuration."""
+    manager = _get_manager(request)
+
+    # Check if server exists
+    existing = await asyncio.to_thread(
+        manager._mcp_server_repository.get_mcp_server,
+        server_id
+    )
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail="MCP server not found"
+        )
+
+    if not existing.is_builtin:
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(
+                code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                message="Server is not a built-in server"
+            ).model_dump()
+        )
+
+    # Look up the definition in the registry
+    registry = get_registry()
+    definition = registry.get_by_name(existing.name)
+    if not definition:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Built-in server definition '{existing.name}' not found in registry"
+        )
+
+    # Reset to default config (empty values = defaults only)
+    defaults_config = definition.build_config({})
+
+    # Update the server
+    updated = await asyncio.to_thread(
+        manager._mcp_server_repository.update_mcp_server,
+        server_id,
+        config=defaults_config
+    )
+    return _mcp_server_to_info(updated)

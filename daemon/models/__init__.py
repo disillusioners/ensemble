@@ -53,4 +53,8 @@ __all__ = [
     "McpServerInfo",
     "McpServerListResponse",
     "McpServerDeleteResponse",
+    "ConfigSchemaField",
+    "BuiltinServerTemplate",
+    "BuiltinTemplateListResponse",
+    "BuiltinServerConfigure",
 ]

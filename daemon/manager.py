@@ -38,6 +38,7 @@ from .repositories import (
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
+from .mcp.builtin_servers import get_registry as get_mcp_registry
 
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance, InstanceStatus
@@ -471,6 +472,9 @@ class InstanceManager:
         # Background tasks for cleanup operations (tracked for cancellation on shutdown)
         self._background_tasks: list[asyncio.Task] = []
 
+        # Bootstrap built-in MCP servers
+        self._bootstrap_builtin_servers()
+
         # ── Initialize Services ──────────────────────────────────────────────────
         # Services are initialized after all internal state is set up.
         # They receive references to the manager facade and required state.
@@ -532,6 +536,73 @@ class InstanceManager:
         # MCP service for managing MCP tool lifecycle
         from .services.mcp_service import McpService
         self._mcp_service = McpService(manager=self)
+
+    def _bootstrap_builtin_servers(self) -> None:
+        """Bootstrap built-in MCP servers on daemon startup.
+
+        For each registered built-in server definition:
+        1. Build default config from empty values
+        2. Check if server exists by name
+        3. If not exists → create with is_builtin=True
+        4. If exists and is_builtin=True and schema version differs → update schema (preserve user config)
+        5. If exists and is_builtin=False → log warning, skip
+
+        Fault-tolerant: per-server try/except, logs errors and continues.
+        Idempotent: safe to run multiple times.
+        """
+        registry = get_mcp_registry()
+        definitions = registry.get_all()
+        if not definitions:
+            logger.info("No built-in MCP servers registered")
+            return
+
+        logger.info(f"Bootstrapping {len(definitions)} built-in MCP servers...")
+
+        for definition in definitions:
+            try:
+                default_config = definition.build_config({})
+                schema_dicts = definition.get_config_schema()
+                schema_version = definition.schema_version
+
+                existing = self._mcp_server_repository.get_mcp_server_by_name(definition.name)
+
+                if existing is None:
+                    # Create new built-in server
+                    self._mcp_server_repository.create_mcp_server(
+                        name=definition.name,
+                        description=definition.description,
+                        config=default_config,
+                        is_builtin=True,
+                        config_schema=schema_dicts,
+                        config_schema_version=schema_version,
+                    )
+                    logger.info(f"Created built-in MCP server: {definition.name}")
+                elif existing.is_builtin:
+                    # Check schema version drift
+                    if existing.config_schema_version != schema_version:
+                        self._mcp_server_repository.update_mcp_server(
+                            existing.id,
+                            config_schema=schema_dicts,
+                            config_schema_version=schema_version,
+                        )
+                        logger.info(
+                            f"Updated schema for built-in MCP server: {definition.name} "
+                            f"(v{existing.config_schema_version} -> v{schema_version})"
+                        )
+                    else:
+                        logger.debug(f"Built-in MCP server already exists: {definition.name}")
+                else:
+                    # User-created server with same name — skip
+                    logger.warning(
+                        f"Skipping built-in MCP server '{definition.name}': "
+                        f"a user-created server with this name already exists"
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed to bootstrap built-in MCP server '{definition.name}': {e}")
+                continue  # Fault-tolerant: continue with other servers
+
+        logger.info("Built-in MCP server bootstrap complete")
 
     @property
     def checkpointer(self):
