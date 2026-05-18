@@ -307,6 +307,7 @@ class TestErrorCodes:
             "MAPPING_NOT_FOUND",
             "MAPPING_ALREADY_EXISTS",
             "SERVICE_UNAVAILABLE",
+            "BUILTIN_SERVER_PROTECTED",
         ]
         assert len(values) == len(expected_codes)
         for code in expected_codes:

@@ -156,6 +156,12 @@ class TestAllCompleteness:
             "McpServerInfo",
             "McpServerListResponse",
             "McpServerDeleteResponse",
+            # mcp_server config
+            "ConfigSchemaField",
+            # builtin servers (Phase 1)
+            "BuiltinServerConfigure",
+            "BuiltinServerTemplate",
+            "BuiltinTemplateListResponse",
         ]
         
         actual_all = models.__all__
