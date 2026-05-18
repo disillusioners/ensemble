@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-17 MCP Runtime Integration)
+## Test Results (Latest: 2026-05-18 Phase 1 Built-in MCP Server Backend Framework)
+
+### Phase 1 Built-in MCP Server Backend Framework (2026-05-18)
+- **Unit Tests**: 3,653/3,653 PASSED (27 skipped, 0 failures)
+- **Daemon Startup**: ✅ dev.sh runs 30s without crash
+- **API Endpoints**: ✅ GET /builtin-templates returns `{"templates":[]}`, GET /mcp-servers works
+- **Migration**: ✅ Valid SQL, applies cleanly (3 columns: is_builtin, config_schema, config_schema_version)
+- **Quick Fixes**: 2 issues fixed (missing mcp dependency, test completeness assertions)
+- **Commits**: `dc2a45c` (dependency fix), `2f76162` (test fixes)
+- See `.agents/tester/RESULTS/2026-05-18-phase1-backend-framework.md` for full report
+
+### Phase 1 Built-in MCP Server Status: ✅ READY (3,653 tests all passing, daemon clean startup)
 
 ### MCP Runtime Integration (2026-05-17)
 - **MCP Tests**: 161/161 PASSED (145 existing + 16 new runtime integration tests)

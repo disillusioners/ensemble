@@ -66,7 +66,7 @@ class BuiltinServerDefinition(ABC):
         5. If section == "args":
            - arg_format == "key_value": append "--key-name" and str(value) to args list
              (key should be converted: underscores to hyphens, e.g., "api_key" → "--api-key")
-           - arg_format == "flag": append "--flag-name" if True / "--no-flag-name" if False
+            - arg_format == "flag": append "--flag-name" if True / omit entirely if False
              (same key conversion)
         6. If section == "env": set env dict key = field key uppercased, value = str(value)
         7. Merge base config with generated args/env, appending to base args
