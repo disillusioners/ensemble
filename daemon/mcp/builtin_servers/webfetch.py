@@ -37,6 +37,24 @@ class WebFetchServerDefinition(BuiltinServerDefinition):
             "args": ["mcp-server-fetch"],
         }
 
+    def build_config(self, user_values: dict[str, Any]) -> dict[str, Any]:
+        """
+        Build config with proxy_url validation.
+
+        Validates that proxy_url (if provided) uses http:// or https:// scheme.
+        """
+        # Validate proxy_url if present
+        proxy_url = user_values.get("proxy_url")
+        if proxy_url:
+            if not isinstance(proxy_url, str):
+                raise ValueError("proxy_url must be a string")
+            if not proxy_url.startswith(("http://", "https://")):
+                raise ValueError(
+                    "proxy_url must start with http:// or https:// "
+                    "(e.g., 'http://proxy:8080' or 'https://proxy:8080')"
+                )
+        return super().build_config(user_values)
+
     def get_config_schema(self) -> list[dict[str, Any]]:
         """Return the configuration schema for WebFetch server."""
         return [
@@ -66,7 +84,7 @@ class WebFetchServerDefinition(BuiltinServerDefinition):
                 "type": "text",
                 "section": "args",
                 "arg_format": "key_value",
-                "description": "HTTP proxy URL for routing requests through a proxy server",
+                "description": "HTTP proxy URL (must start with http:// or https://)",
                 "default": None,
                 "required": False,
             },

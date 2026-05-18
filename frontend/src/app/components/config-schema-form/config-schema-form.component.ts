@@ -92,7 +92,8 @@ export class ConfigSchemaFormComponent implements OnInit {
 
   protected onNumberChange(key: string, event: Event): void {
     const target = event.target as HTMLInputElement;
-    const value = target.value === '' ? 0 : Number(target.value);
+    const parsed = Number(target.value);
+    const value = target.value === '' || isNaN(parsed) ? null : parsed;
     this.onFieldChange(key, value);
   }
 

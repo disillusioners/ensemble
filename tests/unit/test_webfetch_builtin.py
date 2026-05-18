@@ -160,13 +160,13 @@ class TestWebFetchBuildConfig:
         assert args[ua_idx + 1] == "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
 
     def test_build_config_default_ignores_robots_txt(self, webfetch_definition):
-        """Test that default ignore_robots_txt (False) emits --no-ignore-robots-txt."""
+        """Test that ignore_robots_txt (False) is omitted when using defaults."""
         result = webfetch_definition.build_config({})
 
         args = result.get("args", [])
-        # When default is False, the flag should be emitted as --no-ignore-robots-txt
-        assert "--no-ignore-robots-txt" in args
+        # When default is False, the flag should be omitted entirely
         assert "--ignore-robots-txt" not in args
+        assert "--no-ignore-robots-txt" not in args
 
     def test_build_config_ignore_robots_txt_true(self, webfetch_definition):
         """Test that --ignore-robots-txt flag is emitted when True."""
@@ -177,12 +177,13 @@ class TestWebFetchBuildConfig:
         assert "--no-ignore-robots-txt" not in args
 
     def test_build_config_ignore_robots_txt_false(self, webfetch_definition):
-        """Test that --no-ignore-robots-txt flag is emitted when False."""
+        """Test that --no-ignore-robots-txt is NOT emitted when False."""
         result = webfetch_definition.build_config({"ignore_robots_txt": False})
 
         args = result.get("args", [])
-        assert "--no-ignore-robots-txt" in args
+        # When False, the flag should be omitted entirely
         assert "--ignore-robots-txt" not in args
+        assert "--no-ignore-robots-txt" not in args
 
     def test_build_config_custom_user_agent(self, webfetch_definition):
         """Test that custom user_agent value is used."""
@@ -208,6 +209,25 @@ class TestWebFetchBuildConfig:
         assert "--proxy-url" in args
         proxy_idx = args.index("--proxy-url")
         assert args[proxy_idx + 1] == "http://proxy:8080"
+
+    def test_build_config_proxy_url_https(self, webfetch_definition):
+        """Test that proxy_url with https:// is accepted."""
+        result = webfetch_definition.build_config({"proxy_url": "https://secure-proxy:8080"})
+
+        args = result.get("args", [])
+        assert "--proxy-url" in args
+        proxy_idx = args.index("--proxy-url")
+        assert args[proxy_idx + 1] == "https://secure-proxy:8080"
+
+    def test_build_config_proxy_url_invalid_scheme(self, webfetch_definition):
+        """Test that proxy_url with invalid scheme raises error."""
+        with pytest.raises(ValueError, match="http:// or https://"):
+            webfetch_definition.build_config({"proxy_url": "ftp://proxy:8080"})
+
+    def test_build_config_proxy_url_no_scheme(self, webfetch_definition):
+        """Test that proxy_url without scheme raises error."""
+        with pytest.raises(ValueError, match="http:// or https://"):
+            webfetch_definition.build_config({"proxy_url": "proxy:8080"})
 
     def test_build_config_all_fields(self, webfetch_definition):
         """Test building config with all fields provided."""
@@ -273,10 +293,8 @@ class TestWebFetchParseConfig:
 
         # Default user_agent should be parsed
         assert parsed["user_agent"] == "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
-        # Default ignore_robots_txt is False - should parse to False
-        # Since False produces --no-ignore-robots-txt in build_config,
-        # parse_config should recover False
-        assert parsed["ignore_robots_txt"] is False
+        # Default ignore_robots_txt is False - should NOT be in parsed (flag omitted)
+        assert "ignore_robots_txt" not in parsed
 
     def test_parse_config_with_proxy(self, webfetch_definition):
         """Test parsing config with proxy_url."""
@@ -318,11 +336,12 @@ class TestWebFetchParseConfig:
         assert parsed["proxy_url"] == "http://full:8080"
 
     def test_parse_config_false_flag_recovered(self, webfetch_definition):
-        """Test that False flag value is correctly recovered."""
+        """Test that False flag value results in omission (not recovered, defaults apply)."""
         built_config = webfetch_definition.build_config({"ignore_robots_txt": False})
         parsed = webfetch_definition.parse_config(built_config)
 
-        assert parsed["ignore_robots_txt"] is False
+        # False flag is omitted, not present in parsed
+        assert "ignore_robots_txt" not in parsed
 
 
 # =============================================================================
@@ -405,8 +424,9 @@ class TestWebFetchEndToEnd:
         args = config["args"]
         assert "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)" in args
 
-        # Default ignore_robots_txt is False, so --no-ignore-robots-txt should be included
-        assert "--no-ignore-robots-txt" in args
+        # Default ignore_robots_txt is False, so flag should be OMITTED
+        assert "--ignore-robots-txt" not in args
+        assert "--no-ignore-robots-txt" not in args
 
         # Default proxy_url is None, so --proxy-url should NOT be included
         assert "--proxy-url" not in args

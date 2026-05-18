@@ -211,7 +211,6 @@ function createMockTemplate(overrides: Partial<BuiltinServerTemplate> = {}): Bui
       { key: 'api_key', label: 'API Key', type: 'text', section: 'env', required: true },
       { key: 'timeout', label: 'Timeout', type: 'number', section: 'args', default: 30, min: 1, max: 300 }
     ],
-    default_config: { api_key: '', timeout: 30 },
     ...overrides,
   };
 }

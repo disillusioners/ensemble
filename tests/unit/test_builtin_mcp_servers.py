@@ -322,14 +322,14 @@ class TestBuiltinServerDefinitionBuildConfig:
         assert "API_URL" in result["env"]
         assert result["env"]["API_URL"] == "https://api.example.com"
 
-    def test_boolean_false_produces_negation(self, test_definition):
-        """build_config with boolean False should produce --no-flag format."""
-        # When verbose=False, should emit --no-verbose
+    def test_boolean_false_is_omitted(self, test_definition):
+        """build_config with boolean False should omit the flag entirely."""
+        # When verbose=False, flag should be omitted (not emitted)
         user_values = {"api_key": "sk-test", "verbose": False}
         result = test_definition.build_config(user_values)
 
-        assert "--no-verbose" in result["args"]
         assert "--verbose" not in result["args"]
+        assert "--no-verbose" not in result["args"]
 
 
 # =============================================================================
@@ -431,16 +431,17 @@ class TestBuiltinServerDefinitionParseConfig:
         assert "timeout" not in result
         assert "verbose" not in result
 
-    def test_parse_config_boolean_false_from_negation(self, test_definition):
-        """parse_config should recover False from --no-verbose flag."""
+    def test_parse_config_omitted_flag(self, test_definition):
+        """parse_config should not recover False when flag is omitted (defaults apply)."""
         stored_config = {
-            "args": ["--api-key", "sk-test", "--no-verbose"],
+            "args": ["--api-key", "sk-test"],
             "env": {}
         }
         result = test_definition.parse_config(stored_config)
 
         assert result["api_key"] == "sk-test"
-        assert result["verbose"] is False
+        # Flag omitted means False (defaults apply), so not in parsed result
+        assert "verbose" not in result
 
     def test_parse_config_value_ambiguity(self, test_definition):
         """parse_config should not treat a flag as a value for a preceding --key."""

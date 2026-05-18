@@ -110,8 +110,7 @@ class BuiltinServerDefinition(ABC):
                 if arg_format == "flag":
                     if value:
                         args.append(f"--{cli_key}")
-                    else:
-                        args.append(f"--no-{cli_key}")
+                    # When False, omit entirely — absence IS the False state
                 else:  # key_value
                     args.append(f"--{cli_key}")
                     args.append(str(value))
@@ -171,12 +170,9 @@ class BuiltinServerDefinition(ABC):
                     result[key] = self._coerce_value(raw_value, field_type)
             elif section == "args":
                 if arg_format == "flag":
-                    flag_str = f"--{cli_key}"
-                    no_flag_str = f"--no-{cli_key}"
-                    if flag_str in user_args:
+                    # Presence of flag means True, absence means False (let defaults apply)
+                    if f"--{cli_key}" in user_args:
                         result[key] = True
-                    elif no_flag_str in user_args:
-                        result[key] = False
                 else:  # key_value
                     key_str = f"--{cli_key}"
                     try:

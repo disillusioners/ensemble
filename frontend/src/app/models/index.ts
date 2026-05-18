@@ -235,6 +235,7 @@ export interface ConfigSchemaField {
   min?: number;
   max?: number;
   options?: string[];  // for select type
+  arg_format?: 'key_value' | 'flag';
 }
 
 export interface McpServer {
@@ -245,6 +246,7 @@ export interface McpServer {
   is_active: boolean;
   is_builtin?: boolean;
   config_schema?: ConfigSchemaField[] | null;
+  config_schema_version?: string;
   initial_values?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string | null;

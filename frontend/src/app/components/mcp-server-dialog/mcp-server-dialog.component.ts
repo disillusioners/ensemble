@@ -28,6 +28,7 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly isActive = signal(true);
   protected readonly error = signal<string | null>(null);
   protected readonly configJsonError = signal<string | null>(null);
+  protected readonly saving = signal(false);
 
   // Schema form state
   protected readonly schemaFormValues = signal<Record<string, unknown>>({});
@@ -142,10 +143,16 @@ export class McpServerDialogComponent implements OnInit {
     const server = this.server;
     if (!server) return;
 
-    this.mcpServerService.updateServer(server.id, {
-      config: this.schemaFormValues()
+    this.saving.set(true);
+    this.mcpServerService.configureBuiltin({
+      template_name: server.name,
+      values: this.schemaFormValues()
     }).subscribe({
       next: (updatedServer) => {
+        this.saving.set(false);
+        this.mcpServerService.servers.update(servers =>
+          servers.map(s => s.id === server.id ? updatedServer : s)
+        );
         this.snackBar.open(`Configuration saved for "${server.name}"`, 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar'
@@ -153,6 +160,7 @@ export class McpServerDialogComponent implements OnInit {
         this.dialogRef.close({ type: 'builtin-update', server: updatedServer });
       },
       error: (err) => {
+        this.saving.set(false);
         console.error('Failed to save builtin configuration:', err);
         const message = err?.error?.detail || err?.message || 'Failed to save configuration';
         this.snackBar.open(message, 'Close', {
@@ -167,11 +175,13 @@ export class McpServerDialogComponent implements OnInit {
     const tmpl = this.template;
     if (!tmpl) return;
 
+    this.saving.set(true);
     this.mcpServerService.configureBuiltin({
       template_name: tmpl.name,
       values: this.schemaFormValues()
     }).subscribe({
       next: (newServer) => {
+        this.saving.set(false);
         this.snackBar.open(`Server "${newServer.name}" configured successfully`, 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar'
@@ -179,6 +189,7 @@ export class McpServerDialogComponent implements OnInit {
         this.dialogRef.close({ type: 'template-create', server: newServer });
       },
       error: (err) => {
+        this.saving.set(false);
         console.error('Failed to configure template:', err);
         const message = err?.error?.detail || err?.message || 'Failed to configure template';
         this.snackBar.open(message, 'Close', {
@@ -242,8 +253,10 @@ export class McpServerDialogComponent implements OnInit {
       return;
     }
 
+    this.saving.set(true);
     this.mcpServerService.resetBuiltin(server.id).subscribe({
       next: (updatedServer) => {
+        this.saving.set(false);
         this.snackBar.open(`Configuration reset to defaults for "${server.name}"`, 'Close', {
           duration: 3000,
           panelClass: 'success-snackbar'
@@ -258,6 +271,7 @@ export class McpServerDialogComponent implements OnInit {
         }
       },
       error: (err) => {
+        this.saving.set(false);
         console.error('Failed to reset builtin configuration:', err);
         const message = err?.error?.detail || err?.message || 'Failed to reset configuration';
         this.snackBar.open(message, 'Close', {
@@ -269,6 +283,9 @@ export class McpServerDialogComponent implements OnInit {
   }
 
   protected isSubmitDisabled(): boolean {
+    if (this.saving()) {
+      return true;
+    }
     if (this.isBuiltinConfigureMode() || this.isTemplateMode()) {
       return !this.schemaFormValid();
     }

@@ -118,7 +118,7 @@
           <button type="button" (click)="handleClose()" class="cancel-btn">
             Cancel
           </button>
-          <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn">
+          <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn" [class.loading]="saving()">
             {{ getSubmitButtonText() }}
           </button>
         </div>
