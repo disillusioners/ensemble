@@ -157,7 +157,11 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
     except BuiltinConfigValidationError as e:
         raise HTTPException(
             status_code=422,
-            detail={"errors": e.errors}
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message="Configuration validation failed",
+                details={"errors": e.errors}
+            ).model_dump()
         )
 
     # Build the final config from user values
@@ -361,7 +365,10 @@ async def reset_builtin_server(server_id: str, request: Request):
     if not existing:
         raise HTTPException(
             status_code=404,
-            detail="MCP server not found"
+            detail=ErrorResponse(
+                code=ErrorCodes.MCP_SERVER_NOT_FOUND,
+                message=f"MCP server not found: {server_id}"
+            ).model_dump()
         )
 
     if not existing.is_builtin:

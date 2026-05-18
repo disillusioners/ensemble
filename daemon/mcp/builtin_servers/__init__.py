@@ -37,8 +37,12 @@ class BuiltinServerRegistry:
 
     @property
     def definitions(self) -> dict[str, "BuiltinServerDefinition"]:
-        """Access all definitions."""
-        return self._definitions
+        """Access all definitions (returns a copy)."""
+        return dict(self._definitions)
+
+    def unregister(self, name: str) -> None:
+        """Remove a registered definition by name."""
+        self._definitions.pop(name, None)
 
 
 # Module-level convenience

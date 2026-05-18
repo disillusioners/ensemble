@@ -59,7 +59,7 @@ def validate_config_values(
 
         # Type checking
         if field_type == "number":
-            if not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 errors.append({"field": key, "error": f"'{label}' must be a number"})
                 continue
             if field.get("min") is not None and value < field["min"]:

@@ -41,10 +41,6 @@ class BuiltinServerDefinition(ABC):
         """Return the config schema as a list of ConfigSchemaField dicts."""
         ...
 
-    def get_base_config(self) -> dict[str, Any]:
-        """Return base config with defaults applied (calls build_config({}))."""
-        return self.build_config({})
-
     def build_config(self, user_values: dict[str, Any]) -> dict[str, Any]:
         """
         Generic config builder. Iterates schema fields and generates args/env.
@@ -56,7 +52,7 @@ class BuiltinServerDefinition(ABC):
         4. If section == "args":
            - arg_format == "key_value": append "--key-name" and str(value) to args list
              (key should be converted: underscores to hyphens, e.g., "api_key" → "--api-key")
-           - arg_format == "flag": if value is truthy, append "--flag-name" to args list
+           - arg_format == "flag": append "--flag-name" if True / "--no-flag-name" if False
              (same key conversion)
         5. If section == "env": set env dict key = field key uppercased, value = str(value)
         6. Return {"args": args_list, "env": env_dict}

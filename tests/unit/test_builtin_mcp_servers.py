@@ -153,8 +153,7 @@ def registry_with_test_def():
     registry.register(test_def)
     yield registry
     # Clean up: unregister the test definition
-    if test_def.name in registry.definitions:
-        del registry.definitions[test_def.name]
+    registry.unregister(test_def.name)
 
 
 @pytest.fixture
@@ -636,14 +635,13 @@ class TestBuiltinServerRegistry:
         test_def = TestBuiltinServerDefinition()
 
         # Ensure not already registered
-        if test_def.name in registry.definitions:
-            del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
         registry.register(test_def)
         assert test_def.name in registry.definitions
 
         # Clean up
-        del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
     def test_get_by_name(self):
         """Test getting definition by name."""
@@ -651,8 +649,7 @@ class TestBuiltinServerRegistry:
         test_def = TestBuiltinServerDefinition()
 
         # Ensure not already registered
-        if test_def.name in registry.definitions:
-            del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
         registry.register(test_def)
         retrieved = registry.get_by_name(test_def.name)
@@ -660,7 +657,7 @@ class TestBuiltinServerRegistry:
         assert retrieved.name == test_def.name
 
         # Clean up
-        del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
     def test_get_by_name_not_found(self):
         """Test getting non-existent definition returns None."""
@@ -674,15 +671,14 @@ class TestBuiltinServerRegistry:
         test_def = TestBuiltinServerDefinition()
 
         # Ensure not already registered
-        if test_def.name in registry.definitions:
-            del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
         registry.register(test_def)
         all_defs = registry.get_all()
         assert test_def in all_defs
 
         # Clean up
-        del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
     def test_definitions_property(self):
         """Test definitions property returns dict."""
@@ -690,8 +686,7 @@ class TestBuiltinServerRegistry:
         test_def = TestBuiltinServerDefinition()
 
         # Ensure not already registered
-        if test_def.name in registry.definitions:
-            del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
         registry.register(test_def)
         definitions = registry.definitions
@@ -699,7 +694,7 @@ class TestBuiltinServerRegistry:
         assert test_def.name in definitions
 
         # Clean up
-        del registry.definitions[test_def.name]
+        registry.unregister(test_def.name)
 
 
 # =============================================================================
@@ -919,7 +914,7 @@ class TestBuiltinApiEndpoints:
 
         assert response.status_code == 422
         data = response.json()
-        assert "errors" in data["detail"]
+        assert "errors" in data["detail"] or "errors" in data["detail"].get("details", {})
 
     def test_configure_builtin_template_not_found(self, client):
         """Test POST /configure-builtin with non-existent template returns 404."""
@@ -992,101 +987,270 @@ class TestBuiltinApiResetEndpoint:
 
 
 class TestBootstrap:
-    """Tests for bootstrap functionality (if registry has bootstrap)."""
+    """Tests for InstanceManager._bootstrap_builtin_servers()."""
 
-    def test_bootstrap_creates_servers(self, repository, engine, registry_with_test_def):
-        """Test that bootstrap with definitions creates servers in DB."""
-        # Check if registry has bootstrap method
+    @pytest.fixture
+    def bootstrap_engine(self):
+        """Create in-memory SQLite engine for bootstrap tests."""
+        engine = create_engine(
+            "sqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(engine)
+        yield engine
+        engine.dispose()
+
+    @pytest.fixture
+    def bootstrap_repo(self, bootstrap_engine):
+        """Create MCP server repository for bootstrap tests."""
+        return SQLModelMcpServerRepository(bootstrap_engine)
+
+    @pytest.fixture
+    def mock_config(self):
+        """Create mock Config for InstanceManager."""
+        from daemon.config import Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig, QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig
+
+        config = MagicMock(spec=Config)
+        config.llm = MagicMock(spec=LLMConfig)
+        config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.api_key = "test-key"
+        config.llm.model = "gpt-4"
+        config.llm.model_vision = None
+        config.llm.temperature = 0.7
+        config.llm.request_timeout = 60
+
+        config.daemon = MagicMock(spec=DaemonConfig)
+        config.daemon.host = "0.0.0.0"
+        config.daemon.port = 8079
+
+        config.limits = MagicMock(spec=LimitsConfig)
+        config.limits.max_instances = 100
+        config.limits.max_children_per_instance = 10
+        config.limits.instance_timeout_minutes = 60
+        config.limits.message_rate_limit = 60
+        config.limits.graph_recursion_limit = 100
+        config.limits.llm_concurrency = 10
+
+        config.persistence = MagicMock(spec=PersistenceConfig)
+        config.persistence.db_path = ":memory:"
+        config.persistence.checkpointer_db_path = ":memory:"
+
+        config.queue = MagicMock(spec=QueueConfig)
+        config.queue.discard_on_startup = None
+        config.queue.llm_retry_transient_attempts = 10
+        config.queue.llm_retry_timeout_attempts = 3
+
+        config.compaction = MagicMock(spec=CompactionConfig)
+        config.compaction.enabled = False
+
+        config.services = MagicMock(spec=ServicesConfig)
+        config.services.worker_poll_interval = 0.5
+        config.services.stale_task_recovery_interval = 60
+        config.services.task_timeout_minutes = 60
+        config.services.max_task_retries = 3
+        config.services.task_retry_backoff_base = 60
+        config.services.task_retry_backoff_max = 3600
+        config.services.stale_task_cancel_grace_seconds = 10
+        config.services.graph_timeout_minutes = 55
+
+        config.agents = MagicMock(spec=AgentsConfig)
+        config.agents.directory = "./agents"
+
+        config.job_system = MagicMock(spec=JobSystemConfig)
+        config.job_system.default_max_retries = 3
+        config.job_system.retry_backoff_base_seconds = 60
+        config.job_system.retry_backoff_max_seconds = 3600
+        config.job_system.retry_backoff_multiplier = 2.0
+        config.job_system.dlq_enabled = True
+        config.job_system.event_dispatch_enabled = True
+        config.job_system.observer_health_check_interval_seconds = 300
+        config.job_system.idempotency_key_ttl_hours = 24
+        config.job_system.job_retry_scheduler_enabled = None
+
+        return config
+
+    @pytest.fixture
+    def instance_manager_with_repo(self, bootstrap_engine, bootstrap_repo, mock_config):
+        """Create InstanceManager with in-memory DB and test repository."""
+        from unittest.mock import patch, MagicMock
+
+        # Patch database engine creation to use our in-memory engine
+        with patch("daemon.manager.create_engine_from_config") as mock_create_engine, \
+             patch("daemon.manager.get_checkpointer") as mock_checkpointer, \
+             patch("daemon.migrations.runner.MigrationRunner") as mock_migration:
+
+            mock_create_engine.return_value = bootstrap_engine
+            mock_checkpointer.return_value = AsyncMock()
+
+            # Create mock migration runner
+            mock_runner_instance = MagicMock()
+            mock_runner_instance.run_pending_migrations.return_value = []
+            mock_migration.return_value = mock_runner_instance
+
+            # Import here to avoid circular dependencies
+            from daemon.manager import InstanceManager
+
+            # Create manager
+            manager = InstanceManager(mock_config)
+
+            # Override the MCP server repository with our test repo
+            manager._mcp_server_repository = bootstrap_repo
+
+            yield manager
+
+            # Cleanup
+            if hasattr(manager, '_shutting_down'):
+                manager._shutting_down = True
+
+    def test_bootstrap_creates_servers(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that bootstrap creates servers in DB with is_builtin=True."""
+        manager = instance_manager_with_repo
         registry = registry_with_test_def
 
-        # If bootstrap exists, test it
-        if hasattr(registry, 'bootstrap'):
-            definition = registry.get_by_name("test-builtin")
-            registry.bootstrap([definition])
+        # Call bootstrap
+        manager._bootstrap_builtin_servers()
 
-            # Verify server was created
-            server = repository.get_mcp_server_by_name("test-builtin")
-            assert server is not None
-            assert server.is_builtin is True
-            assert server.config_schema is not None
+        # Verify server was created
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server is not None, "Server should be created by bootstrap"
+        assert server.is_builtin is True, "Server should be marked as builtin"
+        assert server.config_schema is not None, "Server should have config schema"
 
-    def test_bootstrap_idempotent(self, repository, engine, registry_with_test_def):
+    def test_bootstrap_idempotent(self, instance_manager_with_repo, registry_with_test_def):
         """Test that running bootstrap twice doesn't create duplicates."""
+        manager = instance_manager_with_repo
         registry = registry_with_test_def
 
-        if hasattr(registry, 'bootstrap'):
-            definition = registry.get_by_name("test-builtin")
-            registry.bootstrap([definition])
-            registry.bootstrap([definition])  # Run again
+        # Call bootstrap twice
+        manager._bootstrap_builtin_servers()
+        manager._bootstrap_builtin_servers()
 
-            # Should still only have one server
-            servers = repository.list_mcp_servers()
-            builtin_servers = [s for s in servers if s.name == "test-builtin"]
-            assert len(builtin_servers) == 1
+        # Should still only have one server
+        servers = manager._mcp_server_repository.list_mcp_servers()
+        builtin_servers = [s for s in servers if s.name == "test-builtin"]
+        assert len(builtin_servers) == 1, "Should have exactly one server after two bootstrap calls"
 
-    def test_bootstrap_schema_drift(self, repository, engine, registry_with_test_def):
+    def test_bootstrap_schema_drift(self, instance_manager_with_repo, registry_with_test_def):
         """Test that schema version change updates schema but preserves config."""
+        from tests.unit.test_builtin_mcp_servers import TestBuiltinServerDefinition
+
+        manager = instance_manager_with_repo
         registry = registry_with_test_def
 
-        if hasattr(registry, 'bootstrap'):
-            definition = registry.get_by_name("test-builtin")
+        # Create a definition with version 1.0
+        class TestBuiltinV1(TestBuiltinServerDefinition):
+            @property
+            def schema_version(self) -> str:
+                return "1.0"
 
-            # Create initial server
-            registry.bootstrap([definition])
-            server = repository.get_mcp_server_by_name("test-builtin")
-            original_config = {"args": ["--api-key", "sk-keep-this"], "env": {}}
+        # Create a definition with version 2.0 (simulating schema change)
+        class TestBuiltinV2(TestBuiltinServerDefinition):
+            @property
+            def schema_version(self) -> str:
+                return "2.0"
 
-            # Update server config directly
-            repository.update_mcp_server(server.id, config=original_config)
+        v1_def = TestBuiltinV1()
+        v2_def = TestBuiltinV2()
 
-            # Simulate schema change by incrementing version
-            definition.schema_version = "2.0"
+        # Register v1 and bootstrap
+        registry.unregister(v1_def.name)  # Clean up if exists
+        registry.register(v1_def)
+        manager._bootstrap_builtin_servers()
 
-            # Bootstrap again
-            registry.bootstrap([definition])
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server.config_schema_version == "1.0"
 
-            # Config should be preserved
-            updated_server = repository.get_mcp_server_by_name("test-builtin")
-            assert updated_server.config == original_config
+        # Update server config directly (simulating user config)
+        user_config = {"args": ["--api-key", "sk-keep-this"], "env": {}}
+        manager._mcp_server_repository.update_mcp_server(server.id, config=user_config)
 
-    def test_bootstrap_fault_tolerant(self, repository, engine, registry_with_test_def):
+        # Replace v1 with v2 in registry (simulating schema version change)
+        registry.unregister(v1_def.name)
+        registry.register(v2_def)
+
+        # Bootstrap again with new version
+        manager._bootstrap_builtin_servers()
+
+        # Verify config was preserved and version updated
+        updated_server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert updated_server.config == user_config, "User config should be preserved after schema update"
+        assert updated_server.config_schema_version == "2.0", "Schema version should be updated"
+
+        # Restore original definition
+        registry.unregister(v2_def.name)
+        registry.register(v1_def)
+
+    def test_bootstrap_fault_tolerant(self, instance_manager_with_repo, registry_with_test_def):
         """Test that one definition failure doesn't stop others."""
+        manager = instance_manager_with_repo
         registry = registry_with_test_def
 
-        if hasattr(registry, 'bootstrap'):
-            # Create a broken definition
-            class BrokenDefinition(BuiltinServerDefinition):
-                @property
-                def name(self) -> str:
-                    return "broken-builtin"
+        # Create a broken definition that will fail during bootstrap
+        class BrokenDefinition(BuiltinServerDefinition):
+            @property
+            def name(self) -> str:
+                return "broken-bootstrap-test"
 
-                @property
-                def display_name(self) -> str:
-                    return "Broken"
+            @property
+            def display_name(self) -> str:
+                return "Broken Bootstrap Test"
 
-                @property
-                def description(self) -> str:
-                    return "Broken"
+            @property
+            def description(self) -> str:
+                return "A broken built-in server"
 
-                @property
-                def schema_version(self) -> str:
-                    return "1.0"
+            @property
+            def schema_version(self) -> str:
+                return "1.0"
 
-                def get_config_schema(self) -> list:
-                    raise RuntimeError("Schema error")
+            def get_config_schema(self) -> list[dict]:
+                raise RuntimeError("Schema error for testing")
 
-            broken_def = BrokenDefinition()
-            good_def = registry.get_by_name("test-builtin")
+            def build_config(self, values: dict) -> dict:
+                raise RuntimeError("Config build error for testing")
 
-            # Bootstrap with both - should not raise
+        broken_def = BrokenDefinition()
+        registry.register(broken_def)
+
+        try:
+            # Bootstrap with broken definition - should not raise
             try:
-                registry.bootstrap([broken_def, good_def])
-            except RuntimeError:
-                pytest.fail("Bootstrap should be fault tolerant")
+                manager._bootstrap_builtin_servers()
+            except RuntimeError as e:
+                if "Schema error" in str(e) or "Config build error" in str(e):
+                    pytest.fail("Bootstrap should be fault tolerant and not raise on broken definition")
+                raise
 
-            # Good definition should still be created
-            server = repository.get_mcp_server_by_name("test-builtin")
-            assert server is not None
+            # Good definition (test-builtin) should still be created
+            server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+            assert server is not None, "Working definition should be created even if another fails"
+            assert server.is_builtin is True
+        finally:
+            # Clean up broken definition
+            registry.unregister(broken_def.name)
+
+    def test_bootstrap_skips_user_created_servers(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that bootstrap skips servers created by users (is_builtin=False)."""
+        manager = instance_manager_with_repo
+
+        # Create a user-created server with same name as the built-in definition
+        manager._mcp_server_repository.create_mcp_server(
+            name="test-builtin",
+            description="User created server",
+            config={"args": [], "env": {}},
+            is_builtin=False,  # User-created, not built-in
+        )
+
+        # Bootstrap should not override the user server
+        manager._bootstrap_builtin_servers()
+
+        # Verify it's still user-created
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server is not None
+        assert server.is_builtin is False, "User-created server should remain user-created"
+        # Config should be empty (user's original config), not the built-in default
+        assert server.config == {"args": [], "env": {}}, "User config should not be overwritten"
 
 
 # =============================================================================
