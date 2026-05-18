@@ -4,11 +4,7 @@
     <!-- Header -->
     <div class="modal-header">
       <h2 class="font-display text-xl font-semibold text-dark-50">
-        @if (isEditMode()) {
-          Edit MCP Server
-        } @else {
-          Add MCP Server
-        }
+        {{ getDialogTitle() }}
       </h2>
       <button (click)="handleClose()" class="close-btn">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -26,79 +22,106 @@
         </div>
       }
 
-      <!-- Name -->
-      <div class="form-group">
-        <label class="form-label">
-          Name <span class="text-accent-rose">*</span>
-        </label>
-        <input
-          type="text"
-          [value]="name()"
-          (input)="onNameChange($event)"
-          placeholder="My MCP Server"
-          class="form-input"
-        />
-      </div>
-
-      <!-- Description -->
-      <div class="form-group">
-        <label class="form-label">Description</label>
-        <textarea
-          [value]="description()"
-          (input)="onDescriptionChange($event)"
-          placeholder="Optional description of what this MCP server does"
-          rows="2"
-          class="form-textarea"
-        ></textarea>
-      </div>
-
-      <!-- Config -->
-      <div class="form-group">
-        <label class="form-label">Configuration (JSON)</label>
-        <textarea
-          [value]="configJson()"
-          (input)="onConfigJsonChange($event)"
-          placeholder='{"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]}'
-          rows="4"
-          class="form-textarea mono"
-          [class.has-error]="configJsonError()"
-        ></textarea>
-        <p class="form-hint" [class.error]="configJsonError()">
-          @if (configJsonError()) {
-            {{ configJsonError() }}
-          } @else {
-            Server configuration in JSON format (command, args, env, etc.)
+      @if (isBuiltinConfigureMode() || isTemplateMode()) {
+        <!-- Builtin Configure / Template Mode -->
+        <!-- Server/Template Info Header -->
+        <div class="info-header">
+          <div class="info-name">{{ isTemplateMode() ? template?.name : server?.name }}</div>
+          @if (isTemplateMode() && template?.description) {
+            <div class="info-description">{{ template?.description }}</div>
           }
-        </p>
-      </div>
+          @if (isBuiltinConfigureMode() && server?.description) {
+            <div class="info-description">{{ server?.description }}</div>
+          }
+        </div>
 
-      <!-- Active Toggle -->
-      <div class="form-group">
-        <label class="toggle-label">
-          <span>Active</span>
+        <!-- Config Schema Form -->
+        <app-config-schema-form
+          #configSchemaForm
+          [schema]="isTemplateMode() ? (template?.config_schema || []) : (server?.config_schema || [])"
+          [initialValues]="isTemplateMode() ? {} : (server?.initial_values || {})"
+          (valuesChange)="onSchemaValuesChange($event)"
+          (isValid)="onSchemaValidChange($event)"
+        ></app-config-schema-form>
+      } @else {
+        <!-- Edit / Add Mode -->
+        <!-- Name -->
+        <div class="form-group">
+          <label class="form-label">
+            Name <span class="text-accent-rose">*</span>
+          </label>
           <input
-            type="checkbox"
-            [checked]="isActive()"
-            (change)="onIsActiveChange($event)"
-            class="toggle-input"
+            type="text"
+            [value]="name()"
+            (input)="onNameChange($event)"
+            placeholder="My MCP Server"
+            class="form-input"
           />
-          <span class="toggle-switch"></span>
-        </label>
-        <p class="form-hint">Enable the server to make it available to agents</p>
-      </div>
+        </div>
+
+        <!-- Description -->
+        <div class="form-group">
+          <label class="form-label">Description</label>
+          <textarea
+            [value]="description()"
+            (input)="onDescriptionChange($event)"
+            placeholder="Optional description of what this MCP server does"
+            rows="2"
+            class="form-textarea"
+          ></textarea>
+        </div>
+
+        <!-- Config -->
+        <div class="form-group">
+          <label class="form-label">Configuration (JSON)</label>
+          <textarea
+            [value]="configJson()"
+            (input)="onConfigJsonChange($event)"
+            placeholder='{"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]}'
+            rows="4"
+            class="form-textarea mono"
+            [class.has-error]="configJsonError()"
+          ></textarea>
+          <p class="form-hint" [class.error]="configJsonError()">
+            @if (configJsonError()) {
+              {{ configJsonError() }}
+            } @else {
+              Server configuration in JSON format (command, args, env, etc.)
+            }
+          </p>
+        </div>
+
+        <!-- Active Toggle -->
+        <div class="form-group">
+          <label class="toggle-label">
+            <span>Active</span>
+            <input
+              type="checkbox"
+              [checked]="isActive()"
+              (change)="onIsActiveChange($event)"
+              class="toggle-input"
+            />
+            <span class="toggle-switch"></span>
+          </label>
+          <p class="form-hint">Enable the server to make it available to agents</p>
+        </div>
+      }
 
       <!-- Actions -->
-      <div class="form-actions">
-        <button type="button" (click)="handleClose()" class="cancel-btn">
-          Cancel
-        </button>
-        <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn">
-          @if (isEditMode()) {
-            Save Changes
-          } @else {
-            Create Server
-          }
-        </button>
+      <div class="form-actions" [class.with-reset]="isBuiltinConfigureMode()">
+        @if (isBuiltinConfigureMode()) {
+          <button type="button" (click)="handleResetToDefaults()" class="reset-btn">
+            Reset to Defaults
+          </button>
+        }
+        <div class="action-group">
+          <button type="button" (click)="handleClose()" class="cancel-btn">
+            Cancel
+          </button>
+          <button type="submit" [disabled]="isSubmitDisabled()" class="submit-btn">
+            {{ getSubmitButtonText() }}
+          </button>
+        </div>
       </div>
     </form>
   </div>

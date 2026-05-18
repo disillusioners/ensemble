@@ -1,0 +1,192 @@
+@if (schema().length === 0) {
+  <div class="empty-state">
+    <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+    </svg>
+    <span class="empty-text">No configuration fields available</span>
+  </div>
+} @else {
+  <div class="config-schema-form">
+
+    @if (argsFields().length > 0) {
+      <div class="form-section">
+        <div class="section-header">
+          <svg class="section-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+          </svg>
+          <h3 class="section-title">Arguments</h3>
+        </div>
+
+        @for (field of argsFields(); track field.key) {
+          <div class="field-group">
+            <label class="field-label">
+              {{ field.label }}
+              @if (field.required) {
+                <span class="required-indicator">*</span>
+              }
+            </label>
+
+            @switch (field.type) {
+              @case ('text') {
+                <input
+                  type="text"
+                  class="form-input"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  (input)="onTextChange(field.key, $event)"
+                />
+              }
+
+              @case ('number') {
+                <input
+                  type="number"
+                  class="form-input"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  [min]="field.min"
+                  [max]="field.max"
+                  (input)="onNumberChange(field.key, $event)"
+                />
+              }
+
+              @case ('boolean') {
+                <div class="toggle-field">
+                  <mat-slide-toggle
+                    [checked]="getFieldValue(field.key)"
+                    (change)="onBooleanChange(field.key, $event.checked)"
+                    color="primary"
+                  ></mat-slide-toggle>
+                  <span class="toggle-label">{{ field.default ? 'Enabled' : 'Disabled' }}</span>
+                </div>
+              }
+
+              @case ('select') {
+                <select
+                  class="form-select"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  (change)="onTextChange(field.key, $event)"
+                >
+                  @for (choice of field.choices; track choice) {
+                    <option [value]="choice">{{ choice }}</option>
+                  }
+                </select>
+              }
+            }
+
+            @if (field.description) {
+              <span class="field-hint">{{ field.description }}</span>
+            }
+
+            @if (isFieldInvalid(field)) {
+              <span class="field-error">
+                @if (field.type === 'number') {
+                  @if (field.min !== undefined && field.max !== undefined) {
+                    Value must be between {{ field.min }} and {{ field.max }}
+                  } @else if (field.min !== undefined) {
+                    Value must be at least {{ field.min }}
+                  } @else if (field.max !== undefined) {
+                    Value must be at most {{ field.max }}
+                  }
+                } @else {
+                  This field is required
+                }
+              </span>
+            }
+          </div>
+        }
+      </div>
+    }
+
+    @if (envFields().length > 0) {
+      <div class="form-section">
+        <div class="section-header">
+          <svg class="section-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+          </svg>
+          <h3 class="section-title">Environment Variables</h3>
+        </div>
+
+        @for (field of envFields(); track field.key) {
+          <div class="field-group">
+            <label class="field-label">
+              {{ field.label }}
+              @if (field.required) {
+                <span class="required-indicator">*</span>
+              }
+            </label>
+
+            @switch (field.type) {
+              @case ('text') {
+                <input
+                  type="text"
+                  class="form-input"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  (input)="onTextChange(field.key, $event)"
+                />
+              }
+
+              @case ('number') {
+                <input
+                  type="number"
+                  class="form-input"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  [min]="field.min"
+                  [max]="field.max"
+                  (input)="onNumberChange(field.key, $event)"
+                />
+              }
+
+              @case ('boolean') {
+                <div class="toggle-field">
+                  <mat-slide-toggle
+                    [checked]="getFieldValue(field.key)"
+                    (change)="onBooleanChange(field.key, $event.checked)"
+                    color="primary"
+                  ></mat-slide-toggle>
+                  <span class="toggle-label">{{ field.default ? 'Enabled' : 'Disabled' }}</span>
+                </div>
+              }
+
+              @case ('select') {
+                <select
+                  class="form-select"
+                  [class.invalid]="isFieldInvalid(field)"
+                  [value]="getFieldValue(field.key)"
+                  (change)="onTextChange(field.key, $event)"
+                >
+                  @for (choice of field.choices; track choice) {
+                    <option [value]="choice">{{ choice }}</option>
+                  }
+                </select>
+              }
+            }
+
+            @if (field.description) {
+              <span class="field-hint">{{ field.description }}</span>
+            }
+
+            @if (isFieldInvalid(field)) {
+              <span class="field-error">
+                @if (field.type === 'number') {
+                  @if (field.min !== undefined && field.max !== undefined) {
+                    Value must be between {{ field.min }} and {{ field.max }}
+                  } @else if (field.min !== undefined) {
+                    Value must be at least {{ field.min }}
+                  } @else if (field.max !== undefined) {
+                    Value must be at most {{ field.max }}
+                  }
+                } @else {
+                  This field is required
+                }
+              </span>
+            }
+          </div>
+        }
+      </div>
+    }
+
+  </div>
+}

@@ -36,6 +36,19 @@ class BuiltinServerDefinition(ABC):
         """Version of the config schema. Changes trigger schema drift detection."""
         ...
 
+    def get_base_config(self) -> dict[str, Any]:
+        """
+        Return base configuration including transport, command, and fixed args.
+
+        Subclasses override to provide server-specific base config like:
+        {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-server-fetch"]
+        }
+        """
+        return {}
+
     @abstractmethod
     def get_config_schema(self) -> list[dict[str, Any]]:
         """Return the config schema as a list of ConfigSchemaField dicts."""
@@ -46,22 +59,30 @@ class BuiltinServerDefinition(ABC):
         Generic config builder. Iterates schema fields and generates args/env.
 
         Algorithm:
-        1. Get schema from get_config_schema()
-        2. For each field, resolve value: user_values[key] if present, else field['default']
-        3. Skip if resolved value is None or empty string ("")
-        4. If section == "args":
+        1. Get base config from get_base_config()
+        2. Get schema from get_config_schema()
+        3. For each field, resolve value: user_values[key] if present, else field['default']
+        4. Skip if resolved value is None or empty string ("")
+        5. If section == "args":
            - arg_format == "key_value": append "--key-name" and str(value) to args list
              (key should be converted: underscores to hyphens, e.g., "api_key" → "--api-key")
            - arg_format == "flag": append "--flag-name" if True / "--no-flag-name" if False
              (same key conversion)
-        5. If section == "env": set env dict key = field key uppercased, value = str(value)
-        6. Return {"args": args_list, "env": env_dict}
+        6. If section == "env": set env dict key = field key uppercased, value = str(value)
+        7. Merge base config with generated args/env, appending to base args
+        8. Return merged config
 
-        If any base args/env should always be present, subclasses can override to merge.
+        If any base args/env should always be present, subclasses can override get_base_config().
         """
+        base_config = self.get_base_config()
         schema = self.get_config_schema()
         args: list[str] = []
         env: dict[str, str] = {}
+
+        # Copy base env vars
+        base_env = base_config.get("env", {})
+        if isinstance(base_env, dict):
+            env.update(base_env)
 
         for field in schema:
             key = field["key"]
@@ -95,26 +116,46 @@ class BuiltinServerDefinition(ABC):
                     args.append(f"--{cli_key}")
                     args.append(str(value))
 
-        return {"args": args, "env": env}
+        # Merge with base config
+        result = {**base_config}
+        # Append schema args to base args
+        base_args = base_config.get("args", [])
+        if isinstance(base_args, list):
+            result["args"] = base_args + args
+        else:
+            result["args"] = args
+        if env:
+            result["env"] = env
+
+        return result
 
     def parse_config(self, stored_config: dict[str, Any]) -> dict[str, Any]:
         """
         Reverse-map stored MCP config back to user values for form pre-fill.
 
         Algorithm:
-        1. Get schema from get_config_schema()
-        2. Get stored args list and env dict from stored_config
-        3. For each schema field:
+        1. Get base config from get_base_config()
+        2. Get schema from get_config_schema()
+        3. Get stored args list and env dict from stored_config
+        4. Skip base args from stored config (only parse user args)
+        5. For each schema field:
            - If section == "env": look up key.upper() in env dict, coerce to field type
            - If section == "args" and arg_format == "flag": check if "--key-name" exists in args → True/False
            - If section == "args" and arg_format == "key_value": find "--key-name" in args, take next element as value, coerce type
-        4. Type coercion: "number" → int/float, "boolean" → bool, "text"/"select" → str
-        5. Return dict of {key: coerced_value} for all fields found in stored config
+        6. Type coercion: "number" → int/float, "boolean" → bool, "text"/"select" → str
+        7. Return dict of {key: coerced_value} for all fields found in stored config
         """
+        base_config = self.get_base_config()
+        base_args = base_config.get("args", [])
+        base_args_count = len(base_args) if isinstance(base_args, list) else 0
+
         schema = self.get_config_schema()
         stored_args = stored_config.get("args", [])
         stored_env = stored_config.get("env", {})
         result: dict[str, Any] = {}
+
+        # Skip base args, only parse user args
+        user_args = stored_args[base_args_count:] if base_args_count > 0 else stored_args
 
         for field in schema:
             key = field["key"]
@@ -132,16 +173,16 @@ class BuiltinServerDefinition(ABC):
                 if arg_format == "flag":
                     flag_str = f"--{cli_key}"
                     no_flag_str = f"--no-{cli_key}"
-                    if flag_str in stored_args:
+                    if flag_str in user_args:
                         result[key] = True
-                    elif no_flag_str in stored_args:
+                    elif no_flag_str in user_args:
                         result[key] = False
                 else:  # key_value
                     key_str = f"--{cli_key}"
                     try:
-                        idx = stored_args.index(key_str)
-                        if idx + 1 < len(stored_args):
-                            next_val = stored_args[idx + 1]
+                        idx = user_args.index(key_str)
+                        if idx + 1 < len(user_args):
+                            next_val = user_args[idx + 1]
                             if next_val.startswith("--"):
                                 # Next token is a flag, not our value — skip
                                 pass

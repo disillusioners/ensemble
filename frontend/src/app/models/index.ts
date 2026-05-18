@@ -222,12 +222,30 @@ export interface PauseResponse {
 export * from './job-queue.model';
 
 // MCP Server types
+
+// Config schema for built-in server templates
+export interface ConfigSchemaField {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'boolean' | 'select';
+  section: 'args' | 'env';
+  required?: boolean;
+  default?: unknown;
+  description?: string;
+  min?: number;
+  max?: number;
+  choices?: string[];  // for select type
+}
+
 export interface McpServer {
   id: string;
   name: string;
   description: string | null;
   config: Record<string, unknown>;
   is_active: boolean;
+  is_builtin?: boolean;
+  config_schema?: ConfigSchemaField[] | null;
+  initial_values?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string | null;
 }
@@ -253,4 +271,21 @@ export interface McpServerListResponse {
 export interface McpServerDeleteResponse {
   deleted: boolean;
   id: string;
+}
+
+// Built-in MCP Server Template types
+export interface BuiltinServerTemplate {
+  name: string;
+  description: string;
+  config_schema: ConfigSchemaField[];
+  default_config: Record<string, unknown>;
+}
+
+export interface BuiltinTemplateListResponse {
+  templates: BuiltinServerTemplate[];
+}
+
+export interface BuiltinServerConfigure {
+  template_name: string;
+  values: Record<string, unknown>;
 }

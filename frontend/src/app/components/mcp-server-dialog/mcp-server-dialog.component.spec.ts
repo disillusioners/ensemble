@@ -1,5 +1,5 @@
-import { signal } from '@angular/core';
-import type { McpServer, McpServerCreate, McpServerUpdate } from '../../models';
+import { signal, computed } from '@angular/core';
+import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate, ConfigSchemaField } from '../../models';
 
 // Mock MatDialogRef
 class MockMatDialogRef<T = unknown> {
@@ -19,6 +19,7 @@ class MockMatDialogRef<T = unknown> {
 // Dialog data interface (mirrors actual component)
 interface DialogData {
   server?: McpServer;
+  template?: BuiltinServerTemplate;
 }
 
 // Testable McpServerDialogComponent (mirrors actual component)
@@ -30,18 +31,31 @@ class TestableMcpServerDialogComponent {
   protected readonly error = signal<string | null>(null);
   protected readonly configJsonError = signal<string | null>(null);
 
+  // Schema form state
+  protected readonly schemaFormValues = signal<Record<string, unknown>>({});
+  protected readonly schemaFormValid = signal(false);
+
   private readonly dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>;
   protected readonly data: DialogData | null;
 
   protected readonly isEditMode: () => boolean;
+  protected readonly isBuiltinConfigureMode: () => boolean;
+  protected readonly isTemplateMode: () => boolean;
 
   constructor(dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>, data?: DialogData) {
     this.dialogRef = dialogRef;
     this.data = data || null;
-    this.isEditMode = () => !!this.data?.server;
+    this.isEditMode = computed(() => !!this.data?.server && !this.data?.server.is_builtin);
+    this.isBuiltinConfigureMode = computed(() => !!this.data?.server?.is_builtin);
+    this.isTemplateMode = computed(() => !!this.data?.template);
 
-    if (this.data?.server) {
+    if (this.data?.server && !this.data.server.is_builtin) {
       this.initializeFromServer(this.data.server);
+    } else if (this.data?.server?.is_builtin) {
+      // Builtin configure mode - initialize schema form with existing values
+      if (this.data.server.initial_values) {
+        this.schemaFormValues.set({ ...this.data.server.initial_values });
+      }
     }
   }
 
@@ -52,6 +66,14 @@ class TestableMcpServerDialogComponent {
     if (server.config && Object.keys(server.config).length > 0) {
       this.configJson.set(JSON.stringify(server.config, null, 2));
     }
+  }
+
+  onSchemaValuesChange(values: Record<string, unknown>): void {
+    this.schemaFormValues.set(values);
+  }
+
+  onSchemaValidChange(isValid: boolean): void {
+    this.schemaFormValid.set(isValid);
   }
 
   onNameChange(event: Event): void {
@@ -139,6 +161,9 @@ class TestableMcpServerDialogComponent {
   }
 
   isSubmitDisabled(): boolean {
+    if (this.isBuiltinConfigureMode() || this.isTemplateMode()) {
+      return !this.schemaFormValid();
+    }
     return !this.name().trim() || this.configJsonError() !== null;
   }
 }
@@ -153,6 +178,40 @@ function createMockServer(overrides: Partial<McpServer> = {}): McpServer {
     is_active: true,
     created_at: '2025-01-15T10:30:00Z',
     updated_at: null,
+    ...overrides,
+  };
+}
+
+// Helper to create mock builtin server
+function createMockBuiltinServer(overrides: Partial<McpServer> = {}): McpServer {
+  return {
+    id: `builtin-${Math.random().toString(36).substr(2, 9)}`,
+    name: 'Test Builtin Server',
+    description: 'A test builtin MCP server',
+    config: {},
+    is_active: true,
+    is_builtin: true,
+    config_schema: [
+      { key: 'api_key', label: 'API Key', type: 'text', section: 'env', required: true },
+      { key: 'debug', label: 'Debug Mode', type: 'boolean', section: 'args', default: false }
+    ],
+    initial_values: { api_key: '', debug: false },
+    created_at: '2025-01-15T10:30:00Z',
+    updated_at: null,
+    ...overrides,
+  };
+}
+
+// Helper to create mock template
+function createMockTemplate(overrides: Partial<BuiltinServerTemplate> = {}): BuiltinServerTemplate {
+  return {
+    name: 'test-template',
+    description: 'A test builtin template',
+    config_schema: [
+      { key: 'api_key', label: 'API Key', type: 'text', section: 'env', required: true },
+      { key: 'timeout', label: 'Timeout', type: 'number', section: 'args', default: 30, min: 1, max: 300 }
+    ],
+    default_config: { api_key: '', timeout: 30 },
     ...overrides,
   };
 }
@@ -863,6 +922,114 @@ describe('McpServerDialogComponent', () => {
       component.handleClose();
 
       expect(closeSpy).toHaveBeenCalledWith(null);
+    });
+  });
+
+  describe('mode detection', () => {
+    it('should detect builtin configure mode', () => {
+      const builtinServer = createMockBuiltinServer();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: builtinServer });
+
+      expect(component.isBuiltinConfigureMode()).toBe(true);
+      expect(component.isEditMode()).toBe(false);
+      expect(component.isTemplateMode()).toBe(false);
+    });
+
+    it('should detect template mode', () => {
+      const template = createMockTemplate();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { template });
+
+      expect(component.isTemplateMode()).toBe(true);
+      expect(component.isEditMode()).toBe(false);
+      expect(component.isBuiltinConfigureMode()).toBe(false);
+    });
+
+    it('should not confuse builtin server as edit mode', () => {
+      const builtinServer = createMockBuiltinServer();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: builtinServer });
+
+      expect(component.isEditMode()).toBe(false);
+    });
+
+    it('should detect both modes when server and template are present', () => {
+      // In practice, dialog data would have either server or template, not both
+      // But computed signals check independently
+      const builtinServer = createMockBuiltinServer();
+      const component = new TestableMcpServerDialogComponent(dialogRef, {
+        server: builtinServer,
+        template: createMockTemplate()
+      });
+
+      // Both would be true in this edge case
+      expect(component.isBuiltinConfigureMode()).toBe(true);
+      expect(component.isTemplateMode()).toBe(true);
+    });
+  });
+
+  describe('schema form state', () => {
+    it('should initialize with empty schema values in create mode', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      expect(component.schemaFormValues()).toEqual({});
+    });
+
+    it('should initialize with initial_values in builtin configure mode', () => {
+      const builtinServer = createMockBuiltinServer({
+        initial_values: { api_key: 'secret123', debug: true }
+      });
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: builtinServer });
+
+      expect(component.schemaFormValues()).toEqual({ api_key: 'secret123', debug: true });
+    });
+
+    it('should update schema form values on onSchemaValuesChange', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+      component.onSchemaValuesChange({ api_key: 'newkey', timeout: 60 });
+
+      expect(component.schemaFormValues()).toEqual({ api_key: 'newkey', timeout: 60 });
+    });
+
+    it('should update schema form validity on onSchemaValidChange', () => {
+      const component = new TestableMcpServerDialogComponent(dialogRef);
+
+      component.onSchemaValidChange(true);
+      expect(component.schemaFormValid()).toBe(true);
+
+      component.onSchemaValidChange(false);
+      expect(component.schemaFormValid()).toBe(false);
+    });
+  });
+
+  describe('isSubmitDisabled in schema modes', () => {
+    it('should disable submit in builtin mode when schema form is invalid', () => {
+      const builtinServer = createMockBuiltinServer();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: builtinServer });
+
+      component.onSchemaValidChange(false);
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should enable submit in builtin mode when schema form is valid', () => {
+      const builtinServer = createMockBuiltinServer();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { server: builtinServer });
+
+      component.onSchemaValidChange(true);
+      expect(component.isSubmitDisabled()).toBe(false);
+    });
+
+    it('should disable submit in template mode when schema form is invalid', () => {
+      const template = createMockTemplate();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { template });
+
+      component.onSchemaValidChange(false);
+      expect(component.isSubmitDisabled()).toBe(true);
+    });
+
+    it('should enable submit in template mode when schema form is valid', () => {
+      const template = createMockTemplate();
+      const component = new TestableMcpServerDialogComponent(dialogRef, { template });
+
+      component.onSchemaValidChange(true);
+      expect(component.isSubmitDisabled()).toBe(false);
     });
   });
 });

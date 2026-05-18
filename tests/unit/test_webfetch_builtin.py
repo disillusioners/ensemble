@@ -1,0 +1,412 @@
+"""Tests for WebFetch built-in MCP server definition.
+
+This module tests the WebFetchServerDefinition class including:
+- Schema definition (get_config_schema)
+- Config building (build_config)
+- Config parsing (parse_config)
+- Integration with registry
+"""
+
+import pytest
+
+from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+from daemon.mcp.builtin_servers import get_registry
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def webfetch_definition():
+    """Create a WebFetchServerDefinition instance."""
+    return WebFetchServerDefinition()
+
+
+@pytest.fixture
+def registry():
+    """Get the global registry."""
+    return get_registry()
+
+
+# =============================================================================
+# Test Properties
+# =============================================================================
+
+
+class TestWebFetchProperties:
+    """Tests for WebFetchServerDefinition property values."""
+
+    def test_name(self, webfetch_definition):
+        """Test that name is 'webfetch'."""
+        assert webfetch_definition.name == "webfetch"
+
+    def test_display_name(self, webfetch_definition):
+        """Test that display_name is 'WebFetch'."""
+        assert webfetch_definition.display_name == "WebFetch"
+
+    def test_description(self, webfetch_definition):
+        """Test that description is set correctly."""
+        assert "Fetch and read web page content" in webfetch_definition.description
+        assert "agents" in webfetch_definition.description
+
+    def test_schema_version(self, webfetch_definition):
+        """Test that schema_version is '1'."""
+        assert webfetch_definition.schema_version == "1"
+
+
+# =============================================================================
+# Test Base Config
+# =============================================================================
+
+
+class TestWebFetchBaseConfig:
+    """Tests for get_base_config()."""
+
+    def test_base_config_transport(self, webfetch_definition):
+        """Test that base config includes stdio transport."""
+        base_config = webfetch_definition.get_base_config()
+        assert base_config.get("transport") == "stdio"
+
+    def test_base_config_command(self, webfetch_definition):
+        """Test that base config includes uvx command."""
+        base_config = webfetch_definition.get_base_config()
+        assert base_config.get("command") == "uvx"
+
+    def test_base_config_args(self, webfetch_definition):
+        """Test that base config includes mcp-server-fetch args."""
+        base_config = webfetch_definition.get_base_config()
+        assert base_config.get("args") == ["mcp-server-fetch"]
+
+
+# =============================================================================
+# Test Schema
+# =============================================================================
+
+
+class TestWebFetchSchema:
+    """Tests for get_config_schema()."""
+
+    def test_schema_returns_three_fields(self, webfetch_definition):
+        """Test that schema returns exactly 3 fields."""
+        schema = webfetch_definition.get_config_schema()
+        assert len(schema) == 3
+
+    def test_schema_user_agent_field(self, webfetch_definition):
+        """Test user_agent field configuration."""
+        schema = webfetch_definition.get_config_schema()
+        user_agent = next(f for f in schema if f["key"] == "user_agent")
+
+        assert user_agent["key"] == "user_agent"
+        assert user_agent["label"] == "User Agent"
+        assert user_agent["type"] == "text"
+        assert user_agent["section"] == "args"
+        assert user_agent["arg_format"] == "key_value"
+        assert user_agent["default"] == "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
+        assert user_agent["required"] is False
+        assert "User-Agent" in user_agent["description"]
+
+    def test_schema_ignore_robots_txt_field(self, webfetch_definition):
+        """Test ignore_robots_txt field configuration."""
+        schema = webfetch_definition.get_config_schema()
+        ignore_robots = next(f for f in schema if f["key"] == "ignore_robots_txt")
+
+        assert ignore_robots["key"] == "ignore_robots_txt"
+        assert ignore_robots["label"] == "Ignore robots.txt"
+        assert ignore_robots["type"] == "boolean"
+        assert ignore_robots["section"] == "args"
+        assert ignore_robots["arg_format"] == "flag"
+        assert ignore_robots["default"] is False
+        assert ignore_robots["required"] is False
+
+    def test_schema_proxy_url_field(self, webfetch_definition):
+        """Test proxy_url field configuration."""
+        schema = webfetch_definition.get_config_schema()
+        proxy_url = next(f for f in schema if f["key"] == "proxy_url")
+
+        assert proxy_url["key"] == "proxy_url"
+        assert proxy_url["label"] == "Proxy URL"
+        assert proxy_url["type"] == "text"
+        assert proxy_url["section"] == "args"
+        assert proxy_url["arg_format"] == "key_value"
+        assert proxy_url["default"] is None
+        assert proxy_url["required"] is False
+
+
+# =============================================================================
+# Test build_config
+# =============================================================================
+
+
+class TestWebFetchBuildConfig:
+    """Tests for build_config() method."""
+
+    def test_build_config_includes_base_config(self, webfetch_definition):
+        """Test that build_config includes base config."""
+        result = webfetch_definition.build_config({})
+
+        assert result.get("transport") == "stdio"
+        assert result.get("command") == "uvx"
+        assert "mcp-server-fetch" in result.get("args", [])
+
+    def test_build_config_default_user_agent(self, webfetch_definition):
+        """Test that default user_agent is included when no values provided."""
+        result = webfetch_definition.build_config({})
+
+        args = result.get("args", [])
+        assert "--user-agent" in args
+        ua_idx = args.index("--user-agent")
+        assert args[ua_idx + 1] == "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
+
+    def test_build_config_default_ignores_robots_txt(self, webfetch_definition):
+        """Test that default ignore_robots_txt (False) emits --no-ignore-robots-txt."""
+        result = webfetch_definition.build_config({})
+
+        args = result.get("args", [])
+        # When default is False, the flag should be emitted as --no-ignore-robots-txt
+        assert "--no-ignore-robots-txt" in args
+        assert "--ignore-robots-txt" not in args
+
+    def test_build_config_ignore_robots_txt_true(self, webfetch_definition):
+        """Test that --ignore-robots-txt flag is emitted when True."""
+        result = webfetch_definition.build_config({"ignore_robots_txt": True})
+
+        args = result.get("args", [])
+        assert "--ignore-robots-txt" in args
+        assert "--no-ignore-robots-txt" not in args
+
+    def test_build_config_ignore_robots_txt_false(self, webfetch_definition):
+        """Test that --no-ignore-robots-txt flag is emitted when False."""
+        result = webfetch_definition.build_config({"ignore_robots_txt": False})
+
+        args = result.get("args", [])
+        assert "--no-ignore-robots-txt" in args
+        assert "--ignore-robots-txt" not in args
+
+    def test_build_config_custom_user_agent(self, webfetch_definition):
+        """Test that custom user_agent value is used."""
+        result = webfetch_definition.build_config({"user_agent": "CustomBot/1.0"})
+
+        args = result.get("args", [])
+        assert "--user-agent" in args
+        ua_idx = args.index("--user-agent")
+        assert args[ua_idx + 1] == "CustomBot/1.0"
+
+    def test_build_config_proxy_url_none_omitted(self, webfetch_definition):
+        """Test that proxy_url is omitted when None."""
+        result = webfetch_definition.build_config({"proxy_url": None})
+
+        args = result.get("args", [])
+        assert "--proxy-url" not in args
+
+    def test_build_config_proxy_url_set(self, webfetch_definition):
+        """Test that proxy_url value is included when set."""
+        result = webfetch_definition.build_config({"proxy_url": "http://proxy:8080"})
+
+        args = result.get("args", [])
+        assert "--proxy-url" in args
+        proxy_idx = args.index("--proxy-url")
+        assert args[proxy_idx + 1] == "http://proxy:8080"
+
+    def test_build_config_all_fields(self, webfetch_definition):
+        """Test building config with all fields provided."""
+        result = webfetch_definition.build_config({
+            "user_agent": "MyBot/2.0",
+            "ignore_robots_txt": True,
+            "proxy_url": "http://proxy:8080",
+        })
+
+        args = result.get("args", [])
+        assert "mcp-server-fetch" in args
+        assert "--user-agent" in args
+        assert "MyBot/2.0" in args
+        assert "--ignore-robots-txt" in args
+        assert "--proxy-url" in args
+        assert "http://proxy:8080" in args
+
+    def test_build_config_args_order(self, webfetch_definition):
+        """Test that args are in correct order: base + user_agent + flag + proxy."""
+        result = webfetch_definition.build_config({
+            "user_agent": "TestBot",
+            "ignore_robots_txt": True,
+            "proxy_url": "http://proxy:8080",
+        })
+
+        args = result.get("args", [])
+        # Should be: mcp-server-fetch, --user-agent, value, --ignore-robots-txt, --proxy-url, value
+        expected_order = [
+            "mcp-server-fetch",
+            "--user-agent",
+            "TestBot",
+            "--ignore-robots-txt",
+            "--proxy-url",
+            "http://proxy:8080",
+        ]
+        assert args == expected_order
+
+
+# =============================================================================
+# Test parse_config
+# =============================================================================
+
+
+class TestWebFetchParseConfig:
+    """Tests for parse_config() method."""
+
+    def test_parse_config_roundtrip(self, webfetch_definition):
+        """Test that build_config output can be parsed back."""
+        original_values = {
+            "user_agent": "RoundtripBot",
+            "ignore_robots_txt": True,
+        }
+        built_config = webfetch_definition.build_config(original_values)
+        parsed = webfetch_definition.parse_config(built_config)
+
+        assert parsed["user_agent"] == "RoundtripBot"
+        assert parsed["ignore_robots_txt"] is True
+
+    def test_parse_config_default_values(self, webfetch_definition):
+        """Test parsing default config."""
+        built_config = webfetch_definition.build_config({})
+        parsed = webfetch_definition.parse_config(built_config)
+
+        # Default user_agent should be parsed
+        assert parsed["user_agent"] == "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)"
+        # Default ignore_robots_txt is False - should parse to False
+        # Since False produces --no-ignore-robots-txt in build_config,
+        # parse_config should recover False
+        assert parsed["ignore_robots_txt"] is False
+
+    def test_parse_config_with_proxy(self, webfetch_definition):
+        """Test parsing config with proxy_url."""
+        original_values = {"proxy_url": "http://proxy:8080"}
+        built_config = webfetch_definition.build_config(original_values)
+        parsed = webfetch_definition.parse_config(built_config)
+
+        assert parsed["proxy_url"] == "http://proxy:8080"
+
+    def test_parse_config_skips_base_args(self, webfetch_definition):
+        """Test that parse_config correctly skips base args."""
+        # Build config with user values
+        built_config = webfetch_definition.build_config({
+            "user_agent": "TestAgent",
+            "ignore_robots_txt": True,
+        })
+
+        # Verify base args are at the start
+        args = built_config.get("args", [])
+        assert args[0] == "mcp-server-fetch"
+
+        # Parse should work correctly
+        parsed = webfetch_definition.parse_config(built_config)
+        assert parsed["user_agent"] == "TestAgent"
+        assert parsed["ignore_robots_txt"] is True
+
+    def test_parse_config_all_fields(self, webfetch_definition):
+        """Test parsing full config with all fields."""
+        original_values = {
+            "user_agent": "FullBot",
+            "ignore_robots_txt": True,
+            "proxy_url": "http://full:8080",
+        }
+        built_config = webfetch_definition.build_config(original_values)
+        parsed = webfetch_definition.parse_config(built_config)
+
+        assert parsed["user_agent"] == "FullBot"
+        assert parsed["ignore_robots_txt"] is True
+        assert parsed["proxy_url"] == "http://full:8080"
+
+    def test_parse_config_false_flag_recovered(self, webfetch_definition):
+        """Test that False flag value is correctly recovered."""
+        built_config = webfetch_definition.build_config({"ignore_robots_txt": False})
+        parsed = webfetch_definition.parse_config(built_config)
+
+        assert parsed["ignore_robots_txt"] is False
+
+
+# =============================================================================
+# Test Registry Integration
+# =============================================================================
+
+
+class TestWebFetchRegistryIntegration:
+    """Tests for WebFetch registration in global registry."""
+
+    def test_webfetch_registered_in_registry(self, registry):
+        """Test that WebFetch is registered in the global registry."""
+        webfetch = registry.get_by_name("webfetch")
+        assert webfetch is not None
+        assert isinstance(webfetch, WebFetchServerDefinition)
+
+    def test_registry_contains_webfetch(self, registry):
+        """Test that webfetch is in registry definitions."""
+        assert "webfetch" in registry.definitions
+
+    def test_registry_get_all_includes_webfetch(self, registry):
+        """Test that get_all() includes WebFetch."""
+        all_defs = registry.get_all()
+        webfetch_names = [d.name for d in all_defs]
+        assert "webfetch" in webfetch_names
+
+
+# =============================================================================
+# Test End-to-End Integration
+# =============================================================================
+
+
+class TestWebFetchEndToEnd:
+    """End-to-end integration tests for WebFetch."""
+
+    def test_full_config_generation(self, webfetch_definition):
+        """Test complete config generation workflow."""
+        # User provides custom values
+        user_values = {
+            "user_agent": "AgentBot/1.0",
+            "ignore_robots_txt": True,
+            "proxy_url": "http://agent-proxy:3128",
+        }
+
+        # Build config
+        config = webfetch_definition.build_config(user_values)
+
+        # Verify structure
+        assert config["transport"] == "stdio"
+        assert config["command"] == "uvx"
+        assert "mcp-server-fetch" in config["args"]
+
+        # Verify user values are in args
+        args = config["args"]
+        assert "--user-agent" in args
+        assert "AgentBot/1.0" in args
+        assert "--ignore-robots-txt" in args
+        assert "--proxy-url" in args
+        assert "http://agent-proxy:3128" in args
+
+        # Parse back
+        parsed = webfetch_definition.parse_config(config)
+
+        # Verify values match
+        assert parsed["user_agent"] == "AgentBot/1.0"
+        assert parsed["ignore_robots_txt"] is True
+        assert parsed["proxy_url"] == "http://agent-proxy:3128"
+
+    def test_default_only_config(self, webfetch_definition):
+        """Test config generation with only defaults."""
+        config = webfetch_definition.build_config({})
+
+        # Should include base config and default user_agent
+        assert config["transport"] == "stdio"
+        assert config["command"] == "uvx"
+        assert "mcp-server-fetch" in config["args"]
+        assert "--user-agent" in config["args"]
+
+        # Should include default user_agent value
+        args = config["args"]
+        assert "Mozilla/5.0 (compatible; MCP-WebFetch/1.0)" in args
+
+        # Default ignore_robots_txt is False, so --no-ignore-robots-txt should be included
+        assert "--no-ignore-robots-txt" in args
+
+        # Default proxy_url is None, so --proxy-url should NOT be included
+        assert "--proxy-url" not in args

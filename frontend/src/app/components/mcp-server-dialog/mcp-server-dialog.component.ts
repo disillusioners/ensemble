@@ -1,21 +1,27 @@
-import { Component, signal, computed, OnInit, inject } from '@angular/core';
+import { Component, signal, computed, OnInit, inject, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
-import type { McpServer, McpServerCreate, McpServerUpdate } from '../../models';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate } from '../../models';
+import { ConfigSchemaFormComponent } from '../config-schema-form/config-schema-form.component';
+import { McpServerService } from '../../services/mcp-server.service';
 
 interface DialogData {
   server?: McpServer;
+  template?: BuiltinServerTemplate;
 }
 
 @Component({
   selector: 'app-mcp-server-dialog',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatDialogModule],
+  imports: [CommonModule, FormsModule, MatDialogModule, MatSnackBarModule, ConfigSchemaFormComponent],
   templateUrl: './mcp-server-dialog.html',
   styleUrl: './mcp-server-dialog.scss'
 })
 export class McpServerDialogComponent implements OnInit {
+  @ViewChild('configSchemaForm') configSchemaForm?: ConfigSchemaFormComponent;
+
   protected readonly name = signal('');
   protected readonly description = signal('');
   protected readonly configJson = signal('');
@@ -23,15 +29,33 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly error = signal<string | null>(null);
   protected readonly configJsonError = signal<string | null>(null);
 
+  // Schema form state
+  protected readonly schemaFormValues = signal<Record<string, unknown>>({});
+  protected readonly schemaFormValid = signal(false);
+
   private readonly dialogRef = inject(MatDialogRef<McpServerDialogComponent>);
   protected readonly data = inject<DialogData>(MAT_DIALOG_DATA);
+  private readonly snackBar = inject(MatSnackBar);
+  private readonly mcpServerService = inject(McpServerService);
 
-  protected readonly isEditMode = computed(() => !!this.data?.server);
+  // Mode detection
+  protected readonly isEditMode = computed(() => !!this.data?.server && !this.data?.server.is_builtin);
+  protected readonly isBuiltinConfigureMode = computed(() => !!this.data?.server?.is_builtin);
+  protected readonly isTemplateMode = computed(() => !!this.data?.template);
+
+  // Convenience accessors
+  protected get server(): McpServer | undefined {
+    return this.data?.server;
+  }
+
+  protected get template(): BuiltinServerTemplate | undefined {
+    return this.data?.template;
+  }
 
   constructor() {}
 
   ngOnInit(): void {
-    if (this.data?.server) {
+    if (this.data?.server && !this.data.server.is_builtin) {
       // Edit mode - pre-fill form
       const server = this.data.server;
       this.name.set(server.name);
@@ -39,6 +63,14 @@ export class McpServerDialogComponent implements OnInit {
       this.isActive.set(server.is_active);
       if (server.config && Object.keys(server.config).length > 0) {
         this.configJson.set(JSON.stringify(server.config, null, 2));
+      }
+    } else if (this.data?.server?.is_builtin) {
+      // Builtin configure mode - initialize schema form with existing values
+      const server = this.data.server;
+      this.name.set(server.name);
+      this.description.set(server.description || '');
+      if (server.initial_values) {
+        this.schemaFormValues.set({ ...server.initial_values });
       }
     }
   }
@@ -56,13 +88,21 @@ export class McpServerDialogComponent implements OnInit {
   protected onConfigJsonChange(event: Event): void {
     const target = event.target as HTMLTextAreaElement;
     this.configJson.set(target.value);
-    // Validate JSON
     this.validateConfigJson();
   }
 
   protected onIsActiveChange(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.isActive.set(target.checked);
+  }
+
+  // Schema form output handlers
+  protected onSchemaValuesChange(values: Record<string, unknown>): void {
+    this.schemaFormValues.set(values);
+  }
+
+  protected onSchemaValidChange(isValid: boolean): void {
+    this.schemaFormValid.set(isValid);
   }
 
   private validateConfigJson(): boolean {
@@ -87,9 +127,69 @@ export class McpServerDialogComponent implements OnInit {
   }
 
   protected handleSubmit(): void {
-    // Clear previous error
     this.error.set(null);
 
+    if (this.isBuiltinConfigureMode()) {
+      this.handleBuiltinConfigureSubmit();
+    } else if (this.isTemplateMode()) {
+      this.handleTemplateSubmit();
+    } else {
+      this.handleEditOrCreateSubmit();
+    }
+  }
+
+  private handleBuiltinConfigureSubmit(): void {
+    const server = this.server;
+    if (!server) return;
+
+    this.mcpServerService.updateServer(server.id, {
+      config: this.schemaFormValues()
+    }).subscribe({
+      next: (updatedServer) => {
+        this.snackBar.open(`Configuration saved for "${server.name}"`, 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar'
+        });
+        this.dialogRef.close({ type: 'builtin-update', server: updatedServer });
+      },
+      error: (err) => {
+        console.error('Failed to save builtin configuration:', err);
+        const message = err?.error?.detail || err?.message || 'Failed to save configuration';
+        this.snackBar.open(message, 'Close', {
+          duration: 5000,
+          panelClass: 'error-snackbar'
+        });
+      }
+    });
+  }
+
+  private handleTemplateSubmit(): void {
+    const tmpl = this.template;
+    if (!tmpl) return;
+
+    this.mcpServerService.configureBuiltin({
+      template_name: tmpl.name,
+      values: this.schemaFormValues()
+    }).subscribe({
+      next: (newServer) => {
+        this.snackBar.open(`Server "${newServer.name}" configured successfully`, 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar'
+        });
+        this.dialogRef.close({ type: 'template-create', server: newServer });
+      },
+      error: (err) => {
+        console.error('Failed to configure template:', err);
+        const message = err?.error?.detail || err?.message || 'Failed to configure template';
+        this.snackBar.open(message, 'Close', {
+          duration: 5000,
+          panelClass: 'error-snackbar'
+        });
+      }
+    });
+  }
+
+  private handleEditOrCreateSubmit(): void {
     // Validation - Name
     const nameValue = this.name().trim();
     if (!nameValue) {
@@ -113,7 +213,7 @@ export class McpServerDialogComponent implements OnInit {
       config = JSON.parse(configJson);
     }
 
-    if (this.isEditMode() && this.data?.server) {
+    if (this.isEditMode() && this.server) {
       // Edit mode
       const update: McpServerUpdate = {
         name: nameValue,
@@ -134,7 +234,68 @@ export class McpServerDialogComponent implements OnInit {
     }
   }
 
+  protected handleResetToDefaults(): void {
+    const server = this.server;
+    if (!server || !this.isBuiltinConfigureMode()) return;
+
+    if (!confirm('Reset configuration to defaults? Your custom settings will be lost.')) {
+      return;
+    }
+
+    this.mcpServerService.resetBuiltin(server.id).subscribe({
+      next: (updatedServer) => {
+        this.snackBar.open(`Configuration reset to defaults for "${server.name}"`, 'Close', {
+          duration: 3000,
+          panelClass: 'success-snackbar'
+        });
+        // Re-initialize schema form with new initial values
+        if (updatedServer.initial_values) {
+          this.schemaFormValues.set({ ...updatedServer.initial_values });
+          // Trigger the config schema form to re-initialize
+          if (this.configSchemaForm) {
+            this.configSchemaForm.ngOnInit();
+          }
+        }
+      },
+      error: (err) => {
+        console.error('Failed to reset builtin configuration:', err);
+        const message = err?.error?.detail || err?.message || 'Failed to reset configuration';
+        this.snackBar.open(message, 'Close', {
+          duration: 5000,
+          panelClass: 'error-snackbar'
+        });
+      }
+    });
+  }
+
   protected isSubmitDisabled(): boolean {
+    if (this.isBuiltinConfigureMode() || this.isTemplateMode()) {
+      return !this.schemaFormValid();
+    }
     return !this.name().trim() || this.configJsonError() !== null;
+  }
+
+  protected getDialogTitle(): string {
+    if (this.isTemplateMode()) {
+      const displayName = (this.template as { display_name?: string })?.display_name;
+      return `Configure: ${displayName || this.template?.name || 'Template'}`;
+    }
+    if (this.isBuiltinConfigureMode()) {
+      return `Configure: ${this.server?.name || 'Server'}`;
+    }
+    if (this.isEditMode()) {
+      return `Edit: ${this.server?.name || 'Server'}`;
+    }
+    return 'Add MCP Server';
+  }
+
+  protected getSubmitButtonText(): string {
+    if (this.isBuiltinConfigureMode() || this.isTemplateMode()) {
+      return 'Save Configuration';
+    }
+    if (this.isEditMode()) {
+      return 'Save';
+    }
+    return 'Add Server';
   }
 }

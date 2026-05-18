@@ -116,6 +116,141 @@ $accent-blue: #3b82f6;
   }
 }
 
+// Built-in dropdown
+.builtin-dropdown-container {
+  position: relative;
+}
+
+.add-builtin-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid $accent-violet;
+  color: $accent-violet;
+  background-color: rgba($accent-violet, 0.1);
+
+  &:hover:not(:disabled) {
+    background-color: rgba($accent-violet, 0.2);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &.dropdown-open {
+    background-color: rgba($accent-violet, 0.2);
+  }
+
+  .chevron {
+    transition: transform 0.2s ease;
+  }
+
+  &.dropdown-open .chevron {
+    transform: rotate(180deg);
+  }
+}
+
+.builtin-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  min-width: 300px;
+  max-width: 400px;
+  background-color: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 0.5rem;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.dropdown-header {
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: $text-muted;
+  border-bottom: 1px solid $border-color;
+}
+
+.dropdown-loading {
+  display: flex;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+  text-align: left;
+
+  &:hover:not(:disabled) {
+    background-color: $bg-card-hover;
+  }
+
+  &.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+.template-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.template-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: $text-primary;
+}
+
+.template-desc {
+  font-size: 0.75rem;
+  color: $text-secondary;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conflict-warning {
+  font-size: 0.6875rem;
+  color: $accent-amber;
+  white-space: nowrap;
+  margin-left: 0.5rem;
+}
+
+.dropdown-empty {
+  padding: 1rem;
+  text-align: center;
+  color: $text-muted;
+  font-size: 0.875rem;
+}
+
+.dropdown-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
 // SVG animations
 .spinning {
   animation: spin 1s linear infinite;
@@ -212,6 +347,30 @@ $accent-blue: #3b82f6;
   gap: 1.5rem;
 }
 
+// Section headers
+.section-header {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.section-title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: $text-muted;
+  white-space: nowrap;
+}
+
+.section-line {
+  flex: 1;
+  height: 1px;
+  background-color: $border-color;
+}
+
 // Server card
 .server-card {
   background-color: $bg-card;
@@ -223,6 +382,14 @@ $accent-blue: #3b82f6;
   &:hover {
     border-color: rgba($accent-cyan, 0.3);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  }
+
+  &.builtin {
+    border-color: rgba($accent-violet, 0.3);
+
+    &:hover {
+      border-color: rgba($accent-violet, 0.5);
+    }
   }
 }
 
@@ -246,6 +413,38 @@ $accent-blue: #3b82f6;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+// Badges
+.builtin-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background-color: rgba($accent-violet, 0.2);
+  color: $accent-violet;
+  flex-shrink: 0;
+}
+
+.conflict-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background-color: rgba($accent-amber, 0.2);
+  color: $accent-amber;
+  flex-shrink: 0;
 }
 
 .status-badge {
@@ -326,6 +525,15 @@ $accent-blue: #3b82f6;
 
   &:hover {
     background-color: rgba($accent-cyan, 0.2);
+  }
+}
+
+.configure-btn {
+  color: $accent-violet;
+  background-color: rgba($accent-violet, 0.1);
+
+  &:hover {
+    background-color: rgba($accent-violet, 0.2);
   }
 }
 

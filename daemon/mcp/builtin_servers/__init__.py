@@ -52,3 +52,9 @@ _registry = BuiltinServerRegistry()
 def get_registry() -> BuiltinServerRegistry:
     """Get the global registry instance."""
     return _registry
+
+
+# Register built-in server definitions
+from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+
+_registry.register(WebFetchServerDefinition())

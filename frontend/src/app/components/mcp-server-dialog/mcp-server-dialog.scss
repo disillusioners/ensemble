@@ -188,6 +188,27 @@ $accent-blue: #3b82f6;
   font-size: 0.875rem;
 }
 
+// Info header for builtin/template mode
+.info-header {
+  padding: 0.75rem;
+  background-color: rgba($accent-cyan, 0.1);
+  border: 1px solid rgba($accent-cyan, 0.2);
+  border-radius: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.info-name {
+  font-weight: 600;
+  color: $text-primary;
+  font-size: 0.9375rem;
+}
+
+.info-description {
+  color: $text-secondary;
+  font-size: 0.8125rem;
+  margin-top: 0.25rem;
+}
+
 // Toggle
 .toggle-label {
   display: flex;
@@ -238,6 +259,30 @@ $accent-blue: #3b82f6;
   justify-content: flex-end;
   gap: 0.75rem;
   padding-top: 0.5rem;
+
+  &.with-reset {
+    justify-content: space-between;
+  }
+}
+
+.action-group {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.reset-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  color: $accent-amber;
+  background-color: transparent;
+  border: 1px solid $accent-amber;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover {
+    background-color: rgba($accent-amber, 0.15);
+  }
 }
 
 .cancel-btn {

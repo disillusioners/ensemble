@@ -1,4 +1,4 @@
-import { Component, inject, OnInit, DestroyRef } from '@angular/core';
+import { Component, inject, OnInit, DestroyRef, computed, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { Router } from '@angular/router';
@@ -9,7 +9,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { McpServerService } from '../../services/mcp-server.service';
 import { McpServerDialogComponent } from '../mcp-server-dialog/mcp-server-dialog.component';
-import type { McpServer, McpServerCreate, McpServerUpdate } from '../../models';
+import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate } from '../../models';
 
 @Component({
   selector: 'app-mcp-server-list',
@@ -34,9 +34,30 @@ export class McpServerListComponent implements OnInit {
 
   readonly servers = this.mcpServerService.servers;
   readonly loading = this.mcpServerService.loading;
+  readonly templatesLoading = this.mcpServerService.templatesLoading;
+
+  // Dropdown state for built-in server configuration
+  readonly builtinDropdownOpen = signal(false);
+
+  // Computed signals for separation
+  readonly builtInServers = computed(() => this.servers().filter(s => s.is_builtin));
+  readonly userServers = computed(() => this.servers().filter(s => !s.is_builtin));
+
+  // Computed: names that conflict with available templates
+  readonly conflictingNames = computed(() => {
+    const tmplNames = new Set(this.mcpServerService.templates().map(t => t.name));
+    return this.userServers().filter(s => tmplNames.has(s.name)).map(s => s.name);
+  });
+
+  // Computed: templates not yet configured as built-in servers
+  readonly unconfiguredTemplates = computed(() => {
+    const configuredNames = new Set(this.builtInServers().map(s => s.name));
+    return this.mcpServerService.templates().filter(t => !configuredNames.has(t.name));
+  });
 
   ngOnInit(): void {
     this.loadServers();
+    this.loadTemplates();
   }
 
   protected loadServers(): void {
@@ -46,6 +67,13 @@ export class McpServerListComponent implements OnInit {
         console.error('Failed to load MCP servers:', err);
         this.showError('Failed to load MCP servers');
       }
+    });
+  }
+
+  protected loadTemplates(): void {
+    this.mcpServerService.listTemplates().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {},
+      error: () => {} // Error handled in service
     });
   }
 
@@ -93,6 +121,45 @@ export class McpServerListComponent implements OnInit {
         this.showError('Failed to delete MCP server');
       }
     });
+  }
+
+  protected toggleBuiltinDropdown(): void {
+    this.builtinDropdownOpen.update(v => !v);
+  }
+
+  protected closeBuiltinDropdown(): void {
+    this.builtinDropdownOpen.set(false);
+  }
+
+  protected onConfigureTemplate(template: BuiltinServerTemplate): void {
+    this.closeBuiltinDropdown();
+    const dialogRef = this.dialog.open(McpServerDialogComponent, {
+      panelClass: 'dark-modal-panel',
+      disableClose: true,
+      data: { template }
+    });
+
+    dialogRef.afterClosed().pipe(takeUntilDestroyed(this.destroyRef)).subscribe((result?: { values: Record<string, unknown> }) => {
+      if (result) {
+        this.configureBuiltinServer(template.name, result.values);
+      }
+    });
+  }
+
+  private configureBuiltinServer(templateName: string, values: Record<string, unknown>): void {
+    this.mcpServerService.configureBuiltin({
+      template_name: templateName,
+      values
+    }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (server) => {
+        this.showSuccess(`Built-in server "${server.name}" configured successfully`);
+      },
+      error: () => {} // Error handled in service
+    });
+  }
+
+  protected isTemplateDisabled(template: BuiltinServerTemplate): boolean {
+    return this.conflictingNames().includes(template.name);
   }
 
   private createServer(data: McpServerCreate): void {
