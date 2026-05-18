@@ -21,6 +21,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..utils import parse_think_tags, serialize_message
 from .cancellation import CancellationService
+from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -367,6 +368,14 @@ class InstanceMessagingService:
         except Exception:
             return 0
 
+    def _maybe_trigger_title_generation(self, instance_id: str, message: str, should_trigger: bool) -> None:
+        """Fire-and-forget title generation if conditions are met."""
+        if should_trigger:
+            MainLoopBridge.run_async_no_wait(
+                self._manager._generate_and_broadcast_title(instance_id, message)
+            )
+            logger.debug(f"Title generation triggered for first message to instance {instance_id[:8]}...")
+
     async def send_message(self, instance_id: str, message: str) -> "MessageResult":
         """Send a message to an instance and get the response.
 
@@ -387,6 +396,14 @@ class InstanceMessagingService:
         
         # Get instance graph (will lazy-load from DB if needed)
         graph = self._manager.get_instance(instance_id)
+        
+        # Check if this is the first message (instance was IDLE)
+        # This determines if we should trigger title generation
+        instance_meta = self._manager._instance_repository.get(instance_id)
+        is_first_message = (
+            instance_meta is not None and
+            instance_meta.status == InstanceStatus.IDLE.value
+        )
 
         # Register current task for cancellation tracking
         current_task = asyncio.current_task()
@@ -412,6 +429,9 @@ class InstanceMessagingService:
             # Don't re-raise - we want clean stop
             return MessageResult(content="")
         finally:
+            # Trigger title generation even on cancellation (fire-and-forget)
+            self._maybe_trigger_title_generation(instance_id, message, is_first_message)
+            
             # Always unregister the task, but only if we're still the registered task
             # (handles race condition where new execution starts before our finally runs)
             if task_registered and current_task:
@@ -419,7 +439,7 @@ class InstanceMessagingService:
                 if existing is current_task:
                     self._manager._graph_tasks.pop(instance_id, None)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
-
+        
         # Extract message data from the current turn
         messages = result.get("messages", [])
         
@@ -589,12 +609,15 @@ class InstanceMessagingService:
             # 3. Update instance status if IDLE or PAUSED (resuming from pause)
             # Also clear paused_at when transitioning away from PAUSED status
             status_changed_to_running = False
+            is_idle_to_running = False
             instance = session.get(Instance, instance_id)
             if instance:
+                previous_status = instance.status
                 if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
                     instance.status = InstanceStatus.RUNNING.value
                     instance.paused_at = None  # Clear paused_at on resume
                     status_changed_to_running = True
+                    is_idle_to_running = previous_status == InstanceStatus.IDLE.value
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:
@@ -626,6 +649,12 @@ class InstanceMessagingService:
         # Emit status_change event if status was changed to running
         if status_changed_to_running:
             await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value)
+        
+        # Trigger title generation for first user message (fire-and-forget)
+        # This fires when instance transitions from IDLE -> RUNNING with a user message
+        self._maybe_trigger_title_generation(
+            instance_id, message, is_idle_to_running and msg_type == MessageType.HUMAN.value
+        )
         
         # After commit — task is now visible in DB
         if self._manager._worker_pool is not None:
