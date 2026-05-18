@@ -91,8 +91,10 @@ class BuiltinServerDefinition(ABC):
                 env[key.upper()] = str(value)
             elif section == "args":
                 if arg_format == "flag":
-                    if value:  # Only emit flag if truthy
+                    if value:
                         args.append(f"--{cli_key}")
+                    else:
+                        args.append(f"--no-{cli_key}")
                 else:  # key_value
                     args.append(f"--{cli_key}")
                     args.append(str(value))
@@ -133,15 +135,22 @@ class BuiltinServerDefinition(ABC):
             elif section == "args":
                 if arg_format == "flag":
                     flag_str = f"--{cli_key}"
+                    no_flag_str = f"--no-{cli_key}"
                     if flag_str in stored_args:
                         result[key] = True
+                    elif no_flag_str in stored_args:
+                        result[key] = False
                 else:  # key_value
                     key_str = f"--{cli_key}"
                     try:
                         idx = stored_args.index(key_str)
                         if idx + 1 < len(stored_args):
-                            raw_value = stored_args[idx + 1]
-                            result[key] = self._coerce_value(raw_value, field_type)
+                            next_val = stored_args[idx + 1]
+                            if next_val.startswith("--"):
+                                # Next token is a flag, not our value — skip
+                                pass
+                            else:
+                                result[key] = self._coerce_value(next_val, field_type)
                     except ValueError:
                         pass  # key not found in args
 
@@ -152,9 +161,10 @@ class BuiltinServerDefinition(ABC):
         """Coerce a value to the expected type based on schema field type."""
         if field_type == "number":
             try:
-                if "." in str(value):
-                    return float(value)
-                return int(value)
+                float_val = float(value)
+                if float_val.is_integer():
+                    return int(float_val)
+                return float_val
             except (ValueError, TypeError):
                 return value
         elif field_type == "boolean":

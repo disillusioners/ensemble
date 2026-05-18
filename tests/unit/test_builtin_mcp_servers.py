@@ -323,6 +323,15 @@ class TestBuiltinServerDefinitionBuildConfig:
         assert "API_URL" in result["env"]
         assert result["env"]["API_URL"] == "https://api.example.com"
 
+    def test_boolean_false_produces_negation(self, test_definition):
+        """build_config with boolean False should produce --no-flag format."""
+        # When verbose=False, should emit --no-verbose
+        user_values = {"api_key": "sk-test", "verbose": False}
+        result = test_definition.build_config(user_values)
+
+        assert "--no-verbose" in result["args"]
+        assert "--verbose" not in result["args"]
+
 
 # =============================================================================
 # Group 2: parse_config Tests (Reverse Mapping)
@@ -422,6 +431,34 @@ class TestBuiltinServerDefinitionParseConfig:
         # Other fields not in stored config should be absent
         assert "timeout" not in result
         assert "verbose" not in result
+
+    def test_parse_config_boolean_false_from_negation(self, test_definition):
+        """parse_config should recover False from --no-verbose flag."""
+        stored_config = {
+            "args": ["--api-key", "sk-test", "--no-verbose"],
+            "env": {}
+        }
+        result = test_definition.parse_config(stored_config)
+
+        assert result["api_key"] == "sk-test"
+        assert result["verbose"] is False
+
+    def test_parse_config_value_ambiguity(self, test_definition):
+        """parse_config should not treat a flag as a value for a preceding --key."""
+        # Malformed config where a value position contains a flag
+        # Note: --timeout is the key in schema (key_value), but --verbose is a flag
+        stored_config = {
+            "args": ["--api-key", "--verbose", "--timeout", "8080"],
+            "env": {}
+        }
+        result = test_definition.parse_config(stored_config)
+
+        # api_key should NOT be populated (because --verbose is a flag, not a value)
+        assert "api_key" not in result
+        # verbose should be True (the flag IS present)
+        assert result["verbose"] is True
+        # timeout should be 8080 (correctly parsed after --timeout)
+        assert result["timeout"] == 8080
 
 
 # =============================================================================
@@ -753,6 +790,27 @@ class TestBuiltinApiProtection:
         assert response.status_code == 200
         data = response.json()
         assert data["is_active"] is False
+
+    def test_update_builtin_rejects_config(self, client, shared_repository):
+        """PUT with config changes on a built-in server should return 403."""
+        # Create a built-in server using shared repository
+        builtin_server = shared_repository.create_mcp_server(
+            name="test-builtin",
+            description="Test builtin",
+            config={"args": [], "env": {}},
+            is_builtin=True,
+        )
+
+        # Try to update config
+        response = client.put(
+            f"/api/mcp-servers/{builtin_server.id}",
+            json={"config": {"args": ["--api-key", "sk-new"], "env": {}}},
+        )
+
+        assert response.status_code == 403
+        data = response.json()
+        assert data["detail"]["code"] == ErrorCodes.BUILTIN_SERVER_PROTECTED.value
+        assert "config" in data["detail"]["message"].lower()
 
 
 # =============================================================================

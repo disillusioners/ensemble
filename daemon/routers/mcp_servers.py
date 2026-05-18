@@ -184,17 +184,26 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
         )
         return _mcp_server_to_info(updated)
     else:
-        # Create new built-in server
-        created = await asyncio.to_thread(
-            manager._mcp_server_repository.create_mcp_server,
-            name=definition.name,
-            description=definition.description,
-            config=generated_config,
-            is_builtin=True,
-            config_schema=schema_as_dicts,
-            config_schema_version=definition.schema_version,
-        )
-        return _mcp_server_to_info(created)
+        # Create new built-in server (handle race condition)
+        try:
+            created = await asyncio.to_thread(
+                manager._mcp_server_repository.create_mcp_server,
+                name=definition.name,
+                description=definition.description,
+                config=generated_config,
+                is_builtin=True,
+                config_schema=schema_as_dicts,
+                config_schema_version=definition.schema_version,
+            )
+            return _mcp_server_to_info(created)
+        except Exception as e:
+            # Handle race condition: concurrent create attempt
+            if "unique" in str(e).lower() or "UNIQUE constraint" in str(e):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A server with name '{definition.name}' was created concurrently"
+                )
+            raise
 
 
 @router.get("/{server_id}", response_model=McpServerInfo)
@@ -241,7 +250,7 @@ async def update_mcp_server(
             ).model_dump()
         )
 
-    # Built-in servers: only allow config and is_active updates
+    # Built-in servers: only allow is_active updates
     if existing.is_builtin:
         if mcp_server_update.name is not None or mcp_server_update.description is not None:
             raise HTTPException(
@@ -249,6 +258,14 @@ async def update_mcp_server(
                 detail=ErrorResponse(
                     code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
                     message="Cannot modify name or description of a built-in MCP server"
+                ).model_dump()
+            )
+        if mcp_server_update.config is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=ErrorResponse(
+                    code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                    message="Cannot modify config of a built-in MCP server. Use /configure-builtin or /reset-builtin endpoints instead."
                 ).model_dump()
             )
 
