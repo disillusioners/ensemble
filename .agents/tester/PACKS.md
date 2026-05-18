@@ -8,14 +8,14 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-18 | ✅ PASS (feature/builtin-mcp-servers Phase 1 no regression) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-19 | ✅ PASS (feature/builtin-mcp-servers all phases, no regression) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
-| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-05-18 | ✅ PASS (feature/builtin-mcp-servers Phase 1 no regression) |
+| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-05-19 | ✅ PASS (feature/builtin-mcp-servers all phases, no regression) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-04-29 | ✅ PASS (991 passed, 19 skipped, kb-fifo-queue no regression) |
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format, tool registration, agent definition, crash recovery | 2 min | 2026-04-24 | ✅ PASS (38 passed, 0 failed, 2 benign bugs found) |
-| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD) | 2 min | 2026-05-16 | ✅ PASS (412 passed, feature/mcp-server-crud, +134 MCP server tests) |
+| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD) | 2 min | 2026-05-19 | ✅ PASS (518 passed, feature/builtin-mcp-servers all phases, +146 MCP server tests) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | models_split_unit_test | tests/unit/test_models_split.py | Phase 2 models split: backward compat, __all__ completeness, cross-module refs, instantiation, HealthResponse, Pydantic behavior | 2 min | 2026-04-23 | ✅ PASS (30 passed, Phase 6 no regression) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-23 | ⚠️ FILE NOT FOUND (stale entry) |
@@ -32,8 +32,8 @@
 | reasoning_content_edge_cases_test | tests/unit/test_reasoning_content_edge_cases.py | reasoning_content edge cases: SystemMessage, multi-turn, human-only, reasoning alternate key gap | 2 min | 2026-05-04 | ✅ PASS (6 tests, 0 failures) |
 | reasoning_content_fallback_test | tests/unit/test_reasoning_content_fallback.py | reasoning_content fallback chain: empty string preserved, reasoning key fallback, response_metadata fallback, streaming fallbacks, non-string logging safety | 2 min | 2026-05-05 | ✅ PASS (7 tests, 0 failures, fix/reasoning-content-bugs) |
 | windows_path_workdir_test | tests/unit/test_filesystem_workdir.py | Windows path compatibility: _normed_contains, _is_within_workdir, symlink escape, empty TEMP/TMP bypass, mocked Windows behavior | 2 min | 2026-05-16 | ✅ PASS (21 tests, 0 failures, feature/windows-path-fix) |
-| mcp_server_crud_unit_test | tests/unit/test_mcp_server_crud.py | MCP Server CRUD backend: models, schemas, repository, router, integration | 2 min | 2026-05-18 | ✅ PASS (55 tests, feature/builtin-mcp-servers Phase 1 no regression) |
-| mcp_runtime_integration_test | tests/unit/test_mcp_runtime_integration.py | MCP runtime integration: full flow, resilience, restore, edge cases, lifecycle cleanup | 2 min | 2026-05-18 | ✅ PASS (16 tests, feature/builtin-mcp-servers Phase 1 no regression) |
+| mcp_server_crud_unit_test | tests/unit/test_mcp_server_crud.py | MCP Server CRUD backend: models, schemas, repository, router, integration | 2 min | 2026-05-19 | ✅ PASS (55 tests, feature/builtin-mcp-servers all phases, no regression) |
+| mcp_runtime_integration_test | tests/unit/test_mcp_runtime_integration.py | MCP runtime integration: full flow, resilience, restore, edge cases, lifecycle cleanup | 2 min | 2026-05-19 | ✅ PASS (16 tests, feature/builtin-mcp-servers all phases, no regression) |
 
 ## Integration Test Packs
 
