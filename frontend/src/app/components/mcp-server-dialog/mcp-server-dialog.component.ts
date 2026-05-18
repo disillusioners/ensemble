@@ -253,7 +253,7 @@ export class McpServerDialogComponent implements OnInit {
           this.schemaFormValues.set({ ...updatedServer.initial_values });
           // Trigger the config schema form to re-initialize
           if (this.configSchemaForm) {
-            this.configSchemaForm.ngOnInit();
+            this.configSchemaForm.resetForm();
           }
         }
       },
@@ -277,7 +277,7 @@ export class McpServerDialogComponent implements OnInit {
 
   protected getDialogTitle(): string {
     if (this.isTemplateMode()) {
-      const displayName = (this.template as { display_name?: string })?.display_name;
+      const displayName = this.data.template?.display_name;
       return `Configure: ${displayName || this.template?.name || 'Template'}`;
     }
     if (this.isBuiltinConfigureMode()) {

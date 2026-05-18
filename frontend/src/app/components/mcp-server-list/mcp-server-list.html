@@ -49,7 +49,7 @@
                   (click)="onConfigureTemplate(template)"
                   [disabled]="isTemplateDisabled(template)">
                   <div class="template-info">
-                    <span class="template-name">{{ template.name }}</span>
+                    <span class="template-name">{{ template.display_name || template.name }}</span>
                     @if (template.description) {
                       <span class="template-desc">{{ template.description }}</span>
                     }

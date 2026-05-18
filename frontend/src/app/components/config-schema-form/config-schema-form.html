@@ -56,7 +56,7 @@
                     (change)="onBooleanChange(field.key, $event.checked)"
                     color="primary"
                   ></mat-slide-toggle>
-                  <span class="toggle-label">{{ field.default ? 'Enabled' : 'Disabled' }}</span>
+                  <span class="toggle-label">{{ getFieldValue(field.key) ? 'Enabled' : 'Disabled' }}</span>
                 </div>
               }
 
@@ -67,8 +67,8 @@
                   [value]="getFieldValue(field.key)"
                   (change)="onTextChange(field.key, $event)"
                 >
-                  @for (choice of field.choices; track choice) {
-                    <option [value]="choice">{{ choice }}</option>
+                  @for (option of field.options; track option) {
+                    <option [value]="option">{{ option }}</option>
                   }
                 </select>
               }
@@ -146,7 +146,7 @@
                     (change)="onBooleanChange(field.key, $event.checked)"
                     color="primary"
                   ></mat-slide-toggle>
-                  <span class="toggle-label">{{ field.default ? 'Enabled' : 'Disabled' }}</span>
+                  <span class="toggle-label">{{ getFieldValue(field.key) ? 'Enabled' : 'Disabled' }}</span>
                 </div>
               }
 
@@ -157,8 +157,8 @@
                   [value]="getFieldValue(field.key)"
                   (change)="onTextChange(field.key, $event)"
                 >
-                  @for (choice of field.choices; track choice) {
-                    <option [value]="choice">{{ choice }}</option>
+                  @for (option of field.options; track option) {
+                    <option [value]="option">{{ option }}</option>
                   }
                 </select>
               }

@@ -234,7 +234,7 @@ export interface ConfigSchemaField {
   description?: string;
   min?: number;
   max?: number;
-  choices?: string[];  // for select type
+  options?: string[];  // for select type
 }
 
 export interface McpServer {
@@ -276,9 +276,9 @@ export interface McpServerDeleteResponse {
 // Built-in MCP Server Template types
 export interface BuiltinServerTemplate {
   name: string;
+  display_name: string;
   description: string;
   config_schema: ConfigSchemaField[];
-  default_config: Record<string, unknown>;
 }
 
 export interface BuiltinTemplateListResponse {

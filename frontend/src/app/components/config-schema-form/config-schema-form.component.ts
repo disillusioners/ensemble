@@ -35,6 +35,17 @@ export class ConfigSchemaFormComponent implements OnInit {
     this.emitValidity();
   }
 
+  /**
+   * Re-initializes form values from current inputs.
+   * Called externally when initial values change (e.g., after server reset).
+   */
+  public resetForm(): void {
+    this.initializeValues();
+    this.touched.set(new Set());
+    this.emitValues();
+    this.emitValidity();
+  }
+
   private initializeValues(): void {
     const initial: Record<string, unknown> = {};
 
