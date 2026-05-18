@@ -4,6 +4,7 @@ import { CommonModule } from '@angular/common';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from './services/api.service';
 import { SseService } from './services/sse.service';
 import type { HealthResponse } from './models';
@@ -18,7 +19,8 @@ import type { HealthResponse } from './models';
     RouterLinkActive,
     MatToolbarModule,
     MatIconModule,
-    MatButtonModule
+    MatButtonModule,
+    MatMenuModule
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
@@ -29,6 +31,10 @@ export class App implements OnInit {
   
   readonly health = signal<HealthResponse | null>(null);
   readonly isStreaming = this.sseService.isStreaming;
+
+  readonly settingsMenuItems = [
+    { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' }
+  ];
 
   ngOnInit(): void {
     this.loadHealth();

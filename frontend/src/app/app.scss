@@ -92,6 +92,16 @@
   gap: 1rem;
 }
 
+.gear-button {
+  color: #94a3b8;
+  transition: color 0.15s ease, background-color 0.15s ease;
+
+  &:hover {
+    color: #f1f5f9;
+    background-color: #1e293b;
+  }
+}
+
 .health-status {
   display: flex;
   align-items: center;
