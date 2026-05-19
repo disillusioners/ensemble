@@ -44,6 +44,13 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
     "AsyncSqliteSaver": MagicMock()
 })
 
+# Create mock MCP module (for testing without mcp package installed)
+# This provides a minimal is_mcp_tool function for tests
+mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
+    "is_mcp_tool": lambda name: name.startswith("mcp_") if name else False,
+})
+
+
 # Save and replace modules (only for non-integration tests)
 _original_modules = {}
 _mock_modules = {
@@ -55,10 +62,11 @@ _mock_modules = {
     "langgraph.checkpoint": mock_langgraph_checkpoint,
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
+    "daemon.mcp.tool_adapter": mock_mcp_tool_adapter,
 }
 
 def pytest_collection_modifyitems(items):
-    """Only apply langgraph mocks for unit tests, not integration tests."""
+    """Only apply mocks for unit tests, not integration tests."""
     import sys
     for item in items:
         if "integration" not in item.fspath.strpath:
