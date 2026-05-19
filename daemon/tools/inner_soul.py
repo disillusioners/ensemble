@@ -378,6 +378,76 @@ def _compact_memory(content: str) -> str:
     return '\n'.join(result)
 
 
+def _archive_memory_file(agent_path: Path, filename: str) -> bool:
+    """Move a memory file from memories/ to memories/archive/YYYY/MM/.
+    
+    Args:
+        agent_path: Path to the agent directory
+        filename: Just the filename (e.g., "20260517_0930-some-memory.md")
+    
+    Returns:
+        True if archived successfully, False otherwise.
+    """
+    source = agent_path / "memories" / filename
+    if not source.exists() or not source.is_file():
+        return False
+    
+    now = datetime.now()
+    archive_dir = agent_path / "memories" / "archive" / f"{now.year:04d}" / f"{now.month:02d}"
+    
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        
+        dest = archive_dir / filename
+        # Handle name collision in archive
+        counter = 1
+        while dest.exists():
+            stem = Path(filename).stem
+            suffix = Path(filename).suffix
+            dest = archive_dir / f"{stem}-{counter}{suffix}"
+            counter += 1
+        
+        source.rename(dest)
+        return True
+    except OSError:
+        return False
+
+
+def _archive_old_memories(agent_path: Path, ttl_days: int = 90) -> int:
+    """Archive memory files older than TTL days.
+    
+    Scans memories/ for .md files older than ttl_days and moves them to
+    memories/archive/YYYY/MM/.
+    
+    Args:
+        agent_path: Path to the agent directory
+        ttl_days: Minimum age in days before archiving (0 = disabled)
+    
+    Returns:
+        Number of files archived.
+    """
+    if ttl_days <= 0:
+        return 0
+    
+    memories_dir = agent_path / "memories"
+    if not memories_dir.exists():
+        return 0
+    
+    now = datetime.now().timestamp()
+    cutoff = now - (ttl_days * 86400)  # seconds in a day
+    archived = 0
+    
+    for f in sorted(memories_dir.iterdir()):
+        if not f.is_file() or f.suffix != ".md" or f.is_symlink():
+            continue
+        # Use modification time as age indicator
+        if f.stat().st_mtime < cutoff:
+            if _archive_memory_file(agent_path, f.name):
+                archived += 1
+    
+    return archived
+
+
 def create_inner_soul_tool(
     manager: "InstanceManager",
     agent_id: str,
@@ -398,6 +468,13 @@ def create_inner_soul_tool(
     registry = get_registry()
     agent_meta = registry.get(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
+    
+    # Run archival sweep if configured
+    if agent_path:
+        growth_rules = _load_growth_rules(agent_path)
+        ttl_days = growth_rules.get("memory_archive_ttl_days", 90)
+        if ttl_days > 0:
+            _archive_old_memories(agent_path, ttl_days)
     
     @register_tool_category("self")
     @tool
@@ -796,6 +873,11 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
                 current = _compact_memory(current)
                 word_count = len(current.split())
             
+            # Archive old memory files to free space
+            rules_for_archive = _load_growth_rules(agent_path) if rules is None else rules
+            ttl_days = rules_for_archive.get("memory_archive_ttl_days", 90)
+            _archive_old_memories(agent_path, ttl_days)
+            
             # Find insertion point (before "*For events" marker or HTML comments)
             lines = current.rstrip().split('\n')
             insert_idx = len(lines)
@@ -1021,12 +1103,15 @@ def _load_growth_rules(agent_path: Path) -> dict:
         "soul_requires_approval": True,
         "workflow_changes_per_tasks": 5,
         "soul_changes_per_tasks": 10,
+        "memory_archive_ttl_days": 90,
     }
     
     if match := re.search(r"memory\.md.*?(\d+)\s*words", content, re.IGNORECASE):
         rules["max_memory_words"] = int(match.group(1))
     if match := re.search(r"soul\.md.*?(\d+)\s*characters", content, re.IGNORECASE):
         rules["max_soul_chars"] = int(match.group(1))
+    if match := re.search(r"archive.*?(\d+)\s*days?", content, re.IGNORECASE):
+        rules["memory_archive_ttl_days"] = int(match.group(1))
     
     return rules
 

@@ -178,25 +178,52 @@ def load_shared_knowledge() -> str:
     return ""
 
 
-def load_recent_memories(agent_dir: Path, limit: int = 5) -> str:
+def load_recent_memories(agent_dir: Path, limit: int = 5, include_archived: bool = False, archive_limit: int = 5) -> str:
     """Load list of recent memory filenames from memories/ directory.
     
     Returns filenames only (not content) to minimize token usage.
+    When include_archived=True, also lists files from memories/archive/YYYY/MM/.
     """
     memories_dir = agent_dir / "memories"
     if not memories_dir.exists() or not memories_dir.is_dir():
         return ""
     
+    # Active memory files
     memory_files = sorted(
-        [f for f in memories_dir.iterdir() if f.suffix == ".md" and not f.is_symlink()],
-        key=lambda p: p.name,  # Sort by name (timestamp-prefix sorts chronologically)
-        reverse=True           # Most recent first
+        [f for f in memories_dir.iterdir() if f.suffix == ".md" and not f.is_symlink() and f.is_file()],
+        key=lambda p: p.name,
+        reverse=True
     )[:limit]
     
-    if not memory_files:
+    lines = [f"- {f.name}" for f in memory_files]
+    
+    # Archived memory files
+    if include_archived:
+        archive_dir = memories_dir / "archive"
+        if archive_dir.exists() and archive_dir.is_dir():
+            archive_files = []
+            for year_dir in sorted(archive_dir.iterdir(), reverse=True):
+                if not year_dir.is_dir() or not year_dir.name.isdigit():
+                    continue
+                for month_dir in sorted(year_dir.iterdir(), reverse=True):
+                    if not month_dir.is_dir() or not month_dir.name.isdigit():
+                        continue
+                    for f in month_dir.iterdir():
+                        if f.suffix == ".md" and not f.is_symlink() and f.is_file():
+                            archive_files.append(f)
+            
+            # Sort by full path (includes YYYY/MM/ so chronologically sorted)
+            archive_files.sort(key=lambda p: f"{p.parent.name}/{p.name}", reverse=True)
+            archive_files = archive_files[:archive_limit]
+            
+            for f in archive_files:
+                # Format as archive/YYYY/MM/filename.md
+                relative = f.relative_to(archive_dir)
+                lines.append(f"- archive/{relative}")
+    
+    if not lines:
         return ""
     
-    lines = [f"- {f.name}" for f in memory_files]
     return "\n".join(lines)
 
 

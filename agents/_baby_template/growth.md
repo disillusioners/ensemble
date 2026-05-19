@@ -47,3 +47,26 @@ When memory.md approaches its size limit (80% of max words), the system will aut
 
 ### Configuration
 - `max_memory_words`: 2000 (override by adding `memory.md: <N> words` in this file)
+
+## Memory Archive
+
+Old memories are automatically archived to `memories/archive/YYYY/MM/` after a configurable TTL.
+
+### Archive Behavior
+- Files older than `memory_archive_ttl_days` (default 90 days) are moved to archive
+- Archived files are preserved (not deleted) and can be accessed via `archive/YYYY/MM/filename`
+- Archiving runs automatically on each inner_soul call
+- Set `archive: 0 days` to disable archiving
+
+### Accessing Archived Memories
+- Use `access_memory("archive/2026/01/my-old-memory.md")` to read an archived file
+- Set `include_archived: true` in loader to list archived filenames in prompts
+
+### Token Budget
+| Visibility | Filenames Shown | Est. Tokens | % of 8k Context |
+|-----------|-----------------|-------------|-----------------|
+| Default | 5 active | ~30 | <0.5% |
+| With archives | 5 active + 5 archived | ~115 | <1.5% |
+
+### Configuration
+- `memory_archive_ttl_days`: 90 (override by adding `archive: <N> days` in this file)

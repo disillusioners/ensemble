@@ -66,6 +66,15 @@ If you try to write ANY of these to memory, the tool will REJECT it with a clear
 - The agent response includes `compact: true` to signal compaction occurred
 - Key facts must NEVER be deleted during compaction — only exact duplicates
 
+## Archive
+- Memory files older than `memory_archive_ttl_days` (default 90) are moved to `memories/archive/YYYY/MM/`
+- Archiving runs on each inner_soul invocation
+- Archived files accessible via `access_memory("archive/YYYY/MM/filename.md")`
+- Archive is a MOVE operation (files leave `memories/`, enter `memories/archive/`)
+- Archive failures are logged but non-fatal
+- TTL of 0 disables archiving entirely
+- Directory structure `YYYY/MM/` is auto-created
+
 ## Multi-File Updates
 
 When a request matches multiple classifications:
