@@ -1,0 +1,17 @@
+{
+  "id": "gaia",
+  "name": "Gaia",
+  "description": "Environment setup assistant — helps users configure their local environment by reading setup scripts for required tools and dependencies",
+  "icon": "🌍",
+  "color": "accent-green",
+  "version": "1.0.0",
+  "system": false,
+  "capabilities": [],
+  "tags": ["environment", "setup", "dependencies"],
+  "innate_skills": [],
+  "tools": {
+    "allow": ["bash", "filesystem", "help"],
+    "deny": []
+  },
+  "llm_model": null
+}
