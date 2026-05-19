@@ -13,6 +13,29 @@ import pytest
 # Path constants
 GAIA_AGENT_DIR = Path(__file__).parent.parent.parent / "agents" / "gaia"
 
+# Tool categories for testing (mirrors what the registry should contain)
+TOOL_CATEGORIES: dict[str, list[str]] = {
+    "bash": ["bash"],
+    "filesystem": ["list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"],
+    "time": ["time"],
+    "instance": [
+        "spawn_instance", "send_message", "terminate_instance",
+        "list_instances", "get_instance_info"
+    ],
+    "self": ["inner_soul", "access_memory"],
+    "project": [
+        "project_create", "project_get", "project_list", "project_search",
+        "project_get_by_instance", "project_get_by_directory", "project_update",
+        "project_set_status", "project_add_directory", "project_remove_directory",
+        "project_set_tags", "project_add_tag", "project_remove_tag",
+        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
+        "project_set_metadata", "project_delete_metadata",
+        "project_link", "project_unlink", "project_delete",
+    ],
+    "help": ["tool_help"],
+    "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
+}
+
 
 # =============================================================================
 # 1. Meta.json Validation
@@ -362,6 +385,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
@@ -374,6 +398,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
@@ -388,6 +413,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
@@ -400,6 +426,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
@@ -414,6 +441,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
@@ -428,6 +456,7 @@ class TestGaiaToolFiltering:
         allowed_tools = resolve_tool_filter(
             allow=["bash", "filesystem", "help"],
             deny=None,
+            tool_categories=TOOL_CATEGORIES,
         )
 
         assert allowed_tools is not None
