@@ -291,11 +291,11 @@ Returns:
     @tool
     def agent_read(agent_name: str, file: str = "soul.md") -> dict:
         """Read an agent's file contents. Use tool_help("agent_read") for details."""
-        # Protect system agents except _mother (self-read) and _inner_soul (mother can modify)
-        if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
+        # Protect system agents except _mother (self-read)
+        if agent_name.startswith("_") and agent_name != "_mother":
             return {
                 "success": False,
-                "error": "Cannot read system agents except _mother and _inner_soul"
+                "error": "Cannot read system agents except _mother"
             }
         
         valid_files = ["soul.md", "workflow.md", "rule.md", "user.md", "memory.md", "tools.md", "growth.md", "meta.json"]
@@ -348,11 +348,11 @@ Returns:
     @tool
     def agent_modify(agent_name: str, file: str, content: str) -> dict:
         """Modify an agent's file contents. Use tool_help("agent_modify") for details."""
-        # Protect system agents except _mother (self-mod) and _inner_soul (mother can modify)
-        if agent_name.startswith("_") and agent_name not in ("_mother", "_inner_soul"):
+        # Protect system agents except _mother (self-mod)
+        if agent_name.startswith("_") and agent_name != "_mother":
             return {
                 "success": False,
-                "error": "Cannot modify system agents except _mother and _inner_soul"
+                "error": "Cannot modify system agents except _mother"
             }
         
         # Only allow modifying specific files

@@ -308,46 +308,29 @@ Before any soul.md addition, `inner_soul` validates:
 
 ---
 
-## The `_inner_soul` Agent
+## The `_inner_soul/` Directory
+
+> **This is NOT a real agent.** It is a documentation directory that defines the behavior of the `inner_soul` tool function (`daemon/tools/inner_soul.py`).
 
 ### Purpose
 
-Immutable tool-agent that handles all self-modification requests. It is the guardian of agent evolution.
+Contains markdown files that describe the intended behavior of the self-modification system. These serve as design reference and documentation only.
 
-### Configuration
+### Why No `meta.json`?
 
-```markdown
-# soul.md
-I am the mutation gateway. I handle all self-modification requests from agents.
+This directory intentionally lacks `meta.json`, preventing the agent registry from registering it as a real agent. Without `meta.json`, the directory is invisible to the agent system at runtime.
 
-When an agent says "I want to remember/learn/change this", I:
-1. Determine the appropriate action
-2. Pick the right file
-3. Validate against growth.md rules
-4. Apply the change or request user approval
+### Files
 
-I am immutable — I cannot modify myself.
-```
+| File | Purpose |
+|------|---------|
+| `soul.md` | Describes the "personality" and purpose of the inner_soul function |
+| `rule.md` | Classification rules and compaction instructions for memory management |
+| `workflow.md` | Step-by-step workflow for how inner_soul processes requests |
 
-### Workflow
+### Runtime Behavior
 
-```
-1. Receive  — Agent provides intent + content
-2. Classify — Determine action type and target
-3. Validate — Check against growth.md rules
-4. Route    — Direct to appropriate file/action
-5. Apply    — Execute the change
-6. Confirm  — Tell agent what was done
-```
-
-### Rules
-
-- Cannot modify itself
-- Must validate all requests against growth.md
-- Must request user approval for soul.md changes
-- Must use timestamp-based filenames for memories
-- Must keep memory.md short
-- Must log all mutations
+**None of these files are loaded at runtime.** The actual behavior is implemented in `daemon/tools/inner_soul.py` as Python code. These markdown files serve as human-readable documentation only.
 
 ---
 
