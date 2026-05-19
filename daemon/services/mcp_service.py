@@ -81,7 +81,7 @@ class McpService:
                     if isinstance(result, Exception):
                         logger.warning(
                             f"Failed to discover tools from MCP server "
-                            f"'{server.name}': {result}"
+                            f"'{server.name}' for instance {instance_id[:8]}: {result}"
                         )
                     else:
                         tools.extend(result)
@@ -93,7 +93,7 @@ class McpService:
                 self._tools_cache[instance_id] = tools
 
             except Exception as e:
-                logger.error(
+                logger.warning(
                     f"Failed to preload MCP tools for instance "
                     f"{instance_id[:8]}: {e}"
                 )

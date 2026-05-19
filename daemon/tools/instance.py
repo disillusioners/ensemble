@@ -38,6 +38,7 @@ from .rag_tools import create_rag_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
+from daemon.mcp.tool_adapter import is_mcp_tool
 from daemon.rag.config import is_rag_enabled
 
 
@@ -50,9 +51,24 @@ def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
     """
     try:
         if hasattr(manager, '_mcp_service') and manager._mcp_service:
-            return manager._mcp_service.get_mcp_tools(instance_id)
+            tools = manager._mcp_service.get_mcp_tools(instance_id)
+            if tools:
+                logger.info(
+                    f"Loaded {len(tools)} MCP tools for instance {instance_id[:8]}"
+                )
+            else:
+                logger.info(
+                    f"No MCP tools available for instance {instance_id[:8]}"
+                )
+            return tools
+        else:
+            logger.debug(
+                f"MCP service not available for instance {instance_id[:8]}"
+            )
     except Exception as e:
-        logger.warning(f"Failed to load MCP tools: {e}")
+        logger.warning(
+            f"Failed to load MCP tools for instance {instance_id[:8]}: {e}"
+        )
     return []
 
 
@@ -649,26 +665,26 @@ Returns:
 
 def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
     """Apply tool filtering based on agent's tools configuration.
-    
+
     Args:
         tools: List of all tools (before filtering)
         agent_id: The agent identifier to look up tools config
-        
+
     Returns:
         Filtered list of tools based on agent's tools config.
         Returns all tools if no config or config is empty.
     """
     # Import registry locally to avoid circular imports
     from ..registry import get_registry
-    
+
     # Get agent metadata
     registry = get_registry()
     agent_meta = registry.get(agent_id)
-    
+
     if agent_meta is None or agent_meta.tools is None:
         # No tools config → all tools allowed (backward compatible)
         return tools
-    
+
     # Collect all tool names for MCP category expansion
     all_tool_names: set[str] = set()
     for tool in tools:
@@ -680,18 +696,51 @@ def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
                 tool_name = getattr(func, '__name__', None)
         if tool_name:
             all_tool_names.add(tool_name)
-    
+
     # Resolve the filter with MCP-aware category expansion
     allowed_tools = resolve_tool_filter(
         allow=agent_meta.tools.allow,
         deny=agent_meta.tools.deny,
         all_tool_names=all_tool_names,
     )
-    
+
     # If None returned, all tools are allowed
     if allowed_tools is None:
         return tools
+
+    # ── Always include MCP tools unless explicitly denied ──
+    # MCP tools are dynamically discovered and should be available by default.
+    # This fixes the chicken-and-egg problem where agents have explicit allow
+    # lists that don't include "mcp", but still need MCP tools to work.
+    denied_tools: set[str] = set()
+    if agent_meta.tools.deny:
+        # Expand deny list (categories → individual tools) for MCP category
+        for item in agent_meta.tools.deny:
+            if item == "mcp":
+                # "mcp" in deny list means deny ALL MCP tools
+                # Collect MCP tool names from the tools list
+                for tool in tools:
+                    tool_name = getattr(tool, 'name', None)
+                    if tool_name is None:
+                        func = getattr(tool, 'func', None) or getattr(tool, 'coroutine', None)
+                        if func:
+                            tool_name = getattr(func, '__name__', None)
+                    if tool_name and is_mcp_tool(tool_name):
+                        denied_tools.add(tool_name)
+            else:
+                denied_tools.add(item)
     
+    for tool in tools:
+        tool_name = getattr(tool, 'name', None)
+        if tool_name is None:
+            func = getattr(tool, 'func', None) or getattr(tool, 'coroutine', None)
+            if func:
+                tool_name = getattr(func, '__name__', None)
+        if tool_name and is_mcp_tool(tool_name):
+            # Include MCP tool unless explicitly in deny list
+            if tool_name not in denied_tools:
+                allowed_tools.add(tool_name)
+
     # Filter tools by name
     filtered_tools = []
     for tool in tools:
@@ -701,16 +750,16 @@ def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
             func = getattr(tool, 'func', None) or getattr(tool, 'coroutine', None)
             if func:
                 tool_name = getattr(func, '__name__', None)
-        
+
         if tool_name is None:
             logger.warning(f"Tool has no name attribute — skipping filter for: {type(tool)}")
             continue
-        
+
         if tool_name and tool_name in allowed_tools:
             filtered_tools.append(tool)
-    
+
     if len(filtered_tools) < len(tools):
         logger.debug(f"Filtered tools for {agent_id}: {len(tools)} → {len(filtered_tools)} "
                      f"(removed: {set(t.name for t in tools if hasattr(t, 'name')) - allowed_tools})")
-    
+
     return filtered_tools
