@@ -122,6 +122,27 @@ class TestSingletonFactory:
         wp._mcp_warmup_pool = None
 
 
+class TestCreatePooledConnection:
+    """Tests for _create_pooled_connection method."""
+
+    @pytest.mark.asyncio
+    async def test_create_pooled_connection_cleanup_on_session_failure(self, pool):
+        """Verify subprocess cleanup when ClientSession() constructor fails."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", side_effect=RuntimeError("constructor failed")):
+            with pytest.raises(RuntimeError, match="constructor failed"):
+                await pool._create_pooled_connection("context7")
+
+        # Verify cleanup: __aexit__ was called to terminate subprocess
+        mock_cm.__aexit__.assert_called_once()
+
+
 class TestWarmup:
     """Tests for warmup method."""
 

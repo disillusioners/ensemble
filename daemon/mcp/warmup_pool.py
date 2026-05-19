@@ -127,7 +127,7 @@ class McpWarmupPool:
         for result in results:
             if isinstance(result, Exception):
                 logger.error(f"Failed to create pooled connection for '{server_name}': {result}")
-            elif pool.qsize() < self._pool_sizes.get(server_name, 1):
+            else:
                 await pool.put(result)
 
     async def _create_pooled_connection(self, server_name: str) -> PooledConnection:
@@ -363,6 +363,15 @@ class McpWarmupPool:
                 asyncio.gather(*close_tasks, return_exceptions=True),
                 timeout=10.0,
             )
+
+        # Final sweep: catch any connections added by late replenish tasks
+        for server_name, pool in self._pools.items():
+            while True:
+                try:
+                    conn = pool.get_nowait()
+                    await self._close_connection(conn)
+                except asyncio.QueueEmpty:
+                    break
 
         logger.info("MCP warm-up pool drained")
 

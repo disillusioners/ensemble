@@ -707,6 +707,10 @@ class InstanceManager:
         self._background_tasks.append(asyncio.create_task(self._cleanup_stale_completions()))
         # NEW: Schedule periodic cleanup of paused instances exceeding TTL
         self._background_tasks.append(asyncio.create_task(self._cleanup_paused_instances()))
+        # FIX: W3 — Wire deferred warmup (deferred from __init__ because no running loop)
+        if self.config.mcp_pool.enabled and self._warmup_task is None:
+            self._warmup_task = asyncio.create_task(self._warmup_and_report())
+            logger.debug("MCP warmup task started from initialize()")
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     async def _cleanup_stale_completions(self) -> None:
@@ -1783,6 +1787,14 @@ class InstanceManager:
         
         self._shutting_down = True
         logger.info("Starting graceful shutdown...")
+        
+        # FIX: C2 — Cancel warmup task if still running
+        if self._warmup_task and not self._warmup_task.done():
+            self._warmup_task.cancel()
+            try:
+                await self._warmup_task
+            except asyncio.CancelledError:
+                pass
         
         # Cancel all background cleanup tasks first
         for task in self._background_tasks:

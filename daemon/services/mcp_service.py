@@ -52,7 +52,13 @@ class McpService:
         if definition is None:
             return False
         config = definition.get_base_config()
-        return config.get("transport") == "stdio"
+        if config.get("transport") != "stdio":
+            return False
+        # Also verify the server's own config transport matches
+        server_transport = server.config.get("transport") if isinstance(server.config, dict) else None
+        if server_transport is not None and server_transport != "stdio":
+            return False
+        return True
 
     async def _probe_connection(self, conn, timeout: float = 3.0) -> bool:
         """Quick liveness probe — MCP protocol ping with short timeout."""
@@ -108,7 +114,12 @@ class McpService:
 
                 # Handle pooled servers (from warm-up pool)
                 for server in pooled_servers:
-                    conn = await pool.acquire(server.name)
+                    try:
+                        conn = await pool.acquire(server.name)
+                    except Exception as e:
+                        logger.warning(f"Pool acquire failed for {server.name}: {e}")
+                        cold_servers.append(server)
+                        continue
                     if conn:
                         # Liveness probe: verify connection is still alive before transfer
                         alive = await self._probe_connection(conn)
