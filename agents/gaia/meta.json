@@ -10,7 +10,7 @@
   "tags": ["environment", "setup", "dependencies"],
   "innate_skills": [],
   "tools": {
-    "allow": ["bash", "filesystem", "help"]
+    "allow": ["bash", "filesystem", "help", "mcp"]
   },
   "llm_model": null
 }

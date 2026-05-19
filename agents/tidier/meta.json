@@ -6,6 +6,6 @@
   "color": "accent-purple",
   "innate_skills": ["opencode"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp"]
   }
 }

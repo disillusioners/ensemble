@@ -45,9 +45,10 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
 })
 
 # Create mock MCP module (for testing without mcp package installed)
-# This provides a minimal is_mcp_tool function for tests
+# This provides minimal tool_adapter functions for tests
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "is_mcp_tool": lambda name: name.startswith("mcp_") if name else False,
+    "adapt_mcp_tools": lambda server_name, tools: tools,  # Identity function for tests
 })
 
 
