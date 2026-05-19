@@ -264,7 +264,7 @@ class TestLoadRecentMemoriesArchive:
         assert "archive/2025/12/20251201_1000-archived.md" in result
 
     def test_load_recent_archive_sorted_newest_first(self, tmp_path):
-        """Archived files are sorted newest first (by month descending) - NOTE: sort key uses month not year."""
+        """Archived files are sorted newest first (by full path YYYY/MM descending)."""
         from daemon.loader import load_recent_memories
 
         agent_dir = tmp_path / "test-agent"
@@ -276,9 +276,9 @@ class TestLoadRecentMemoriesArchive:
         archive_dir_2026.mkdir(parents=True)
         archive_dir_2025.mkdir(parents=True)
 
-        # Older archived file
+        # Older archived file (December 2025)
         (archive_dir_2025 / "20251201_1000-old.md").write_text("# Old")
-        # Newer archived file (but in January which sorts lower by month)
+        # Newer archived file (January 2026)
         (archive_dir_2026 / "20260115_1000-new.md").write_text("# New")
 
         result = load_recent_memories(agent_dir, include_archived=True, limit=0)
@@ -287,11 +287,9 @@ class TestLoadRecentMemoriesArchive:
         archive_lines = [l for l in lines if "archive/" in l]
         assert len(archive_lines) == 2
 
-        # NOTE: Due to a bug in loader.py, sort key uses month (parent.name) not year
-        # So month 12 (December) > month 01 (January), meaning 2025/12 appears before 2026/01
-        # This test documents the actual behavior, not the expected behavior
-        assert "2025/12" in archive_lines[0]
-        assert "2026/01" in archive_lines[1]
+        # Sorted by full path (YYYY/MM/filename), so 2026/01 comes before 2025/12
+        assert "2026/01" in archive_lines[0]
+        assert "2025/12" in archive_lines[1]
 
     def test_load_recent_archive_respects_limit(self, tmp_path):
         """archive_limit param limits archived entries (separate from active limit)."""

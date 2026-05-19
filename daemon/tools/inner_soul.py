@@ -31,6 +31,9 @@ Remember, learn, or change agent behavior and access memories.
 **Target types**: `memory`, `workflow`, `soul`, `user`
 """
 
+# Rate limiting for archive sweep (keyed by agent path, value is last sweep time)
+_last_archive_sweep: dict[str, float] = {}
+
 if TYPE_CHECKING:
     from ..manager import InstanceManager
 
@@ -264,6 +267,7 @@ def _lock_memory_file(filepath: Path, timeout: float = 5.0):
     """Acquire exclusive lock on memory file with timeout.
     
     Uses a separate .lock file to avoid modifying the actual memory file.
+    Lock file is cleaned up in the finally block after releasing the flock.
     """
     lock_file = filepath.with_suffix('.lock')
     lock_file.touch(exist_ok=True)
@@ -285,6 +289,8 @@ def _lock_memory_file(filepath: Path, timeout: float = 5.0):
         if acquired:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         f.close()
+        # Clean up lock file after releasing the flock
+        lock_file.unlink(missing_ok=True)
 
 
 def _atomic_write_memory(filepath: Path, content: str):
@@ -325,13 +331,23 @@ def _atomic_write_memory(filepath: Path, content: str):
         raise
 
 
-def _should_compact(agent_path: Path, max_words: int) -> bool:
-    """Check if memory.md exceeds compaction threshold (80% of max_words)."""
-    memory_file = agent_path / "memory.md"
-    if not memory_file.exists():
-        return False
-    word_count = len(memory_file.read_text().split())
-    return word_count > max_words * 0.8
+def _normalize_list_item(line: str) -> str | None:
+    """Normalize a list item line for deduplication.
+    
+    Strips common list markers (-, *, 1., 2., etc.) and whitespace.
+    
+    Args:
+        line: The line to normalize.
+        
+    Returns:
+        Lowercased content without the list marker, or None if not a list item.
+    """
+    stripped = line.strip()
+    # Match common list markers: "- ", "* ", "1. ", "2. ", etc.
+    match = re.match(r'^\s*(?:[-*]|\d+\.)\s+(.+)$', stripped, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    return None
 
 
 def _compact_memory(content: str) -> str:
@@ -355,10 +371,15 @@ def _compact_memory(content: str) -> str:
             # Preserve headers
             unique_lines.append(line)
             continue
-        if normalized.startswith('- ') and normalized not in seen:
-            seen.add(normalized)
-            unique_lines.append(line)
-        elif not normalized.startswith('- '):
+        
+        # Check if this is a list item (any marker: -, *, 1., 2., etc.)
+        list_content = _normalize_list_item(line)
+        if list_content is not None:
+            # Deduplicate list items by their content
+            if list_content not in seen:
+                seen.add(list_content)
+                unique_lines.append(line)
+        else:
             # Preserve non-list lines (they're structural)
             unique_lines.append(line)
     
@@ -417,7 +438,7 @@ def _archive_old_memories(agent_path: Path, ttl_days: int = 90) -> int:
     """Archive memory files older than TTL days.
     
     Scans memories/ for .md files older than ttl_days and moves them to
-    memories/archive/YYYY/MM/.
+    memories/archive/YYYY/MM/. Uses rate limiting to avoid scanning too often.
     
     Args:
         agent_path: Path to the agent directory
@@ -429,12 +450,18 @@ def _archive_old_memories(agent_path: Path, ttl_days: int = 90) -> int:
     if ttl_days <= 0:
         return 0
     
+    # Rate limiting: only sweep if at least 5 minutes have passed
+    key = str(agent_path)
+    now = time.monotonic()
+    if key in _last_archive_sweep and now - _last_archive_sweep[key] < 300:
+        return 0  # Skip — too soon
+    _last_archive_sweep[key] = now
+    
     memories_dir = agent_path / "memories"
     if not memories_dir.exists():
         return 0
     
-    now = datetime.now().timestamp()
-    cutoff = now - (ttl_days * 86400)  # seconds in a day
+    cutoff = datetime.now().timestamp() - (ttl_days * 86400)  # seconds in a day
     archived = 0
     
     for f in sorted(memories_dir.iterdir()):
@@ -873,11 +900,6 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
                 current = _compact_memory(current)
                 word_count = len(current.split())
             
-            # Archive old memory files to free space
-            rules_for_archive = _load_growth_rules(agent_path) if rules is None else rules
-            ttl_days = rules_for_archive.get("memory_archive_ttl_days", 90)
-            _archive_old_memories(agent_path, ttl_days)
-            
             # Find insertion point (before "*For events" marker or HTML comments)
             lines = current.rstrip().split('\n')
             insert_idx = len(lines)
@@ -933,54 +955,62 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
     
     now = datetime.now()
     
-    # Read current soul
-    if soul_file.exists():
-        current = soul_file.read_text()
-    else:
-        current = "# Who I Am\n\n"
-    
-    # Check size constraints
-    max_chars = rules.get("max_soul_chars", 2000)
-    if len(current) >= max_chars:
+    try:
+        with _lock_memory_file(soul_file):
+            # Read current soul inside lock
+            if soul_file.exists():
+                current = soul_file.read_text()
+            else:
+                current = "# Who I Am\n\n"
+            
+            # Check size constraints
+            max_chars = rules.get("max_soul_chars", 2000)
+            if len(current) >= max_chars:
+                return {
+                    "success": False,
+                    "target": "soul",
+                    "error": f"soul.md at {len(current)} chars (max {max_chars}). Cannot add more."
+                }
+            
+            # Determine where to add the change
+            lines = current.rstrip().split('\n')
+            
+            # Format the change based on request type
+            request_lower = request.lower()
+            is_name_change = any(p in request_lower for p in ["my name is", "i am called", "call me", "remember my name", "remember your name"])
+            
+            if is_name_change:
+                # Extract name and format nicely
+                name = request.split('name is')[-1].split('called')[-1].strip().rstrip('.')
+                formatted = f"**My name is {name}**"
+                # Insert right after main header
+                insert_idx = 1  # After first line (header)
+                while insert_idx < len(lines) and lines[insert_idx].strip() == "":
+                    insert_idx += 1
+                # Check if name already exists and update it
+                for i, line in enumerate(lines):
+                    if line.startswith("**My name is"):
+                        lines[i] = formatted
+                        formatted = None  # Flag that we updated, not inserted
+                        break
+            else:
+                formatted = f"- {request}"
+                # Append at the end
+                insert_idx = len(lines)
+            
+            # Insert the change (if not already updated)
+            if formatted:
+                lines.insert(insert_idx, formatted)
+            new_content = '\n'.join(lines)
+            
+            # Use atomic write inside lock
+            _atomic_write_memory(soul_file, new_content)
+    except TimeoutError:
         return {
             "success": False,
             "target": "soul",
-            "error": f"soul.md at {len(current)} chars (max {max_chars}). Cannot add more."
+            "error": "Could not acquire lock on soul.md - please retry"
         }
-    
-    # Determine where to add the change
-    lines = current.rstrip().split('\n')
-    
-    # Format the change based on request type
-    request_lower = request.lower()
-    is_name_change = any(p in request_lower for p in ["my name is", "i am called", "call me", "remember my name", "remember your name"])
-    
-    if is_name_change:
-        # Extract name and format nicely
-        name = request.split('name is')[-1].split('called')[-1].strip().rstrip('.')
-        formatted = f"**My name is {name}**"
-        # Insert right after main header
-        insert_idx = 1  # After first line (header)
-        while insert_idx < len(lines) and lines[insert_idx].strip() == "":
-            insert_idx += 1
-        # Check if name already exists and update it
-        for i, line in enumerate(lines):
-            if line.startswith("**My name is"):
-                lines[i] = formatted
-                formatted = None  # Flag that we updated, not inserted
-                break
-    else:
-        formatted = f"- {request}"
-        # Append at the end
-        insert_idx = len(lines)
-    
-    # Insert the change (if not already updated)
-    if formatted:
-        lines.insert(insert_idx, formatted)
-    new_content = '\n'.join(lines)
-    
-    # Write updated soul
-    soul_file.write_text(new_content)
     
     # Invalidate cache if manager provided
     if manager:
@@ -1020,15 +1050,26 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
     """Add user information to user.md."""
     user_file = agent_path / "user.md"
     
-    current = user_file.read_text() if user_file.exists() else "# User\n\n"
+    try:
+        with _lock_memory_file(user_file):
+            current = user_file.read_text() if user_file.exists() else "# User\n\n"
+            
+            # Remove placeholder
+            if "(To be filled" in current:
+                current = current.split("(To be filled")[0].rstrip()
+            
+            # Append
+            new_content = f"{current}\n- {request}"
+            
+            # Use atomic write inside lock
+            _atomic_write_memory(user_file, new_content)
+    except TimeoutError:
+        return {
+            "success": False,
+            "target": "user",
+            "error": "Could not acquire lock on user.md - please retry"
+        }
     
-    # Remove placeholder
-    if "(To be filled" in current:
-        current = current.split("(To be filled")[0].rstrip()
-    
-    # Append
-    new_content = f"{current}\n- {request}"
-    user_file.write_text(new_content)
     if manager:
         manager.prompt_cache.invalidate(agent_id)
     
@@ -1043,13 +1084,24 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
     """Add workflow change."""
     workflow_file = agent_path / "workflow.md"
     
-    current = workflow_file.read_text() if workflow_file.exists() else "# Workflow\n\n"
+    try:
+        with _lock_memory_file(workflow_file):
+            current = workflow_file.read_text() if workflow_file.exists() else "# Workflow\n\n"
+            
+            if "**Learned:**" not in current:
+                current += "\n\n---\n\n**Learned:**\n"
+            
+            new_workflow = f"{current}\n- {request}"
+            
+            # Use atomic write inside lock
+            _atomic_write_memory(workflow_file, new_workflow)
+    except TimeoutError:
+        return {
+            "success": False,
+            "target": "workflow",
+            "error": "Could not acquire lock on workflow.md - please retry"
+        }
     
-    if "**Learned:**" not in current:
-        current += "\n\n---\n\n**Learned:**\n"
-    
-    new_workflow = f"{current}\n- {request}"
-    workflow_file.write_text(new_workflow)
     if manager:
         manager.prompt_cache.invalidate(agent_id)
     
@@ -1087,15 +1139,8 @@ def _format_response(request: str, results: list, classification: dict) -> str:
 def _load_growth_rules(agent_path: Path) -> dict:
     """Parse growth.md for rules."""
     growth_file = agent_path / "growth.md"
-    if not growth_file.exists():
-        return {
-            "max_memory_words": 2000,
-            "max_soul_chars": 2000,
-            "soul_requires_approval": True,
-        }
     
-    content = growth_file.read_text()
-    
+    # Default rules - returned when growth.md doesn't exist
     rules = {
         "max_memory_words": 2000,
         "max_soul_chars": 2000,
@@ -1105,6 +1150,11 @@ def _load_growth_rules(agent_path: Path) -> dict:
         "soul_changes_per_tasks": 10,
         "memory_archive_ttl_days": 90,
     }
+    
+    if not growth_file.exists():
+        return rules
+    
+    content = growth_file.read_text()
     
     if match := re.search(r"memory\.md.*?(\d+)\s*words", content, re.IGNORECASE):
         rules["max_memory_words"] = int(match.group(1))

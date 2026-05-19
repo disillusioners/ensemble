@@ -212,8 +212,8 @@ def load_recent_memories(agent_dir: Path, limit: int = 5, include_archived: bool
                         if f.suffix == ".md" and not f.is_symlink() and f.is_file():
                             archive_files.append(f)
             
-            # Sort by full path (includes YYYY/MM/ so chronologically sorted)
-            archive_files.sort(key=lambda p: f"{p.parent.name}/{p.name}", reverse=True)
+            # Sort by full relative path (YYYY/MM/filename.md) for correct chronological order
+            archive_files.sort(key=lambda p: str(p.relative_to(archive_dir)), reverse=True)
             archive_files = archive_files[:archive_limit]
             
             for f in archive_files:

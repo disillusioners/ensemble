@@ -3,9 +3,8 @@
 Tests:
 1. _lock_memory_file() - exclusive file locking with timeout
 2. _atomic_write_memory() - atomic write with backup/rollback
-3. _should_compact() - compaction threshold detection
-4. _compact_memory() - line deduplication
-5. _update_memory_md() - integration of locking + compaction
+3. _compact_memory() - line deduplication (handles all list markers)
+4. _update_memory_md() - integration of locking + compaction
 """
 
 import pytest
@@ -17,7 +16,6 @@ from unittest.mock import MagicMock, patch
 from daemon.tools.inner_soul import (
     _lock_memory_file,
     _atomic_write_memory,
-    _should_compact,
     _compact_memory,
     _update_memory_md,
 )
@@ -272,98 +270,7 @@ class TestAtomicWriteMemory:
 
 
 # =============================================================================
-# 3. Compaction Detection Tests
-# =============================================================================
-
-
-class TestShouldCompact:
-    """Tests for the _should_compact() function."""
-
-    def test_should_compact_below_threshold(self, tmp_path):
-        """Returns False when memory.md is below 80% threshold."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-
-        # Create memory with 50 words (well below 80% of 2000)
-        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Word {i}" for i in range(50)]))
-
-        assert _should_compact(agent_path, max_words=2000) is False
-
-    def test_should_compact_above_threshold(self, tmp_path):
-        """Returns True when memory.md exceeds 80% threshold."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-
-        # Create memory with 1700 words (85% of 2000, above threshold)
-        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Word {i}" for i in range(1700)]))
-
-        assert _should_compact(agent_path, max_words=2000) is True
-
-    def test_should_compact_no_file(self, tmp_path):
-        """Returns False when memory.md doesn't exist."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        # Don't create memory.md
-
-        assert _should_compact(agent_path, max_words=2000) is False
-
-    def test_should_compact_exactly_at_threshold(self, tmp_path):
-        """Returns False at exactly 80% (only triggers above 80%)."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-
-        # Create memory with exactly 1600 words (80% of 2000)
-        # Each "- Word X" is 3 words, "# Memory" is 2 words
-        # Need (1600 - 2) / 3 ≈ 533 items to get ~1600 words
-        num_items = 533  # Will give us ~1601 words (just above threshold)
-        # Actually let's use fewer items to get exactly 1600:
-        num_items = 532  # Will give us (532 * 3 + 2) = 1598 words < 1600
-        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Word {i}" for i in range(num_items)]))
-
-        word_count = len(memory_file.read_text().split())
-        # Verify we're at or below 80% threshold
-        assert word_count <= 2000 * 0.8, f"Word count {word_count} should be <= 1600"
-
-        result = _should_compact(agent_path, max_words=2000)
-        # At exactly 80% (1598 vs 1600 threshold), should NOT compact
-        assert result is False
-
-    def test_should_compact_at_81_percent(self, tmp_path):
-        """Returns True at 81% (just above 80% threshold)."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-
-        # Create memory with ~1620 words (81% of 2000)
-        # 1620 - 2 = 1618 / 3 ≈ 540 items
-        num_items = 540  # Will give us 540 * 3 + 2 = 1622 words > 1600
-        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Word {i}" for i in range(num_items)]))
-
-        assert _should_compact(agent_path, max_words=2000) is True
-
-    def test_should_compact_with_different_max_words(self, tmp_path):
-        """Works correctly with different max_words values."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-
-        # Create memory with exactly 420 words
-        # 420 - 2 = 418 / 3 ≈ 139 items
-        num_items = 139  # Will give us 139 * 3 + 2 = 419 words
-        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Item {i}" for i in range(num_items)]))
-
-        # 419 words / 500 max = 83.8% > 80% threshold -> should compact
-        assert _should_compact(agent_path, max_words=500) is True
-
-        # 419 words / 600 max = 69.8% < 80% threshold -> should NOT compact
-        assert _should_compact(agent_path, max_words=600) is False
-
-
-# =============================================================================
-# 4. Deduplication Tests
+# 3. Deduplication Tests
 # =============================================================================
 
 
@@ -846,25 +753,35 @@ class TestEdgeCases:
         # Should deduplicate the link line
         assert result.count("[Link text]") == 1
 
-    def test_should_compact_empty_file(self, tmp_path):
-        """Returns False for empty memory.md."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-        memory_file.write_text("")
+    def test_compact_numbered_lists_deduplicated(self):
+        """Numbered lists (1., 2., etc.) are also deduplicated."""
+        content = """# Memory
 
-        # Empty file has 0 words
-        assert _should_compact(agent_path, max_words=2000) is False
+1. First item
+2. Second item
+1. First item
+3. Third item
+"""
+        result = _compact_memory(content)
 
-    def test_should_compact_header_only(self, tmp_path):
-        """Returns False for memory with only header."""
-        agent_path = tmp_path / "agent"
-        agent_path.mkdir()
-        memory_file = agent_path / "memory.md"
-        memory_file.write_text("# Memory\n")
+        # Should have only one "First item" entry
+        lines = result.split('\n')
+        first_item_count = sum(1 for line in lines if line.strip().startswith("1."))
+        assert first_item_count == 1
 
-        # Only header = minimal words
-        assert _should_compact(agent_path, max_words=2000) is False
+    def test_compact_asterisk_lists_deduplicated(self):
+        """Asterisk lists (* item) are also deduplicated."""
+        content = """# Memory
+
+* First item
+* Second item
+* First item
+"""
+        result = _compact_memory(content)
+
+        lines = result.split('\n')
+        first_item_count = sum(1 for line in lines if line.strip().startswith("* First"))
+        assert first_item_count == 1
 
     def test_lock_concurrent_access(self, tmp_path):
         """Multiple threads can access different files concurrently."""

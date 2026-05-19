@@ -66,6 +66,10 @@ def create_access_memory_tool(agent_id: str):
         if not str(filepath).startswith(str(memories_dir.resolve())):
             return "Access denied"
 
+        # Explicit symlink check for defense-in-depth
+        if filepath.is_symlink():
+            return "Access denied"
+
         if not filepath.is_file():
             try:
                 available = sorted([f.name for f in memories_dir.iterdir() if f.suffix == ".md"])
