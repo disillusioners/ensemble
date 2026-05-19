@@ -39,6 +39,8 @@ from .repositories import (
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry
+from .mcp.warmup_pool import get_mcp_warmup_pool
+from .mcp.config import McpStdioConfig
 
 from .repositories.instance.repository import get_agent_name
 from .repositories.instance.models import Instance, InstanceStatus
@@ -472,6 +474,9 @@ class InstanceManager:
         # Background tasks for cleanup operations (tracked for cancellation on shutdown)
         self._background_tasks: list[asyncio.Task] = []
 
+        # Warm-up pool background task reference
+        self._warmup_task: asyncio.Task | None = None
+
         # Bootstrap built-in MCP servers
         self._bootstrap_builtin_servers()
 
@@ -536,6 +541,9 @@ class InstanceManager:
         # MCP service for managing MCP tool lifecycle
         from .services.mcp_service import McpService
         self._mcp_service = McpService(manager=self)
+
+        # Initialize MCP warm-up pool (non-blocking background warmup)
+        self._init_warmup_pool()
 
     def _bootstrap_builtin_servers(self) -> None:
         """Bootstrap built-in MCP servers on daemon startup.
@@ -606,6 +614,69 @@ class InstanceManager:
                 continue  # Fault-tolerant: continue with other servers
 
         logger.info("Built-in MCP server bootstrap complete")
+
+    def _init_warmup_pool(self) -> None:
+        """Initialize and warm up the MCP connection pool.
+
+        Registers all built-in STDIO servers with the pool and starts background
+        warmup. Does NOT block startup — warmup runs as a background task.
+        """
+        if not self.config.mcp_pool.enabled:
+            logger.info("MCP warm-up pool disabled by config")
+            return
+
+        pool = get_mcp_warmup_pool()
+        registry = get_mcp_registry()
+
+        for definition in registry.get_all():
+            name = definition.name
+            config_dict = definition.get_base_config()
+            if config_dict.get("transport") != "stdio":
+                continue
+            pool_size = self.config.mcp_pool.servers.get(
+                name, self.config.mcp_pool.default_pool_size
+            )
+            stdio_config = McpStdioConfig(**config_dict)
+            pool.register_server(name, stdio_config, pool_size=pool_size)
+
+        # Wire pool into MCP service for use during tool execution
+        self._mcp_service.set_warmup_pool(pool)
+
+        # Schedule warmup in background — do not block startup
+        # Note: This uses asyncio.get_running_loop() which must be called from an async context.
+        # If called during __init__ (sync), we defer to initialize() instead.
+        try:
+            loop = asyncio.get_running_loop()
+            # Store task for tracking
+            self._warmup_task = loop.create_task(self._warmup_and_report())
+            logger.info(
+                f"MCP warm-up pool initialized: {len(pool._configs)} server(s) registered, "
+                f"warmup running in background"
+            )
+        except RuntimeError:
+            # No running loop (during __init__), defer warmup to initialize()
+            logger.debug("Deferring MCP warm-up pool to initialize()")
+
+    async def _warmup_and_report(self) -> None:
+        """Background task to warm up pool and start health checks."""
+        pool = get_mcp_warmup_pool()
+        try:
+            await pool.warmup()
+            status = pool.get_status()
+            logger.info(f"MCP warm-up pool ready: {status}")
+            pool.start_health_check(self.config.mcp_pool.health_check_interval)
+        except Exception as e:
+            logger.warning(f"MCP warm-up pool warmup failed: {e}")
+
+    async def _drain_warmup_pool(self) -> None:
+        """Drain the MCP warm-up pool during shutdown."""
+        pool = get_mcp_warmup_pool()
+        try:
+            await asyncio.wait_for(pool.drain(), timeout=15.0)
+        except asyncio.TimeoutError:
+            logger.warning("MCP pool drain timed out, forcing cleanup")
+        except Exception as e:
+            logger.warning(f"Error draining MCP pool: {e}")
 
     @property
     def checkpointer(self):
@@ -1725,6 +1796,7 @@ class InstanceManager:
             ("wait_inflight", self._wait_for_inflight(grace_period)),
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
+            ("drain_mcp_pool", self._drain_warmup_pool()),
             ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
         ]
         

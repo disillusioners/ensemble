@@ -184,6 +184,21 @@ class JobSystemConfig(BaseSettings):
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
 
+class McpPoolConfig(BaseSettings):
+    """MCP warm-up connection pool configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="MCP_POOL_")
+
+    enabled: bool = Field(default=True, description="Enable MCP warm-up pool for faster tool access")
+    default_pool_size: int = Field(default=1, ge=1, description="Default number of pre-warmed connections per server")
+    servers: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-server pool size overrides (server_name → pool_size)"
+    )
+    health_check_interval: int = Field(default=60, ge=10, description="Health check interval in seconds")
+    health_check_timeout: int = Field(default=5, ge=1, description="Health check timeout per connection in seconds")
+
+
 class Config(BaseSettings):
     """Main configuration class aggregating all sections."""
 
@@ -198,6 +213,7 @@ class Config(BaseSettings):
     compaction: CompactionConfig = Field(default_factory=CompactionConfig)
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
+    mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
 
 
 def load_config(config_path: str | None = None) -> Config:
@@ -289,6 +305,8 @@ def load_config(config_path: str | None = None) -> Config:
         config_dict["services"] = processed_config["services"]
     if "job_system" in processed_config:
         config_dict["job_system"] = processed_config["job_system"]
+    if "mcp_pool" in processed_config:
+        config_dict["mcp_pool"] = processed_config["mcp_pool"]
 
     # Create and validate config
     return Config(**config_dict)
