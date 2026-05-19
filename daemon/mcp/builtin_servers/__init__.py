@@ -56,5 +56,7 @@ def get_registry() -> BuiltinServerRegistry:
 
 # Register built-in server definitions
 from daemon.mcp.builtin_servers.webfetch import WebFetchServerDefinition
+from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
 
 _registry.register(WebFetchServerDefinition())
+_registry.register(Context7ServerDefinition())
