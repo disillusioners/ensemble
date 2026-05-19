@@ -296,3 +296,220 @@ class TestCloseAllConnections:
             await service.close_all_connections()
 
         mock_conn_mgr.close_all.assert_awaited_once()
+
+
+class TestProbeConnection:
+    """Tests for _probe_connection method."""
+
+    @pytest.mark.asyncio
+    async def test_probe_connection_live(self, service):
+        """Should return True for live sessions."""
+        # _probe_connection expects conn with .session attribute
+        mock_conn = MagicMock()
+        mock_conn.session.send_ping = AsyncMock()
+
+        result = await service._probe_connection(mock_conn)
+
+        assert result is True
+        mock_conn.session.send_ping.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_probe_connection_dead(self, service):
+        """Should return False for dead sessions."""
+        # _probe_connection expects conn with .session attribute
+        mock_conn = MagicMock()
+        mock_conn.session.send_ping = AsyncMock(side_effect=RuntimeError("Connection dead"))
+
+        result = await service._probe_connection(mock_conn)
+
+        assert result is False
+
+
+class TestIsBuiltinStdio:
+    """Tests for _is_builtin_stdio method."""
+
+    def test_is_builtin_stdio_context7(self, service):
+        """Should return True for context7 (registered STDIO server)."""
+        mock_registry = MagicMock()
+        mock_definition = MagicMock()
+        mock_definition.get_base_config.return_value = {"transport": "stdio"}
+        mock_registry.get_by_name.return_value = mock_definition
+
+        with patch("daemon.mcp.builtin_servers.get_registry", return_value=mock_registry):
+            server = _make_server(name="context7", config={"transport": "stdio"})
+            assert service._is_builtin_stdio(server) is True
+
+    def test_is_builtin_stdio_webfetch(self, service):
+        """Should return True for webfetch (registered STDIO server)."""
+        mock_registry = MagicMock()
+        mock_definition = MagicMock()
+        mock_definition.get_base_config.return_value = {"transport": "stdio"}
+        mock_registry.get_by_name.return_value = mock_definition
+
+        with patch("daemon.mcp.builtin_servers.get_registry", return_value=mock_registry):
+            server = _make_server(name="webfetch", config={"transport": "stdio"})
+            assert service._is_builtin_stdio(server) is True
+
+    def test_is_builtin_stdio_user_defined(self, service):
+        """Should return False for user-defined servers not in registry."""
+        mock_registry = MagicMock()
+        mock_registry.get_by_name.return_value = None
+
+        with patch("daemon.mcp.builtin_servers.get_registry", return_value=mock_registry):
+            server = _make_server(name="my-custom-server", config={"transport": "stdio"})
+            assert service._is_builtin_stdio(server) is False
+
+    def test_is_builtin_stdio_sse_server(self, service):
+        """Should return False for SSE servers."""
+        mock_registry = MagicMock()
+        mock_definition = MagicMock()
+        mock_definition.get_base_config.return_value = {"transport": "sse"}
+        mock_registry.get_by_name.return_value = mock_definition
+
+        with patch("daemon.mcp.builtin_servers.get_registry", return_value=mock_registry):
+            server = _make_server(name="context7", config={"transport": "sse"})
+            assert service._is_builtin_stdio(server) is False
+
+
+class TestPoolAwarePreload:
+    """Tests for pool-aware preload functionality."""
+
+    @pytest.fixture
+    def mock_pool(self):
+        """Create a mock warmup pool."""
+        from daemon.mcp.warmup_pool import PooledConnection
+        import time
+
+        pool = AsyncMock()
+        pool.acquire = AsyncMock(return_value=None)  # Default: pool empty
+        return pool
+
+    @pytest.fixture
+    def mock_pooled_connection(self):
+        """Create a mock PooledConnection."""
+        from daemon.mcp.warmup_pool import PooledConnection
+        import time
+
+        return PooledConnection(
+            session=AsyncMock(),
+            stream_cm=MagicMock(),
+            tools=[_make_tool(name="pooled_tool")],
+            server_name="context7",
+            created_at=time.monotonic(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_preload_uses_pool_when_available(self, service, manager, mock_pool, mock_pooled_connection):
+        """Pool connection should be used when available."""
+        mock_pool.acquire = AsyncMock(return_value=mock_pooled_connection)
+        service.set_warmup_pool(mock_pool)
+
+        server = _make_server(name="context7", config={"transport": "stdio"})
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.transfer_session = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # Should have acquired from pool and transferred
+        mock_pool.acquire.assert_awaited_once_with("context7")
+        mock_conn_mgr.transfer_session.assert_awaited_once()
+
+        # Should have cached the tools from pool
+        tools = service.get_mcp_tools("inst-1")
+        assert len(tools) == 1
+
+    @pytest.mark.asyncio
+    async def test_preload_falls_back_when_pool_empty(self, service, manager, mock_pool):
+        """Cold-start fallback should occur when pool is empty."""
+        mock_pool.acquire = AsyncMock(return_value=None)  # Pool empty
+        service.set_warmup_pool(mock_pool)
+
+        server = _make_server(name="context7", config={"transport": "stdio"})
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock()
+        mock_conn_mgr.get_session.return_value = MagicMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ), patch(
+            "langchain_mcp_adapters.tools.load_mcp_tools",
+            new_callable=AsyncMock,
+            return_value=[_make_tool(name="cold_tool")]
+        ), patch(
+            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            return_value=[_make_tool(name="cold_tool")]
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # Should fall back to cold start
+        mock_conn_mgr.connect_instance.assert_awaited_once()
+        tools = service.get_mcp_tools("inst-1")
+        assert len(tools) == 1
+
+    @pytest.mark.asyncio
+    async def test_preload_falls_back_when_pool_not_configured(self, service, manager):
+        """Should work with pool=None (no pool configured)."""
+        service.set_warmup_pool(None)  # No pool
+
+        server = _make_server(name="custom-server", config={"transport": "stdio"})
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock()
+        mock_conn_mgr.get_session.return_value = MagicMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ), patch(
+            "langchain_mcp_adapters.tools.load_mcp_tools",
+            new_callable=AsyncMock,
+            return_value=[_make_tool(name="tool")]
+        ), patch(
+            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            return_value=[_make_tool(name="tool")]
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # Should still work via cold start
+        mock_conn_mgr.connect_instance.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_preload_falls_back_on_stale_pooled_connection(self, service, manager, mock_pool, mock_pooled_connection):
+        """Stale pool connection should fall back to cold-start."""
+        # Simulate stale connection (probe fails)
+        mock_pooled_connection.session.send_ping = AsyncMock(side_effect=RuntimeError("Stale"))
+        mock_pool.acquire = AsyncMock(return_value=mock_pooled_connection)
+        service.set_warmup_pool(mock_pool)
+
+        server = _make_server(name="context7", config={"transport": "stdio"})
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.connect_instance = AsyncMock()
+        mock_conn_mgr.get_session.return_value = MagicMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ), patch(
+            "langchain_mcp_adapters.tools.load_mcp_tools",
+            new_callable=AsyncMock,
+            return_value=[_make_tool(name="fallback_tool")]
+        ), patch(
+            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            return_value=[_make_tool(name="fallback_tool")]
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # Should fall back to cold start after detecting stale connection
+        mock_conn_mgr.connect_instance.assert_awaited_once()

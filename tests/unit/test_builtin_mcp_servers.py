@@ -1010,7 +1010,7 @@ class TestBootstrap:
     @pytest.fixture
     def mock_config(self):
         """Create mock Config for InstanceManager."""
-        from daemon.config import Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig, QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig
+        from daemon.config import Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig, QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig, McpPoolConfig
 
         config = MagicMock(spec=Config)
         config.llm = MagicMock(spec=LLMConfig)
@@ -1068,6 +1068,13 @@ class TestBootstrap:
         config.job_system.observer_health_check_interval_seconds = 300
         config.job_system.idempotency_key_ttl_hours = 24
         config.job_system.job_retry_scheduler_enabled = None
+
+        config.mcp_pool = MagicMock(spec=McpPoolConfig)
+        config.mcp_pool.enabled = True
+        config.mcp_pool.default_pool_size = 1
+        config.mcp_pool.servers = {}
+        config.mcp_pool.health_check_interval = 60
+        config.mcp_pool.health_check_timeout = 5
 
         return config
 

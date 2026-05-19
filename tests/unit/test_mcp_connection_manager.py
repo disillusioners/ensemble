@@ -223,6 +223,40 @@ class TestCloseAll:
         assert mgr._stream_contexts == {}
 
 
+class TestTransferSession:
+    """Tests for transfer_session method."""
+
+    @pytest.mark.asyncio
+    async def test_transfer_session_registers_connection(self):
+        """Should register session and stream_cm in tracking dicts."""
+        mgr = McpConnectionManager()
+        mock_session = AsyncMock()
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__aexit__ = AsyncMock()
+
+        await mgr.transfer_session("inst-1", "server-1", mock_session, mock_stream_cm)
+
+        assert mgr._connections["inst-1"]["server-1"] is mock_session
+        assert mgr._stream_contexts["inst-1"]["server-1"] is mock_stream_cm
+
+    @pytest.mark.asyncio
+    async def test_transfer_session_integrates_with_close(self):
+        """Transferred sessions should be cleaned up by close_instance."""
+        mgr = McpConnectionManager()
+        mock_session = AsyncMock()
+        mock_stream_cm = MagicMock()
+        mock_stream_cm.__aexit__ = AsyncMock()
+
+        await mgr.transfer_session("inst-1", "server-1", mock_session, mock_stream_cm)
+        await mgr.close_instance("inst-1")
+
+        # Session should be closed and removed
+        mock_session.close.assert_awaited_once()
+        mock_stream_cm.__aexit__.assert_awaited_once()
+        assert "inst-1" not in mgr._connections
+        assert "inst-1" not in mgr._stream_contexts
+
+
 class TestSingleton:
     """Tests for singleton pattern."""
 
