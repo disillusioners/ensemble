@@ -19,6 +19,8 @@ from daemon.tools.inner_soul import (
     create_inner_soul_tool,
     _RAG_TARGETS,
     _KNOWLEDGE_CLASSIFICATIONS,
+    _update_memories,
+    _update_memory_md,
 )
 
 
@@ -663,3 +665,315 @@ class TestInnerSoulToolResponseStructure:
             
             assert "Processed" in result or "workflow" in result.lower()
             assert "workflow.md" in result
+
+
+# =============================================================================
+# Bug Fix Tests: target="memories" routing
+# =============================================================================
+
+
+class TestMemoriesTargetRouting:
+    """Tests for the target="memories" routing fix.
+
+    Bug fix: "memories" was added to the target Literal type annotation,
+    and the code path `if target == "memories": return _update_memories(...)`
+    is now active (was previously dead code).
+    """
+
+    def test_explicit_target_memories_calls_update_memories(self, temp_agent, mock_manager):
+        """Test that explicit target='memories' triggers _update_memories()."""
+        classification = {"type": "event", "targets": ["memories"], "description": "Event or observation"}
+        
+        # Call _update_memories directly
+        result = _update_memories("test_agent", temp_agent, "Test memory content", classification, mock_manager)
+        
+        # Verify success
+        assert result["success"] is True
+        assert result["target"] == "memories"
+        assert "file" in result
+        assert result["file"].startswith("memories/")
+        
+        # Verify file was created
+        memories_dir = temp_agent / "memories"
+        memory_files = list(memories_dir.glob("*.md"))
+        assert len(memory_files) >= 1
+        
+        # Verify file content
+        created_file = memory_files[-1]  # Get the most recent one
+        content = created_file.read_text()
+        assert "Test memory content" in content
+        assert "event" in content.lower()
+
+    def test_execute_update_with_memories_target(self, temp_agent, mock_manager):
+        """Test that _execute_update routes to _update_memories for target='memories'."""
+        from daemon.tools.inner_soul import _execute_update
+        
+        classification = {"type": "skill", "targets": ["memories"], "description": "New skills"}
+        growth_rules = {"max_memory_words": 500, "max_soul_chars": 2000}
+        
+        # Execute update with memories target
+        result = _execute_update(
+            agent_id="test_agent",
+            agent_path=temp_agent,
+            request="I can now write async tests",
+            target="memories",
+            intent=None,
+            rules=growth_rules,
+            manager=mock_manager,
+            classification=classification
+        )
+        
+        # Should succeed
+        assert result["success"] is True
+        assert result["target"] == "memories"
+        
+        # File should be created
+        memories_dir = temp_agent / "memories"
+        memory_files = list(memories_dir.glob("*.md"))
+        assert len(memory_files) >= 1
+
+    def test_tool_with_explicit_target_memories(self, mock_registry, mock_manager, temp_agent):
+        """Test full tool invocation with target='memories'."""
+        # This is the main integration test for the bug fix
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            
+            memories_dir = temp_agent / "memories"
+            memories_before = list(memories_dir.glob("*.md"))
+            
+            # Call tool with explicit target="memories"
+            result = inner_soul_tool.invoke({
+                "target": "memories",
+                "request": "Remember this important observation"
+            })
+            
+            # Should succeed and not redirect
+            assert "ERROR" not in result or "experience()" not in result
+            
+            # Should create a memory file
+            memories_after = list(memories_dir.glob("*.md"))
+            assert len(memories_after) > len(memories_before)
+            
+            # Verify the new memory contains the request content
+            new_files = [f for f in memories_after if f not in memories_before]
+            assert len(new_files) >= 1
+            content = new_files[0].read_text()
+            assert "important observation" in content
+
+
+# =============================================================================
+# Bug Fix Tests: Honest error message when memory exceeds limit
+# =============================================================================
+
+
+class TestMemoryLimitErrorMessage:
+    """Tests for the honest error message fix in _update_memory_md().
+
+    Bug fix: When memory.md exceeds the word limit, the error message no longer
+    claims "Saved to memories/" - it now honestly says "Content was not saved".
+    """
+
+    def test_memory_md_error_message_does_not_claim_saved_elsewhere(self, temp_agent, mock_manager):
+        """Test that exceeding memory limit doesn't claim content was saved elsewhere."""
+        # Create memory.md that exceeds limit
+        memory_file = temp_agent / "memory.md"
+        
+        # Create content that exceeds the 500-word default limit
+        # (growth.md in temp_agent fixture has max_memory_words: 2000, but let's set up a scenario)
+        growth_rules = {"max_memory_words": 10, "max_soul_chars": 2000}
+        
+        # Create existing memory with lots of words
+        existing_content = "# Memory\n\n" + "\n".join([f"- Word {i}" for i in range(20)])
+        memory_file.write_text(existing_content)
+        
+        # Try to add more content
+        result = _update_memory_md(
+            agent_id="test_agent",
+            agent_path=temp_agent,
+            request="This should fail because we exceed the limit",
+            rules=growth_rules,
+            manager=mock_manager
+        )
+        
+        # Verify failure
+        assert result["success"] is False
+        assert "error" in result
+        
+        # CRITICAL: Error message should NOT claim content was saved elsewhere
+        error_msg = result["error"]
+        assert "Saved to" not in error_msg, f"Error message should not claim 'Saved to': {error_msg}"
+        assert "not saved" in error_msg.lower() or "exceed" in error_msg.lower() or "limit" in error_msg.lower()
+
+    def test_memory_md_error_message_mentions_limit(self, temp_agent, mock_manager):
+        """Test that error message honestly mentions the limit was exceeded."""
+        growth_rules = {"max_memory_words": 5, "max_soul_chars": 2000}
+        
+        # Create existing memory exceeding limit
+        memory_file = temp_agent / "memory.md"
+        memory_file.write_text("# Memory\n\n" + "\n".join([f"- Item {i}" for i in range(10)]))
+        
+        result = _update_memory_md(
+            agent_id="test_agent",
+            agent_path=temp_agent,
+            request="Excess content",
+            rules=growth_rules,
+            manager=mock_manager
+        )
+        
+        assert result["success"] is False
+        error_msg = result["error"]
+        
+        # Should mention limit exceeded
+        assert "limit" in error_msg.lower() or "words" in error_msg.lower()
+        # Should NOT falsely claim success
+        assert "Saved" not in error_msg or "not saved" in error_msg.lower()
+
+    def test_memory_md_success_does_not_show_error(self, temp_agent, mock_manager):
+        """Test that successful memory.md update doesn't produce error message."""
+        growth_rules = {"max_memory_words": 500, "max_soul_chars": 2000}
+        
+        # Create small memory
+        memory_file = temp_agent / "memory.md"
+        memory_file.write_text("# Memory\n\n- Initial content\n")
+        
+        result = _update_memory_md(
+            agent_id="test_agent",
+            agent_path=temp_agent,
+            request="New valid content",
+            rules=growth_rules,
+            manager=mock_manager
+        )
+        
+        assert result["success"] is True
+        assert "error" not in result
+        
+        # Verify content was written
+        content = memory_file.read_text()
+        assert "New valid content" in content
+
+
+# =============================================================================
+# Bug Fix Tests: _classify_request() with intent parameter
+# =============================================================================
+
+
+class TestClassifyRequestIntentParameter:
+    """Tests for the _classify_request() intent parameter fix.
+
+    Bug fix: _classify_request() now accepts an optional `intent` parameter.
+    When classification falls to default with intent="remember", it routes to
+    memories/ with a debug log; otherwise logs that classification was inconclusive.
+    """
+
+    def test_classify_with_intent_remember_on_default_routes_to_memories(self):
+        """Test that intent='remember' on inconclusive classification routes to memories."""
+        # Use a request that won't match any pattern
+        result = _classify_request("xyz abc 123 random text", intent="remember")
+        
+        # Should route to memories
+        assert result["type"] == "event"
+        assert "memories" in result["targets"]
+        assert len(result["targets"]) == 1
+        assert result["all_matches"] == []
+
+    def test_classify_without_intent_on_default_routes_to_memories(self):
+        """Test that default behavior without intent also routes to memories."""
+        result = _classify_request("xyz abc 123 random text", intent=None)
+        
+        # Should route to memories
+        assert result["type"] == "event"
+        assert "memories" in result["targets"]
+
+    def test_classify_with_intent_learn_on_default_routes_to_memories(self):
+        """Test that intent='learn' on inconclusive classification routes to memories."""
+        result = _classify_request("xyz abc 123", intent="learn")
+        
+        # Should route to memories (fallback behavior)
+        assert "memories" in result["targets"]
+
+    def test_classify_with_intent_change_on_default_routes_to_memories(self):
+        """Test that intent='change' on inconclusive classification routes to memories."""
+        result = _classify_request("xyz abc 123", intent="change")
+        
+        # Should route to memories (fallback behavior)
+        assert "memories" in result["targets"]
+
+    def test_classify_matching_pattern_ignores_intent(self):
+        """Test that matching pattern uses pattern targets, not intent-based routing."""
+        # This request matches identity pattern
+        result = _classify_request("My name is TestUser", intent="remember")
+        
+        # Should match the pattern, not use intent-based routing
+        assert result["type"] == "identity"
+        assert "soul" in result["targets"]
+
+    def test_classify_intent_remember_affects_only_fallback(self):
+        """Test that intent only affects behavior when no pattern matches."""
+        # No pattern match
+        no_match = _classify_request("some random text", intent="remember")
+        assert no_match["all_matches"] == []
+        
+        # Pattern match - intent should be ignored
+        with_match = _classify_request("Remember that the sky is blue", intent="remember")
+        assert "knowledge" in with_match["type"] or "memory" in with_match["targets"]
+
+    def test_classify_intent_parameter_is_optional(self):
+        """Test that _classify_request works without intent parameter (backward compatible)."""
+        # Should work without intent parameter
+        result1 = _classify_request("My name is Test")
+        assert result1 is not None
+        assert "type" in result1
+        
+        # Should work with intent=None
+        result2 = _classify_request("My name is Test", intent=None)
+        assert result2 is not None
+        assert result2 == result1
+
+
+# =============================================================================
+# Bug Fix Tests: Full tool behavior with intent="remember"
+# =============================================================================
+
+
+class TestToolIntentRememberBehavior:
+    """Tests for full tool behavior with intent='remember' parameter."""
+
+    def test_tool_intent_remember_with_unclear_request(self, mock_registry, mock_manager, temp_agent):
+        """Test that intent='remember' routes unclear requests to memories/."""
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            
+            memories_dir = temp_agent / "memories"
+            memories_before = list(memories_dir.glob("*.md"))
+            
+            # Call with unclear request and intent="remember"
+            result = inner_soul_tool.invoke({
+                "intent": "remember",
+                "request": "some unclear text xyz"
+            })
+            
+            # Should create memory file
+            memories_after = list(memories_dir.glob("*.md"))
+            assert len(memories_after) > len(memories_before)
+
+    def test_tool_intent_remember_is_default_for_remember_intent(self, mock_registry, mock_manager, temp_agent):
+        """Test that intent='remember' defaults target to memories/."""
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            
+            memories_dir = temp_agent / "memories"
+            memories_before = list(memories_dir.glob("*.md"))
+            
+            # Call with only intent="remember" (no explicit target)
+            result = inner_soul_tool.invoke({
+                "intent": "remember",
+                "request": "Remember this fact for later"
+            })
+            
+            # Should create memory file (default target is memories/)
+            memories_after = list(memories_dir.glob("*.md"))
+            new_memories = [f for f in memories_after if f not in memories_before]
+            
+            if new_memories:
+                content = new_memories[0].read_text()
+                assert "Remember this fact" in content

@@ -281,7 +281,7 @@ def create_inner_soul_tool(
         content: str | None = None,
         request: str | None = None,
         intent: Literal["remember", "learn", "change"] | None = None,
-        target: Literal["memory", "workflow", "soul", "user"] | None = None
+        target: Literal["memory", "workflow", "soul", "user", "memories"] | None = None
     ) -> str:
         """Remember, learn, or change yourself. Use tool_help("inner_soul") for details."""
         try:
@@ -297,44 +297,104 @@ def create_inner_soul_tool(
             # Load rules
             growth_rules = _load_growth_rules(agent_path)
             
-            # Classify the request semantically
-            classification = _classify_request(actual_request)
+            # Check for compound requests and split if needed
+            request_parts = _split_compound_request(actual_request)
             
-            # Determine targets
-            if target:
-                # Explicit target takes precedence
-                targets = [target]
-            elif intent == "remember" and not target:
-                # Remember defaults to memories
-                targets = ["memories"]
-            elif intent == "learn" and not target:
-                # Learn goes to memories + potentially memory.md
-                targets = ["memories", "memory"]
+            if len(request_parts) == 1:
+                # Single request - use existing flow
+                classification = _classify_request(actual_request, intent=intent)
+                
+                # Determine targets
+                if target:
+                    # Explicit target takes precedence
+                    targets = [target]
+                elif intent == "remember" and not target:
+                    # Remember defaults to memories
+                    targets = ["memories"]
+                elif intent == "learn" and not target:
+                    # Learn goes to memories + potentially memory.md
+                    targets = ["memories", "memory"]
+                else:
+                    # Use semantic classification
+                    targets = classification["targets"]
+                
+                # Check if this should redirect to RAG
+                if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
+                    return _format_rag_redirect(actual_request, classification, targets)
+                
+                # Execute updates
+                results = []
+                for t in targets:
+                    result = _execute_update(
+                        agent_id=agent_id,
+                        agent_path=agent_path,
+                        request=actual_request,
+                        target=t,
+                        intent=intent,
+                        rules=growth_rules,
+                        manager=manager,
+                        classification=classification
+                    )
+                    results.append(result)
+                
+                # Format response
+                return _format_response(actual_request, results, classification)
             else:
-                # Use semantic classification
-                targets = classification["targets"]
-            
-            # --- NEW: Check if this should redirect to RAG ---
-            if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
-                return _format_rag_redirect(actual_request, classification, targets)
-            
-            # Execute updates
-            results = []
-            for t in targets:
-                result = _execute_update(
-                    agent_id=agent_id,
-                    agent_path=agent_path,
-                    request=actual_request,
-                    target=t,
-                    intent=intent,
-                    rules=growth_rules,
-                    manager=manager,
-                    classification=classification
-                )
-                results.append(result)
-            
-            # Format response
-            return _format_response(actual_request, results, classification)
+                # Compound request - process each part independently
+                compound_lines = [f"✓ Compound request split into {len(request_parts)} parts:"]
+                all_results = []
+                
+                for idx, part in enumerate(request_parts, 1):
+                    # Classify this part independently
+                    classification = _classify_request(part, intent=intent)
+                    
+                    # Determine targets for this part
+                    if target:
+                        targets = [target]
+                    elif intent == "remember" and not target:
+                        targets = ["memories"]
+                    elif intent == "learn" and not target:
+                        targets = ["memories", "memory"]
+                    else:
+                        targets = classification["targets"]
+                    
+                    # Check for RAG redirect
+                    if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
+                        rag_response = _format_rag_redirect(part, classification, targets)
+                        compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → {classification['type']}")
+                        compound_lines.append(f"    {rag_response.split(chr(10))[0]} (redirected to RAG)")
+                        all_results.append({"part": part, "redirected": True, "response": rag_response})
+                        continue
+                    
+                    # Execute updates for this part
+                    results = []
+                    for t in targets:
+                        result = _execute_update(
+                            agent_id=agent_id,
+                            agent_path=agent_path,
+                            request=part,
+                            target=t,
+                            intent=intent,
+                            rules=growth_rules,
+                            manager=manager,
+                            classification=classification
+                        )
+                        results.append(result)
+                    
+                    # Build result lines for this part
+                    truncated = f"{part[:50]}{'...' if len(part) > 50 else ''}"
+                    compound_lines.append(f"  Part {idx}: \"{truncated}\" → {classification['type']} ({', '.join(targets)})")
+                    
+                    for r in results:
+                        if r.get("success"):
+                            file_name = r.get("file", "")
+                            compound_lines.append(f"    ✓ {r.get('target', 'unknown')}: {file_name}")
+                        else:
+                            compound_lines.append(f"    ⚠ {r.get('target', 'unknown')}: {r.get('error', 'Unknown error')}")
+                    
+                    all_results.append({"part": part, "results": results, "classification": classification})
+                
+                return "\n".join(compound_lines)
             
         except Exception as e:
             return f"ERROR: {str(e)}"
@@ -361,7 +421,7 @@ Args:
     request: What you want to remember/learn/change. Can be natural
              language like "My name is Cody" or "User prefers concise responses"
     intent: (Optional) Explicit intent: "remember", "learn", or "change"
-    target: (Optional) Explicit target: "memory", "workflow", "soul", "user"
+    target: (Optional) Explicit target: "memory", "memories", "workflow", "soul", "user"
 
 Returns:
     Confirmation of what was done, or error message
@@ -391,8 +451,46 @@ Examples:
     return inner_soul
 
 
-def _classify_request(request: str) -> dict:
-    """Semantically classify a request to determine appropriate targets."""
+def _split_compound_request(request: str) -> list[str]:
+    """Split compound requests into individual parts for independent processing.
+    
+    Attempts splitting in order of preference:
+    1. AND keyword (case-insensitive, word boundary)
+    2. Semicolons
+    3. Sentence boundaries (period followed by uppercase)
+    4. Single request (no split)
+    
+    Args:
+        request: The potentially compound request string.
+        
+    Returns:
+        List of individual request strings (empty strings filtered out).
+    """
+    # Try splitting on AND keyword first
+    parts = re.split(r'\s+AND\s+', request, flags=re.IGNORECASE)
+    
+    if len(parts) == 1:
+        # No AND found, try semicolons
+        parts = re.split(r'\s*;\s*', request)
+    
+    if len(parts) == 1:
+        # No semicolons found, try sentence boundaries
+        parts = re.split(r'\.\s+(?=[A-Z])', request)
+    
+    # Strip whitespace and filter empty strings
+    parts = [p.strip() for p in parts if p.strip()]
+    
+    # Return single request if no split occurred
+    return parts if parts else [request]
+
+
+def _classify_request(request: str, intent: str | None = None) -> dict:
+    """Semantically classify a request to determine appropriate targets.
+    
+    Args:
+        request: The user request to classify.
+        intent: Optional explicit intent ("remember", "learn", "change").
+    """
     request_lower = request.lower()
     
     # Check each classification type
@@ -422,7 +520,22 @@ def _classify_request(request: str) -> dict:
         best["all_matches"] = [m["type"] for m in matches]
         return best
     
-    # Default: treat as event/observation
+    # Classification failed - determine fallback based on intent
+    # Default fallback: treat as event/observation.
+    # Note: Natural phrasing like "Context7 is built-in MCP server" falls through here
+    # because regex patterns can't match arbitrary factual statements.
+    # Phase 5 will add LLM-based classification fallback to handle these edge cases.
+    if intent == "remember":
+        logger.debug("Classification fell back to memories/ for remember intent")
+        return {
+            "type": "event",
+            "targets": ["memories"],
+            "description": "Event or observation (remember intent fallback)",
+            "all_matches": []
+        }
+    
+    # No pattern matched and no remember intent
+    logger.debug("Classification inconclusive - no pattern matched, defaulting to event/memories")
     return {
         "type": "event",
         "targets": ["memories"],
@@ -513,7 +626,7 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
         return {
             "success": False,
             "target": "memory",
-            "error": f"memory.md at {word_count} words (max {max_words}). Saved to memories/ instead."
+            "error": f"Write exceeds memory limit ({word_count} >= {max_words} words). Content was not saved. Consider using `access_memory` to save to a separate memory file, or reduce content length."
         }
     
     # Find insertion point
