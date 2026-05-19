@@ -1,6 +1,6 @@
 """Context7 built-in MCP server definition.
 
-Provides the @upstreamapi/context7-mcp package via npx for fetching
+Provides the @upstash/context7-mcp package via npx for fetching
 up-to-date library documentation.
 """
 
@@ -31,11 +31,11 @@ class Context7ServerDefinition(BuiltinServerDefinition):
         return "1"
 
     def get_base_config(self) -> dict[str, Any]:
-        """Return base configuration for @upstreamapi/context7-mcp."""
+        """Return base configuration for @upstash/context7-mcp."""
         return {
             "transport": "stdio",
             "command": "npx",
-            "args": ["-y", "@upstreamapi/context7-mcp"],
+            "args": ["-y", "@upstash/context7-mcp"],
         }
 
     def get_config_schema(self) -> list[dict[str, Any]]:

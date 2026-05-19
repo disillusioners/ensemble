@@ -72,7 +72,7 @@ class TestContext7BaseConfig:
 
         assert base_config.get("transport") == "stdio"
         assert base_config.get("command") == "npx"
-        assert base_config.get("args") == ["-y", "@upstreamapi/context7-mcp"]
+        assert base_config.get("args") == ["-y", "@upstash/context7-mcp"]
 
     def test_base_config_transport(self, context7_definition):
         """Test that base config includes stdio transport."""
@@ -87,7 +87,7 @@ class TestContext7BaseConfig:
     def test_base_config_args(self, context7_definition):
         """Test that base config includes correct args."""
         base_config = context7_definition.get_base_config()
-        assert base_config.get("args") == ["-y", "@upstreamapi/context7-mcp"]
+        assert base_config.get("args") == ["-y", "@upstash/context7-mcp"]
 
 
 # =============================================================================
@@ -123,7 +123,7 @@ class TestContext7BuildConfig:
 
         assert result.get("transport") == "stdio"
         assert result.get("command") == "npx"
-        assert result.get("args") == ["-y", "@upstreamapi/context7-mcp"]
+        assert result.get("args") == ["-y", "@upstash/context7-mcp"]
 
     def test_build_config_no_extra_fields(self, context7_definition):
         """Test that build_config doesn't add extra fields."""
@@ -156,7 +156,7 @@ class TestContext7ParseConfig:
         stored_config = {
             "transport": "stdio",
             "command": "npx",
-            "args": ["-y", "@upstreamapi/context7-mcp"],
+            "args": ["-y", "@upstash/context7-mcp"],
         }
         result = context7_definition.parse_config(stored_config)
 
@@ -165,7 +165,7 @@ class TestContext7ParseConfig:
     def test_parse_config_with_any_config(self, context7_definition):
         """Test that parse_config ignores any config fields (none defined)."""
         stored_config = {
-            "args": ["-y", "@upstreamapi/context7-mcp", "--some-arg", "value"],
+            "args": ["-y", "@upstash/context7-mcp", "--some-arg", "value"],
             "env": {"SOME_VAR": "value"},
         }
         result = context7_definition.parse_config(stored_config)
@@ -372,7 +372,7 @@ class TestContext7Bootstrap:
         server = manager._mcp_server_repository.get_mcp_server_by_name("context7")
         assert server.config.get("transport") == "stdio"
         assert server.config.get("command") == "npx"
-        assert server.config.get("args") == ["-y", "@upstreamapi/context7-mcp"]
+        assert server.config.get("args") == ["-y", "@upstash/context7-mcp"]
 
 
 # =============================================================================
