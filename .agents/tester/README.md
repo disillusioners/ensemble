@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-19 Unified Memory Architecture — All 6 Phases Complete)
+## Test Results (Latest: 2026-05-19 MCP STDIO Server Warm-Up Pool)
+
+### MCP STDIO Server Warm-Up Pool (2026-05-19)
+- **Full Test Suite**: 4,036 passed, 0 new regressions, 27 skipped
+- **New Pool Tests**: 78/78 PASSED (24 warmup_pool + 19 connection_manager + 35 mcp_service)
+- **Existing MCP Tests**: 147/147 PASSED (63 CRUD + 16 runtime + 43 builtin + 25 context7)
+- **Daemon Boot**: ✅ Runs 30s without crash (ensure.md PASS)
+- **Pool Warm-Up**: ✅ "MCP warm-up pool initialized: 2 server(s) registered, warmup running in background"
+- **Resource Leaks**: ✅ 0 orphaned processes after shutdown
+- **Quick Fixes**: 3 (MCP SDK mocks in conftest, mock tool patches, config fixture fix)
+- See `.agents/tester/RESULTS/2026-05-19-mcp-server-pool.md` for full report
+
+### MCP Server Warm-Up Pool Status: ✅ READY (78 pool tests pass, daemon verified, no regressions)
 
 ### Unified Memory Architecture — All Phases (2026-05-19)
 - **Full Test Suite**: 3,982 passed, 0 real failures, 27 skipped (17 ordering issues that pass individually)
