@@ -300,23 +300,25 @@ def create_inner_soul_tool(
             # Check for compound requests and split if needed
             request_parts = _split_compound_request(actual_request)
             
+            # Filter out whitespace-only parts
+            request_parts = [p for p in request_parts if p.strip()]
+            
+            # Check for empty/meaningless request
+            if not request_parts:
+                return "ERROR: Request is empty after processing"
+            
+            # Check if single part is essentially just split markers
+            if len(request_parts) == 1:
+                stripped = request_parts[0].strip().upper()
+                if stripped in ("AND", ";", "OR"):
+                    return "ERROR: Request is empty after processing"
+            
             if len(request_parts) == 1:
                 # Single request - use existing flow
                 classification = _classify_request(actual_request, intent=intent)
                 
-                # Determine targets
-                if target:
-                    # Explicit target takes precedence
-                    targets = [target]
-                elif intent == "remember" and not target:
-                    # Remember defaults to memories
-                    targets = ["memories"]
-                elif intent == "learn" and not target:
-                    # Learn goes to memories + potentially memory.md
-                    targets = ["memories", "memory"]
-                else:
-                    # Use semantic classification
-                    targets = classification["targets"]
+                # Determine targets using helper
+                targets = _resolve_targets(target, intent, classification)
                 
                 # Check if this should redirect to RAG
                 if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
@@ -348,15 +350,8 @@ def create_inner_soul_tool(
                     # Classify this part independently
                     classification = _classify_request(part, intent=intent)
                     
-                    # Determine targets for this part
-                    if target:
-                        targets = [target]
-                    elif intent == "remember" and not target:
-                        targets = ["memories"]
-                    elif intent == "learn" and not target:
-                        targets = ["memories", "memory"]
-                    else:
-                        targets = classification["targets"]
+                    # Determine targets for this part using helper
+                    targets = _resolve_targets(target, intent, classification)
                     
                     # Check for RAG redirect
                     if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
@@ -451,11 +446,32 @@ Examples:
     return inner_soul
 
 
+def _resolve_targets(target: str | None, intent: str | None, classification: dict) -> list[str]:
+    """Resolve the target(s) for a request based on explicit params and classification.
+    
+    Args:
+        target: Explicitly specified target, or None.
+        intent: Explicitly specified intent, or None.
+        classification: The classification dict from _classify_request().
+        
+    Returns:
+        List of target strings to update.
+    """
+    if target:
+        return [target]
+    elif intent == "remember":
+        return ["memories"]
+    elif intent == "learn":
+        return ["memories", "memory"]
+    else:
+        return classification["targets"]
+
+
 def _split_compound_request(request: str) -> list[str]:
     """Split compound requests into individual parts for independent processing.
     
     Attempts splitting in order of preference:
-    1. AND keyword (case-insensitive, word boundary)
+    1. AND keyword (uppercase only, word boundary)
     2. Semicolons
     3. Sentence boundaries (period followed by uppercase)
     4. Single request (no split)
@@ -466,8 +482,8 @@ def _split_compound_request(request: str) -> list[str]:
     Returns:
         List of individual request strings (empty strings filtered out).
     """
-    # Try splitting on AND keyword first
-    parts = re.split(r'\s+AND\s+', request, flags=re.IGNORECASE)
+    # Try splitting on AND keyword first (uppercase only)
+    parts = re.split(r'\s+AND\s+', request)
     
     if len(parts) == 1:
         # No AND found, try semicolons
@@ -480,8 +496,15 @@ def _split_compound_request(request: str) -> list[str]:
     # Strip whitespace and filter empty strings
     parts = [p.strip() for p in parts if p.strip()]
     
-    # Return single request if no split occurred
-    return parts if parts else [request]
+    # Return parts if we have them, otherwise check fallback
+    if parts:
+        return parts
+    
+    # No parts after split - check if original request is essentially empty or just split markers
+    stripped = request.strip()
+    if not stripped or stripped.upper() in ("AND", ";", "OR"):
+        return []
+    return [stripped]
 
 
 def _classify_request(request: str, intent: str | None = None) -> dict:

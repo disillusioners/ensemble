@@ -99,19 +99,17 @@ class TestSplitCompoundRequest:
         assert "I prefer dark mode" in result
 
     def test_split_on_and_lowercase(self):
-        """Split on lowercase AND keyword (case-insensitive)."""
-        # The regex uses re.IGNORECASE, so lowercase 'and' should also split
+        """Lowercase 'and' should NOT split - only uppercase AND triggers splitting."""
+        # The regex only matches uppercase AND, so lowercase 'and' should not split
         result = _split_compound_request("one and two")
-        assert len(result) == 2
-        assert "one" in result
-        assert "two" in result
+        assert len(result) == 1
+        assert "one and two" in result
 
     def test_split_on_and_mixed_case(self):
-        """Split on mixed case AND keyword."""
+        """Mixed case And should NOT split - only uppercase AND triggers splitting."""
         result = _split_compound_request("First part And Second part")
-        assert len(result) == 2
-        assert "First part" in result
-        assert "Second part" in result
+        assert len(result) == 1
+        assert "First part And Second part" in result
 
     def test_split_multiple_ands(self):
         """Split on multiple AND keywords."""
@@ -216,32 +214,26 @@ class TestSplitCompoundRequest:
     # -------------------------------------------------------------------------
 
     def test_empty_string(self):
-        """Empty string should return single-item list with empty string stripped."""
+        """Empty string should return empty list (filtered out)."""
         result = _split_compound_request("")
-        # Empty strings should be filtered out, leaving empty list
-        # Then function returns [request] which is [""]
-        assert len(result) == 1
-        assert result == [""]
+        assert result == []
 
     def test_whitespace_only(self):
-        """Whitespace-only string returns as-is (no split pattern matches)."""
+        """Whitespace-only string returns empty list (filtered out)."""
         result = _split_compound_request("   ")
-        # No split pattern matches, so returns original string with whitespace
-        assert len(result) == 1
-        assert result == ["   "]
+        assert result == []
 
     def test_only_and(self):
-        """String with only AND should handle gracefully."""
+        """String with only AND should not split (no whitespace before AND)."""
         result = _split_compound_request("AND")
-        # AND alone with surrounding whitespace splits to empty strings
-        # which are filtered out, leaving empty result
+        # AND alone doesn't split (no whitespace before), so it's returned as-is
         assert result == ["AND"]
 
     def test_and_with_only_whitespace(self):
-        """AND with only whitespace around should handle gracefully."""
+        """AND with only whitespace around should return empty (filtered out)."""
         result = _split_compound_request("   AND   ")
-        # Should produce empty strings which get filtered
-        assert result == ["   AND   "]
+        # Splits to ['', ''] which filters to [], then fallback check catches "AND"
+        assert result == []
 
     def test_multiple_empty_parts_filtered(self):
         """Multiple empty parts after split should be filtered."""
@@ -471,15 +463,48 @@ class TestCompoundEdgeCases:
             assert "10 parts" in result
 
     def test_empty_parts_after_split(self, mock_registry, mock_manager, temp_agent):
-        """Handle empty parts after split gracefully."""
+        """Handle empty parts after split gracefully - returns error."""
         with patch("daemon.registry.get_registry", return_value=mock_registry):
             inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
-            # This would produce empty parts after split
+            # "AND" alone splits to empty parts, which are filtered, returning error
             result = inner_soul_tool.invoke({"request": "AND"})
+            assert "ERROR" in result
+            assert "empty" in result.lower()
+
+    def test_whitespace_only_split_returns_error(self, mock_registry, mock_manager, temp_agent):
+        """Splitting whitespace-only string should return error, not create files."""
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
             
-            # Should handle gracefully (not crash)
-            assert "ERROR" not in result or "✓" in result
+            memories_dir = temp_agent / "memories"
+            memories_before = list(memories_dir.glob("*.md"))
+            
+            # Whitespace-only should return error
+            result = inner_soul_tool.invoke({"request": "   AND   "})
+            assert "ERROR" in result
+            assert "empty" in result.lower()
+            
+            # Should NOT create any files
+            memories_after = list(memories_dir.glob("*.md"))
+            assert memories_after == memories_before
+
+    def test_semicolon_only_split_returns_error(self, mock_registry, mock_manager, temp_agent):
+        """Splitting semicolon-only string should return error, not create files."""
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            inner_soul_tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            
+            memories_dir = temp_agent / "memories"
+            memories_before = list(memories_dir.glob("*.md"))
+            
+            # Semicolon-only should return error
+            result = inner_soul_tool.invoke({"request": ";"})
+            assert "ERROR" in result
+            assert "empty" in result.lower()
+            
+            # Should NOT create any files
+            memories_after = list(memories_dir.glob("*.md"))
+            assert memories_after == memories_before
 
     def test_and_without_space_does_not_split(self):
         """AND without spaces should not split."""
