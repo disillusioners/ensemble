@@ -21,6 +21,10 @@ from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
 
+# STDIO: Needs time for subprocess spawn (npx/uvx package resolution + download) + handshake
+# On cold start, npx needs 8-15s and uvx needs 5-10s
+STDIO_DEFAULT_TIMEOUT = 30.0
+
 # Module-level singleton
 _mcp_connection_manager: McpConnectionManager | None = None
 
@@ -82,7 +86,7 @@ class McpConnectionManager:
         self,
         instance_id: str,
         servers: list[McpServer],
-        per_server_timeout: float = 5.0,
+        per_server_timeout: float = 15.0,
     ) -> None:
         """
         Connect all MCP servers for an instance in parallel.
@@ -90,7 +94,7 @@ class McpConnectionManager:
         Args:
             instance_id: Unique identifier for the agent instance
             servers: List of MCP server configurations
-            per_server_timeout: Timeout in seconds for each connection attempt
+            per_server_timeout: Timeout in seconds for each connection attempt (default: 15s)
         """
         if not servers:
             return
@@ -153,7 +157,12 @@ class McpConnectionManager:
         config = validate_mcp_server_config(server.config)
 
         if isinstance(config, McpStdioConfig):
-            return await self._create_stdio_session(config, instance_id, server_name, timeout)
+            # STDIO needs longer timeout for subprocess spawn + handshake
+            # Use config timeout if specified, otherwise use STDIO default
+            effective_timeout = config.timeout if config.timeout is not None else STDIO_DEFAULT_TIMEOUT
+            return await self._create_stdio_session(
+                config, instance_id, server_name, effective_timeout
+            )
         elif isinstance(config, McpSseConfig):
             return await self._create_sse_session(config, instance_id, server_name, timeout)
         elif isinstance(config, McpStreamableHttpConfig):
@@ -193,7 +202,18 @@ class McpConnectionManager:
                     streams_cm, read_stream, write_stream, instance_id, server_name
                 )
         except asyncio.TimeoutError:
-            logger.error(f"STDIO connection timed out for command: {config.command}")
+            command_str = f"{config.command} {' '.join(config.args)}"
+            logger.error(
+                f"STDIO connection timed out after {timeout}s for command: {command_str}. "
+                f"This may be due to cold start (npx/uvx package resolution) taking longer than expected. "
+                f"Consider increasing the timeout in the server config (e.g., timeout: 45) or "
+                f"ensure the MCP server package is cached."
+            )
+            # Try to get stderr from the process if available
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
             raise
 
     async def _create_sse_session(

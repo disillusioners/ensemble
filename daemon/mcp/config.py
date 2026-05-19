@@ -23,6 +23,11 @@ class McpStdioConfig(BaseModel):
     command: str = Field(description="Command to execute for the MCP server")
     args: list[str] = Field(default_factory=list, description="Command-line arguments")
     env: dict[str, str] | None = Field(default=None, description="Environment variables")
+    timeout: float | None = Field(
+        default=None,
+        description="Connection timeout in seconds. Defaults to 30s for STDIO (supports cold starts). "
+        "Set lower for fast servers or higher for slow network/package resolution.",
+    )
 
 
 class McpSseConfig(BaseModel):
