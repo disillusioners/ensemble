@@ -289,6 +289,23 @@ class McpConnectionManager:
         """
         return self._connections.get(instance_id, {}).get(server_name)
 
+    async def transfer_session(
+        self,
+        instance_id: str,
+        server_name: str,
+        session: ClientSession,
+        stream_cm: Any,
+    ) -> None:
+        """Transfer an externally-managed session into this manager's tracking."""
+        async with self._lock:
+            if instance_id not in self._connections:
+                self._connections[instance_id] = {}
+            if instance_id not in self._stream_contexts:
+                self._stream_contexts[instance_id] = {}
+            self._connections[instance_id][server_name] = session
+            self._stream_contexts[instance_id][server_name] = stream_cm
+        logger.debug(f"Transferred pooled session for '{server_name}' to instance {instance_id[:8]}")
+
     async def close_instance(self, instance_id: str) -> None:
         """
         Close all MCP sessions and stream context managers for an instance.

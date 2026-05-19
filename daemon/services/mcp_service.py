@@ -19,6 +19,7 @@ from daemon.mcp.tool_adapter import adapt_mcp_tools
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
     from daemon.manager import InstanceManager
+    from daemon.mcp.warmup_pool import McpWarmupPool
     from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,32 @@ class McpService:
         self._tools_cache: dict[str, list[BaseTool]] = {}
         self._preload_locks: dict[str, asyncio.Lock] = {}
         self._preload_lock = asyncio.Lock()  # Protects _preload_locks dict
+        self._warmup_pool: McpWarmupPool | None = None
+
+    def set_warmup_pool(self, pool: "McpWarmupPool") -> None:
+        """Inject the warm-up pool (called after initialization)."""
+        self._warmup_pool = pool
+
+    def _is_builtin_stdio(self, server) -> bool:
+        """Check if a server is a built-in STDIO server."""
+        from daemon.mcp.builtin_servers import get_registry
+        registry = get_registry()
+        definition = registry.get_by_name(server.name)
+        if definition is None:
+            return False
+        config = definition.get_base_config()
+        return config.get("transport") == "stdio"
+
+    async def _probe_connection(self, conn, timeout: float = 3.0) -> bool:
+        """Quick liveness probe — MCP protocol ping with short timeout."""
+        try:
+            await asyncio.wait_for(
+                conn.session.send_ping(),
+                timeout=timeout,
+            )
+            return True
+        except Exception:
+            return False
 
     async def preload_mcp_tools(self, instance_id: str) -> None:
         """Connect to MCP servers and discover tools for an instance.
@@ -46,6 +73,7 @@ class McpService:
 
         Non-fatal: logs errors and caches empty list on failure.
         Uses per-instance locking to prevent concurrent preload races.
+        First tries warm-up pool for built-in STDIO servers.
         """
         # Get or create per-instance lock
         async with self._preload_lock:
@@ -65,26 +93,58 @@ class McpService:
                     return
 
                 conn_mgr = get_mcp_connection_manager()
-                await conn_mgr.connect_instance(instance_id, servers)
+                pool = self._warmup_pool
 
-                # Discover tools from all connected servers (parallel)
-                results = await asyncio.gather(
-                    *[
-                        self._discover_server_tools(instance_id, server)
-                        for server in servers
-                    ],
-                    return_exceptions=True,
-                )
+                # Split servers into pooled vs cold-start
+                pooled_servers = []
+                cold_servers = []
+                for server in servers:
+                    if pool and self._is_builtin_stdio(server):
+                        pooled_servers.append(server)
+                    else:
+                        cold_servers.append(server)
 
                 tools = []
-                for server, result in zip(servers, results):
-                    if isinstance(result, Exception):
-                        logger.warning(
-                            f"Failed to discover tools from MCP server "
-                            f"'{server.name}': {result}"
-                        )
-                    else:
-                        tools.extend(result)
+
+                # Handle pooled servers (from warm-up pool)
+                for server in pooled_servers:
+                    conn = await pool.acquire(server.name)
+                    if conn:
+                        # Liveness probe: verify connection is still alive before transfer
+                        alive = await self._probe_connection(conn)
+                        if alive:
+                            # Transfer ownership to connection manager
+                            await conn_mgr.transfer_session(
+                                instance_id, server.name, conn.session, conn.stream_cm
+                            )
+                            tools.extend(conn.tools)  # Pre-discovered tools!
+                            continue
+                        else:
+                            # Stale connection — close it, fall back to cold-start
+                            logger.warning(f"Stale pooled connection for '{server.name}', falling back")
+                            try:
+                                await conn.session.close()
+                                await conn.stream_cm.__aexit__(None, None, None)
+                            except Exception:
+                                pass
+                    # Pool empty or stale — fall back to cold start for this server
+                    cold_servers.append(server)
+
+                # Handle cold-start servers (existing flow)
+                if cold_servers:
+                    await conn_mgr.connect_instance(instance_id, cold_servers)
+                    results = await asyncio.gather(
+                        *[self._discover_server_tools(instance_id, s) for s in cold_servers],
+                        return_exceptions=True,
+                    )
+                    for server, result in zip(cold_servers, results):
+                        if isinstance(result, Exception):
+                            logger.warning(
+                                f"Failed to discover tools from MCP server "
+                                f"'{server.name}': {result}"
+                            )
+                        else:
+                            tools.extend(result)
 
                 logger.info(
                     f"Discovered {len(tools)} MCP tools from {len(servers)} "
