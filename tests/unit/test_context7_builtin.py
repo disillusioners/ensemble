@@ -54,8 +54,8 @@ class TestContext7Properties:
         assert "AI coding assistants" in context7_definition.description
 
     def test_schema_version(self, context7_definition):
-        """Test that schema_version is '1'."""
-        assert context7_definition.schema_version == "1"
+        """Test that schema_version is '2'."""
+        assert context7_definition.schema_version == "2"
 
 
 # =============================================================================

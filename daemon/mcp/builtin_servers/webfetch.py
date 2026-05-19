@@ -27,7 +27,7 @@ class WebFetchServerDefinition(BuiltinServerDefinition):
 
     @property
     def schema_version(self) -> str:
-        return "1"
+        return "2"
 
     def get_base_config(self) -> dict[str, Any]:
         """Return base configuration for mcp-server-fetch."""

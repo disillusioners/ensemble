@@ -52,8 +52,8 @@ class TestWebFetchProperties:
         assert "agents" in webfetch_definition.description
 
     def test_schema_version(self, webfetch_definition):
-        """Test that schema_version is '1'."""
-        assert webfetch_definition.schema_version == "1"
+        """Test that schema_version is '2'."""
+        assert webfetch_definition.schema_version == "2"
 
 
 # =============================================================================
