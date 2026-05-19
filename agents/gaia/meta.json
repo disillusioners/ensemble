@@ -10,8 +10,7 @@
   "tags": ["environment", "setup", "dependencies"],
   "innate_skills": [],
   "tools": {
-    "allow": ["bash", "filesystem", "help"],
-    "deny": []
+    "allow": ["bash", "filesystem", "help"]
   },
   "llm_model": null
 }

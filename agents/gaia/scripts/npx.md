@@ -67,7 +67,7 @@ nvm allows you to install and manage multiple Node.js versions:
 
 ```bash
 # Install nvm (macOS/Linux)
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
 
 # Install Node.js LTS
 nvm install --lts
