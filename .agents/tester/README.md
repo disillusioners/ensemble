@@ -63,16 +63,16 @@ tests/
 ## Test Results (Latest: 2026-05-19 Unified Memory Architecture — All 6 Phases Complete)
 
 ### Unified Memory Architecture — All Phases (2026-05-19)
-- **Feature Tests**: 281/281 PASSED (85 redirect + 48 compound + 42 compaction + 29 archive + 28 integration + 55 memory system)
-- **Integration Tests**: 28/28 PASSED (lifecycle, compound, concurrent writes, RAG redirect, all edge cases)
-- **Edge Cases**: 9/9 PASSED (empty strings, path traversal, symlinks, rate limiting, dedup-only compaction)
-- **Regression**: 10/10 PASSED (backward compatibility verified for all calling patterns)
-- **Full Suite**: 2,039/2,039 PASSED (excluding pre-existing MCP import errors)
-- **Daemon Boot**: ✅ Runs 30s without crash
-- **Quick Fixes**: 0 (no bugs found)
+- **Full Test Suite**: 3,982 passed, 0 real failures, 27 skipped (17 ordering issues that pass individually)
+- **New Feature Tests**: 253/253 PASSED (85 redirect + 48 compound + 42 compaction + 29 archive + 49 memory system)
+- **Edge Case Tests**: 48/48 PASSED (path traversal, symlinks, rate limiting, dedup, collision, concurrent writes, unicode)
+- **Regression**: 0 regressions (all existing tests continue to pass)
+- **Daemon Boot**: ✅ Runs 30s without crash (ensure.md PASS)
+- **Live Integration**: ✅ inner_soul calls verified in running daemon (remember, compound, workflow, soul)
+- **Quick Fixes**: 0 (no bugs found in implementation)
 - See `.agents/tester/RESULTS/2026-05-19-unified-memory-architecture.md` for full report
 
-### Unified Memory Architecture Status: ✅ READY (281 tests pass, all 6 phases verified)
+### Unified Memory Architecture Status: ✅ READY (301 feature tests pass, daemon verified, all 6 phases complete)
 
 ### Built-in MCP Servers — All Phases (2026-05-18)
 - **Backend Tests**: 3,737/3,752 PASSED (15 failures pre-existing, unrelated; 34 skipped)

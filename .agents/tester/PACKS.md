@@ -41,6 +41,7 @@
 | memory_compaction_unit_test | tests/unit/tools/test_inner_soul_compaction.py | Phase 3 compaction: file locking, atomic writes, deduplication, structure preservation | 2 min | 2026-05-19 | ✅ PASS (42 tests, feature/unified-memory-architecture) |
 | memory_archive_unit_test | tests/unit/tools/test_archive_lifecycle.py | Phase 4 archive: path validation, traversal protection, symlinks, auto-archive, rate limiting | 2 min | 2026-05-19 | ✅ PASS (29 tests, feature/unified-memory-architecture) |
 | memory_integration_test | tests/test_memory_integration.py | Integration: full lifecycle, compound requests, concurrent writes, RAG redirect, edge cases, regression | 2 min | 2026-05-19 | ✅ PASS (28 tests, feature/unified-memory-architecture) |
+| memory_edge_cases_test | tests/unit/tools/test_memory_edge_cases.py | Edge cases: path traversal, symlinks, rate limiting, compaction boundaries, concurrent writes, collision, unicode | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
 
 ## Integration Test Packs
 
