@@ -29,6 +29,15 @@ def _make_mock_tool(name: str = "echo", description: str = "Echo tool"):
     return tool
 
 
+def _make_adapted_tool(name: str, description: str = "Test tool"):
+    """Create a mock tool with proper name attribute for adapt_mcp_tools results."""
+    tool = MagicMock()
+    tool.name = name  # Set as attribute, not constructor arg
+    tool.description = description
+    tool.copy = MagicMock(side_effect=lambda: tool)
+    return tool
+
+
 @pytest.fixture
 def mock_manager():
     """Create a mock manager with MCP service."""
@@ -71,11 +80,11 @@ class TestFullFlowMcpToolsInjected:
             new_callable=AsyncMock,
             return_value=[tool1, tool2]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            side_effect=lambda name, tools: [
-                MagicMock(name=f"mcp_{name}_{t.name}", description=t.description)
-                for t in tools
-            ]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+                side_effect=lambda name, tools: [
+                    _make_adapted_tool(name=f"mcp_{name.replace('-', '_').replace(' ', '_')}_{t.name}", description=t.description)
+                    for t in tools
+                ]
         ):
             await mcp_service.preload_mcp_tools("test-instance-1")
 
@@ -108,8 +117,9 @@ class TestFullFlowMcpToolsInjected:
         mock_conn_mgr.get_session.side_effect = get_session
 
         def adapt_tools(name, tools):
-            prefix = f"mcp_{name}_"
-            return [MagicMock(name=f"{prefix}{t.name}", description=t.description) for t in tools]
+            slugified_name = name.replace('-', '_').replace(' ', '_')
+            prefix = f"mcp_{slugified_name}_"
+            return [_make_adapted_tool(name=f"{prefix}{t.name}", description=t.description) for t in tools]
 
         # Track which server's tools are loaded
         load_calls = []
@@ -130,7 +140,7 @@ class TestFullFlowMcpToolsInjected:
             new_callable=AsyncMock,
             side_effect=mock_load_tools
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            "daemon.services.mcp_service.adapt_mcp_tools",
             side_effect=adapt_tools
         ):
             await mcp_service.preload_mcp_tools("multi-server-instance")
@@ -162,8 +172,8 @@ class TestFullFlowMcpToolsInjected:
             new_callable=AsyncMock,
             return_value=[tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_cleanup_test_test")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_cleanup_test_test")]
         ):
             await mcp_service.preload_mcp_tools("cleanup-instance")
 
@@ -210,8 +220,8 @@ class TestResilienceValidInvalidServers:
             new_callable=AsyncMock,
             return_value=[good_tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_good_server_good_tool")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_good_server_good_tool")]
         ):
             await mcp_service.preload_mcp_tools("resilient-instance")
 
@@ -313,8 +323,8 @@ class TestRestorePathMcpPreloaded:
             new_callable=AsyncMock,
             return_value=[tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_restored_server_restored_tool")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_restored_server_restored_tool")]
         ):
             await mcp_service.preload_mcp_tools("restored-instance")
 
@@ -369,7 +379,7 @@ class TestEdgeCases:
 
         def adapt_tools(name, tools):
             if name == "filter-test":
-                return [MagicMock(name=f"mcp_filter_test_{t.name}", description=t.description) for t in tools]
+                return [_make_adapted_tool(name=f"mcp_filter_test_{t.name}", description=t.description) for t in tools]
             return tools
 
         with patch(
@@ -380,7 +390,7 @@ class TestEdgeCases:
             new_callable=AsyncMock,
             return_value=[mcp_tool, regular_tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            "daemon.services.mcp_service.adapt_mcp_tools",
             side_effect=adapt_tools
         ):
             await mcp_service.preload_mcp_tools("filter-instance")
@@ -413,8 +423,8 @@ class TestEdgeCases:
             new_callable=AsyncMock,
             return_value=[tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_concurrent_server_concurrent_tool")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_concurrent_server_concurrent_tool")]
         ):
             # Launch concurrent preloads
             await asyncio.gather(
@@ -451,8 +461,8 @@ class TestLifecycleCleanup:
             new_callable=AsyncMock,
             return_value=[tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_idempotent_server_test")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_idempotent_server_test")]
         ):
             await mcp_service.preload_mcp_tools("idempotent-instance")
 
@@ -483,8 +493,8 @@ class TestLifecycleCleanup:
             new_callable=AsyncMock,
             return_value=[tool]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
-            return_value=[MagicMock(name="mcp_server_test")]
+            "daemon.services.mcp_service.adapt_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_server_test")]
         ):
             await mcp_service.preload_mcp_tools("instance1")
             await mcp_service.preload_mcp_tools("instance2")
@@ -514,7 +524,8 @@ class TestLifecycleCleanup:
         mock_conn_mgr.get_session.side_effect = get_session
 
         def adapt_tools(name, tools):
-            return [MagicMock(name=f"mcp_{name}_{t.name}", description=t.description) for t in tools]
+            slugified_name = name.replace('-', '_').replace(' ', '_')
+            return [_make_adapted_tool(name=f"mcp_{slugified_name}_{t.name}", description=t.description) for t in tools]
 
         with patch(
             "daemon.services.mcp_service.get_mcp_connection_manager",
@@ -524,16 +535,16 @@ class TestLifecycleCleanup:
             new_callable=AsyncMock,
             side_effect=lambda s: [tool1] if "instance-a" in str(s.metadata) else [tool2]
         ), patch(
-            "daemon.mcp.tool_adapter.adapt_mcp_tools",
+            "daemon.services.mcp_service.adapt_mcp_tools",
             side_effect=adapt_tools
         ):
             # Load for instance A
             mcp_service._tools_cache["instance-a"] = [
-                MagicMock(name="mcp_shared_server_tool1", description="A's tool")
+                _make_adapted_tool(name="mcp_shared_server_tool1", description="A's tool")
             ]
             # Load for instance B
             mcp_service._tools_cache["instance-b"] = [
-                MagicMock(name="mcp_shared_server_tool2", description="B's tool")
+                _make_adapted_tool(name="mcp_shared_server_tool2", description="B's tool")
             ]
 
         # Verify isolation

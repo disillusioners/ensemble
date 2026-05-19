@@ -291,6 +291,13 @@ class TestContext7Bootstrap:
         config.agents = MagicMock(spec=AgentsConfig)
         config.agents.directory = "./agents"
 
+        config.mcp_pool = MagicMock()
+        config.mcp_pool.enabled = False
+        config.mcp_pool.default_pool_size = 1
+        config.mcp_pool.servers = {}
+        config.mcp_pool.health_check_interval = 60
+        config.mcp_pool.health_check_timeout = 5
+
         config.job_system = MagicMock(spec=JobSystemConfig)
         config.job_system.default_max_retries = 3
         config.job_system.retry_backoff_base_seconds = 60

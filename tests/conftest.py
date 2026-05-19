@@ -6,7 +6,7 @@ import pytest
 from pathlib import Path
 from datetime import datetime
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 
 # Create mock modules and add to sys.modules BEFORE any daemon imports
@@ -25,7 +25,7 @@ mock_langgraph_graph = create_mock_module("langgraph.graph", {
     "MessagesState": MagicMock(),
     "START": MagicMock(),
     "END": MagicMock(),
-    "CompiledGraph": MagicMock(),  # Add CompiledGraph here since source code imports from here
+    "CompiledGraph": MagicMock(),
 })
 mock_langgraph_graph_state = create_mock_module("langgraph.graph.state", {
     "CompiledStateGraph": MagicMock(),
@@ -45,10 +45,42 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
 })
 
 # Create mock MCP module (for testing without mcp package installed)
-# This provides minimal tool_adapter functions for tests
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
+    "mcp_tool_name": lambda server_name, tool_name: f"mcp_{server_name}_{tool_name}",
     "is_mcp_tool": lambda name: name.startswith("mcp_") if name else False,
-    "adapt_mcp_tools": lambda server_name, tools: tools,  # Identity function for tests
+    "adapt_mcp_tools": lambda server_name, tools: tools,
+    "_slugify": lambda name: name.lower().replace("-", "_").replace(" ", "_"),
+})
+
+# Create mock MCP SDK module (mcp package)
+mock_mcp = create_mock_module("mcp", {"__path__": ["mcp"]})
+mock_mcp.ClientSession = MagicMock()
+mock_mcp.StdioServerParameters = MagicMock()
+mock_mcp.stdio_client = MagicMock()
+mock_mcp_client = create_mock_module("mcp.client", {"__path__": []})
+mock_mcp_client.sse = create_mock_module("mcp.client.sse", {
+    "sse_client": MagicMock(),
+})
+mock_mcp_client.streamable_http = create_mock_module("mcp.client.streamable_http", {
+    "streamablehttp_client": MagicMock(),
+})
+mock_mcp_client_stdio = create_mock_module("mcp.client.stdio", {})
+mock_mcp_server = create_mock_module("mcp.server", {"__path__": []})
+mock_mcp_server.stdio = create_mock_module("mcp.server.stdio", {})
+mock_mcp_types = create_mock_module("mcp.types", {
+    "TextResourceContents": MagicMock(),
+    "ImageResourceContents": MagicMock(),
+    "EmbeddedResource": MagicMock(),
+})
+mock_mcp_stdio_client = create_mock_module("mcp.client.stdio.context_manager", {
+    "__aenter__": AsyncMock(return_value=MagicMock()),
+    "__aexit__": AsyncMock(return_value=None),
+})
+
+# Create mock langchain_mcp_adapters module
+mock_langchain_mcp = create_mock_module("langchain_mcp_adapters", {"__path__": []})
+mock_langchain_mcp_tools = create_mock_module("langchain_mcp_adapters.tools", {
+    "load_mcp_tools": AsyncMock(return_value=[]),
 })
 
 
@@ -64,18 +96,35 @@ _mock_modules = {
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
     "daemon.mcp.tool_adapter": mock_mcp_tool_adapter,
+    # Mock MCP SDK modules
+    "mcp": mock_mcp,
+    "mcp.client": mock_mcp_client,
+    "mcp.client.sse": mock_mcp_client.sse,
+    "mcp.client.streamable_http": mock_mcp_client.streamable_http,
+    "mcp.client.stdio": mock_mcp_client_stdio,
+    "mcp.server": mock_mcp_server,
+    "mcp.server.stdio": mock_mcp_server.stdio,
+    "mcp.types": mock_mcp_types,
+    "mcp.client.stdio.context_manager": mock_mcp_stdio_client,
+    # Mock langchain_mcp_adapters
+    "langchain_mcp_adapters": mock_langchain_mcp,
+    "langchain_mcp_adapters.tools": mock_langchain_mcp_tools,
 }
+
+# Inject mocks into sys.modules BEFORE any test imports happen
+for key, mock_mod in _mock_modules.items():
+    if key not in sys.modules:
+        sys.modules[key] = mock_mod
+
 
 def pytest_collection_modifyitems(items):
     """Only apply mocks for unit tests, not integration tests."""
-    import sys
     for item in items:
         if "integration" not in item.fspath.strpath:
-            # Apply mocks for this test
+            # Ensure mocks are applied for unit tests
             for key in _mock_modules:
-                if key in sys.modules:
-                    _original_modules[key] = sys.modules[key]
-                sys.modules[key] = _mock_modules[key]
+                if key not in sys.modules:
+                    sys.modules[key] = _mock_modules[key]
         else:
             # Restore real modules for integration tests
             for key in _mock_modules:
@@ -221,14 +270,14 @@ def clean_env():
     """Clean up environment variables before and after each test."""
     # Store original env vars
     original_env = os.environ.copy()
-    
+
     yield
-    
+
     # Restore original env (but don't restore ENSEMBLE_CONFIG as tests may modify it)
     for key in os.environ:
         if key not in original_env:
             del os.environ[key]
-    
+
     for key, value in original_env.items():
         if key != "ENSEMBLE_CONFIG" and os.environ.get(key) != value:
             os.environ[key] = value
@@ -240,7 +289,6 @@ def clean_env():
 @pytest.fixture
 def mock_on_message():
     """Create a mock async callback for message handling."""
-    from unittest.mock import AsyncMock
     return AsyncMock()
 
 
@@ -254,7 +302,6 @@ def mock_execution_callback():
 @pytest.fixture
 def mock_source_repo():
     """Create a mock SourceRepository with run counter support."""
-    from unittest.mock import MagicMock
     repo = MagicMock()
     repo.increment_scheduler_run_counter = MagicMock(return_value=1)
     return repo
