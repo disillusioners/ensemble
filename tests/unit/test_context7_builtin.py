@@ -374,6 +374,50 @@ class TestContext7Bootstrap:
         assert server.config.get("command") == "npx"
         assert server.config.get("args") == ["-y", "@upstash/context7-mcp"]
 
+    def test_schema_drift_refreshes_config(self, instance_manager_with_repo):
+        """Test that schema drift resets stale config to defaults.
+
+        When schema_version changes, bootstrap should update the config
+        to the new defaults rather than preserving stale values.
+        """
+        manager = instance_manager_with_repo
+        repo = manager._mcp_server_repository
+
+        # Delete any existing context7 server first (bootstrap may have created one)
+        existing = repo.get_mcp_server_by_name("context7")
+        if existing:
+            repo.delete_mcp_server(existing.id)
+
+        # Create a server entry with old package name and schema_version="1"
+        old_config = {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "@upstreamapi/context7-mcp"],
+        }
+        repo.create_mcp_server(
+            name="context7",
+            description="Context7 MCP server",
+            config=old_config,
+            is_builtin=True,
+            config_schema=[],
+            config_schema_version="1",
+        )
+
+        # Verify the old config is stored
+        server = repo.get_mcp_server_by_name("context7")
+        assert server.config.get("args") == ["-y", "@upstreamapi/context7-mcp"]
+        assert server.config_schema_version == "1"
+
+        # Run bootstrap - should detect schema drift and reset config
+        manager._bootstrap_builtin_servers()
+
+        # Verify config was refreshed with new package name
+        updated_server = repo.get_mcp_server_by_name("context7")
+        assert updated_server.config.get("args") == ["-y", "@upstash/context7-mcp"], \
+            "Package name should be updated to @upstash/context7-mcp"
+        assert updated_server.config_schema_version == "2", \
+            "Schema version should be updated to 2"
+
 
 # =============================================================================
 # Test npx Unavailable

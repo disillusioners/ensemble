@@ -1133,7 +1133,11 @@ class TestBootstrap:
         assert len(builtin_servers) == 1, "Should have exactly one server after two bootstrap calls"
 
     def test_bootstrap_schema_drift(self, instance_manager_with_repo, registry_with_test_def):
-        """Test that schema version change updates schema but preserves config."""
+        """Test that schema version change resets config to defaults.
+
+        When schema_version changes, bootstrap should reset the config to
+        the new defaults rather than preserving potentially stale user values.
+        """
         from tests.unit.test_builtin_mcp_servers import TestBuiltinServerDefinition
 
         manager = instance_manager_with_repo
@@ -1145,11 +1149,27 @@ class TestBootstrap:
             def schema_version(self) -> str:
                 return "1.0"
 
+            def build_config(self, values: dict) -> dict:
+                # v1 builds config with different structure
+                return {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "old-package-v1"],
+                }
+
         # Create a definition with version 2.0 (simulating schema change)
         class TestBuiltinV2(TestBuiltinServerDefinition):
             @property
             def schema_version(self) -> str:
                 return "2.0"
+
+            def build_config(self, values: dict) -> dict:
+                # v2 builds config with new package name
+                return {
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "new-package-v2"],
+                }
 
         v1_def = TestBuiltinV1()
         v2_def = TestBuiltinV2()
@@ -1161,6 +1181,7 @@ class TestBootstrap:
 
         server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
         assert server.config_schema_version == "1.0"
+        assert server.config["args"] == ["-y", "old-package-v1"]
 
         # Update server config directly (simulating user config)
         user_config = {"args": ["--api-key", "sk-keep-this"], "env": {}}
@@ -1173,9 +1194,10 @@ class TestBootstrap:
         # Bootstrap again with new version
         manager._bootstrap_builtin_servers()
 
-        # Verify config was preserved and version updated
+        # Verify config was RESET to defaults and version updated
         updated_server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
-        assert updated_server.config == user_config, "User config should be preserved after schema update"
+        assert updated_server.config["args"] == ["-y", "new-package-v2"], \
+            "Config should be reset to defaults on schema drift"
         assert updated_server.config_schema_version == "2.0", "Schema version should be updated"
 
         # Restore original definition

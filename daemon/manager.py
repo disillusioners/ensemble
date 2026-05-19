@@ -582,12 +582,15 @@ class InstanceManager:
                     if existing.config_schema_version != schema_version:
                         self._mcp_server_repository.update_mcp_server(
                             existing.id,
+                            config=default_config,  # refresh stale config with rebuilt defaults
                             config_schema=schema_dicts,
                             config_schema_version=schema_version,
                         )
-                        logger.info(
-                            f"Updated schema for built-in MCP server: {definition.name} "
-                            f"(v{existing.config_schema_version} -> v{schema_version})"
+                        logger.warning(
+                            "Built-in MCP server '%s' config reset to defaults due to schema version change (%s → %s)",
+                            definition.name,
+                            existing.config_schema_version,
+                            schema_version,
                         )
                     else:
                         logger.debug(f"Built-in MCP server already exists: {definition.name}")

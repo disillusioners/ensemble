@@ -430,3 +430,198 @@ class TestWebFetchEndToEnd:
 
         # Default proxy_url is None, so --proxy-url should NOT be included
         assert "--proxy-url" not in args
+
+
+# =============================================================================
+# Test Bootstrap Integration
+# =============================================================================
+
+
+class TestWebFetchBootstrapIntegration:
+    """Integration tests for WebFetch bootstrap with InstanceManager."""
+
+    @pytest.fixture
+    def bootstrap_engine(self):
+        """Create in-memory SQLite engine for bootstrap tests."""
+        from sqlalchemy import create_engine
+        from sqlmodel import SQLModel
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(engine)
+        yield engine
+        engine.dispose()
+
+    @pytest.fixture
+    def bootstrap_repo(self, bootstrap_engine):
+        """Create MCP server repository for bootstrap tests."""
+        from daemon.repositories.mcp_server.repository import SQLModelMcpServerRepository
+
+        return SQLModelMcpServerRepository(bootstrap_engine)
+
+    @pytest.fixture
+    def mock_config(self):
+        """Create mock Config for InstanceManager."""
+        from daemon.config import (
+            Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig,
+            QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig
+        )
+        from unittest.mock import MagicMock
+
+        config = MagicMock(spec=Config)
+        config.llm = MagicMock(spec=LLMConfig)
+        config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.api_key = "test-key"
+        config.llm.model = "gpt-4"
+        config.llm.model_vision = None
+        config.llm.temperature = 0.7
+        config.llm.request_timeout = 60
+
+        config.daemon = MagicMock(spec=DaemonConfig)
+        config.daemon.host = "0.0.0.0"
+        config.daemon.port = 8079
+
+        config.limits = MagicMock(spec=LimitsConfig)
+        config.limits.max_instances = 100
+        config.limits.max_children_per_instance = 10
+        config.limits.instance_timeout_minutes = 60
+        config.limits.message_rate_limit = 60
+        config.limits.graph_recursion_limit = 100
+        config.limits.llm_concurrency = 10
+
+        config.persistence = MagicMock(spec=PersistenceConfig)
+        config.persistence.db_path = ":memory:"
+        config.persistence.checkpointer_db_path = ":memory:"
+
+        config.queue = MagicMock(spec=QueueConfig)
+        config.queue.discard_on_startup = None
+        config.queue.llm_retry_transient_attempts = 10
+        config.queue.llm_retry_timeout_attempts = 3
+
+        config.compaction = MagicMock(spec=CompactionConfig)
+        config.compaction.enabled = False
+
+        config.services = MagicMock(spec=ServicesConfig)
+        config.services.worker_poll_interval = 0.5
+        config.services.stale_task_recovery_interval = 60
+        config.services.task_timeout_minutes = 60
+        config.services.max_task_retries = 3
+        config.services.task_retry_backoff_base = 60
+        config.services.task_retry_backoff_max = 3600
+        config.services.stale_task_cancel_grace_seconds = 10
+        config.services.graph_timeout_minutes = 55
+
+        config.agents = MagicMock(spec=AgentsConfig)
+        config.agents.directory = "./agents"
+
+        config.job_system = MagicMock(spec=JobSystemConfig)
+        config.job_system.default_max_retries = 3
+        config.job_system.retry_backoff_base_seconds = 60
+        config.job_system.retry_backoff_max_seconds = 3600
+        config.job_system.retry_backoff_multiplier = 2.0
+        config.job_system.dlq_enabled = True
+        config.job_system.event_dispatch_enabled = True
+        config.job_system.observer_health_check_interval_seconds = 300
+        config.job_system.idempotency_key_ttl_hours = 24
+        config.job_system.job_retry_scheduler_enabled = None
+
+        return config
+
+    @pytest.fixture
+    def instance_manager_with_repo(self, bootstrap_engine, bootstrap_repo, mock_config):
+        """Create InstanceManager with in-memory DB and test repository."""
+        from unittest.mock import patch, MagicMock
+        from asyncio import Future
+
+        # Patch database engine creation to use our in-memory engine
+        with patch("daemon.manager.create_engine_from_config") as mock_create_engine, \
+             patch("daemon.manager.get_checkpointer") as mock_checkpointer, \
+             patch("daemon.migrations.runner.MigrationRunner") as mock_migration:
+
+            mock_create_engine.return_value = bootstrap_engine
+            async_mock = MagicMock()
+            async_mock.return_value = None
+            mock_checkpointer.return_value = async_mock
+
+            # Create mock migration runner
+            mock_runner_instance = MagicMock()
+            mock_runner_instance.run_pending_migrations.return_value = []
+            mock_migration.return_value = mock_runner_instance
+
+            # Import here to avoid circular dependencies
+            from daemon.manager import InstanceManager
+
+            # Create manager
+            manager = InstanceManager(mock_config)
+
+            # Override the MCP server repository with our test repo
+            manager._mcp_server_repository = bootstrap_repo
+
+            yield manager
+
+            # Cleanup
+            if hasattr(manager, "_shutting_down"):
+                manager._shutting_down = True
+
+    def test_bootstrap_creates_webfetch_server(self, instance_manager_with_repo):
+        """Test that bootstrap creates webfetch server in DB with is_builtin=True."""
+        manager = instance_manager_with_repo
+
+        # Call bootstrap
+        manager._bootstrap_builtin_servers()
+
+        # Verify server was created
+        server = manager._mcp_server_repository.get_mcp_server_by_name("webfetch")
+        assert server is not None, "WebFetch server should be created by bootstrap"
+        assert server.is_builtin is True, "Server should be marked as builtin"
+
+    def test_schema_drift_removes_stale_flag(self, instance_manager_with_repo):
+        """Test that schema drift resets stale config with obsolete flags.
+
+        When schema_version changes from 1 to 2, bootstrap should update
+        the config to the new defaults (no --no-ignore-robots-txt flag).
+        """
+        manager = instance_manager_with_repo
+        repo = manager._mcp_server_repository
+
+        # Delete any existing webfetch server first (bootstrap may have created one)
+        existing = repo.get_mcp_server_by_name("webfetch")
+        if existing:
+            repo.delete_mcp_server(existing.id)
+
+        # Create a server entry with old config that includes --no-ignore-robots-txt
+        # and schema_version="1" (old schema that used the negative flag)
+        old_config = {
+            "transport": "stdio",
+            "command": "uvx",
+            "args": ["mcp-server-fetch", "--no-ignore-robots-txt"],
+        }
+        repo.create_mcp_server(
+            name="webfetch",
+            description="WebFetch MCP server",
+            config=old_config,
+            is_builtin=True,
+            config_schema=[],
+            config_schema_version="1",
+        )
+
+        # Verify the old config is stored
+        server = repo.get_mcp_server_by_name("webfetch")
+        assert "--no-ignore-robots-txt" in server.config.get("args", [])
+        assert server.config_schema_version == "1"
+
+        # Run bootstrap - should detect schema drift and reset config
+        manager._bootstrap_builtin_servers()
+
+        # Verify config was refreshed - stale flag should be removed
+        updated_server = repo.get_mcp_server_by_name("webfetch")
+        args = updated_server.config.get("args", [])
+        assert "--no-ignore-robots-txt" not in args, \
+            "Stale --no-ignore-robots-txt flag should be removed"
+        assert "--ignore-robots-txt" not in args, \
+            "Default False value should result in no flag"
+        assert updated_server.config_schema_version == "2", \
+            "Schema version should be updated to 2"
