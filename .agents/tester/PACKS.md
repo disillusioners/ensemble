@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 32 packs
-- Unit: 25 | Integration: 1 | Mock: 2 | E2E: 4
+- Total: 33 packs
+- Unit: 26 | Integration: 1 | Mock: 2 | E2E: 4
 
 ## Unit Test Packs
 
@@ -34,6 +34,7 @@
 | windows_path_workdir_test | tests/unit/test_filesystem_workdir.py | Windows path compatibility: _normed_contains, _is_within_workdir, symlink escape, empty TEMP/TMP bypass, mocked Windows behavior | 2 min | 2026-05-16 | ✅ PASS (21 tests, 0 failures, feature/windows-path-fix) |
 | mcp_server_crud_unit_test | tests/unit/test_mcp_server_crud.py | MCP Server CRUD backend: models, schemas, repository, router, integration | 2 min | 2026-05-19 | ✅ PASS (55 tests, feature/builtin-mcp-servers all phases, no regression) |
 | mcp_runtime_integration_test | tests/unit/test_mcp_runtime_integration.py | MCP runtime integration: full flow, resilience, restore, edge cases, lifecycle cleanup | 2 min | 2026-05-19 | ✅ PASS (16 tests, feature/builtin-mcp-servers all phases, no regression) |
+| context7_unit_test | tests/unit/test_context7_builtin.py | Context7 built-in MCP server: properties, base config, config schema, build config, parse config, registry, bootstrap, npx unavailability | 2 min | 2026-05-19 | ✅ PASS (24 tests, Context7 integration verified, no regression) |
 
 ## Integration Test Packs
 
