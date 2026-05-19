@@ -9,7 +9,7 @@ import asyncio
 import logging
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import mcp
@@ -45,6 +45,8 @@ class McpWarmupPool:
     replenishment.
     """
 
+    DEFAULT_POOL_SIZE = 1
+
     def __init__(self) -> None:
         """Initialize the warmup pool with empty state."""
         self._pools: dict[str, asyncio.Queue[PooledConnection]] = {}
@@ -57,7 +59,7 @@ class McpWarmupPool:
         self._replenish_tasks: set[asyncio.Task] = set()
         self._replenish_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
 
-    def register_server(self, server_name: str, config: McpStdioConfig, pool_size: int = 1) -> None:
+    def register_server(self, server_name: str, config: McpStdioConfig, pool_size: int = DEFAULT_POOL_SIZE) -> None:
         """
         Register a built-in STDIO server for pooling.
 
@@ -99,7 +101,7 @@ class McpWarmupPool:
         self._running = True
 
         async def warmup_server(server_name: str) -> None:
-            size = pool_size.get(server_name, 1) if pool_size else self._pool_sizes.get(server_name, 1)
+            size = pool_size.get(server_name, self.DEFAULT_POOL_SIZE) if pool_size else self._pool_sizes.get(server_name, 1)
             try:
                 await self._warmup_server(server_name, size)
                 logger.info(f"Warmed up pool for '{server_name}' ({size} connections)")
@@ -242,7 +244,7 @@ class McpWarmupPool:
             return
 
         pool = self._pools.get(server_name)
-        if pool is None or pool.qsize() >= self._pool_sizes.get(server_name, 1):
+        if pool is None or pool.qsize() >= self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
             return
 
         async with self._replenish_semaphore:
@@ -250,7 +252,7 @@ class McpWarmupPool:
                 return
 
             async with self._locks[server_name]:
-                if pool.qsize() >= self._pool_sizes.get(server_name, 1):
+                if pool.qsize() >= self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
                     return
 
                 try:
@@ -294,7 +296,7 @@ class McpWarmupPool:
                     await pool.put(conn)
 
                 # Replenish if below target
-                if len(healthy) < self._pool_sizes.get(server_name, 1):
+                if len(healthy) < self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
                     self._start_tracked_replenish(server_name)
 
     async def _health_check_loop(self, interval: float) -> None:
@@ -331,6 +333,7 @@ class McpWarmupPool:
     async def drain(self) -> None:
         """Drain the pool: stop accepting, cancel tasks, close connections."""
         self._running = False
+        self._tool_discovery_cache.clear()
 
         # Cancel replenish tasks
         for task in self._replenish_tasks:
