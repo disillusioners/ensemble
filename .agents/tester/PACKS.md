@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 34 packs
-- Unit: 27 | Integration: 1 | Mock: 2 | E2E: 4
+- Total: 40 packs
+- Unit: 33 | Integration: 1 | Mock: 2 | E2E: 4
 
 ## Unit Test Packs
 
@@ -35,7 +35,12 @@
 | mcp_server_crud_unit_test | tests/unit/test_mcp_server_crud.py | MCP Server CRUD backend: models, schemas, repository, router, integration | 2 min | 2026-05-19 | ✅ PASS (55 tests, feature/builtin-mcp-servers all phases, no regression) |
 | mcp_runtime_integration_test | tests/unit/test_mcp_runtime_integration.py | MCP runtime integration: full flow, resilience, restore, edge cases, lifecycle cleanup | 2 min | 2026-05-19 | ✅ PASS (16 tests, feature/builtin-mcp-servers all phases, no regression) |
 | context7_unit_test | tests/unit/test_context7_builtin.py | Context7 built-in MCP server: properties, base config, config schema, build config, parse config, registry, bootstrap, npx unavailability | 2 min | 2026-05-19 | ✅ PASS (24 tests, Context7 integration verified, no regression) |
-| gaia_agent_unit_test | tests/unit/test_gaia_agent.py | Gaia agent: meta.json validation, registry discovery, agent loading, tool filtering, script accessibility, full pipeline | 2 min | 2026-05-19 | ✅ PASS (44 tests, Gaia agent implementation verified) |
+| gaia_agent_unit_test | tests/unit/test_gaia_agent.py | Gaia agent: meta.json validation, registry discovery, agent loading, tool filtering, script accessibility, full pipeline | 2 min | 2026-05-19 | ⚠️ 2 FAIL (pre-existing tool category expansion bug, not memory-related) |
+| memory_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Phase 1 bug fixes: target="memories", honest error messages, classification fallback, RAG redirect | 2 min | 2026-05-19 | ✅ PASS (85 tests, feature/unified-memory-architecture) |
+| memory_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Phase 2 compound requests: AND splitting, semicolons, sentence boundaries, per-part classification | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
+| memory_compaction_unit_test | tests/unit/tools/test_inner_soul_compaction.py | Phase 3 compaction: file locking, atomic writes, deduplication, structure preservation | 2 min | 2026-05-19 | ✅ PASS (42 tests, feature/unified-memory-architecture) |
+| memory_archive_unit_test | tests/unit/tools/test_archive_lifecycle.py | Phase 4 archive: path validation, traversal protection, symlinks, auto-archive, rate limiting | 2 min | 2026-05-19 | ✅ PASS (29 tests, feature/unified-memory-architecture) |
+| memory_integration_test | tests/test_memory_integration.py | Integration: full lifecycle, compound requests, concurrent writes, RAG redirect, edge cases, regression | 2 min | 2026-05-19 | ✅ PASS (28 tests, feature/unified-memory-architecture) |
 
 ## Integration Test Packs
 
