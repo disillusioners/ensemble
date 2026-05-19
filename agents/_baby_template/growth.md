@@ -30,3 +30,20 @@ inner_soul(request="Mistake: I assumed git was configured")        # lesson → 
 - Patterns become habits (3+ times → workflow change)
 - Identity changes need user approval
 - Never lose memories (append-only)
+
+## Memory Compaction
+
+When memory.md approaches its size limit (80% of max words), the system will automatically compact it by:
+
+1. **Deduplication** — Remove duplicate entries, keeping the most recent version
+2. **Structure preservation** — Headers, blank lines, and formatting are preserved
+3. **Order preservation** — Chronological order of unique entries is maintained
+
+### Compaction Rules
+- Compaction triggers at 80% of `max_memory_words` (configurable below)
+- The agent is notified when compaction occurs (response includes `compact: true`)
+- Key facts are NEVER removed during compaction — only exact duplicates
+- If compaction can't free enough space, new entries are rejected with a message
+
+### Configuration
+- `max_memory_words`: 2000 (override by adding `memory.md: <N> words` in this file)

@@ -12,6 +12,11 @@ from langchain_core.tools import tool
 from typing import TYPE_CHECKING, Literal
 import re
 import logging
+import fcntl
+import time
+import os
+import tempfile
+from contextlib import contextmanager
 
 from ._tool_registry import register_tool_category
 from ..rag.config import is_rag_enabled
@@ -252,6 +257,125 @@ def _format_rag_redirect(request: str, classification: dict, targets: list[str])
     ]
 
     return "\n".join(lines)
+
+
+@contextmanager
+def _lock_memory_file(filepath: Path, timeout: float = 5.0):
+    """Acquire exclusive lock on memory file with timeout.
+    
+    Uses a separate .lock file to avoid modifying the actual memory file.
+    """
+    lock_file = filepath.with_suffix('.lock')
+    lock_file.touch(exist_ok=True)
+    f = open(lock_file, 'r+')
+    deadline = time.monotonic() + timeout
+    acquired = False
+    try:
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except (IOError, OSError, BlockingIOError):
+                time.sleep(0.1)
+        if not acquired:
+            raise TimeoutError(f"Could not acquire lock on {filepath} within {timeout}s")
+        yield
+    finally:
+        if acquired:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        f.close()
+
+
+def _atomic_write_memory(filepath: Path, content: str):
+    """Write to memory file atomically. MUST be called inside _lock_memory_file().
+    
+    Sequence: write tmp -> rename current to .bak -> rename tmp to current -> delete .bak
+    Uses tempfile for the tmp file to avoid conflicts.
+    """
+    parent = filepath.parent
+    backup = filepath.with_suffix('.bak')
+    
+    # Write to temp file first
+    with tempfile.NamedTemporaryFile(
+        mode='w', dir=parent, suffix='.tmp', delete=False, encoding='utf-8'
+    ) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    
+    try:
+        # Rename current to backup (only if exists)
+        if filepath.exists():
+            filepath.replace(backup)
+        
+        # Rename temp to current (atomic on POSIX)
+        tmp_path.replace(filepath)
+        
+        # Remove backup on success
+        if backup.exists():
+            backup.unlink()
+    except Exception:
+        # Rollback: restore from backup if anything failed
+        if not filepath.exists() and backup.exists():
+            backup.replace(filepath)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def _should_compact(agent_path: Path, max_words: int) -> bool:
+    """Check if memory.md exceeds compaction threshold (80% of max_words)."""
+    memory_file = agent_path / "memory.md"
+    if not memory_file.exists():
+        return False
+    word_count = len(memory_file.read_text().split())
+    return word_count > max_words * 0.8
+
+
+def _compact_memory(content: str) -> str:
+    """Simple deduplication: remove duplicate lines, keep most recent version.
+    
+    Preserves structure (headers, blank lines). Deduplicates non-structural lines
+    by keeping the most recent occurrence (bottom of file = most recent).
+    """
+    lines = content.strip().split('\n')
+    seen = set()
+    unique_lines = []
+    
+    # Process from newest (bottom) to oldest (top)
+    for line in reversed(lines):
+        normalized = line.strip().lower()
+        if not normalized:
+            # Preserve blank lines
+            unique_lines.append(line)
+            continue
+        if normalized.startswith('#'):
+            # Preserve headers
+            unique_lines.append(line)
+            continue
+        if normalized.startswith('- ') and normalized not in seen:
+            seen.add(normalized)
+            unique_lines.append(line)
+        elif not normalized.startswith('- '):
+            # Preserve non-list lines (they're structural)
+            unique_lines.append(line)
+    
+    # Reverse back to original order
+    unique_lines.reverse()
+    
+    # Remove excessive blank lines (max 1 consecutive)
+    result = []
+    prev_blank = False
+    for line in unique_lines:
+        is_blank = not line.strip()
+        if is_blank and prev_blank:
+            continue
+        result.append(line)
+        prev_blank = is_blank
+    
+    return '\n'.join(result)
 
 
 def create_inner_soul_tool(
@@ -637,49 +761,86 @@ def _update_memories(agent_id: str, agent_path: Path, request: str, classificati
     }
 
 
+def _format_rejection(target: str, max_words: int, word_count: int, rules: dict | None = None) -> dict:
+    """Format rejection message for memory limit exceeded."""
+    return {
+        "success": False,
+        "target": target,
+        "error": f"Memory limit exceeded ({word_count} >= {max_words} words). Content was not saved."
+    }
+
+
 def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
-    """Add to core memory.md."""
+    """Add to core memory.md with file locking and compaction support."""
     memory_file = agent_path / "memory.md"
     
-    current = memory_file.read_text() if memory_file.exists() else "# Memory\n\n"
-    word_count = len(current.split())
-    
-    max_words = rules.get("max_memory_words", 500)
-    if word_count >= max_words:
+    try:
+        with _lock_memory_file(memory_file):
+            # Read current content inside lock
+            current = memory_file.read_text() if memory_file.exists() else "# Memory\n\n"
+            word_count = len(current.split())
+            max_words = rules.get("max_memory_words", 2000)
+            
+            # Check proactive compaction threshold (80%)
+            should_compact = word_count > max_words * 0.8
+            
+            if word_count >= max_words:
+                # Always try compaction when at capacity
+                current = _compact_memory(current)
+                word_count = len(current.split())
+                # Re-check after compaction
+                if word_count >= max_words:
+                    return _format_rejection("memory", max_words, word_count, rules)
+            elif should_compact:
+                # Proactively compact when approaching capacity
+                current = _compact_memory(current)
+                word_count = len(current.split())
+            
+            # Find insertion point (before "*For events" marker or HTML comments)
+            lines = current.rstrip().split('\n')
+            insert_idx = len(lines)
+            for i, line in enumerate(lines):
+                if line.startswith("*For events") or line.startswith("<!--"):
+                    insert_idx = i
+                    break
+            
+            # Check if the new entry would duplicate
+            new_entry = f"\n- {request}"
+            normalized_new = request.strip().lower()
+            for line in lines:
+                if line.strip().lower() == f"- {normalized_new}":
+                    return {
+                        "success": True,
+                        "action": "skipped",
+                        "target": "memory",
+                        "message": "Entry already exists in memory.md",
+                        "compact": False,
+                    }
+            
+            lines.insert(insert_idx, new_entry)
+            new_content = '\n'.join(lines)
+            
+            # Use atomic write instead of direct write
+            _atomic_write_memory(memory_file, new_content)
+            
+            # Invalidate prompt cache so next prompt sees the updated memory
+            if manager and hasattr(manager, 'prompt_cache'):
+                manager.prompt_cache.invalidate(agent_id)
+            
+            return {
+                "success": True,
+                "action": "updated",
+                "target": "memory",
+                "message": f"Added to memory.md",
+                "compact": should_compact,
+            }
+    except TimeoutError:
         return {
             "success": False,
+            "action": "error",
             "target": "memory",
-            "error": f"Write exceeds memory limit ({word_count} >= {max_words} words). Content was not saved. Consider using `access_memory` to save to a separate memory file, or reduce content length."
+            "message": "Could not acquire lock on memory.md - please retry",
         }
-    
-    # Find insertion point
-    lines = current.rstrip().split('\n')
-    insert_idx = len(lines)
-    for i, line in enumerate(lines):
-        if line.startswith("*For events") or line.startswith("<!--"):
-            insert_idx = i
-            break
-    
-    # Insert
-    lines.insert(insert_idx, f"\n- {request}")
-    new_content = '\n'.join(lines)
-    
-    memory_file.write_text(new_content)
-    
-    # Invalidate cache separately so cache failure doesn't fail the write
-    if manager:
-        try:
-            manager.prompt_cache.invalidate(agent_id)
-        except Exception as e:
-            logger.warning(f"Cache invalidation failed for {agent_id}: {e}")
-    
-    new_word_count = len(new_content.split())
-    return {
-        "success": True,
-        "target": "memory",
-        "file": "memory.md",
-        "words": f"{new_word_count}/{max_words}"
-    }
 
 
 def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, manager: "InstanceManager" | None = None) -> dict:
@@ -815,35 +976,6 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
         "target": "workflow",
         "file": "workflow.md"
     }
-
-
-def _format_rejection(request: str, classification: dict) -> str:
-    """Format rejection message for project knowledge attempts."""
-    truncated = request[:80] + ('...' if len(request) > 80 else '')
-    lines = [
-        f"✗ REJECTED: \"{truncated}\"",
-        f"  Classification: {classification['type']}",
-        "",
-        "⚠️  This is PROJECT KNOWLEDGE and does NOT belong in agent memory.",
-        "",
-        "Agent memory is for:",
-        "  • Personal growth and self-knowledge",
-        "  • Learned patterns about yourself",
-        "  • Lessons from interactions",
-        "  • Skills you've developed",
-        "",
-        "Agent memory is NOT for:",
-        "  • Project-specific files or directories",
-        "  • Tech stacks or infrastructure (k8s, PostgreSQL, etc.)",
-        "  • Test scripts or automation you created",
-        "  • External project names or tool names",
-        "",
-        "Project knowledge belongs in:",
-        "  • .agents/{agent-id}/memories/ (if it's an event worth remembering)",
-        "  • Project documentation (README, docs/)",
-        "  • Git history and commit messages",
-    ]
-    return "\n".join(lines)
 
 
 def _format_response(request: str, results: list, classification: dict) -> str:

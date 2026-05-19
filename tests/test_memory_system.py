@@ -415,33 +415,38 @@ class TestCacheInvalidation:
         assert result["success"] is True
         mock_cache.invalidate.assert_called_once_with("test-agent")
 
-    def test_update_memory_md_wraps_invalidate_in_try_except(self, tmp_path):
-        """_update_memory_md wraps invalidate in try/except (cache failure doesn't fail write)."""
+    def test_update_memory_md_with_lock_handles_file_timeout(self, tmp_path):
+        """_update_memory_md returns error on lock timeout, does not call invalidate."""
         from daemon.tools.inner_soul import _update_memory_md
 
         agent_dir = tmp_path / "test-agent"
         agent_dir.mkdir()
 
-        # Create mock manager that raises on invalidate
+        # Create mock manager - invalidate should NOT be called by _update_memory_md
+        # (cache invalidation moved to _update_memories instead)
         mock_cache = MagicMock()
-        mock_cache.invalidate.side_effect = Exception("Cache error!")
         mock_manager = MagicMock()
         mock_manager.prompt_cache = mock_cache
 
         rules = {"max_memory_words": 500}
 
-        # Should not raise, should return success
-        result = _update_memory_md(
-            agent_id="test-agent",
-            agent_path=agent_dir,
-            request="Test memory content",
-            rules=rules,
-            manager=mock_manager
-        )
+        # Patch _lock_memory_file to raise TimeoutError
+        from daemon.tools import inner_soul
+        with patch.object(inner_soul, '_lock_memory_file', side_effect=TimeoutError("Lock timeout")):
+            result = _update_memory_md(
+                agent_id="test-agent",
+                agent_path=agent_dir,
+                request="Test memory content",
+                rules=rules,
+                manager=mock_manager
+            )
 
-        assert result["success"] is True
+        assert result["success"] is False
+        assert result["action"] == "error"
         assert result["target"] == "memory"
-        mock_cache.invalidate.assert_called_once()
+        assert "Could not acquire lock" in result["message"]
+        # invalidate is not called by _update_memory_md anymore
+        mock_cache.invalidate.assert_not_called()
 
     def test_writing_new_memory_invalidates_cache(self, tmp_path):
         """Writing a new memory invalidates prompt cache so next load picks up the change."""
@@ -730,17 +735,18 @@ class TestProjectKnowledgeClassification:
     def test_format_rejection_message_legacy(self):
         """_format_rejection is a legacy function that still works if called directly."""
         from daemon.tools.inner_soul import _format_rejection
-
-        classification = {
-            "type": "project_knowledge",
-            "description": "Project-specific knowledge - must NOT enter agent memory"
-        }
-
-        result = _format_rejection("Created test/packs/script.sh", classification)
-
-        assert "REJECTED" in result
-        assert "PROJECT KNOWLEDGE" in result
-        assert "Created test/packs/script.sh" in result  # shows original request
-        assert "does NOT belong" in result
-        assert "Agent memory is for" in result
-        assert "Agent memory is NOT for" in result
+    
+        # _format_rejection returns a simple error message without compaction suggestions
+        result = _format_rejection(
+            target="memory",
+            max_words=2000,
+            word_count=2500,
+            rules={"compact_threshold": 0.8}  # rules are accepted but ignored
+        )
+    
+        assert result["success"] is False
+        assert result["target"] == "memory"
+        assert "Memory limit exceeded" in result["error"]
+        assert "2500 >= 2000" in result["error"]
+        # Compact suggestion removed - dead code cleanup
+        assert "compact" not in result["error"].lower()

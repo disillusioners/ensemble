@@ -51,10 +51,20 @@ If you try to write ANY of these to memory, the tool will REJECT it with a clear
 
 | Target | Limit |
 |--------|-------|
-| memory.md | 500 words |
+| memory.md | 2000 words (compaction at 80%) |
 | soul.md | 2000 chars, 20 statements |
 | Each memory file | 2000 chars |
 | Each soul addition | 200 chars |
+
+## Compaction
+
+- When memory.md exceeds 80% of `max_memory_words`, deduplicate before rejecting
+- Deduplication removes duplicate lines (case-insensitive match), keeping the most recent
+- Headers (`#`) and structural lines are always preserved
+- If deduplication frees enough space, the new entry is added
+- If not, the write is rejected with the current word count
+- The agent response includes `compact: true` to signal compaction occurred
+- Key facts must NEVER be deleted during compaction — only exact duplicates
 
 ## Multi-File Updates
 
