@@ -17,6 +17,7 @@ from daemon.mcp.config import (
     McpStreamableHttpConfig,
     validate_mcp_server_config,
 )
+from daemon.mcp.managed_session import ManagedClientSession
 from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
@@ -44,16 +45,22 @@ class McpConnectionManager:
         self._lock = asyncio.Lock()  # Eager initialization
 
     async def _close_session_with_stream(
-        self, server_name: str, session: ClientSession, stream_cm: Any = None
+        self, server_name: str, session: ManagedClientSession, stream_cm: Any = None
     ) -> None:
         """Close a session and its associated stream context manager."""
+        # Stop the session's receive loop first
         try:
-            await session.close()
+            await session.stop()
         except Exception as e:
-            logger.warning(f"Error closing session for '{server_name}': {e}")
-        if stream_cm is not None:
+            logger.warning(f"Error stopping session for '{server_name}': {e}")
+        # Handle tuple from _open_and_track_session: (streams_cm, session)
+        actual_stream_cm = stream_cm
+        if isinstance(stream_cm, tuple):
+            actual_stream_cm = stream_cm[0]
+        # Close the stream context manager
+        if actual_stream_cm is not None:
             try:
-                await stream_cm.__aexit__(None, None, None)
+                await actual_stream_cm.__aexit__(None, None, None)
             except Exception as e:
                 logger.warning(f"Error closing streams for '{server_name}': {e}")
 
@@ -64,18 +71,25 @@ class McpConnectionManager:
         write_stream: Any,
         instance_id: str,
         server_name: str,
-    ) -> ClientSession:
+    ) -> ManagedClientSession:
         """Open a session from streams, track contexts, handle errors."""
+        # Use ManagedClientSession so we can control task group lifecycle
+        session = ManagedClientSession(read_stream, write_stream)
         try:
-            session = ClientSession(read_stream, write_stream)
+            # Start the receive loop (required for ClientSession to work)
+            await session.start()
             await session.initialize()
             # Track stream context manager for cleanup
             if instance_id not in self._stream_contexts:
                 self._stream_contexts[instance_id] = {}
-            self._stream_contexts[instance_id][server_name] = streams_cm
+            self._stream_contexts[instance_id][server_name] = (streams_cm, session)
             return session
         except Exception as e:
             logger.error(f"Failed to create session for '{server_name}': {e}")
+            try:
+                await session.stop()
+            except Exception:
+                pass
             try:
                 await streams_cm.__aexit__(None, None, None)
             except Exception:
@@ -222,7 +236,7 @@ class McpConnectionManager:
         instance_id: str,
         server_name: str,
         timeout: float,
-    ) -> ClientSession:
+    ) -> ManagedClientSession:
         """
         Create a session using SSE transport.
 
@@ -233,7 +247,7 @@ class McpConnectionManager:
             timeout: Connection timeout in seconds
 
         Returns:
-            Initialized MCP ClientSession
+            Initialized MCP ManagedClientSession
         """
         streams_cm = sse_client(config.url, headers=config.headers or {})
         try:
@@ -252,7 +266,7 @@ class McpConnectionManager:
         instance_id: str,
         server_name: str,
         timeout: float,
-    ) -> ClientSession:
+    ) -> ManagedClientSession:
         """
         Create a session using Streamable HTTP transport.
 
@@ -263,7 +277,7 @@ class McpConnectionManager:
             timeout: Connection timeout in seconds
 
         Returns:
-            Initialized MCP ClientSession
+            Initialized MCP ManagedClientSession
         """
         streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
         try:
@@ -276,7 +290,7 @@ class McpConnectionManager:
             logger.error(f"Streamable HTTP connection timed out for URL: {config.url}")
             raise
 
-    def get_session(self, instance_id: str, server_name: str) -> ClientSession | None:
+    def get_session(self, instance_id: str, server_name: str) -> ManagedClientSession | None:
         """
         Get an MCP session for a specific instance and server.
 
@@ -303,7 +317,8 @@ class McpConnectionManager:
             if instance_id not in self._stream_contexts:
                 self._stream_contexts[instance_id] = {}
             self._connections[instance_id][server_name] = session
-            self._stream_contexts[instance_id][server_name] = stream_cm
+            # For transferred sessions, stream_cm is just the streams_cm (not a tuple)
+            self._stream_contexts[instance_id][server_name] = (stream_cm, session)
         logger.debug(f"Transferred pooled session for '{server_name}' to instance {instance_id[:8]}")
 
     async def close_instance(self, instance_id: str) -> None:

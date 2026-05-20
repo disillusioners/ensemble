@@ -18,6 +18,7 @@ from mcp import ClientSession, StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig
+from daemon.mcp.managed_session import ManagedClientSession
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ _mcp_warmup_pool: McpWarmupPool | None = None
 class PooledConnection:
     """A pre-warmed MCP connection ready for immediate use."""
 
-    session: ClientSession
+    session: ManagedClientSession
     stream_cm: Any
     tools: list[BaseTool]
     server_name: str
@@ -175,16 +176,20 @@ class McpWarmupPool:
             env=config.env,
         )
         streams_cm = mcp.stdio_client(server_params)
-        session: ClientSession | None = None
+        read_stream = write_stream = None
+        session: ManagedClientSession | None = None
 
         try:
             read_stream, write_stream = await streams_cm.__aenter__()
-            session = ClientSession(read_stream, write_stream)
 
             # Single outer timeout wrapping everything from startup to tool discovery
             async with asyncio.timeout(60):
                 # Give subprocess time to start up (npx/uvx need time for package resolution)
                 await asyncio.sleep(2.0)
+
+                # Use ManagedClientSession to keep receive loop running after initialization
+                session = ManagedClientSession(read_stream, write_stream)
+                await session.start()
 
                 # Retry initialize with per-attempt timeout
                 max_retries = 3
@@ -227,11 +232,11 @@ class McpWarmupPool:
             )
         except BaseException:
             # Clean up to prevent orphaned subprocess
-            try:
-                if session is not None:
-                    await session.close()
-            except Exception:
-                pass
+            if session is not None:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
             try:
                 await streams_cm.__aexit__(*sys.exc_info())
             except Exception:
@@ -433,7 +438,7 @@ class McpWarmupPool:
             conn: Connection to close
         """
         try:
-            await conn.session.close()
+            await conn.session.stop()
         except Exception:
             pass
         try:

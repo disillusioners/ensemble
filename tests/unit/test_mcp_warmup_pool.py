@@ -54,9 +54,10 @@ def registered_pool(pool):
 def mock_stdio_client():
     """Mock mcp.stdio_client to return simulated streams."""
     with patch("daemon.mcp.warmup_pool.mcp.stdio_client") as mock_stdio, \
-         patch("daemon.mcp.warmup_pool.ClientSession") as mock_client_session_cls:
+         patch("daemon.mcp.warmup_pool.ManagedClientSession") as mock_client_session_cls:
         # Create mock session that properly handles async methods
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock()
         mock_session.send_ping = AsyncMock()
         mock_client_session_cls.return_value = mock_session
@@ -127,7 +128,7 @@ class TestCreatePooledConnection:
 
     @pytest.mark.asyncio
     async def test_create_pooled_connection_cleanup_on_session_failure(self, pool):
-        """Verify subprocess cleanup when ClientSession() constructor fails."""
+        """Verify subprocess cleanup when ManagedClientSession() constructor fails."""
         pool.register_server("context7", _make_config(), pool_size=1)
 
         mock_cm = AsyncMock()
@@ -135,7 +136,7 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", side_effect=RuntimeError("constructor failed")):
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", side_effect=RuntimeError("constructor failed")):
             with pytest.raises(RuntimeError, match="constructor failed"):
                 await pool._create_pooled_connection("context7")
 
@@ -152,11 +153,12 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=[TimeoutError("First timeout"), None])
         mock_session.send_ping = AsyncMock()
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
             mock_tools.return_value = [MagicMock()]
 
@@ -175,12 +177,13 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         # Fail twice, succeed on third
         mock_session.initialize = AsyncMock(side_effect=[TimeoutError("1"), TimeoutError("2"), None])
         mock_session.send_ping = AsyncMock()
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
             mock_tools.return_value = [MagicMock()]
 
@@ -199,10 +202,11 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=RuntimeError("Persistent failure"))
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session):
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session):
             with pytest.raises(RuntimeError, match="Persistent failure"):
                 await pool._create_pooled_connection("context7")
 
@@ -219,6 +223,7 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=[TimeoutError("1"), TimeoutError("2"), None])
         mock_session.send_ping = AsyncMock()
 
@@ -230,7 +235,7 @@ class TestCreatePooledConnection:
             await original_sleep(0)
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools, \
              patch("asyncio.sleep", side_effect=track_sleep):
             mock_tools.return_value = [MagicMock()]
@@ -252,11 +257,12 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=asyncio.TimeoutError)
         mock_session.send_ping = AsyncMock()
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
             mock_tools.return_value = [MagicMock()]
 
@@ -275,11 +281,12 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=asyncio.CancelledError("Task cancelled"))
         mock_session.send_ping = AsyncMock()
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session):
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session):
             with pytest.raises(asyncio.CancelledError):
                 await pool._create_pooled_connection("context7")
 
@@ -297,6 +304,7 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(return_value=None)
         mock_session.send_ping = AsyncMock()
 
@@ -308,7 +316,7 @@ class TestCreatePooledConnection:
             await original_sleep(0)
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools, \
              patch("asyncio.sleep", side_effect=track_sleep):
             mock_tools.return_value = [MagicMock()]
@@ -329,11 +337,12 @@ class TestCreatePooledConnection:
         mock_cm.__aexit__ = AsyncMock(return_value=None)
 
         mock_session = MagicMock()
+        mock_session.start = AsyncMock()
         mock_session.initialize = AsyncMock(side_effect=RuntimeError("Persistent"))
         mock_session.send_ping = AsyncMock()
 
         with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
-             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.ManagedClientSession", return_value=mock_session), \
              patch("daemon.mcp.warmup_pool.logger") as mock_logger:
             with pytest.raises(RuntimeError):
                 await pool._create_pooled_connection("context7")
@@ -542,8 +551,8 @@ class TestDrain:
 
         await registered_pool.drain()
 
-        conn1.session.close.assert_awaited_once()
-        conn2.session.close.assert_awaited_once()
+        conn1.session.stop.assert_awaited_once()
+        conn2.session.stop.assert_awaited_once()
         conn1.stream_cm.__aexit__.assert_awaited_once()
         conn2.stream_cm.__aexit__.assert_awaited_once()
 
@@ -611,7 +620,7 @@ class TestHealthCheck:
         # Only healthy connection should remain
         assert registered_pool._pools["context7"].qsize() == 1
         # Dead connection should have been closed
-        dead_conn.session.close.assert_awaited_once()
+        dead_conn.session.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_health_check_acquires_lock(self, registered_pool):

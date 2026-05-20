@@ -127,19 +127,19 @@ class TestCloseInstance:
         """Should remove all sessions and stream contexts for an instance."""
         mgr = McpConnectionManager()
         mock_session = AsyncMock()
-        mock_session.close = AsyncMock()
+        mock_session.stop = AsyncMock()
         mgr._connections["inst-1"] = {"server-1": mock_session}
 
-        # Add stream context
+        # Add stream context as tuple (streams_cm, session)
         mock_stream_cm = MagicMock()
         mock_stream_cm.__aexit__ = AsyncMock()
-        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm}
+        mgr._stream_contexts["inst-1"] = {"server-1": (mock_stream_cm, mock_session)}
 
         await mgr.close_instance("inst-1")
 
         assert "inst-1" not in mgr._connections
         assert "inst-1" not in mgr._stream_contexts
-        mock_session.close.assert_awaited_once()
+        mock_session.stop.assert_awaited_once()
         mock_stream_cm.__aexit__.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -154,7 +154,7 @@ class TestCloseInstance:
         """Session should be removed even if close() raises."""
         mgr = McpConnectionManager()
         mock_session = AsyncMock()
-        mock_session.close.side_effect = Exception("Close failed")
+        mock_session.stop.side_effect = Exception("Close failed")
         mgr._connections["inst-1"] = {"server-1": mock_session}
 
         # Should not raise
@@ -168,12 +168,12 @@ class TestCloseInstance:
         """Stream contexts should be closed even if session close fails."""
         mgr = McpConnectionManager()
         mock_session = AsyncMock()
-        mock_session.close.side_effect = Exception("Close failed")
+        mock_session.stop.side_effect = Exception("Close failed")
         mgr._connections["inst-1"] = {"server-1": mock_session}
 
         mock_stream_cm = MagicMock()
         mock_stream_cm.__aexit__ = AsyncMock()
-        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm}
+        mgr._stream_contexts["inst-1"] = {"server-1": (mock_stream_cm, mock_session)}
 
         await mgr.close_instance("inst-1")
 
@@ -193,20 +193,20 @@ class TestCloseAll:
         mgr._connections["inst-1"] = {"server-1": s1}
         mgr._connections["inst-2"] = {"server-2": s2}
 
-        # Add stream contexts
+        # Add stream contexts as tuples (streams_cm, session)
         mock_stream_cm1 = MagicMock()
         mock_stream_cm1.__aexit__ = AsyncMock()
         mock_stream_cm2 = MagicMock()
         mock_stream_cm2.__aexit__ = AsyncMock()
-        mgr._stream_contexts["inst-1"] = {"server-1": mock_stream_cm1}
-        mgr._stream_contexts["inst-2"] = {"server-2": mock_stream_cm2}
+        mgr._stream_contexts["inst-1"] = {"server-1": (mock_stream_cm1, s1)}
+        mgr._stream_contexts["inst-2"] = {"server-2": (mock_stream_cm2, s2)}
 
         await mgr.close_all()
 
         assert mgr._connections == {}
         assert mgr._stream_contexts == {}
-        s1.close.assert_awaited_once()
-        s2.close.assert_awaited_once()
+        s1.stop.assert_awaited_once()
+        s2.stop.assert_awaited_once()
         mock_stream_cm1.__aexit__.assert_awaited_once()
         mock_stream_cm2.__aexit__.assert_awaited_once()
 
@@ -215,7 +215,7 @@ class TestCloseAll:
         """Should handle errors in individual close() calls."""
         mgr = McpConnectionManager()
         s1 = AsyncMock()
-        s1.close.side_effect = Exception("Failed")
+        s1.stop.side_effect = Exception("Failed")
         mgr._connections["inst-1"] = {"server-1": s1}
 
         await mgr.close_all()
@@ -237,7 +237,8 @@ class TestTransferSession:
         await mgr.transfer_session("inst-1", "server-1", mock_session, mock_stream_cm)
 
         assert mgr._connections["inst-1"]["server-1"] is mock_session
-        assert mgr._stream_contexts["inst-1"]["server-1"] is mock_stream_cm
+        # transfer_session stores (stream_cm, session) tuple
+        assert mgr._stream_contexts["inst-1"]["server-1"] == (mock_stream_cm, mock_session)
 
     @pytest.mark.asyncio
     async def test_transfer_session_integrates_with_close(self):
@@ -251,7 +252,7 @@ class TestTransferSession:
         await mgr.close_instance("inst-1")
 
         # Session should be closed and removed
-        mock_session.close.assert_awaited_once()
+        mock_session.stop.assert_awaited_once()
         mock_stream_cm.__aexit__.assert_awaited_once()
         assert "inst-1" not in mgr._connections
         assert "inst-1" not in mgr._stream_contexts
