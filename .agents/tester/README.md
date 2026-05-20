@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-20 MCP Tools Visible to LLM Fix)
+## Test Results (Latest: 2026-05-20 MCP Warmup Pool Tool Adaptation + Scan Ordering Fix)
+
+### MCP Warmup Pool Tool Adaptation + Scan Ordering Fix (2026-05-20)
+- **Branch**: fix/mcp-tools-not-available-to-llm (commit 73be23f)
+- **Unit Tests**: 251/251 PASS across 8 MCP packs (warmup_pool, core, gaia, service, connection, runtime, context7, crud)
+- **E2E Test**: 8/8 PASS — MCP tools verified in API (mcp_context7_*, mcp_webfetch_*) + LLM response mentions MCP
+- **ensure.md**: PASS — dev.sh stable 30s+, MCP servers warm up (context7 + webfetch)
+- **Quick Fixes**: 0 (none needed)
+- **Root Cause**: warmup_pool skipped adapt_mcp_tools() + wrong tool scan ordering
+- See `.agents/tester/RESULTS/2026-05-20-mcp-warmup-adapt-scan-ordering.md` for full report
+
+### MCP Warmup Pool Tool Adaptation Fix Status: ✅ READY (all tests pass, E2E verified, no regressions)
 
 ### MCP Tools Visible to LLM Fix (2026-05-20)
 - **Branch**: fix/mcp-tools-not-available-to-llm (commits b2cd271, 2af8f97)
