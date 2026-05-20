@@ -60,7 +60,20 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-19 MCP STDIO Server Warm-Up Pool)
+## Test Results (Latest: 2026-05-20 Critical Experience Phase 5)
+
+### Critical Experience Feature — Phase 5 (2026-05-20)
+- **New CE Tests**: 82/82 PASSED (36 tool + 14 injection + 20 schema + 13 API)
+- **Tool Logic**: Add (10 tests), Merge (10 tests), Eviction (6 tests), List (3 tests), Remove (5 tests), Constants (2 tests)
+- **Injection**: format_project_context with priority icons 🔴🟡🟢⚪, deduplication, non-dict skip
+- **Schema**: CriticalExperience model validation, Project.to_dict(), migration file
+- **API**: GET /projects/{id} and GET /projects include critical_experience
+- **Full Suite**: 2,867 passed, 0 regressions
+- **ensure.md**: ✅ dev.sh runs 30s without crash, migration 20260520_000001 applied
+- **Quick Fixes**: 1 (API tests commit `77aa78f`)
+- See `.agents/tester/RESULTS/2026-05-20-critical-experience-phase5.md` for full report
+
+### Critical Experience Phase 5 Status: ✅ READY (82 tests pass, 0 regressions, daemon clean startup)
 
 ### MCP STDIO Server Warm-Up Pool (2026-05-19)
 - **Full Test Suite**: 4,036 passed, 0 new regressions, 27 skipped

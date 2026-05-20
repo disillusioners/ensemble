@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 46 packs
-- Unit: 39 | Integration: 1 | Mock: 2 | E2E: 4
+- Total: 50 packs
+- Unit: 43 | Integration: 1 | Mock: 2 | E2E: 4
 
 ## Unit Test Packs
 
@@ -45,6 +45,10 @@
 | memory_archive_unit_test | tests/unit/tools/test_archive_lifecycle.py | Phase 4 archive: path validation, traversal protection, symlinks, auto-archive, rate limiting | 2 min | 2026-05-19 | ✅ PASS (29 tests, feature/unified-memory-architecture) |
 | memory_integration_test | tests/test_memory_integration.py | Integration: full lifecycle, compound requests, concurrent writes, RAG redirect, edge cases, regression | 2 min | 2026-05-19 | ✅ PASS (28 tests, feature/unified-memory-architecture) |
 | memory_edge_cases_test | tests/unit/tools/test_memory_edge_cases.py | Edge cases: path traversal, symlinks, rate limiting, compaction boundaries, concurrent writes, collision, unicode | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
+| ce_tools_unit_test | tests/unit/tools/test_critical_experience.py | Critical Experience tools: add (validation, categories, priorities), merge (keyword overlap, shorter summary), eviction (priority order, max capacity), list, remove | 2 min | 2026-05-20 | ✅ PASS (36 tests, feature/critical-experience Phase 5) |
+| ce_injection_unit_test | tests/unit/test_critical_experience_injection.py | format_project_context injection: CE section formatting, priority icons, deduplication, non-dict skip, reference handling | 2 min | 2026-05-20 | ✅ PASS (14 tests, feature/critical-experience Phase 5) |
+| ce_schema_unit_test | tests/unit/test_critical_experience_schema.py | CriticalExperience model validation, Project integration, migration file (UP/DOWN, default []) | 2 min | 2026-05-20 | ✅ PASS (20 tests, feature/critical-experience Phase 5) |
+| ce_api_unit_test | tests/unit/test_critical_experience_api.py | Projects API: GET /projects/{id} and GET /projects include critical_experience in response | 2 min | 2026-05-20 | ✅ PASS (13 tests, feature/critical-experience Phase 5) |
 
 ## Integration Test Packs
 
