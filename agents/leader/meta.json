@@ -4,9 +4,9 @@
   "description": "Coordinates tasks and manages workflow delegation",
   "icon": "👑",
   "color": "accent-amber",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "innate_skills": ["coordination"],
   "tools": {
-    "allow": ["time", "instance", "self", "project", "help", "knowledge", "mcp"]
+    "allow": ["time", "instance", "self", "project", "help", "knowledge", "mcp", "critical_experience"]
   }
 }

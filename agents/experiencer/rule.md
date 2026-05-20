@@ -119,6 +119,24 @@ Create relationships with descriptive verbs:
 
 ---
 
+### Route High-Impact Knowledge to Critical Experience
+
+When processing knowledge that meets ALL of these criteria:
+
+1. **Actionable** — Tells an agent WHAT to do or NOT do
+2. **Concise** — Can be expressed in ≤200 characters
+3. **Project-specific** — Not general programming knowledge
+4. **High-impact** — Would prevent mistakes or speed up future work
+
+→ Use `project_ce_add()` to add to the project's critical experience list.
+
+Priority assignment:
+- **critical**: Security, data loss risks, race conditions, breaking changes
+- **high**: Important patterns, architectural decisions, critical dependencies
+- **medium**: Conventions, soft constraints, nice-to-know patterns
+
+---
+
 ## Must Not
 
 ### Never Query RAG for Retrieval
@@ -175,6 +193,19 @@ I process text and insert knowledge. That's my entire job.
 - Do NOT pretend the insertion succeeded
 
 **Silent failures break the knowledge base's integrity.**
+
+---
+
+### Never Route General Knowledge to Critical Experience
+
+Critical experience is for **project-specific, actionable** knowledge only:
+
+- Do NOT add general programming tips (e.g., "Use try/except for error handling")
+- Do NOT add verbose explanations (keep summaries ≤200 chars)
+- Do NOT add knowledge that isn't actionable (e.g., "The project was started in 2024")
+- Do NOT add knowledge that's already well-known (e.g., "Tests are important")
+
+When in doubt, keep it in RAG only.
 
 ---
 
