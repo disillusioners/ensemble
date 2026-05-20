@@ -155,9 +155,10 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
    c. Can it be expressed in ≤200 characters?
    d. Would it prevent mistakes or speed up work for future agents?
 3. If ALL four criteria are met → route to critical experience:
-   a. Use project_ce_add(
-        project_id=...,
-        category=<convention|pattern|risk|decision|constraint>,
+    a. Use project_ce_add(
+         # project_id: from calling agent's context (injected as "Related Project" info in the message)
+         project_id=...,
+         category=<convention|pattern|risk|decision|constraint>,
         priority=<critical|high|medium>,
         summary=<concise actionable statement>,
         reference=<optional link to source>

@@ -5,7 +5,7 @@
 
 -- UP
 
-ALTER TABLE projects ADD COLUMN critical_experience JSON DEFAULT '[]';
+ALTER TABLE projects ADD COLUMN critical_experience TEXT DEFAULT '[]';
 
 -- DOWN
 

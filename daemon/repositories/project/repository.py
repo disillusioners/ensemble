@@ -364,6 +364,7 @@ class SQLModelProjectRepository:
             for key, value in updates.items():
                 if hasattr(project, key):
                     setattr(project, key, value)
+                    flag_modified(project, key)
 
             project.updated_at = datetime.now(timezone.utc).isoformat()
             session.commit()

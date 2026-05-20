@@ -173,6 +173,8 @@ def format_project_context(project) -> str:
     if ce_entries:
         ce_section = "\n### ⚡ Critical Experience\n"
         for entry in ce_entries:
+            if not isinstance(entry, dict):
+                continue
             priority_icon = {
                 "critical": "🔴", "high": "🟡", "medium": "🟢"
             }.get(entry.get("priority", ""), "⚪")
@@ -182,10 +184,14 @@ def format_project_context(project) -> str:
             ref_str = f" *(ref: {reference})*" if reference else ""
             ce_section += f"- {priority_icon} **[{category}]** {summary}{ref_str}\n"
     
+    # Exclude critical_experience from JSON dump to avoid duplication
+    # (it's already displayed in the formatted section below)
+    data = {k: v for k, v in project_dict.items() if k != "critical_experience"}
+
     return f"""## Related Project
 
 ```json
-{json.dumps(project_dict, indent=2)}
+{json.dumps(data, indent=2)}
 ```
 {ce_section}
 """

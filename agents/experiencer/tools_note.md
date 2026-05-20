@@ -309,7 +309,8 @@ that is always visible to all agents working on the project.
 ### project_ce_add
 
 Adds or merges a critical experience entry. If a similar entry exists (same category + theme),
-it will be merged automatically.
+it will be merged automatically. **Merge logic:** Triggers when same category + ≥2 keyword overlap
+(words >3 chars). Shorter summary wins. Timestamps are updated.
 
 **When to use:** After extracting knowledge that meets ALL critical experience criteria
 (actionable, concise, project-specific, high-impact).
