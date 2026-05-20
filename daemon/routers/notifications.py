@@ -6,7 +6,6 @@ import json
 from fastapi import APIRouter, Request
 
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
-from daemon.services.notification_broadcaster import get_notification_broadcaster
 from sse_starlette.sse import EventSourceResponse
 
 
