@@ -106,7 +106,7 @@ class McpWarmupPool:
                 await self._warmup_server(server_name, size)
                 logger.info(f"Warmed up pool for '{server_name}' ({size} connections)")
             except Exception as e:
-                logger.error(f"Failed to warm up pool for '{server_name}': {e}")
+                logger.error(f"Failed to warm up pool for '{server_name}': {e}", exc_info=True)
 
         await asyncio.gather(
             *[warmup_server(name) for name in self._configs],
@@ -127,8 +127,12 @@ class McpWarmupPool:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
-            if isinstance(result, Exception):
-                logger.error(f"Failed to create pooled connection for '{server_name}': {result}")
+            if isinstance(result, BaseException):
+                logger.error(
+                    f"Failed to create pooled connection for '{server_name}': "
+                    f"{type(result).__name__}: {result}",
+                    exc_info=result,
+                )
             else:
                 await pool.put(result)
 
@@ -260,7 +264,7 @@ class McpWarmupPool:
                     await pool.put(conn)
                     logger.debug(f"Replenished pool for {server_name}")
                 except Exception as e:
-                    logger.warning(f"Failed to replenish pool for {server_name}: {e}")
+                    logger.warning(f"Failed to replenish pool for {server_name}: {e}", exc_info=True)
 
     async def health_check(self) -> None:
         """
@@ -314,7 +318,7 @@ class McpWarmupPool:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Health check loop error: {e}")
+                logger.error(f"Health check loop error: {e}", exc_info=True)
 
     def start_health_check(self, interval: float = 60) -> None:
         """
@@ -405,7 +409,7 @@ class McpWarmupPool:
             server_name: {
                 "available": pool.qsize(),
                 "pool_size": self._pool_sizes.get(server_name, 1),
-                "healthy": self._running,
+                "healthy": pool.qsize() > 0,
             }
             for server_name, pool in self._pools.items()
         }
