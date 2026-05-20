@@ -142,6 +142,206 @@ class TestCreatePooledConnection:
         # Verify cleanup: __aexit__ was called to terminate subprocess
         mock_cm.__aexit__.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_on_second_attempt(self, pool):
+        """Session.initialize() retry succeeds on 2nd attempt."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=[TimeoutError("First timeout"), None])
+        mock_session.send_ping = AsyncMock()
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
+            mock_tools.return_value = [MagicMock()]
+
+            conn = await pool._create_pooled_connection("context7")
+
+        assert conn is not None
+        assert mock_session.initialize.call_count == 2, "Should have retried once"
+
+    @pytest.mark.asyncio
+    async def test_retry_succeeds_on_third_attempt(self, pool):
+        """Session.initialize() retry succeeds on 3rd (final) attempt."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        # Fail twice, succeed on third
+        mock_session.initialize = AsyncMock(side_effect=[TimeoutError("1"), TimeoutError("2"), None])
+        mock_session.send_ping = AsyncMock()
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
+            mock_tools.return_value = [MagicMock()]
+
+            conn = await pool._create_pooled_connection("context7")
+
+        assert conn is not None
+        assert mock_session.initialize.call_count == 3, "Should have retried twice"
+
+    @pytest.mark.asyncio
+    async def test_all_retries_exhausted_raises(self, pool):
+        """All 3 retries exhausted raises the final error."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=RuntimeError("Persistent failure"))
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session):
+            with pytest.raises(RuntimeError, match="Persistent failure"):
+                await pool._create_pooled_connection("context7")
+
+        assert mock_session.initialize.call_count == 3, "Should have attempted 3 times"
+        mock_cm.__aexit__.assert_called_once(), "Cleanup should be called"
+
+    @pytest.mark.asyncio
+    async def test_retry_exponential_backoff_timing(self, pool):
+        """Verify exponential backoff: 2s then 4s delays between retries."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=[TimeoutError("1"), TimeoutError("2"), None])
+        mock_session.send_ping = AsyncMock()
+
+        sleep_durations: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def track_sleep(duration: float):
+            sleep_durations.append(duration)
+            await original_sleep(0)
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools, \
+             patch("asyncio.sleep", side_effect=track_sleep):
+            mock_tools.return_value = [MagicMock()]
+            conn = await pool._create_pooled_connection("context7")
+
+        assert conn is not None
+        # sleep_durations = [2.0 (startup), 2.0 (retry1 backoff), 4.0 (retry2 backoff)]
+        # We only care about retry backoffs: positions 1 and 2
+        assert sleep_durations[1] == 2.0, f"Expected 2.0s backoff first, got {sleep_durations[1]}"
+        assert sleep_durations[2] == 4.0, f"Expected 4.0s backoff second, got {sleep_durations[2]}"
+
+    @pytest.mark.asyncio
+    async def test_per_attempt_timeout_triggers_retry(self, pool):
+        """10s per-attempt timeout on initialize() triggers retry."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=asyncio.TimeoutError)
+        mock_session.send_ping = AsyncMock()
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools:
+            mock_tools.return_value = [MagicMock()]
+
+            with pytest.raises(asyncio.TimeoutError):
+                await pool._create_pooled_connection("context7")
+
+        assert mock_session.initialize.call_count == 3, "Should have retried 3 times on timeout"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_immediately(self, pool):
+        """CancelledError propagates immediately without retrying."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=asyncio.CancelledError("Task cancelled"))
+        mock_session.send_ping = AsyncMock()
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session):
+            with pytest.raises(asyncio.CancelledError):
+                await pool._create_pooled_connection("context7")
+
+        # Should only attempt once (no retries for CancelledError)
+        assert mock_session.initialize.call_count == 1, "CancelledError should not trigger retries"
+        mock_cm.__aexit__.assert_called_once(), "Cleanup should still be called"
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_succeeds_no_backoff(self, pool):
+        """First attempt success means no retry delays (only startup delay)."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(return_value=None)
+        mock_session.send_ping = AsyncMock()
+
+        sleep_durations: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def track_sleep(duration: float):
+            sleep_durations.append(duration)
+            await original_sleep(0)
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.load_mcp_tools", new_callable=AsyncMock) as mock_tools, \
+             patch("asyncio.sleep", side_effect=track_sleep):
+            mock_tools.return_value = [MagicMock()]
+            conn = await pool._create_pooled_connection("context7")
+
+        assert conn is not None
+        assert mock_session.initialize.call_count == 1
+        # Only startup delay (2.0s), no retry backoff
+        assert sleep_durations == [2.0], f"Expected only startup delay [2.0], got {sleep_durations}"
+
+    @pytest.mark.asyncio
+    async def test_retry_log_levels(self, pool):
+        """Verify WARNING on retry attempts, ERROR on final failure."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=RuntimeError("Persistent"))
+        mock_session.send_ping = AsyncMock()
+
+        with patch("daemon.mcp.warmup_pool.mcp.stdio_client", return_value=mock_cm), \
+             patch("daemon.mcp.warmup_pool.ClientSession", return_value=mock_session), \
+             patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            with pytest.raises(RuntimeError):
+                await pool._create_pooled_connection("context7")
+
+        # 2 WARNING calls (retries), 1 ERROR call (final failure)
+        assert mock_logger.warning.call_count == 2, f"Expected 2 warnings, got {mock_logger.warning.call_count}"
+        assert mock_logger.error.call_count == 1, f"Expected 1 error, got {mock_logger.error.call_count}"
+
 
 class TestWarmup:
     """Tests for warmup method."""
