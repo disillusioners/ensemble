@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-20 MCP Warmup Pool Logging+Retry)
+## Test Results (Latest: 2026-05-20 MCP Stdio Connection Root Cause Fix)
+
+### MCP Stdio Connection Root Cause Fix (2026-05-20)
+- **Branch**: fix/mcp-stdio-connection-init (commits 3981088, 9ef15d7)
+- **MCP Unit Tests**: 147/147 PASSED (warmup_pool 40 + connection_manager 19 + mcp_service 25 + runtime 16 + context7 25 + tool_filter 22)
+- **E2E Startup**: ✅ dev.sh runs 30s, both context7 & webfetch warm up successfully (1/1 connections)
+- **Regression Check**: 4,162 passed, 20 pre-existing failures (unrelated)
+- **Root Cause**: ClientSession created without entering async context manager → receive loop never ran
+- **Fix**: ManagedClientSession with explicit start()/stop() lifecycle
+- **Quick Fixes**: 1 (conftest.py is_mcp_tool mock fix, commit 07beba7)
+- See `.agents/tester/RESULTS/2026-05-20-mcp-stdio-connection-init.md` for full report
+
+### MCP Stdio Connection Fix Status: ✅ READY (147 tests pass, daemon verified, no regressions)
 
 ### MCP Warmup Pool — Logging + Retry Logic (2026-05-20)
 - **Branch**: fix/mcp-warmup-pool-logging-logic (commit 9d42d41, test commit 78b0392)
