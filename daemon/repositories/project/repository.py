@@ -137,7 +137,7 @@ class SQLModelProjectRepository:
             self._sync_tags_bulk(session, project.project_id, tags)
             self._sync_shortnames_bulk(session, project.project_id, shortnames)
 
-            return self._enrich_project(session, project) or project.to_data()
+            return self._enrich_project(session, project) or project.to_dict()
 
     # --------------------------------------------------------
     # READ

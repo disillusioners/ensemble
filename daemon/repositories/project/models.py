@@ -14,6 +14,60 @@ from typing import Any
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+from pydantic import BaseModel, field_validator
+
+
+CRITICAL_EXPERIENCE_MAX_ENTRIES = 30
+
+
+class CriticalExperienceCategory(str, enum.Enum):
+    CONVENTION = "convention"
+    PATTERN = "pattern"
+    RISK = "risk"
+    DECISION = "decision"
+    CONSTRAINT = "constraint"
+
+class CriticalExperiencePriority(str, enum.Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+
+class CriticalExperience(BaseModel):
+    """A single critical experience entry for a project."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    source_agent: str = ""
+    category: str
+    priority: str
+    summary: str
+    reference: str | None = None
+
+    @field_validator('category')
+    @classmethod
+    def validate_category(cls, v):
+        valid = [e.value for e in CriticalExperienceCategory]
+        if v not in valid:
+            raise ValueError(f"Invalid category '{v}', must be one of {valid}")
+        return v
+
+    @field_validator('priority')
+    @classmethod
+    def validate_priority(cls, v):
+        valid = [e.value for e in CriticalExperiencePriority]
+        if v not in valid:
+            raise ValueError(f"Invalid priority '{v}', must be one of {valid}")
+        return v
+
+    @field_validator('summary')
+    @classmethod
+    def validate_summary(cls, v):
+        if len(v) > 200:
+            raise ValueError(f"Summary must be ≤200 chars, got {len(v)}")
+        return v
+
+    def to_dict(self) -> dict:
+        return self.model_dump()
 
 
 class ProjectStatus(str, enum.Enum):
@@ -87,7 +141,12 @@ class Project(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column(JSON)
     )
-    
+
+    critical_experience: list[dict] = Field(
+        default_factory=list,
+        sa_column=Column(JSON)
+    )
+
     creator_instance_id: str | None = None
     creator_agent_id: str | None = None
     
@@ -129,6 +188,7 @@ class Project(SQLModel, table=True):
             "shortnames": list(self._shortnames),
             "metadata": dict(self.project_metadata),
             "relationships": dict(self.relationships),
+            "critical_experience": self.critical_experience if self.critical_experience else [],
             "creator_instance_id": self.creator_instance_id,
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,
