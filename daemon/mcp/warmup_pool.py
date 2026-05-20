@@ -103,8 +103,13 @@ class McpWarmupPool:
         async def warmup_server(server_name: str) -> None:
             size = pool_size.get(server_name, self.DEFAULT_POOL_SIZE) if pool_size else self._pool_sizes.get(server_name, 1)
             try:
-                await self._warmup_server(server_name, size)
-                logger.info(f"Warmed up pool for '{server_name}' ({size} connections)")
+                success_count = await self._warmup_server(server_name, size)
+                if success_count == size:
+                    logger.info(f"Warmed up pool for '{server_name}' ({success_count}/{size} connections)")
+                elif success_count > 0:
+                    logger.warning(f"Partially warmed up pool for '{server_name}' ({success_count}/{size} connections)")
+                else:
+                    logger.error(f"Failed to warm up pool for '{server_name}' (0/{size} connections created)")
             except Exception as e:
                 logger.error(f"Failed to warm up pool for '{server_name}': {e}", exc_info=True)
 
@@ -114,18 +119,22 @@ class McpWarmupPool:
         )
         logger.info(f"MCP warmup complete: {len(self._configs)} server(s) ready")
 
-    async def _warmup_server(self, server_name: str, size: int) -> None:
+    async def _warmup_server(self, server_name: str, size: int) -> int:
         """
         Warm up a single server's pool.
 
         Args:
             server_name: Name of the server
             size: Number of connections to create
+
+        Returns:
+            Number of successfully created connections
         """
         pool = self._pools[server_name]
         tasks = [self._create_pooled_connection(server_name) for _ in range(size)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
+        success_count = 0
         for result in results:
             if isinstance(result, (Exception, asyncio.CancelledError)):
                 logger.error(
@@ -138,6 +147,9 @@ class McpWarmupPool:
                 raise result
             else:
                 await pool.put(result)
+                success_count += 1
+
+        return success_count
 
     async def _create_pooled_connection(self, server_name: str) -> PooledConnection:
         """
@@ -168,10 +180,38 @@ class McpWarmupPool:
         try:
             read_stream, write_stream = await streams_cm.__aenter__()
             session = ClientSession(read_stream, write_stream)
-            async with asyncio.timeout(30):
-                await session.initialize()
 
-                # Use cached tools if available, otherwise discover
+            # Single outer timeout wrapping everything from startup to tool discovery
+            async with asyncio.timeout(60):
+                # Give subprocess time to start up (npx/uvx need time for package resolution)
+                await asyncio.sleep(2.0)
+
+                # Retry initialize with per-attempt timeout
+                max_retries = 3
+                last_error: Exception | None = None
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        async with asyncio.timeout(10):
+                            await session.initialize()
+                            break  # Success
+                    except asyncio.CancelledError:
+                        raise  # Propagate cancellation immediately
+                    except (asyncio.TimeoutError, Exception) as e:
+                        last_error = e
+                        if attempt < max_retries:
+                            wait_time = attempt * 2  # 2s, 4s backoff
+                            logger.warning(
+                                f"Initialize attempt {attempt}/{max_retries} failed for '{server_name}': "
+                                f"{type(e).__name__}: {e}. Retrying in {wait_time}s..."
+                            )
+                            await asyncio.sleep(wait_time)
+                        else:
+                            logger.error(
+                                f"All {max_retries} initialize attempts failed for '{server_name}'"
+                            )
+                            raise last_error
+
+                # Tool discovery (inside the 60s outer timeout)
                 if server_name in self._tool_discovery_cache:
                     tools = self._tool_discovery_cache[server_name]
                 else:
