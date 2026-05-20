@@ -72,7 +72,7 @@ def _ensure_tool_metadata_populated() -> None:
     scan_tools_for_full_docs(all_tools)
 
 
-def load_tools_doc_for_agent(agent_id: str) -> str:
+def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = None) -> str:
     """Build tool documentation for an agent based on their allowed tools.
     
     Dynamically generates tool documentation by:
@@ -82,6 +82,7 @@ def load_tools_doc_for_agent(agent_id: str) -> str:
     
     Args:
         agent_id: The agent identifier to get tool documentation for.
+        mcp_tool_names: Optional list of MCP tool names for "mcp" category expansion.
         
     Returns:
         Formatted string with tool documentation sections.
@@ -107,6 +108,12 @@ def load_tools_doc_for_agent(agent_id: str) -> str:
         logger.debug(f"Registry lookup failed for {agent_id}: {e}")
         return ""
     
+    # Build all_tool_names set for MCP category expansion
+    all_tool_names: set[str] | None = None
+    if mcp_tool_names:
+        all_tool_names = set(mcp_tool_names)
+        logger.debug(f"Including {len(mcp_tool_names)} MCP tools in tool filter resolution for {agent_id}")
+    
     # Resolve filter to set of allowed tool names
     if tool_filter is None:
         # No filter → all tools allowed, pass None to get all categories
@@ -115,6 +122,7 @@ def load_tools_doc_for_agent(agent_id: str) -> str:
         allowed_tools = resolve_tool_filter(
             allow=tool_filter.allow,
             deny=tool_filter.deny,
+            all_tool_names=all_tool_names,
         )
         # If None returned, all tools are allowed
         if allowed_tools is None:
@@ -476,27 +484,48 @@ def estimate_messages_tokens(messages: list) -> int:
 class PromptCache:
     """In-memory cache for compiled prompts.
     
-    Uses agent_id as cache key for logical identification rather than filesystem path.
+    Uses agent_id and MCP tool names as cache key for logical identification
+    rather than filesystem path. MCP tool names are included because different
+    instances may have different MCP tools, which affects the tools section.
     """
     
     def __init__(self) -> None:
         self._cache: dict[str, tuple[str, int, dict[str, float]]] = {}
     
-    def get(self, agent_id: str) -> tuple[str, int] | None:
+    def _make_key(self, agent_id: str, mcp_tool_names: list[str] | None) -> str:
+        """Create a cache key from agent_id and MCP tool names.
+        
+        Args:
+            agent_id: The agent identifier.
+            mcp_tool_names: Optional list of MCP tool names.
+        
+        Returns:
+            Cache key string.
+        """
+        # Normalize MCP tool names: sort and join, use empty string for None/empty
+        if mcp_tool_names:
+            normalized_mcp = ",".join(sorted(mcp_tool_names))
+        else:
+            normalized_mcp = ""
+        return f"{agent_id}::{normalized_mcp}"
+    
+    def get(self, agent_id: str, mcp_tool_names: list[str] | None = None) -> tuple[str, int] | None:
         """Get cached prompt for agent.
         
         Args:
             agent_id: The agent identifier (e.g., "coder").
+            mcp_tool_names: Optional list of MCP tool names.
             
         Returns:
             Tuple of (compiled_prompt, token_count) or None if not cached.
         """
-        if agent_id not in self._cache:
+        key = self._make_key(agent_id, mcp_tool_names)
+        if key not in self._cache:
             return None
         
-        return (self._cache[agent_id][0], self._cache[agent_id][1])
+        return (self._cache[key][0], self._cache[key][1])
     
-    def set(self, agent_id: str, prompt: str, tokens: int, mtimes: dict[str, float]) -> None:
+    def set(self, agent_id: str, prompt: str, tokens: int, mtimes: dict[str, float], mcp_tool_names: list[str] | None = None) -> None:
         """Store prompt in cache.
         
         Args:
@@ -504,25 +533,30 @@ class PromptCache:
             prompt: Compiled system prompt.
             tokens: Token count.
             mtimes: Dict of filename to modification time.
+            mcp_tool_names: Optional list of MCP tool names.
         """
-        self._cache[agent_id] = (prompt, tokens, mtimes)
+        key = self._make_key(agent_id, mcp_tool_names)
+        self._cache[key] = (prompt, tokens, mtimes)
     
-    def invalidate(self, agent_id: str) -> None:
+    def invalidate(self, agent_id: str, mcp_tool_names: list[str] | None = None) -> None:
         """Remove agent from cache.
         
         Args:
             agent_id: The agent identifier (e.g., "coder").
+            mcp_tool_names: Optional list of MCP tool names.
         """
-        self._cache.pop(agent_id, None)
+        key = self._make_key(agent_id, mcp_tool_names)
+        self._cache.pop(key, None)
 
 
-def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) -> tuple[str, int]:
+def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mcp_tool_names: list[str] | None = None) -> tuple[str, int]:
     """Load and cache agent prompts including multiple skills.
     
     Args:
         agent_id: The agent identifier (e.g., "coder").
         agent_dir: Path to the agent directory.
         cache: PromptCache instance.
+        mcp_tool_names: Optional list of MCP tool names for "mcp" category expansion.
         
     Returns:
         Tuple of (system_prompt, token_count).
@@ -589,27 +623,29 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache) ->
                 except (PermissionError, OSError):
                     pass  # Skip broken symlinks and permission issues
     
-    # Check cache
-    cached = cache.get(agent_id)
+    # Check cache (include mcp_tool_names in cache key)
+    cached = cache.get(agent_id, mcp_tool_names)
     if cached is not None:
-        # Get stored mtimes from cache
-        stored_mtimes = cache._cache[agent_id][2] if agent_id in cache._cache else {}
+        # Get stored mtimes from cache using the same key
+        cache_key = cache._make_key(agent_id, mcp_tool_names)
+        stored_mtimes = cache._cache.get(cache_key, (None, None, {}))[2]
         
         # Compare mtimes
         if stored_mtimes == current_mtimes:
+            logger.debug(f"Prompt cache hit for {agent_id} (mcp_tools={len(mcp_tool_names) if mcp_tool_names else 0})")
             return cached
     
     # Cache miss or files changed - reload
     prompts = load_agent_prompts(agent_dir)
     skills = load_agent_skills(agent_dir, meta)
-    dynamic_tools = load_tools_doc_for_agent(agent_id)
+    dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
     shared_knowledge = load_shared_knowledge()
     system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
     
-    # Update cache
-    cache.set(agent_id, system_prompt, tokens, current_mtimes)
+    # Update cache (include mcp_tool_names in cache key)
+    cache.set(agent_id, system_prompt, tokens, current_mtimes, mcp_tool_names)
     
     return (system_prompt, tokens)

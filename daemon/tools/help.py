@@ -34,11 +34,12 @@ Usage:
 """
 
 
-def _get_allowed_tools(agent_id: str) -> set[str] | None:
+def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -> set[str] | None:
     """Get the set of allowed tools for an agent.
     
     Args:
         agent_id: The agent identifier.
+        mcp_tool_names: Optional list of MCP tool names for category expansion.
     
     Returns:
         Set of allowed tool names, or None if all tools are allowed.
@@ -52,13 +53,19 @@ def _get_allowed_tools(agent_id: str) -> set[str] | None:
     if agent_meta is None or agent_meta.tools is None:
         return None
     
+    # Build all_tool_names set for MCP category expansion
+    all_tool_names: set[str] | None = None
+    if mcp_tool_names:
+        all_tool_names = set(mcp_tool_names)
+    
     return resolve_tool_filter(
         allow=agent_meta.tools.allow,
         deny=agent_meta.tools.deny,
+        all_tool_names=all_tool_names,
     )
 
 
-def create_help_tool(all_tools: list, agent_id: str):
+def create_help_tool(all_tools: list, agent_id: str, mcp_tool_names: list[str] | None = None):
     """Create a help tool that provides filtered documentation for tools.
     
     This should be called AFTER all other tools are created, so it can
@@ -67,6 +74,7 @@ def create_help_tool(all_tools: list, agent_id: str):
     Args:
         all_tools: List of all tool functions in the session.
         agent_id: The agent identifier for filtering.
+        mcp_tool_names: Optional list of MCP tool names for category expansion.
     
     Returns:
         A tool_help tool function.
@@ -106,8 +114,8 @@ def create_help_tool(all_tools: list, agent_id: str):
             tool_help("project_create")    # Get docs for project_create
             tool_help(category="project")  # List project tools
         """
-        # Get allowed tools for this agent
-        allowed_tools = _get_allowed_tools(agent_id)
+        # Get allowed tools for this agent (pass MCP tool names for category expansion)
+        allowed_tools = _get_allowed_tools(agent_id, mcp_tool_names)
         
         # Get help for specific tool
         if tool_name:

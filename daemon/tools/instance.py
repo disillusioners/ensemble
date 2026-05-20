@@ -631,35 +631,46 @@ Returns:
         knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
         tools.extend(knowledge_tool_list)
 
-    # Add help tool (must be last so it knows about all other tools)
-    help_tool = create_help_tool(tools, agent_id)
-    tools.append(help_tool)
-
-    # ── MCP tools: injected BEFORE scan/filter so metadata is populated ──
-    # IMPORTANT: MCP tools MUST be injected BEFORE scan_tools_for_full_docs()
-    # because _apply_tool_filter() depends on _tool_metadata being populated
-    # by the scan, which must include MCP tools for correct category filtering.
+    # ── MCP tools: load BEFORE creating help tool so we have the names ──
+    # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation
+    # because create_help_tool needs MCP tool names for category expansion.
     mcp_tools = _load_mcp_tools(manager, current_instance_id)
+    mcp_tool_names: list[str] = []
     if mcp_tools:
-        logger.info(f"Injecting {len(mcp_tools)} MCP tools for instance {current_instance_id[:8]}")
-        tools.extend(mcp_tools)
+        # Extract MCP tool names for help tool and system prompt
+        mcp_tool_names = [
+            getattr(t, 'name', None) or getattr(getattr(t, 'func', None), '__name__', None)
+            for t in mcp_tools
+        ]
+        mcp_tool_names = [n for n in mcp_tool_names if n]  # Filter None
+        logger.info(f"Loaded {len(mcp_tools)} MCP tools for instance {current_instance_id[:8]}: {mcp_tool_names[:5]}...")
+
+    # Add help tool (must be created BEFORE adding MCP tools to the list)
+    # Pass MCP tool names so the help tool can expand "mcp" category
+    help_tool = create_help_tool(tools, agent_id, mcp_tool_names)
+    tools.append(help_tool)
 
     # Scan tools to populate _tool_metadata before filtering
     # This enables category expansion in resolve_tool_filter()
     scan_tools_for_full_docs(tools)
     
+    # Add MCP tools AFTER scan (they were already scanned for names above)
+    if mcp_tools:
+        tools.extend(mcp_tools)
+    
     # Apply tool filtering based on agent's tools config
-    tools = _apply_tool_filter(tools, agent_id)
+    tools = _apply_tool_filter(tools, agent_id, mcp_tool_names)
     
     return tools
 
 
-def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
+def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str] | None = None) -> list[Any]:
     """Apply tool filtering based on agent's tools configuration.
     
     Args:
         tools: List of all tools (before filtering)
         agent_id: The agent identifier to look up tools config
+        mcp_tool_names: Optional list of MCP tool names for category expansion.
         
     Returns:
         Filtered list of tools based on agent's tools config.
@@ -678,6 +689,12 @@ def _apply_tool_filter(tools: list[Any], agent_id: str) -> list[Any]:
 
     # Collect all tool names for MCP category expansion
     all_tool_names: set[str] = set()
+    
+    # Add MCP tool names first (they may not be in the tools list yet)
+    if mcp_tool_names:
+        all_tool_names.update(mcp_tool_names)
+    
+    # Add tool names from the tools list
     for tool in tools:
         tool_name = getattr(tool, 'name', None)
         if tool_name is None:

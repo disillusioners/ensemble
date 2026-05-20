@@ -80,6 +80,29 @@ class InstanceLifecycleService:
         """Access checkpointer through manager for test mockability."""
         return self._manager._checkpointer
 
+    def _get_mcp_tool_names(self) -> list[str]:
+        """Get MCP tool names for prompt generation.
+        
+        This extracts tool names from the MCP service without creating the actual
+        tool objects. The names are needed for the system prompt to include MCP
+        tools in the tool documentation.
+        
+        Returns:
+            List of MCP tool names, or empty list if MCP service not available.
+        """
+        try:
+            if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
+                # Get MCP tools from the service (returns tool objects)
+                mcp_tools = self._manager._mcp_service.get_mcp_tools(None)  # None = all tools, not instance-specific
+                # Extract names
+                return [
+                    getattr(t, 'name', None) or getattr(getattr(t, 'func', None), '__name__', None)
+                    for t in mcp_tools
+                ] or []
+        except Exception as e:
+            logger.debug(f"Failed to get MCP tool names: {e}")
+        return []
+
     def _build_llm_config(self, metadata: "AgentMetadata | None" = None) -> dict:
         """Build LLM config dict with optional per-agent model override."""
         llm_config = {
@@ -164,11 +187,15 @@ class InstanceLifecycleService:
                         f"{self._config.limits.max_children_per_instance}"
                     )
 
-        # Load and cache prompt using resolved path
+        # Load MCP tool names for prompt generation (needed before creating tools)
+        # This gets the tool names without actually creating the tool objects
+        mcp_tool_names = self._get_mcp_tool_names()
+        
+        # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(resolved_agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache)
+        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
@@ -568,11 +595,14 @@ class InstanceLifecycleService:
         project_repository = self._manager._project_repository
         prompt_cache = self._manager.prompt_cache
         
-        # Load and cache prompt using resolved path
+        # Load MCP tool names for prompt generation
+        mcp_tool_names = self._get_mcp_tool_names()
+        
+        # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
         agent_path = Path(meta.agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, prompt_cache)
+        system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, prompt_cache, mcp_tool_names)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
