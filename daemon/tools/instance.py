@@ -35,6 +35,7 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .rag_tools import create_rag_tools
+from .critical_experience import create_critical_experience_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -606,6 +607,12 @@ Returns:
     
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
+
+    # Critical experience tools (project-scoped experience management)
+    ce_tools = create_critical_experience_tools(
+        manager.project_store, current_instance_id, agent_id
+    )
+    tools.extend(ce_tools)
     
     # Create job tools if job service is available
     job_tools = create_job_tools_if_available(manager, current_instance_id, agent_id)
