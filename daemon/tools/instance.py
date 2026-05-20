@@ -645,18 +645,17 @@ Returns:
         mcp_tool_names = [n for n in mcp_tool_names if n]  # Filter None
         logger.info(f"Loaded {len(mcp_tools)} MCP tools for instance {current_instance_id[:8]}: {mcp_tool_names[:5]}...")
 
-    # Add help tool (must be created BEFORE adding MCP tools to the list)
-    # Pass MCP tool names so the help tool can expand "mcp" category
+    # Add MCP tools BEFORE creating help tool so mcp_tool_names are available
+    if mcp_tools:
+        tools.extend(mcp_tools)
+
+    # Create help tool - needs mcp_tool_names for MCP category expansion
     help_tool = create_help_tool(tools, agent_id, mcp_tool_names)
     tools.append(help_tool)
 
-    # Scan tools to populate _tool_metadata before filtering
-    # This enables category expansion in resolve_tool_filter()
+    # Scan ALL tools (including MCP + help) to populate _tool_metadata
+    # MUST run after all tools are added to the list
     scan_tools_for_full_docs(tools)
-    
-    # Add MCP tools AFTER scan (they were already scanned for names above)
-    if mcp_tools:
-        tools.extend(mcp_tools)
     
     # Apply tool filtering based on agent's tools config
     tools = _apply_tool_filter(tools, agent_id, mcp_tool_names)

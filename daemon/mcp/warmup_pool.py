@@ -19,6 +19,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig
 from daemon.mcp.managed_session import ManagedClientSession
+from daemon.mcp.tool_adapter import adapt_mcp_tools
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +222,7 @@ class McpWarmupPool:
                     tools = self._tool_discovery_cache[server_name]
                 else:
                     tools = await load_mcp_tools(session)
+                    tools = adapt_mcp_tools(server_name, tools)
                     self._tool_discovery_cache[server_name] = tools
 
             return PooledConnection(
