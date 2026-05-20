@@ -506,6 +506,172 @@ class TestHealthCheck:
             mock_replenish.assert_called_with("context7")
 
 
+class TestWarmupServerExceptionLogging:
+    """Tests for _warmup_server exception logging (Fix 1)."""
+
+    @pytest.mark.asyncio
+    async def test_exc_info_is_proper_3tuple(self, pool):
+        """When exception occurs in _warmup_server, exc_info should be proper 3-tuple."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        # Mock _create_pooled_connection to raise an exception
+        async def raise_error(*args, **kwargs):
+            raise RuntimeError("Connection failed")
+
+        pool._create_pooled_connection = raise_error
+
+        with patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            await pool._warmup_server("context7", 1)
+
+            # Find the error call
+            assert mock_logger.error.called, "Expected error to be logged"
+            call_kwargs = mock_logger.error.call_args.kwargs
+            exc_info = call_kwargs.get("exc_info")
+
+            # Verify exc_info is a proper 3-tuple (type, value, traceback)
+            assert isinstance(exc_info, tuple), f"exc_info should be tuple, got {type(exc_info)}"
+            assert len(exc_info) == 3, f"exc_info should have 3 elements, got {len(exc_info)}"
+
+            exc_type, exc_value, exc_tb = exc_info
+            assert exc_type is RuntimeError, f"First element should be type, got {exc_type}"
+            assert exc_value is not None, "Second element (value) should not be None"
+            assert str(exc_value) == "Connection failed", f"Value message mismatch: {exc_value}"
+            assert exc_tb is not None, "Third element (traceback) should not be None"
+            assert hasattr(exc_tb, "tb_frame"), "Third element should be a traceback object"
+
+
+class TestWarmupServerExceptionHandling:
+    """Tests for _warmup_server exception type handling (Fix 2)."""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_is_caught_and_logged(self, pool):
+        """CancelledError should be caught and logged, not propagated."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        async def raise_cancelled(*args, **kwargs):
+            raise asyncio.CancelledError("Task cancelled")
+
+        pool._create_pooled_connection = raise_cancelled
+
+        with patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            # Should not raise
+            await pool._warmup_server("context7", 1)
+
+            # Should log error for the CancelledError
+            mock_logger.error.assert_called()
+
+            # Verify it was caught as CancelledError
+            call_kwargs = mock_logger.error.call_args.kwargs
+            exc_info = call_kwargs.get("exc_info")
+            assert exc_info is not None
+            assert exc_info[0] is asyncio.CancelledError
+
+    @pytest.mark.asyncio
+    async def test_keyboard_interrupt_propagates(self, pool):
+        """KeyboardInterrupt should propagate (not caught by isinstance)."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        # Create a mock exception that's like KeyboardInterrupt (inherits from BaseException, not Exception)
+        class MockKeyboardInterrupt(BaseException):
+            """Mock that simulates KeyboardInterrupt behavior without triggering pytest's Ctrl+C."""
+            pass
+
+        async def raise_mock_interrupt(*args, **kwargs):
+            raise MockKeyboardInterrupt("Simulated interrupt")
+
+        pool._create_pooled_connection = raise_mock_interrupt
+
+        with patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            # Should raise, not caught (because MockKeyboardInterrupt inherits from BaseException, not Exception)
+            with pytest.raises(MockKeyboardInterrupt, match="Simulated interrupt"):
+                await pool._warmup_server("context7", 1)
+
+            # Error should NOT be logged since it's not caught by isinstance check
+
+    @pytest.mark.asyncio
+    async def test_system_exit_propagates(self, pool):
+        """SystemExit should propagate (not caught by isinstance)."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        # Create a mock exception that's like SystemExit (inherits from BaseException, not Exception)
+        class MockSystemExit(BaseException):
+            """Mock that simulates SystemExit behavior."""
+            pass
+
+        async def raise_mock_exit(*args, **kwargs):
+            raise MockSystemExit("Exiting")
+
+        pool._create_pooled_connection = raise_mock_exit
+
+        with patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            # Should raise, not caught (because MockSystemExit inherits from BaseException, not Exception)
+            with pytest.raises(MockSystemExit, match="Exiting"):
+                await pool._warmup_server("context7", 1)
+
+    @pytest.mark.asyncio
+    async def test_regular_exception_is_caught(self, pool):
+        """Regular Exception subclasses should be caught and logged."""
+        pool.register_server("context7", _make_config(), pool_size=1)
+
+        async def raise_value_error(*args, **kwargs):
+            raise ValueError("Invalid config")
+
+        pool._create_pooled_connection = raise_value_error
+
+        with patch("daemon.mcp.warmup_pool.logger") as mock_logger:
+            # Should not raise
+            await pool._warmup_server("context7", 1)
+
+            # Should log error
+            mock_logger.error.assert_called()
+
+            # Verify it was caught as ValueError
+            call_kwargs = mock_logger.error.call_args.kwargs
+            exc_info = call_kwargs.get("exc_info")
+            assert exc_info is not None
+            assert exc_info[0] is ValueError
+
+
+class TestGetStatusHealthy:
+    """Tests for get_status healthy field (Fix 3)."""
+
+    @pytest.mark.asyncio
+    async def test_healthy_false_when_pool_empty(self, pool):
+        """healthy should be False when pool is empty (qsize == 0)."""
+        pool.register_server("context7", _make_config(), pool_size=2)
+
+        status = pool.get_status()
+
+        assert "context7" in status
+        assert status["context7"]["available"] == 0
+        assert status["context7"]["healthy"] is False, "healthy should be False when pool is empty"
+
+    @pytest.mark.asyncio
+    async def test_healthy_true_when_pool_has_connections(self, pool):
+        """healthy should be True when pool has at least one connection (qsize > 0)."""
+        pool.register_server("context7", _make_config(), pool_size=2)
+        conn = _make_pooled_connection("context7")
+        await pool._pools["context7"].put(conn)
+
+        status = pool.get_status()
+
+        assert "context7" in status
+        assert status["context7"]["available"] == 1
+        assert status["context7"]["healthy"] is True, "healthy should be True when pool has connections"
+
+    @pytest.mark.asyncio
+    async def test_healthy_true_when_pool_full(self, pool):
+        """healthy should be True when pool is at capacity."""
+        pool.register_server("context7", _make_config(), pool_size=2)
+        await pool._pools["context7"].put(_make_pooled_connection("context7"))
+        await pool._pools["context7"].put(_make_pooled_connection("context7"))
+
+        status = pool.get_status()
+
+        assert status["context7"]["available"] == 2
+        assert status["context7"]["healthy"] is True
+
+
 class TestGetStatus:
     """Tests for get_status method."""
 
@@ -520,4 +686,23 @@ class TestGetStatus:
         assert "context7" in status
         assert status["context7"]["available"] == 1
         assert status["context7"]["pool_size"] == 2
-        assert status["context7"]["healthy"] is False  # Not running
+        assert status["context7"]["healthy"] is True  # Has connection, so healthy
+
+    @pytest.mark.asyncio
+    async def test_get_status_multiple_servers(self, pool):
+        """get_status should return status for all registered servers."""
+        pool.register_server("server1", _make_config(), pool_size=1)
+        pool.register_server("server2", _make_config(), pool_size=2)
+
+        # server1 has 1 connection
+        await pool._pools["server1"].put(_make_pooled_connection("server1"))
+        # server2 is empty
+
+        status = pool.get_status()
+
+        assert "server1" in status
+        assert "server2" in status
+        assert status["server1"]["available"] == 1
+        assert status["server1"]["healthy"] is True
+        assert status["server2"]["available"] == 0
+        assert status["server2"]["healthy"] is False

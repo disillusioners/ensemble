@@ -133,6 +133,9 @@ class McpWarmupPool:
                     f"{type(result).__name__}: {result}",
                     exc_info=(type(result), result, result.__traceback__),
                 )
+            elif isinstance(result, BaseException):
+                # Re-raise KeyboardInterrupt, SystemExit, etc.
+                raise result
             else:
                 await pool.put(result)
 
