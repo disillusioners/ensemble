@@ -127,11 +127,11 @@ class McpWarmupPool:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in results:
-            if isinstance(result, BaseException):
+            if isinstance(result, (Exception, asyncio.CancelledError)):
                 logger.error(
                     f"Failed to create pooled connection for '{server_name}': "
                     f"{type(result).__name__}: {result}",
-                    exc_info=result,
+                    exc_info=(type(result), result, result.__traceback__),
                 )
             else:
                 await pool.put(result)
@@ -289,9 +289,9 @@ class McpWarmupPool:
                     try:
                         await asyncio.wait_for(conn.session.send_ping(), timeout=5.0)
                         healthy.append(conn)
-                    except Exception:
+                    except Exception as e:
                         logger.warning(
-                            f"Health check failed for pooled {server_name}, discarding"
+                            f"Health check failed for pooled {server_name}: {e}", exc_info=True
                         )
                         await self._close_connection(conn)
 
