@@ -60,7 +60,20 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-20 MCP Stdio Connection Root Cause Fix)
+## Test Results (Latest: 2026-05-20 MCP Tools Visible to LLM Fix)
+
+### MCP Tools Visible to LLM Fix (2026-05-20)
+- **Branch**: fix/mcp-tools-not-available-to-llm (commits b2cd271, 2af8f97)
+- **Unit Tests**: 1,179 tests run, all branch-relevant PASS (27 pre-existing failures unrelated)
+- **MCP Tool Filter**: 22/22 PASS (core fix verified)
+- **Gaia Agent**: 44/44 PASS (2 pre-existing failures FIXED by this branch!)
+- **E2E Test**: 8/8 PASS — MCP tools verified in API (`mcp_context7_*`, `mcp_webfetch_*`) + LLM response mentions MCP
+- **ensure.md**: PASS — dev.sh stable 30s+, MCP servers warm up (context7 + webfetch)
+- **Quick Fixes**: 0 (none needed)
+- **Root Cause**: `resolve_tool_filter()` called without `all_tool_names` so "mcp" category couldn't expand; cache key mismatch without MCP names
+- See `.agents/tester/RESULTS/2026-05-20-mcp-tools-visible-to-llm.md` for full report
+
+### MCP Tools Visible to LLM Fix Status: ✅ READY (all tests pass, E2E verified, no regressions)
 
 ### MCP Stdio Connection Root Cause Fix (2026-05-20)
 - **Branch**: fix/mcp-stdio-connection-init (commits 3981088, 9ef15d7)

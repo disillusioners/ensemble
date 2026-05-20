@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 50 packs
-- Unit: 43 | Integration: 1 | Mock: 2 | E2E: 4
+- Total: 51 packs
+- Unit: 43 | Integration: 1 | Mock: 2 | E2E: 5
 
 ## Unit Test Packs
 
@@ -38,7 +38,7 @@
 | mcp_warmup_pool_unit_test | tests/unit/test_mcp_warmup_pool.py | MCP warm-up pool: lifecycle, acquire, replenish, health check, drain, liveness probe, exception logging, CancelledError handling, BaseException propagation, **retry logic** (3 attempts, backoff, timeout, log levels) | 2 min | 2026-05-20 | ✅ PASS (40 tests, fix/mcp-stdio-connection-init, ManagedClientSession verified) |
 | mcp_connection_manager_unit_test | tests/unit/test_mcp_connection_manager.py | MCP connection manager: transfer_session(), pool integration | 2 min | 2026-05-20 | ✅ PASS (19 tests, fix/mcp-stdio-connection-init, ManagedClientSession verified) |
 | mcp_service_pool_unit_test | tests/unit/test_mcp_service.py | MCP service pool-aware: preload, liveness probe, graceful degradation | 2 min | 2026-05-20 | ✅ PASS (25 tests, fix/mcp-stdio-connection-init) |
-| gaia_agent_unit_test | tests/unit/test_gaia_agent.py | Gaia agent: meta.json validation, registry discovery, agent loading, tool filtering, script accessibility, full pipeline | 2 min | 2026-05-19 | ⚠️ 2 FAIL (pre-existing tool category expansion bug, not memory-related) |
+| gaia_agent_unit_test | tests/unit/test_gaia_agent.py | Gaia agent: meta.json validation, registry discovery, agent loading, tool filtering, script accessibility, full pipeline | 2 min | 2026-05-20 | ✅ PASS (44/44, fix/mcp-tools-not-available-to-llm FIXED 2 pre-existing failures) |
 | memory_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Phase 1 bug fixes: target="memories", honest error messages, classification fallback, RAG redirect | 2 min | 2026-05-19 | ✅ PASS (85 tests, feature/unified-memory-architecture) |
 | memory_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Phase 2 compound requests: AND splitting, semicolons, sentence boundaries, per-part classification | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
 | memory_compaction_unit_test | tests/unit/tools/test_inner_soul_compaction.py | Phase 3 compaction: file locking, atomic writes, deduplication, structure preservation | 2 min | 2026-05-19 | ✅ PASS (42 tests, feature/unified-memory-architecture) |
@@ -71,6 +71,7 @@
 | stop_resume_spawn_e2e_test | test/packs/stop_resume_spawn_e2e_test.py | Stop→Resume→Spawn Instance: verify spawn_instance works after stop/resume, multiple cycles, no "no running event loop" | 5 min | 2026-05-15 | ✅ PASS (async def fix verified, spawn works after resume, 2 cycles, no errors) |
 | pause_ttl_cold_resume_e2e_test | test/packs/pause_ttl_cold_resume_e2e_test.py | Pause TTL + Cold Resume: pause→paused_at set→daemon restart→cold resume→completed, status transitions | 5 min | 2026-05-16 | ✅ PASS (9/9 steps, cold resume from checkpoint verified) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
+| mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-20 | ✅ PASS (8/8 checks, fix/mcp-tools-not-available-to-llm) |
 
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton | 2 min | 2026-05-20 | ✅ PASS (17/17, notification system) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |
