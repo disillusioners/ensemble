@@ -183,6 +183,7 @@ def scan_tools_for_full_docs(tools: list) -> None:
 # Category module mapping: category_key -> full module path(s)
 CATEGORY_MODULES: dict[str, str | list[str]] = {
     "bash": "daemon.tools.bash",
+    "critical_experience": "daemon.tools.critical_experience",
     "filesystem": "daemon.tools.filesystem",
     "time": "daemon.tools.time",
     "instance": "daemon.tools.instance",
