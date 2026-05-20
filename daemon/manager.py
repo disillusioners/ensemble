@@ -463,6 +463,9 @@ class InstanceManager:
         self._job_queue_mgmt_service: Any = None
         self._dead_letter_service: Any = None
 
+        # NEW: Optional notification broadcaster (set via set_notification_broadcaster)
+        self._notification_broadcaster: Any = None
+
         # Worker pool for message queue redesign
         self._worker_pool: WorkerPool | None = None
         self._task_processor: TaskProcessor | None = None
@@ -825,14 +828,27 @@ class InstanceManager:
         self._job_queue_mgmt_service = service
         logger.info("JobQueueMgmtService connected to SessionManager")
 
+    def set_notification_broadcaster(self, broadcaster: Any) -> None:
+        """Set the NotificationBroadcaster reference.
+
+        This is called by api.py after both InstanceManager and NotificationBroadcaster
+        are created during application startup. Uses a stored reference instead of
+        accessing app.state to avoid circular import issues in tests.
+
+        Args:
+            broadcaster: The NotificationBroadcaster instance.
+        """
+        self._notification_broadcaster = broadcaster
+        logger.info("NotificationBroadcaster connected to InstanceManager")
+
     def set_dead_letter_service(self, service: Any) -> None:
         """Set the dead letter service.
-        
+
         Args:
             service: The DeadLetterService instance.
         """
         self._dead_letter_service = service
-        logger.info("DeadLetterService connected to SessionManager")
+        logger.info("DeadLetterService connected to InstanceManager")
 
     def _on_stale_task_permanent_failure(self, instance_id: str, error: str, message_id: str | None) -> None:
         """Bridge from StaleTaskRecovery thread to InstanceManager._send_error_report.
@@ -1854,3 +1870,12 @@ class InstanceManager:
     def is_shutting_down(self) -> bool:
         """Check if shutdown is in progress."""
         return self._cancellation_service.is_shutting_down
+
+    @property
+    def _notification_broadcaster(self):
+        """Get the NotificationBroadcaster.
+
+        Uses stored reference from set_notification_broadcaster() to avoid
+        circular import issues in tests.
+        """
+        return self._notification_broadcaster

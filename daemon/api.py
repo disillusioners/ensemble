@@ -53,6 +53,7 @@ from daemon.routers import (
     queues_router,
     dlq_router,
     mcp_servers_router,
+    notifications_router,
 )
 
 # Re-export validate_agent_id from utils for backward compatibility
@@ -64,6 +65,7 @@ from daemon.routers.messages import send_message as send_message  # noqa: F401
 from daemon import __version__
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
 from daemon.services.live_event_hub import LiveEventHub
+from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon import constants
 
@@ -263,6 +265,10 @@ async def lifespan(app: FastAPI):
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
     
+    # Initialize NotificationBroadcaster and wire into InstanceManager
+    notification_broadcaster = get_notification_broadcaster()
+    manager.set_notification_broadcaster(notification_broadcaster)
+    
     # Auto-provision system queues for existing projects
     try:
         projects = await asyncio.to_thread(manager._project_repository.list_projects)
@@ -332,6 +338,10 @@ async def lifespan(app: FastAPI):
     # Shutdown LiveEventHub
     if hasattr(app.state, 'live_hub'):
         await app.state.live_hub.shutdown()
+    
+    # Shutdown NotificationBroadcaster
+    if notification_broadcaster is not None:
+        await notification_broadcaster.shutdown()
     
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
@@ -476,6 +486,7 @@ def create_app() -> FastAPI:
     api_router.include_router(queues_router)        # /api/queues
     api_router.include_router(dlq_router)           # /api/dlq
     api_router.include_router(mcp_servers_router)    # /api/mcp-servers
+    api_router.include_router(notifications_router)   # /api/notifications
     
     app.include_router(api_router)
 

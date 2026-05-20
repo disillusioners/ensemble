@@ -43,7 +43,7 @@ class EventPublisherService:
         parent_id: str | None = None,
     ) -> None:
         """Publish an instance lifecycle event via the EventBus.
-        
+
         Args:
             instance_id: The instance ID.
             status: Lifecycle status ("completed", "terminated", "error").
@@ -52,14 +52,14 @@ class EventPublisherService:
         """
         # Import here to avoid circular imports
         from ..repositories.event.models import EventKind
-        
+
         event_data = {
             "instance_id": instance_id,
             "status": status,
             "error": error,
             "parent_id": parent_id,
         }
-        
+
         try:
             # Publish via EventBus - this broadcasts to global subscribers including
             # JobFeedbackObserver which listens for job completion feedback
@@ -71,3 +71,44 @@ class EventPublisherService:
             logger.debug(f"Published INSTANCE_LIFECYCLE event for {instance_id[:8]}...: status={status}")
         except Exception as e:
             logger.warning(f"Failed to publish INSTANCE_LIFECYCLE event for {instance_id[:8]}...: {e}")
+
+        # Emit global notification for root instances (parent_id is None) reaching terminal state
+        if parent_id is None:
+            await self._emit_root_completion_notification(
+                instance_id=instance_id,
+                status=status,
+            )
+
+    async def _emit_root_completion_notification(
+        self,
+        instance_id: str,
+        status: str,
+    ) -> None:
+        """Emit a notification for root instance terminal state.
+
+        Args:
+            instance_id: The root instance ID.
+            status: The terminal status.
+        """
+        broadcaster = self._manager._notification_broadcaster
+        if broadcaster is None:
+            return
+
+        # Get instance metadata for agent info
+        meta = self._manager._instance_repository.get(instance_id)
+        if meta is None:
+            logger.warning(f"Cannot emit notification: instance {instance_id[:8]}... not found")
+            return
+
+        try:
+            await broadcaster.emit_root_completion(
+                instance_id=instance_id,
+                agent_id=meta.agent_id,
+                agent_name=meta.agent_name,
+                status=status,
+            )
+            logger.debug(
+                f"Emitted notification for root instance {instance_id[:8]}...: status={status}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to emit notification for root instance {instance_id[:8]}...: {e}")

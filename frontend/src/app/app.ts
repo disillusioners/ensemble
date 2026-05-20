@@ -7,6 +7,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from './services/api.service';
 import { SseService } from './services/sse.service';
+import { NotificationBellComponent } from './components/notification-bell/notification-bell.component';
 import type { HealthResponse } from './models';
 
 @Component({
@@ -20,7 +21,8 @@ import type { HealthResponse } from './models';
     MatToolbarModule,
     MatIconModule,
     MatButtonModule,
-    MatMenuModule
+    MatMenuModule,
+    NotificationBellComponent
   ],
   templateUrl: './app.html',
   styleUrl: './app.scss'
