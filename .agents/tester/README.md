@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-20 Critical Experience Phase 5)
+## Test Results (Latest: 2026-05-20 MCP Warmup Pool Logging+Retry)
+
+### MCP Warmup Pool — Logging + Retry Logic (2026-05-20)
+- **Branch**: fix/mcp-warmup-pool-logging-logic (commit 9d42d41, test commit 78b0392)
+- **Existing MCP Tests**: 84/84 PASSED (0 regressions)
+- **New Retry Tests**: 8/8 PASSED (retry succeeds 2nd/3rd, exhausted, backoff, timeout, CancelledError, log levels)
+- **Restart Verification**: ✅ dev.sh runs 30s, correct log levels (INFO/WARNING/ERROR), retry visible in logs
+- **Log Fix Verified**: Failed warmup now shows `ERROR - Failed to warm up pool for 'X' (0/1 connections created)`
+- **Minor Note**: "connections" vs "connections created" inconsistency across log messages (cosmetic)
+- **Quick Fixes**: 2 (asyncio.sleep recursion in test mocks)
+- See `.agents/tester/RESULTS/2026-05-20-mcp-warmup-pool-logging-retry.md` for full report
+
+### MCP Warmup Pool Logging+Retry Status: ✅ READY (84 tests pass, daemon verified, retry working)
 
 ### Critical Experience Feature — Phase 5 (2026-05-20)
 - **New CE Tests**: 82/82 PASSED (36 tool + 14 injection + 20 schema + 13 API)
