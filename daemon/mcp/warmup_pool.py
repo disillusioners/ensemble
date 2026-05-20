@@ -14,7 +14,7 @@ from typing import Any
 
 import mcp
 from langchain_core.tools import BaseTool
-from mcp import ClientSession, StdioServerParameters
+from mcp import StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig

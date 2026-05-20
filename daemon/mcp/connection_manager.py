@@ -40,7 +40,7 @@ class McpConnectionManager:
 
     def __init__(self) -> None:
         """Initialize the connection manager with empty connections."""
-        self._connections: dict[str, dict[str, ClientSession]] = {}
+        self._connections: dict[str, dict[str, ManagedClientSession]] = {}
         self._stream_contexts: dict[str, dict[str, Any]] = {}  # instance_id → server_name → stream_cm
         self._lock = asyncio.Lock()  # Eager initialization
 
@@ -151,7 +151,7 @@ class McpConnectionManager:
         instance_id: str,
         server_name: str,
         timeout: float = 5.0,
-    ) -> ClientSession:
+    ) -> ManagedClientSession:
         """
         Create an MCP client session for a server.
 
@@ -190,7 +190,7 @@ class McpConnectionManager:
         instance_id: str,
         server_name: str,
         timeout: float,
-    ) -> ClientSession:
+    ) -> ManagedClientSession:
         """
         Create a session using STDIO transport.
 
@@ -258,6 +258,10 @@ class McpConnectionManager:
                 )
         except asyncio.TimeoutError:
             logger.error(f"SSE connection timed out for URL: {config.url}")
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
             raise
 
     async def _create_streamable_http_session(
@@ -288,6 +292,10 @@ class McpConnectionManager:
                 )
         except asyncio.TimeoutError:
             logger.error(f"Streamable HTTP connection timed out for URL: {config.url}")
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
             raise
 
     def get_session(self, instance_id: str, server_name: str) -> ManagedClientSession | None:

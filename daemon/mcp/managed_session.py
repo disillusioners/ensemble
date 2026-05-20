@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 import anyio
 from mcp import ClientSession
+
+logger = logging.getLogger(__name__)
 
 
 class ManagedClientSession(ClientSession):
@@ -29,8 +33,8 @@ class ManagedClientSession(ClientSession):
             return
         try:
             await self._exit_stack.aclose()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error closing exit stack during stop: {e}")
         self._task_group.cancel_scope.cancel()
         try:
             await self._task_group.__aexit__(None, None, None)
