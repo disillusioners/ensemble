@@ -1870,12 +1870,3 @@ class InstanceManager:
     def is_shutting_down(self) -> bool:
         """Check if shutdown is in progress."""
         return self._cancellation_service.is_shutting_down
-
-    @property
-    def _notification_broadcaster(self):
-        """Get the NotificationBroadcaster.
-
-        Uses stored reference from set_notification_broadcaster() to avoid
-        circular import issues in tests.
-        """
-        return self._notification_broadcaster

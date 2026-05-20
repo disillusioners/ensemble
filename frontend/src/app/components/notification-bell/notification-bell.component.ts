@@ -1,4 +1,4 @@
-import { Component, inject, computed, signal, HostListener, ElementRef, OnDestroy, OnInit } from '@angular/core';
+import { Component, inject, computed, signal, HostListener, ElementRef, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
@@ -30,30 +30,30 @@ export class NotificationBellComponent implements OnDestroy {
   // Track previous count to trigger animation on new notification
   private previousUnreadCount = 0;
 
-  // Interval ID for cleanup
-  private animationCheckInterval: ReturnType<typeof setInterval> | null = null;
+  // Animation timeout for cleanup
+  private animationTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
-    // Watch for new notifications to trigger animation
-    this.animationCheckInterval = setInterval(() => {
-      const currentCount = this.unreadCount();
-      if (currentCount > this.previousUnreadCount) {
+    // Watch for new notifications to trigger animation using Angular effect
+    effect(() => {
+      const count = this.unreadCount();
+      if (count > this.previousUnreadCount) {
         this.triggerAnimation();
       }
-      this.previousUnreadCount = currentCount;
-    }, 100);
+      this.previousUnreadCount = count;
+    });
   }
 
   ngOnDestroy(): void {
-    if (this.animationCheckInterval !== null) {
-      clearInterval(this.animationCheckInterval);
-      this.animationCheckInterval = null;
+    if (this.animationTimeout !== null) {
+      clearTimeout(this.animationTimeout);
+      this.animationTimeout = null;
     }
   }
   
   private triggerAnimation(): void {
     this.isAnimating.set(true);
-    setTimeout(() => {
+    this.animationTimeout = setTimeout(() => {
       this.isAnimating.set(false);
     }, 1000);
   }

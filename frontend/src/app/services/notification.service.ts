@@ -65,6 +65,10 @@ export class NotificationService implements OnDestroy {
     }
     
     this.eventSource = new EventSource(`${this.API_BASE}/notifications/stream`);
+
+    this.eventSource.onopen = () => {
+      this.reconnectAttempts = 0;
+    };
     
     this.eventSource.addEventListener('notification', (event: MessageEvent) => {
       this.ngZone.run(() => {

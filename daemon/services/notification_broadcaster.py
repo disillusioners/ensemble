@@ -107,6 +107,9 @@ class NotificationBroadcaster:
                 except asyncio.QueueFull:
                     # Queue full = slow consumer, mark as dead
                     dead_connections.append(connection_id)
+                except Exception as e:
+                    logger.warning(f"Failed to enqueue for connection {connection_id}: {e}")
+                    dead_connections.append(connection_id)
 
             # Clean up dead connections
             for connection_id in dead_connections:
