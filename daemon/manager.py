@@ -160,18 +160,34 @@ def format_project_context(project) -> str:
         project: ProjectData instance from repository.
     
     Returns:
-        Formatted string with project JSON info.
+        Formatted string with project JSON info and structured critical experience.
     """
     import json
     
     # ProjectData has to_dict() method
     project_dict = project.to_dict() if hasattr(project, 'to_dict') else vars(project)
+    
+    # Build structured critical experience section (REQUIRED for agent visibility)
+    ce_entries = project_dict.get("critical_experience", [])
+    ce_section = ""
+    if ce_entries:
+        ce_section = "\n### ⚡ Critical Experience\n"
+        for entry in ce_entries:
+            priority_icon = {
+                "critical": "🔴", "high": "🟡", "medium": "🟢"
+            }.get(entry.get("priority", ""), "⚪")
+            category = entry.get("category", "")
+            summary = entry.get("summary", "")
+            reference = entry.get("reference")
+            ref_str = f" *(ref: {reference})*" if reference else ""
+            ce_section += f"- {priority_icon} **[{category}]** {summary}{ref_str}\n"
+    
     return f"""## Related Project
 
 ```json
 {json.dumps(project_dict, indent=2)}
 ```
-
+{ce_section}
 """
 
 

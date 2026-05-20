@@ -82,6 +82,7 @@ def _project_to_response(project) -> ProjectResponse:
         shortnames=project.shortnames or [],
         metadata=project.project_metadata or {},
         relationships=project.relationships or {},
+        critical_experience=project.critical_experience or [],
         creator_instance_id=project.creator_instance_id,
         creator_agent_id=project.creator_agent_id,
         created_at=project.created_at,
