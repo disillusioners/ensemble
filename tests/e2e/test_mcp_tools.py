@@ -53,6 +53,7 @@ POLL_INTERVAL = 2  # seconds between message polling
 test_results = {
     "daemon_started": False,
     "instance_created": False,
+    "mcp_tools_in_api": False,
     "message_sent": False,
     "llm_response_received": False,
     "llm_mentions_mcp": False,
@@ -264,6 +265,57 @@ def check_mcp_servers() -> list:
         return []
 
 
+def verify_mcp_tools_via_api(instance_id: str) -> tuple[bool, list[str]]:
+    """Verify MCP tools are available via direct API call.
+
+    This is the PRIMARY verification step - it checks the API response directly
+    rather than relying on LLM interpretation.
+
+    Args:
+        instance_id: The instance ID to verify.
+
+    Returns:
+        Tuple of (found: bool, tool_names: list[str]).
+    """
+    logger.info("=" * 60)
+    logger.info(f"Verifying MCP tools via API for instance {instance_id}...")
+    logger.info("=" * 60)
+
+    try:
+        # Call GET /api/instances/{instance_id}
+        response = requests.get(
+            f"{API_BASE}/instances/{instance_id}",
+            timeout=10,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+        logger.info(f"Instance API response keys: {list(data.keys())}")
+
+        # Check for MCP tool names in the response
+        mcp_tool_names = data.get("mcp_tool_names")
+
+        if mcp_tool_names and isinstance(mcp_tool_names, list):
+            logger.info(f"Found {len(mcp_tool_names)} MCP tool names in API response:")
+            for tool_name in mcp_tool_names:
+                logger.info(f"  - {tool_name}")
+
+            # Filter for tools starting with mcp_ prefix
+            mcp_prefixed = [t for t in mcp_tool_names if t.startswith("mcp_")]
+            if mcp_prefixed:
+                logger.info(f"  Tools with 'mcp_' prefix: {mcp_prefixed}")
+
+            return True, mcp_tool_names
+        else:
+            logger.warning("No 'mcp_tool_names' field found in API response")
+            logger.info(f"Full response data: {data}")
+            return False, []
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to verify MCP tools via API: {e}")
+        return False, []
+
+
 def terminate_instance(instance_id: str) -> bool:
     """Terminate an instance."""
     logger.info(f"Terminating instance {instance_id}...")
@@ -339,11 +391,12 @@ def print_results():
     checks = [
         ("1. Daemon Started", test_results["daemon_started"]),
         ("2. Instance Created", test_results["instance_created"]),
-        ("3. Message Sent", test_results["message_sent"]),
-        ("4. LLM Response Received", test_results["llm_response_received"]),
-        ("5. LLM Mentions MCP Tools", test_results["llm_mentions_mcp"]),
-        ("6. MCP Servers Configured", test_results["mcp_servers_configured"]),
-        ("7. Cleanup Completed", test_results["cleanup_completed"]),
+        ("3. MCP Tools in API Response", test_results["mcp_tools_in_api"]),
+        ("4. Message Sent", test_results["message_sent"]),
+        ("5. LLM Response Received", test_results["llm_response_received"]),
+        ("6. LLM Mentions MCP Tools", test_results["llm_mentions_mcp"]),
+        ("7. MCP Servers Configured", test_results["mcp_servers_configured"]),
+        ("8. Cleanup Completed", test_results["cleanup_completed"]),
     ]
 
     passed = 0
@@ -416,7 +469,16 @@ def main():
             print("❌ FAILED: Could not create instance")
             sys.exit(1)
 
-        # Step 4: Send message asking about MCP tools
+        # Step 4: Verify MCP tools via direct API call (PRIMARY verification)
+        # This is called BEFORE the LLM message to ensure MCP tools are loaded
+        mcp_tools_found, mcp_tool_names = verify_mcp_tools_via_api(instance_id)
+        test_results["mcp_tools_in_api"] = mcp_tools_found
+
+        if not mcp_tools_found:
+            print("⚠️  WARNING: No MCP tools found in API response")
+            print("   (Some MCP servers may be configured but not loaded)")
+
+        # Step 5: Send message asking about MCP tools
         message_content = (
             "What MCP tools do you have available? "
             "List all tools you can use, especially any tools related to "
@@ -430,13 +492,13 @@ def main():
             print("❌ FAILED: Could not send message")
             sys.exit(1)
 
-        # Step 5: Wait for response
+        # Step 6: Wait for response
         response = wait_for_response(instance_id)
 
         if response:
             test_results["llm_response_received"] = True
 
-            # Step 6: Verify response mentions MCP tools
+            # Step 7: Verify response mentions MCP tools (SECONDARY verification)
             content = response.get("content", "")
             print()
             print("=" * 60)

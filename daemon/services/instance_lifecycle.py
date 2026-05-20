@@ -80,27 +80,43 @@ class InstanceLifecycleService:
         """Access checkpointer through manager for test mockability."""
         return self._manager._checkpointer
 
-    def _get_mcp_tool_names(self) -> list[str]:
+    def _get_mcp_tool_names(
+        self,
+        instance_id: str | None = None,
+        stored_mcp_tool_names: list[str] | None = None,
+    ) -> list[str]:
         """Get MCP tool names for prompt generation.
         
         This extracts tool names from the MCP service without creating the actual
         tool objects. The names are needed for the system prompt to include MCP
         tools in the tool documentation.
         
+        Args:
+            instance_id: The instance ID to get cached MCP tools for.
+                If None, falls back to stored_mcp_tool_names.
+            stored_mcp_tool_names: Fallback list from stored instance_metadata.
+                Used when cache is unavailable (e.g., restored instances).
+        
         Returns:
-            List of MCP tool names, or empty list if MCP service not available.
+            List of MCP tool names, or stored_mcp_tool_names if cache miss,
+            or empty list if neither available.
         """
-        try:
-            if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
-                # Get MCP tools from the service (returns tool objects)
-                mcp_tools = self._manager._mcp_service.get_mcp_tools(None)  # None = all tools, not instance-specific
-                # Extract names
-                return [
-                    getattr(t, 'name', None) or getattr(getattr(t, 'func', None), '__name__', None)
-                    for t in mcp_tools
-                ] or []
-        except Exception as e:
-            logger.debug(f"Failed to get MCP tool names: {e}")
+        if instance_id is not None:
+            try:
+                if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
+                    # Get MCP tools from the service using the instance_id cache
+                    mcp_tools = self._manager._mcp_service.get_mcp_tools(instance_id)
+                    if mcp_tools:
+                        # Extract names
+                        return [
+                            getattr(t, 'name', None) or getattr(getattr(t, 'func', None), '__name__', None)
+                            for t in mcp_tools
+                        ] or []
+            except Exception as e:
+                logger.debug(f"Failed to get MCP tool names from cache: {e}")
+        # Fall back to stored metadata (for restored instances where cache may be empty)
+        if stored_mcp_tool_names:
+            return stored_mcp_tool_names
         return []
 
     def _build_llm_config(self, metadata: "AgentMetadata | None" = None) -> dict:
@@ -188,8 +204,8 @@ class InstanceLifecycleService:
                     )
 
         # Load MCP tool names for prompt generation (needed before creating tools)
-        # This gets the tool names without actually creating the tool objects
-        mcp_tool_names = self._get_mcp_tool_names()
+        # This gets the tool names from the MCP service cache (pre-loaded by spawn_instance_with_mcp)
+        mcp_tool_names = self._get_mcp_tool_names(instance_id)
         
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
@@ -250,6 +266,10 @@ class InstanceLifecycleService:
         # Mark as invoked-as-tool if requested
         if invoked_as_tool:
             instance_metadata["invoked_as_tool"] = True
+        
+        # Store MCP tool names for cache key consistency
+        if mcp_tool_names:
+            instance_metadata["mcp_tool_names"] = mcp_tool_names
         
         logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
         
@@ -595,8 +615,9 @@ class InstanceLifecycleService:
         project_repository = self._manager._project_repository
         prompt_cache = self._manager.prompt_cache
         
-        # Load MCP tool names for prompt generation
-        mcp_tool_names = self._get_mcp_tool_names()
+        # Load MCP tool names for prompt generation (prefer cache, fallback to stored)
+        stored_mcp = meta.instance_metadata.get("mcp_tool_names") if meta.instance_metadata else None
+        mcp_tool_names = self._get_mcp_tool_names(instance_id, stored_mcp)
         
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches

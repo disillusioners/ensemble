@@ -1408,9 +1408,9 @@ class InstanceManager:
             meta = self._instance_repository.get(instance_id)
             if not meta:
                 return 0
-            # Get cached token count from prompt cache using agent_id
-            cache_key = meta.agent_id
-            cached = self.prompt_cache.get(cache_key)
+            # Get cached token count from prompt cache using agent_id + mcp_tool_names
+            mcp_tool_names = meta.instance_metadata.get("mcp_tool_names")
+            cached = self.prompt_cache.get(meta.agent_id, mcp_tool_names)
             if cached is not None:
                 _, token_count = cached
                 return token_count

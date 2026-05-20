@@ -51,6 +51,7 @@ class InstanceInfo(BaseModel):
     title: str | None = Field(default=None, description="Auto-generated instance title from first message")
     parent_id: str | None = Field(default=None, description="Parent instance ID if this is a child instance")
     children: list[str] = Field(default_factory=list, description="List of child instance IDs")
+    mcp_tool_names: list[str] | None = Field(default=None, description="List of MCP tool names available to this instance")
     created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
 
@@ -64,6 +65,7 @@ class InstanceInfo(BaseModel):
                 "title": "Help with Python debugging",
                 "parent_id": None,
                 "children": [],
+                "mcp_tool_names": ["webfetch", "context7_fetch_docs"],
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:01:00Z"
             }
