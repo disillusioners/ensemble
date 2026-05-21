@@ -445,7 +445,13 @@ class McpConnectionManager:
         timeout: float,
         is_streamable_http: bool = False,
     ) -> tuple[ManagedClientSession, Any]:
-        """Shared helper to create a test session from streams context manager."""
+        """
+        Shared helper to create a test session from streams context manager.
+
+        Note: For asyncio.TimeoutError, we let it propagate without cleanup because
+        the asyncio.timeout context already handles cancellation properly. Calling
+        session.stop() on an already-cancelled scope can cause issues.
+        """
         session = None
         try:
             async with asyncio.timeout(timeout):
@@ -455,6 +461,9 @@ class McpConnectionManager:
                 await session.start()
                 await session.initialize()
                 return (session, streams_cm)
+        except asyncio.TimeoutError:
+            # Don't cleanup here - asyncio.timeout context handles cancellation
+            raise
         except Exception:
             if session is not None:
                 try:

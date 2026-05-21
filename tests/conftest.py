@@ -44,7 +44,7 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
     "AsyncSqliteSaver": MagicMock()
 })
 
-# Create mock MCP module (for testing without mcp package installed)
+# Create mock MCP SDK module (mcp package)
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "mcp_tool_name": lambda server_name, tool_name: f"mcp_{server_name}_{tool_name}",
     "is_mcp_tool": lambda name: name.startswith("mcp_") and "_" in name[4:] if name else False,
@@ -57,6 +57,41 @@ mock_mcp = create_mock_module("mcp", {"__path__": ["mcp"]})
 mock_mcp.ClientSession = MagicMock()
 mock_mcp.StdioServerParameters = MagicMock()
 mock_mcp.stdio_client = MagicMock()
+
+# Create mock mcp.shared module
+mock_mcp_shared = create_mock_module("mcp.shared", {"__path__": []})
+mock_mcp_shared_exceptions = create_mock_module("mcp.shared.exceptions", {})
+
+
+# Create mock ErrorData for McpError
+class MockErrorData:
+    """Mock ErrorData object that McpError holds."""
+
+    def __init__(self, message: str = None):
+        self.message = message or "Unknown error"
+
+
+# Create McpError exception class for mocking
+class MockMcpError(Exception):
+    """Mock McpError for testing.
+
+    Mimics the real McpError from mcp.shared.exceptions which contains
+    an error attribute with ErrorData.message for the actual error message.
+    """
+
+    def __init__(self, error=None):
+        self.error = error
+        if hasattr(error, 'message') and error.message:
+            message = error.message
+        elif hasattr(error, '__str__'):
+            message = str(error)
+        else:
+            message = "Unknown MCP error"
+        super().__init__(message)
+
+
+mock_mcp_shared_exceptions.McpError = MockMcpError
+mock_mcp.McpError = MockMcpError
 mock_mcp_client = create_mock_module("mcp.client", {"__path__": []})
 mock_mcp_client.sse = create_mock_module("mcp.client.sse", {
     "sse_client": MagicMock(),
@@ -106,6 +141,8 @@ _mock_modules = {
     "mcp.server.stdio": mock_mcp_server.stdio,
     "mcp.types": mock_mcp_types,
     "mcp.client.stdio.context_manager": mock_mcp_stdio_client,
+    "mcp.shared": mock_mcp_shared,
+    "mcp.shared.exceptions": mock_mcp_shared_exceptions,
     # Mock langchain_mcp_adapters
     "langchain_mcp_adapters": mock_langchain_mcp,
     "langchain_mcp_adapters.tools": mock_langchain_mcp_tools,

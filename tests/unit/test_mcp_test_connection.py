@@ -580,6 +580,76 @@ class TestTestConnectionEndpoint:
         assert "/home/user" not in data["message"]
         assert "command was not found" in data["message"]
 
+    def test_mcp_error_returns_specific_message(self, test_client):
+        """McpError (e.g., Session terminated) returns specific error message."""
+        # Import McpError from the mocked mcp module
+        from mcp import McpError
+        # Import MockErrorData for creating error objects
+        from tests.conftest import MockErrorData
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.create_test_session = AsyncMock(
+            side_effect=McpError(MockErrorData(message="Session terminated: server shutting down"))
+        )
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": "https://api.example.com/mcp",
+                    }
+                }
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "Server error: Session terminated" in data["message"]
+        assert "unexpected error" not in data["message"]
+
+    def test_mcp_error_returns_server_error_message(self, test_client):
+        """McpError returns Server error message and logs warning (not exception)."""
+        import logging
+        from mcp import McpError
+        from tests.conftest import MockErrorData
+
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.create_test_session = AsyncMock(
+            side_effect=McpError(MockErrorData(message="Session terminated"))
+        )
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=mock_conn_mgr
+        ), patch.object(
+            logging.getLogger("daemon.routers.mcp_servers"), "warning"
+        ) as mock_warning, patch.object(
+            logging.getLogger("daemon.routers.mcp_servers"), "exception"
+        ) as mock_exception:
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": "https://api.example.com/mcp",
+                    }
+                }
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "Server error" in data["message"]
+        assert "Session terminated" in data["message"]
+        # Verify warning was called (no stack trace)
+        mock_warning.assert_called_once()
+        mock_exception.assert_not_called()  # Should NOT log exception
+
     def test_generic_error_returns_sanitized_message(self, test_client):
         """Generic errors return sanitized message (no internal details leak)."""
         mock_conn_mgr = MagicMock()
@@ -747,29 +817,83 @@ class TestCreateTestSessionFromStreams:
         mock_session.stop.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_timeout_enforcement(self):
-        """Timeout is enforced during session creation."""
+    async def test_timeout_does_not_cleanup_on_cancelled_scope(self):
+        """TimeoutError should propagate without calling session.stop() (scope already cancelled)."""
         from daemon.mcp.connection_manager import McpConnectionManager
         import asyncio
 
         manager = McpConnectionManager()
 
         mock_streams_cm = MagicMock()
+        mock_session = MagicMock()
+        mock_session.stop = AsyncMock()
 
-        # Simulate timeout by making __aenter__ take too long
-        async def slow_enter(self):
+        # Simulate timeout happening after session is created but before initialize
+        call_count = [0]
+
+        async def slow_initialize():
+            call_count[0] += 1
             await asyncio.sleep(10)  # Longer than timeout
+            return MagicMock()
+
+        mock_session.initialize = slow_initialize
+        mock_session.start = AsyncMock()
+
+        async def slow_enter(self):
+            # Return streams immediately, but session creation will timeout
+            await asyncio.sleep(0)  # Small delay
             return (MagicMock(), MagicMock())
 
         mock_streams_cm.__aenter__ = slow_enter
         mock_streams_cm.__aexit__ = AsyncMock(return_value=None)
 
-        with pytest.raises(asyncio.TimeoutError):
-            await manager._create_test_session_from_streams(
-                mock_streams_cm,
-                timeout=0.1,  # Very short timeout
-                is_streamable_http=False,
-            )
+        with patch(
+            "daemon.mcp.connection_manager.ManagedClientSession",
+            return_value=mock_session
+        ):
+            with pytest.raises(asyncio.TimeoutError):
+                await manager._create_test_session_from_streams(
+                    mock_streams_cm,
+                    timeout=0.1,  # Very short timeout
+                    is_streamable_http=False,
+                )
+
+        # Verify session.stop() was NOT called on timeout
+        # (because the asyncio.timeout context handles cancellation)
+        mock_session.stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mcp_error_is_propagated(self):
+        """McpError should be caught, cleaned up, and re-raised."""
+        from daemon.mcp.connection_manager import McpConnectionManager
+        # Import McpError from the mocked mcp module
+        from mcp import McpError
+
+        manager = McpConnectionManager()
+
+        mock_streams_cm = MagicMock()
+        mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+        mock_streams_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = MagicMock()
+        mock_session.start = AsyncMock()
+        mock_session.initialize = AsyncMock(side_effect=McpError("Server returned error: invalid protocol"))
+        mock_session.stop = AsyncMock()
+
+        with patch(
+            "daemon.mcp.connection_manager.ManagedClientSession",
+            return_value=mock_session
+        ):
+            with pytest.raises(McpError, match="Server returned error: invalid protocol"):
+                await manager._create_test_session_from_streams(
+                    mock_streams_cm,
+                    timeout=30.0,
+                    is_streamable_http=False,
+                )
+
+        # Verify cleanup was attempted for non-timeout errors
+        mock_session.stop.assert_called_once()
+        mock_streams_cm.__aexit__.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cleanup_on_exception(self):

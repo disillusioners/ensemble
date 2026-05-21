@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from mcp.shared.exceptions import McpError
 
 from daemon.models import (
     McpServerCreate,
@@ -144,6 +145,22 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
         return McpServerTestConnectionResponse(
             success=False,
             message=f"Invalid configuration: {e}",
+        )
+    except McpError as e:
+        # MCP protocol errors (e.g., "Session terminated", "Invalid request")
+        # Extract error message from e.error.message if available
+        error_message = "Unknown MCP error"
+        if hasattr(e, 'error') and e.error is not None:
+            if hasattr(e.error, 'message') and e.error.message:
+                error_message = e.error.message
+            else:
+                error_message = str(e.error)
+        else:
+            error_message = str(e)
+        logger.warning("MCP server error during test connection: %s", error_message)
+        return McpServerTestConnectionResponse(
+            success=False,
+            message=f"Server error: {error_message}",
         )
     except OSError as e:
         if "ECONNREFUSED" in str(e):
