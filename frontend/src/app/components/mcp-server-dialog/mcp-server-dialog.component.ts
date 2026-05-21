@@ -12,6 +12,24 @@ interface DialogData {
   template?: BuiltinServerTemplate;
 }
 
+// MCP Server templates for quick configuration
+export const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
+  stdio: {
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@example/mcp-server'],
+    env: {}
+  },
+  sse: {
+    transport: 'sse',
+    url: 'http://localhost:3000/sse'
+  },
+  'streamable-http': {
+    transport: 'streamable-http',
+    url: 'http://localhost:3000/mcp'
+  }
+};
+
 @Component({
   selector: 'app-mcp-server-dialog',
   standalone: true,
@@ -29,6 +47,8 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly error = signal<string | null>(null);
   protected readonly configJsonError = signal<string | null>(null);
   protected readonly saving = signal(false);
+  protected readonly selectedTemplate = signal<string | null>(null);
+  protected readonly templateTypes = ['stdio', 'sse', 'streamable-http'];
 
   // Schema form state
   protected readonly schemaFormValues = signal<Record<string, unknown>>({});
@@ -95,6 +115,66 @@ export class McpServerDialogComponent implements OnInit {
   protected onIsActiveChange(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.isActive.set(target.checked);
+  }
+
+  protected selectTemplate(type: string): void {
+    // If clicking the same template, just deselect (keep content)
+    if (this.selectedTemplate() === type) {
+      this.selectedTemplate.set(null);
+      return;
+    }
+
+    // Apply new template
+    const template = MCP_TEMPLATES[type];
+    if (template) {
+      this.configJson.set(JSON.stringify(template, null, 2));
+      this.selectedTemplate.set(type);
+      this.validateConfigJson();
+    }
+  }
+
+  protected formatJson(): void {
+    const json = this.configJson().trim();
+    if (!json) return;
+
+    try {
+      const parsed = JSON.parse(json);
+      this.configJson.set(JSON.stringify(parsed, null, 2));
+      this.validateConfigJson();
+    } catch {
+      // If JSON is invalid, don't format
+    }
+  }
+
+  protected onConfigKeydown(event: KeyboardEvent): void {
+    // Handle Tab key to insert 2 spaces instead of moving focus
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      const target = event.target as HTMLTextAreaElement;
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      const value = this.configJson();
+
+      // Insert 2 spaces at cursor position
+      const newValue = value.substring(0, start) + '  ' + value.substring(end);
+      this.configJson.set(newValue);
+
+      // Move cursor after the inserted spaces
+      requestAnimationFrame(() => {
+        target.selectionStart = target.selectionEnd = start + 2;
+      });
+    }
+  }
+
+  protected autoResize(event: Event): void {
+    const target = event.target as HTMLTextAreaElement;
+    // Reset height to auto to get correct scrollHeight
+    target.style.height = 'auto';
+    // Set height based on content (min 4 rows ~96px, max 12 rows ~288px)
+    const minHeight = 96;
+    const maxHeight = 288;
+    const newHeight = Math.min(Math.max(target.scrollHeight, minHeight), maxHeight);
+    target.style.height = `${newHeight}px`;
   }
 
   // Schema form output handlers

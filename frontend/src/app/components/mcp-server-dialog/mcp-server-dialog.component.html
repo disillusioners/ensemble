@@ -71,22 +71,36 @@
           ></textarea>
         </div>
 
-        <!-- Template Pills -->
+        <!-- Template Selection (Add/Edit mode only) -->
         <div class="form-group">
-          <span class="template-label">Template</span>
-          <div class="template-pills">
-            @for (tpl of templateTypes; track tpl) {
+          <div class="template-section">
+            <span class="template-label">Template</span>
+            <div class="template-pills">
               <button
                 type="button"
-                class="template-pill"
-                [class.active-stdio]="selectedTemplate() === 'stdio' && tpl === 'stdio'"
-                [class.active-sse]="selectedTemplate() === 'sse' && tpl === 'sse'"
-                [class.active-streamable]="selectedTemplate() === 'streamable-http' && tpl === 'streamable-http'"
-                (click)="selectTemplate(tpl)"
+                class="template-pill stdio"
+                [class.active]="selectedTemplate() === 'stdio'"
+                (click)="selectTemplate('stdio')"
               >
-                {{ tpl }}
+                stdio
               </button>
-            }
+              <button
+                type="button"
+                class="template-pill sse"
+                [class.active]="selectedTemplate() === 'sse'"
+                (click)="selectTemplate('sse')"
+              >
+                sse
+              </button>
+              <button
+                type="button"
+                class="template-pill streamable-http"
+                [class.active]="selectedTemplate() === 'streamable-http'"
+                (click)="selectTemplate('streamable-http')"
+              >
+                streamable-http
+              </button>
+            </div>
           </div>
         </div>
 
@@ -95,19 +109,20 @@
           <div class="config-label-row">
             <label class="form-label">Configuration (JSON)</label>
             <button type="button" class="format-btn" (click)="formatJson()" title="Format JSON">
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+              <svg class="format-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 7h16M4 12h10M4 17h7" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
               Format
             </button>
           </div>
           <textarea
+            #configTextarea
             [value]="configJson()"
             (input)="onConfigJsonChange($event); autoResize($event)"
             (keydown)="onConfigKeydown($event)"
             placeholder='{"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]}'
             rows="4"
-            class="form-textarea mono"
+            class="form-textarea code-editor"
             [class.has-error]="configJsonError()"
           ></textarea>
           <p class="form-hint" [class.error]="configJsonError()">
