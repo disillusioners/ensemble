@@ -44,13 +44,15 @@ def _is_restricted_ip(ip_str: str, allow_local: bool) -> bool:
     if ip.is_loopback:
         return not allow_local
 
+    # Check link-local (169.254.x.x, fe80::) BEFORE private
+    # Note: IPv6 link-local (fe80::/10) is also marked as private by Python's ipaddress module,
+    # so we must check link-local first to ensure it's always blocked regardless of allow_local.
+    if ip.is_link_local:
+        return True
+
     # Check private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
     if ip.is_private:
         return not allow_local
-
-    # Check link-local (169.254.x.x, fe80::)
-    if ip.is_link_local:
-        return True
 
     # Check reserved
     if ip.is_reserved:

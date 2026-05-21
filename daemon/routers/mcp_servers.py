@@ -101,34 +101,34 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
             timeout=timeout,
         )
 
-            # Session created successfully — now try to list tools
+        # Session created successfully — now try to list tools
+        try:
+            tools = await session.list_tools()
+            tools_count = len(tools) if tools else 0
+
+            # Success message
+            if tools_count == 0:
+                message = "Connection successful — server responded with no tools"
+            elif tools_count == 1:
+                message = "Connection successful — server responded with 1 tool"
+            else:
+                message = f"Connection successful — server responded with {tools_count} tools"
+
+            return McpServerTestConnectionResponse(
+                success=True,
+                message=message,
+                tools_count=tools_count,
+            )
+        finally:
+            # Always clean up the session
             try:
-                tools = await session.list_tools()
-                tools_count = len(tools) if tools else 0
-
-                # Success message
-                if tools_count == 0:
-                    message = "Connection successful — server responded with no tools"
-                elif tools_count == 1:
-                    message = "Connection successful — server responded with 1 tool"
-                else:
-                    message = f"Connection successful — server responded with {tools_count} tools"
-
-                return McpServerTestConnectionResponse(
-                    success=True,
-                    message=message,
-                    tools_count=tools_count,
-                )
-            finally:
-                # Always clean up the session
-                try:
-                    await session.stop()
-                except Exception as e:
-                    logger.debug("session stop error: %s", e)
-                try:
-                    await streams_cm.__aexit__(None, None, None)
-                except Exception as e:
-                    logger.debug("streams cleanup error: %s", e)
+                await session.stop()
+            except Exception as e:
+                logger.debug("session stop error: %s", e)
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception as e:
+                logger.debug("streams cleanup error: %s", e)
 
     except asyncio.TimeoutError:
         return McpServerTestConnectionResponse(

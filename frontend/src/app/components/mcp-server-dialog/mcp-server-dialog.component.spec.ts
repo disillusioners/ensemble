@@ -1,5 +1,5 @@
 import { signal, computed } from '@angular/core';
-import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate, ConfigSchemaField } from '../../models';
+import type { McpServer, McpServerCreate, McpServerUpdate, McpServerTestConnectionResponse, BuiltinServerTemplate, ConfigSchemaField } from '../../models';
 
 // MCP Server templates (mirrors component)
 const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
@@ -68,10 +68,19 @@ class TestableMcpServerDialogComponent {
   protected readonly configJsonError = signal<string | null>(null);
   protected readonly saving = signal(false);
   protected readonly selectedTemplate = signal<string | null>(null);
+  protected readonly testingConnection = signal(false);
+  protected readonly testResult = signal<McpServerTestConnectionResponse | null>(null);
+
+  // Mock service for test connection
+  protected mcpServerService: { testConnection: jest.Mock } | null = null;
 
   // Schema form state
   protected readonly schemaFormValues = signal<Record<string, unknown>>({});
   protected readonly schemaFormValid = signal(false);
+
+  protected readonly canTestConnection = computed(() => {
+    return !this.testingConnection() && !this.configJsonError() && this.configJson().trim().length > 0;
+  });
 
   private readonly dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>;
   protected readonly data: DialogData | null;
@@ -95,6 +104,35 @@ class TestableMcpServerDialogComponent {
       if (this.data.server.initial_values) {
         this.schemaFormValues.set({ ...this.data.server.initial_values });
       }
+    }
+  }
+
+  protected testConnection(): void {
+    // Clear previous result
+    this.testResult.set(null);
+
+    // Validate JSON config
+    const json = this.configJson().trim();
+    if (!json) {
+      this.testResult.set({ success: false, message: 'Configuration is empty' });
+      return;
+    }
+
+    let parsedConfig: Record<string, unknown>;
+    try {
+      parsedConfig = JSON.parse(json);
+    } catch {
+      this.testResult.set({ success: false, message: 'Invalid JSON format' });
+      return;
+    }
+
+    // Set loading state
+    this.testingConnection.set(true);
+
+    // If mock service is provided, use it
+    if (this.mcpServerService?.testConnection) {
+      this.mcpServerService.testConnection(parsedConfig);
+      this.testingConnection.set(false);
     }
   }
 
@@ -129,6 +167,7 @@ class TestableMcpServerDialogComponent {
     const target = event.target as HTMLTextAreaElement;
     this.configJson.set(target.value);
     this.validateConfigJson();
+    this.testResult.set(null);
   }
 
   onIsActiveChange(event: Event): void {
@@ -1471,6 +1510,179 @@ describe('McpServerDialogComponent', () => {
 
     it('should initialize with null', () => {
       expect(component.selectedTemplate()).toBeNull();
+    });
+  });
+
+  describe('Test Connection', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    describe('canTestConnection computed', () => {
+      it('should be enabled when valid JSON config', () => {
+        component.configJson.set('{"command": "npx", "args": ["test"]}');
+        expect(component.canTestConnection()).toBe(true);
+      });
+
+      it('should be disabled when config is invalid JSON', () => {
+        component.configJson.set('{invalid json}');
+        component.onConfigJsonChange({ target: { value: '{invalid json}' } } as unknown as Event);
+        expect(component.canTestConnection()).toBe(false);
+      });
+
+      it('should be disabled when testingConnection is true', () => {
+        component.configJson.set('{"command": "npx"}');
+        component.testingConnection.set(true);
+        expect(component.canTestConnection()).toBe(false);
+      });
+
+      it('should be disabled when configJson is empty', () => {
+        component.configJson.set('');
+        expect(component.canTestConnection()).toBe(false);
+      });
+
+      it('should be disabled when configJson is whitespace only', () => {
+        component.configJson.set('   ');
+        expect(component.canTestConnection()).toBe(false);
+      });
+
+      it('should be enabled when valid JSON with no error and not testing', () => {
+        component.configJson.set('{"url": "http://localhost:3000"}');
+        component.testingConnection.set(false);
+        component.configJsonError.set(null);
+        expect(component.canTestConnection()).toBe(true);
+      });
+    });
+
+    describe('testConnection', () => {
+      it('should clear previous testResult', () => {
+        component.testResult.set({ success: true, message: 'Previous result' });
+        component.configJson.set('{"command": "npx"}');
+        component.mcpServerService = { testConnection: jest.fn() };
+
+        component.testConnection();
+
+        expect(component.testResult()).toBeNull();
+      });
+
+      it('should set error result when config is empty', () => {
+        component.configJson.set('');
+
+        component.testConnection();
+
+        expect(component.testResult()).toEqual({
+          success: false,
+          message: 'Configuration is empty'
+        });
+      });
+
+      it('should set error result when JSON is invalid', () => {
+        component.configJson.set('{invalid json}');
+
+        component.testConnection();
+
+        expect(component.testResult()).toEqual({
+          success: false,
+          message: 'Invalid JSON format'
+        });
+      });
+
+      it('should call service with parsed config when JSON is valid', () => {
+        const mockTestConnection = jest.fn();
+        component.configJson.set('{"command": "npx", "args": ["test"]}');
+        component.mcpServerService = { testConnection: mockTestConnection };
+
+        component.testConnection();
+
+        expect(mockTestConnection).toHaveBeenCalledWith({ command: 'npx', args: ['test'] });
+      });
+
+      it('should clear testingConnection after service call', () => {
+        const mockTestConnection = jest.fn();
+        component.configJson.set('{"command": "npx"}');
+        component.mcpServerService = { testConnection: mockTestConnection };
+
+        component.testConnection();
+
+        expect(component.testingConnection()).toBe(false);
+      });
+
+      it('should handle nested JSON config', () => {
+        const mockTestConnection = jest.fn();
+        const nestedConfig = {
+          transport: 'sse',
+          url: 'http://localhost:3000/sse',
+          headers: {
+            Authorization: 'Bearer token123'
+          }
+        };
+        component.configJson.set(JSON.stringify(nestedConfig));
+        component.mcpServerService = { testConnection: mockTestConnection };
+
+        component.testConnection();
+
+        expect(mockTestConnection).toHaveBeenCalledWith(nestedConfig);
+      });
+    });
+
+    describe('onConfigJsonChange', () => {
+      it('should clear testResult when config changes', () => {
+        component.testResult.set({ success: true, message: 'Previous test' });
+
+        component.onConfigJsonChange({ target: { value: '{"new": "config"}' } } as unknown as Event);
+
+        expect(component.testResult()).toBeNull();
+      });
+
+      it('should clear testResult even when new config is empty', () => {
+        component.testResult.set({ success: false, message: 'Error' });
+
+        component.onConfigJsonChange({ target: { value: '' } } as unknown as Event);
+
+        expect(component.testResult()).toBeNull();
+      });
+
+      it('should set configJsonError for invalid JSON', () => {
+        component.onConfigJsonChange({ target: { value: '{bad json}' } } as unknown as Event);
+
+        expect(component.configJsonError()).toBe('Invalid JSON format');
+      });
+
+      it('should clear configJsonError for valid JSON', () => {
+        component.configJsonError.set('Previous error');
+
+        component.onConfigJsonChange({ target: { value: '{"valid": true}' } } as unknown as Event);
+
+        expect(component.configJsonError()).toBeNull();
+      });
+    });
+
+    describe('testingConnection signal', () => {
+      it('should initialize with false', () => {
+        expect(component.testingConnection()).toBe(false);
+      });
+
+      it('should be settable', () => {
+        component.testingConnection.set(true);
+        expect(component.testingConnection()).toBe(true);
+
+        component.testingConnection.set(false);
+        expect(component.testingConnection()).toBe(false);
+      });
+    });
+
+    describe('testResult signal', () => {
+      it('should initialize with null', () => {
+        expect(component.testResult()).toBeNull();
+      });
+
+      it('should be settable', () => {
+        const result: McpServerTestConnectionResponse = { success: true, message: 'Connected', tools_count: 5 };
+        component.testResult.set(result);
+        expect(component.testResult()).toEqual(result);
+      });
     });
   });
 });

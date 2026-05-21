@@ -1,7 +1,8 @@
 import { signal } from '@angular/core';
 import { Observable, of } from 'rxjs';
 import { tap, map } from 'rxjs/operators';
-import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse } from '../models';
+import { throwError } from 'rxjs';
+import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse, McpServerTestConnectionResponse } from '../models';
 
 // Mock HttpClient that tracks requests
 class MockHttpClient {
@@ -84,6 +85,10 @@ class TestableMcpServerService {
         this.servers.update(servers => servers.filter(s => s.id !== id));
       })
     );
+  }
+
+  testConnection(config: Record<string, unknown>): Observable<McpServerTestConnectionResponse> {
+    return this.http.post<McpServerTestConnectionResponse>(`${this.API_BASE}/test-connection`, { config });
   }
 }
 
@@ -487,6 +492,166 @@ describe('McpServerService', () => {
             },
           });
         },
+      });
+    });
+  });
+
+  describe('testConnection', () => {
+    it('should make POST request to /api/mcp-servers/test-connection', () => {
+      const config = { command: 'npx', args: ['test'] };
+
+      httpMock.post = jest.fn().mockReturnValue(
+        of({ success: true, message: 'Connected' })
+      );
+
+      service.testConnection(config).subscribe();
+
+      expect(httpMock.post).toHaveBeenCalledWith('/api/mcp-servers/test-connection', { config });
+    });
+
+    it('should send config in request body', () => {
+      const config = { transport: 'stdio', command: 'npx', args: ['-y', '@server/package'] };
+
+      httpMock.post = jest.fn().mockReturnValue(
+        of({ success: true, message: 'OK' })
+      );
+
+      service.testConnection(config).subscribe();
+
+      expect(httpMock.post).toHaveBeenCalledWith(
+        '/api/mcp-servers/test-connection',
+        { config: { transport: 'stdio', command: 'npx', args: ['-y', '@server/package'] } }
+      );
+    });
+
+    it('should return McpServerTestConnectionResponse on success', (done) => {
+      const config = { command: 'npx', args: ['test'] };
+      const response: McpServerTestConnectionResponse = {
+        success: true,
+        message: 'Connection successful',
+        tools_count: 10
+      };
+
+      httpMock.post = jest.fn().mockReturnValue(of(response));
+
+      service.testConnection(config).subscribe({
+        next: (res) => {
+          expect(res.success).toBe(true);
+          expect(res.message).toBe('Connection successful');
+          expect(res.tools_count).toBe(10);
+          done();
+        },
+        error: done.fail,
+      });
+    });
+
+    it('should handle successful connection with zero tools', (done) => {
+      const config = { url: 'http://localhost:3000' };
+      const response: McpServerTestConnectionResponse = {
+        success: true,
+        message: 'Connected but no tools available',
+        tools_count: 0
+      };
+
+      httpMock.post = jest.fn().mockReturnValue(of(response));
+
+      service.testConnection(config).subscribe({
+        next: (res) => {
+          expect(res.success).toBe(true);
+          expect(res.tools_count).toBe(0);
+          done();
+        },
+        error: done.fail,
+      });
+    });
+
+    it('should handle failed connection response', (done) => {
+      const config = { command: 'invalid' };
+      const errorResponse: McpServerTestConnectionResponse = {
+        success: false,
+        message: 'Connection refused'
+      };
+
+      httpMock.post = jest.fn().mockReturnValue(of(errorResponse));
+
+      service.testConnection(config).subscribe({
+        next: (res) => {
+          expect(res.success).toBe(false);
+          expect(res.message).toBe('Connection refused');
+          done();
+        },
+        error: done.fail,
+      });
+    });
+
+    it('should handle HTTP error response', (done) => {
+      const config = { command: 'test' };
+
+      httpMock.post = jest.fn().mockReturnValue(
+        throwError(() => ({ error: { detail: 'Server unavailable' }, status: 500 }))
+      );
+
+      service.testConnection(config).subscribe({
+        next: () => done.fail('Should have errored'),
+        error: (err) => {
+          expect(err.error.detail).toBe('Server unavailable');
+          expect(err.status).toBe(500);
+          done();
+        },
+      });
+    });
+
+    it('should handle network error', (done) => {
+      const config = { url: 'http://invalid-host:9999' };
+
+      httpMock.post = jest.fn().mockReturnValue(
+        throwError(() => new Error('Network error'))
+      );
+
+      service.testConnection(config).subscribe({
+        next: () => done.fail('Should have errored'),
+        error: (err) => {
+          expect(err.message).toBe('Network error');
+          done();
+        },
+      });
+    });
+
+    it('should URL construction uses correct API path', () => {
+      const config = { command: 'npx' };
+
+      httpMock.post = jest.fn().mockReturnValue(of({ success: true, message: 'OK' }));
+
+      service.testConnection(config).subscribe();
+
+      // Verify POST was called with correct URL
+      expect(httpMock.post).toHaveBeenCalledWith('/api/mcp-servers/test-connection', { config });
+    });
+
+    it('should handle complex nested config', (done) => {
+      const config = {
+        transport: 'sse',
+        url: 'http://localhost:3000/sse',
+        headers: {
+          Authorization: 'Bearer token123',
+          'X-Custom-Header': 'value'
+        },
+        timeout: 30000
+      };
+
+      httpMock.post = jest.fn().mockReturnValue(
+        of({ success: true, message: 'OK' })
+      );
+
+      service.testConnection(config).subscribe({
+        next: (res) => {
+          expect(res.success).toBe(true);
+          // Verify the config was passed correctly
+          const postCall = (httpMock.post as jest.Mock).mock.calls[0];
+          expect(postCall[1].config).toEqual(config);
+          done();
+        },
+        error: done.fail,
       });
     });
   });
