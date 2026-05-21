@@ -1,5 +1,6 @@
-import { Component, signal, computed, OnInit, inject, ViewChild, OnDestroy, DestroyRef } from '@angular/core';
+import { Component, signal, computed, OnInit, inject, ViewChild, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
@@ -43,7 +44,7 @@ export const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
   templateUrl: './mcp-server-dialog.html',
   styleUrl: './mcp-server-dialog.scss'
 })
-export class McpServerDialogComponent implements OnInit, OnDestroy {
+export class McpServerDialogComponent implements OnInit {
   @ViewChild('configSchemaForm') configSchemaForm?: ConfigSchemaFormComponent;
 
   protected readonly name = signal('');
@@ -88,7 +89,8 @@ export class McpServerDialogComponent implements OnInit, OnDestroy {
   private handleError(context: string, err: unknown): void {
     this.saving.set(false);
     console.error(`Failed to ${context}:`, err);
-    const message = (err as any)?.error?.detail || (err as any)?.message || `Failed to ${context}`;
+    const error = err as HttpErrorResponse;
+    const message = error.error?.detail || error.message || `Failed to ${context}`;
     this.snackBar.open(message, 'Close', { duration: 5000, panelClass: 'error-snackbar' });
   }
 
@@ -122,9 +124,9 @@ export class McpServerDialogComponent implements OnInit, OnDestroy {
           // Use the detailed message from the BE response
           this.testResult.set({ success: response.success, message: response.message });
         },
-        error: (err) => {
+        error: (err: HttpErrorResponse) => {
           this.testingConnection.set(false);
-          const message = (err as any)?.error?.detail || (err as any)?.message || 'Connection test failed';
+          const message = err.error?.detail || err.message || 'Connection test failed';
           this.testResult.set({ success: false, message });
         }
       });
@@ -149,10 +151,6 @@ export class McpServerDialogComponent implements OnInit, OnDestroy {
         this.schemaFormValues.set({ ...server.initial_values });
       }
     }
-  }
-
-  ngOnDestroy(): void {
-    // Cleanup handled by takeUntilDestroyed() operator
   }
 
   protected onNameChange(event: Event): void {

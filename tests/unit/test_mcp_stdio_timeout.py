@@ -1,24 +1,9 @@
 """Tests for MCP STDIO timeout configuration changes."""
-
-import os
-
 import pytest
 from pydantic import ValidationError
 
 from daemon.mcp.config import McpStdioConfig, McpSseConfig, validate_mcp_server_config
 from daemon.mcp.connection_manager import McpConnectionManager, STDIO_DEFAULT_TIMEOUT
-
-
-@pytest.fixture
-def allow_loopback():
-    """Allow loopback URLs in tests (SSRF protection is enabled by default)."""
-    original = os.environ.get("MCP_ALLOW_LOOPBACK")
-    os.environ["MCP_ALLOW_LOOPBACK"] = "true"
-    yield
-    if original is None:
-        del os.environ["MCP_ALLOW_LOOPBACK"]
-    else:
-        os.environ["MCP_ALLOW_LOOPBACK"] = original
 
 
 class TestMcpStdioConfigTimeoutField:

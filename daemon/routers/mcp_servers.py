@@ -124,12 +124,12 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
                 # Always clean up the session
                 try:
                     await session.stop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("session stop error: %s", e)
                 try:
                     await streams_cm.__aexit__(None, None, None)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("streams cleanup error: %s", e)
 
     except asyncio.TimeoutError:
         return McpServerTestConnectionResponse(

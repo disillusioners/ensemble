@@ -7,10 +7,13 @@ import logging
 import os
 import socket
 from typing import Annotated, Any, Literal, Union
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
+
+_ENV_ALLOW_LOOPBACK = "MCP_ALLOW_LOOPBACK"
 
 
 class McpConfigValidationError(ValueError):
@@ -76,12 +79,6 @@ def _validate_url_not_ssrf(url: str) -> str:
     Raises:
         McpConfigValidationError: If the URL resolves to a restricted address
     """
-    # Parse the URL to extract hostname
-    try:
-        from urllib.parse import urlparse
-    except ImportError:
-        from urlparse import urlparse  # type: ignore
-
     parsed = urlparse(url)
     hostname = parsed.hostname
 
@@ -90,7 +87,7 @@ def _validate_url_not_ssrf(url: str) -> str:
         return url
 
     # Allow loopback only when env var is set (for local dev)
-    allow_loopback = os.environ.get("MCP_ALLOW_LOOPBACK", "false").lower() == "true"
+    allow_loopback = os.environ.get(_ENV_ALLOW_LOOPBACK, "false").lower() == "true"
 
     try:
         # Resolve hostname to IP addresses

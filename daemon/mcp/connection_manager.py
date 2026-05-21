@@ -88,12 +88,12 @@ class McpConnectionManager:
             logger.error(f"Failed to create session for '{server_name}': {e}")
             try:
                 await session.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("session stop error: %s", e)
             try:
                 await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("streams cleanup error: %s", e)
             raise
 
     async def connect_instance(
@@ -419,27 +419,7 @@ class McpConnectionManager:
             env=config.env,
         )
         streams_cm = mcp.stdio_client(server_params)
-        session = None
-        try:
-            async with asyncio.timeout(timeout):
-                read_stream, write_stream = await streams_cm.__aenter__()
-                session = ManagedClientSession(read_stream, write_stream)
-                await session.start()
-                await session.initialize()
-                return (session, streams_cm)
-        except Exception:
-            # Clean up session if it was created
-            if session is not None:
-                try:
-                    await session.stop()
-                except Exception:
-                    pass
-            # Clean up streams
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
+        return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
 
     async def _create_test_sse_session(
         self,
@@ -448,27 +428,7 @@ class McpConnectionManager:
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for SSE transport."""
         streams_cm = sse_client(config.url, headers=config.headers or {})
-        session = None
-        try:
-            async with asyncio.timeout(timeout):
-                read_stream, write_stream = await streams_cm.__aenter__()
-                session = ManagedClientSession(read_stream, write_stream)
-                await session.start()
-                await session.initialize()
-                return (session, streams_cm)
-        except Exception:
-            # Clean up session if it was created
-            if session is not None:
-                try:
-                    await session.stop()
-                except Exception:
-                    pass
-            # Clean up streams
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
+        return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
 
     async def _create_test_streamable_http_session(
         self,
@@ -477,26 +437,34 @@ class McpConnectionManager:
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for Streamable HTTP transport."""
         streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
+        return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=True)
+
+    async def _create_test_session_from_streams(
+        self,
+        streams_cm: Any,
+        timeout: float,
+        is_streamable_http: bool = False,
+    ) -> tuple[ManagedClientSession, Any]:
+        """Shared helper to create a test session from streams context manager."""
         session = None
         try:
             async with asyncio.timeout(timeout):
-                read_stream, write_stream, _ = await streams_cm.__aenter__()
+                result = await streams_cm.__aenter__()
+                read_stream, write_stream = (result[0], result[1]) if is_streamable_http else result
                 session = ManagedClientSession(read_stream, write_stream)
                 await session.start()
                 await session.initialize()
                 return (session, streams_cm)
         except Exception:
-            # Clean up session if it was created
             if session is not None:
                 try:
                     await session.stop()
-                except Exception:
-                    pass
-            # Clean up streams
+                except Exception as e:
+                    logger.debug("session stop error: %s", e)
             try:
                 await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("streams cleanup error: %s", e)
             raise
 
 

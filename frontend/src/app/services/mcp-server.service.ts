@@ -135,7 +135,7 @@ export class McpServerService {
   /**
    * POST /api/mcp-servers/test-connection
    */
-  testConnection(config: any): Observable<{ success: boolean; message: string; tools_count?: number }> {
+  testConnection(config: Record<string, unknown>): Observable<{ success: boolean; message: string; tools_count?: number }> {
     return this.http.post<{ success: boolean; message: string; tools_count?: number }>(`${this.API_BASE}/test-connection`, { config });
   }
 }
