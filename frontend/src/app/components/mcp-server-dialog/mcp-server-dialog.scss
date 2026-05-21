@@ -396,3 +396,91 @@ $accent-blue: #3b82f6;
 .h-5 {
   height: 1.25rem;
 }
+
+// Test Connection
+.test-connection-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.test-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  border-radius: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: $text-secondary;
+  background-color: $bg-primary;
+  border: 1px solid $border-color;
+  cursor: pointer;
+  transition: all 0.15s ease;
+
+  &:hover:not(:disabled) {
+    background-color: $bg-card-hover;
+    border-color: $accent-violet;
+    color: $accent-violet;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .w-4 {
+    width: 1rem;
+  }
+
+  .h-4 {
+    height: 1rem;
+  }
+}
+
+.test-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.test-result {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+
+  &.success {
+    background-color: rgba($accent-emerald, 0.15);
+    border: 1px solid rgba($accent-emerald, 0.3);
+    color: $accent-emerald;
+  }
+
+  &.error {
+    background-color: rgba($accent-rose, 0.15);
+    border: 1px solid rgba($accent-rose, 0.3);
+    color: $accent-rose;
+  }
+
+  .w-4 {
+    width: 1rem;
+  }
+
+  .h-4 {
+    height: 1rem;
+  }
+}

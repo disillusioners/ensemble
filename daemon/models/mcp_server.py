@@ -92,6 +92,20 @@ class BuiltinServerConfigure(BaseModel):
     values: dict[str, Any] = Field(..., description="Configuration values")
 
 
+class McpServerTestConnectionRequest(BaseModel):
+    """Request for testing MCP server connectivity."""
+
+    config: dict[str, Any] = Field(..., description="Server configuration to test")
+
+
+class McpServerTestConnectionResponse(BaseModel):
+    """Response for MCP server connectivity test."""
+
+    success: bool = Field(..., description="Whether the connection test succeeded")
+    message: str = Field(..., description="Result message")
+    tools_count: int | None = Field(default=None, description="Number of tools available (if successful)")
+
+
 __all__ = [
     "McpServerCreate",
     "McpServerUpdate",
@@ -102,4 +116,6 @@ __all__ = [
     "BuiltinServerTemplate",
     "BuiltinTemplateListResponse",
     "BuiltinServerConfigure",
+    "McpServerTestConnectionRequest",
+    "McpServerTestConnectionResponse",
 ]

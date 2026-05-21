@@ -1,10 +1,11 @@
-import { Component, signal, computed, OnInit, inject, ViewChild } from '@angular/core';
+import { Component, signal, computed, OnInit, inject, ViewChild, OnDestroy, DestroyRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate } from '../../models';
 import { ConfigSchemaFormComponent } from '../config-schema-form/config-schema-form.component';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { McpServerService } from '../../services/mcp-server.service';
 
 interface DialogData {
@@ -42,7 +43,7 @@ export const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
   templateUrl: './mcp-server-dialog.html',
   styleUrl: './mcp-server-dialog.scss'
 })
-export class McpServerDialogComponent implements OnInit {
+export class McpServerDialogComponent implements OnInit, OnDestroy {
   @ViewChild('configSchemaForm') configSchemaForm?: ConfigSchemaFormComponent;
 
   protected readonly name = signal('');
@@ -53,6 +54,8 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly configJsonError = signal<string | null>(null);
   protected readonly saving = signal(false);
   protected readonly selectedTemplate = signal<string | null>(null);
+  protected readonly testingConnection = signal(false);
+  protected readonly testResult = signal<{ success: boolean; message: string } | null>(null);
   protected readonly templateTypes = ['stdio', 'sse', 'streamable-http'];
 
   // Schema form state
@@ -63,11 +66,15 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly data = inject<DialogData>(MAT_DIALOG_DATA);
   private readonly snackBar = inject(MatSnackBar);
   private readonly mcpServerService = inject(McpServerService);
+  private readonly destroyRef = inject(DestroyRef);
 
   // Mode detection
   protected readonly isEditMode = computed(() => !!this.data?.server && !this.data?.server.is_builtin);
   protected readonly isBuiltinConfigureMode = computed(() => !!this.data?.server?.is_builtin);
   protected readonly isTemplateMode = computed(() => !!this.data?.template);
+  protected readonly canTestConnection = computed(() => {
+    return !this.testingConnection() && !this.configJsonError() && this.configJson().trim().length > 0;
+  });
 
   // Convenience accessors
   protected get server(): McpServer | undefined {
@@ -83,6 +90,44 @@ export class McpServerDialogComponent implements OnInit {
     console.error(`Failed to ${context}:`, err);
     const message = (err as any)?.error?.detail || (err as any)?.message || `Failed to ${context}`;
     this.snackBar.open(message, 'Close', { duration: 5000, panelClass: 'error-snackbar' });
+  }
+
+  protected testConnection(): void {
+    // Clear previous result
+    this.testResult.set(null);
+
+    // Validate JSON config
+    const json = this.configJson().trim();
+    if (!json) {
+      this.testResult.set({ success: false, message: 'Configuration is empty' });
+      return;
+    }
+
+    let parsedConfig: Record<string, unknown>;
+    try {
+      parsedConfig = JSON.parse(json);
+    } catch {
+      this.testResult.set({ success: false, message: 'Invalid JSON format' });
+      return;
+    }
+
+    // Set loading state
+    this.testingConnection.set(true);
+
+    this.mcpServerService.testConnection(parsedConfig)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (response) => {
+          this.testingConnection.set(false);
+          // Use the detailed message from the BE response
+          this.testResult.set({ success: response.success, message: response.message });
+        },
+        error: (err) => {
+          this.testingConnection.set(false);
+          const message = (err as any)?.error?.detail || (err as any)?.message || 'Connection test failed';
+          this.testResult.set({ success: false, message });
+        }
+      });
   }
 
   ngOnInit(): void {
@@ -106,6 +151,10 @@ export class McpServerDialogComponent implements OnInit {
     }
   }
 
+  ngOnDestroy(): void {
+    // Cleanup handled by takeUntilDestroyed() operator
+  }
+
   protected onNameChange(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.name.set(target.value);
@@ -120,6 +169,7 @@ export class McpServerDialogComponent implements OnInit {
     const target = event.target as HTMLTextAreaElement;
     this.configJson.set(target.value);
     this.validateConfigJson();
+    this.testResult.set(null);
   }
 
   protected onIsActiveChange(event: Event): void {

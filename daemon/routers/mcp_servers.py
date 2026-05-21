@@ -18,8 +18,11 @@ from daemon.models import (
     BuiltinServerTemplate,
     BuiltinTemplateListResponse,
     BuiltinServerConfigure,
+    McpServerTestConnectionRequest,
+    McpServerTestConnectionResponse,
 )
 from daemon.mcp.config import validate_mcp_server_config, McpConfigValidationError
+from daemon.mcp import get_mcp_connection_manager
 from daemon.mcp.builtin_servers import get_registry
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
 from daemon.utils import parse_utc_datetime
@@ -77,6 +80,97 @@ async def list_mcp_servers(request: Request):
     )
     mcp_servers = [_mcp_server_to_info(srv) for srv in mcp_servers_data]
     return McpServerListResponse(mcp_servers=mcp_servers)
+
+
+@router.post("/test-connection", response_model=McpServerTestConnectionResponse)
+async def test_mcp_server_connection(test_request: McpServerTestConnectionRequest):
+    """
+    Test MCP server connectivity before saving.
+
+    Creates a temporary connection to the specified MCP server,
+    verifies it responds correctly, and immediately cleans up.
+    This does NOT save anything to the database.
+    """
+    conn_mgr = get_mcp_connection_manager()
+    timeout = 15.0
+
+    try:
+        # Validate the config format first
+        try:
+            validate_mcp_server_config(test_request.config)
+        except McpConfigValidationError as e:
+            return McpServerTestConnectionResponse(
+                success=False,
+                message=f"Invalid configuration: {e}",
+            )
+
+        # Create a temporary session
+        session, streams_cm = await conn_mgr.create_test_session(
+            test_request.config,
+            timeout=timeout,
+        )
+
+        # Session created successfully — now try to list tools
+        try:
+            tools = await session.list_tools()
+            tools_count = len(tools)
+
+            # Success message
+            if tools_count == 0:
+                message = "Connection successful — server responded with no tools"
+            elif tools_count == 1:
+                message = "Connection successful — server responded with 1 tool"
+            else:
+                message = f"Connection successful — server responded with {tools_count} tools"
+
+            return McpServerTestConnectionResponse(
+                success=True,
+                message=message,
+                tools_count=tools_count,
+            )
+        finally:
+            # Always clean up the session
+            try:
+                await session.stop()
+            except Exception:
+                pass
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+    except asyncio.TimeoutError:
+        return McpServerTestConnectionResponse(
+            success=False,
+            message=f"Connection timed out after {timeout} seconds",
+        )
+    except ConnectionRefusedError:
+        return McpServerTestConnectionResponse(
+            success=False,
+            message="Connection failed: connection refused",
+        )
+    except OSError as e:
+        if "ECONNREFUSED" in str(e):
+            return McpServerTestConnectionResponse(
+                success=False,
+                message="Connection failed: connection refused",
+            )
+        elif "ENOENT" in str(e) or "No such file" in str(e):
+            return McpServerTestConnectionResponse(
+                success=False,
+                message=f"Connection failed: command not found — {e}",
+            )
+        return McpServerTestConnectionResponse(
+            success=False,
+            message=f"Connection failed: {e}",
+        )
+    except Exception as e:
+        # Log full exception for debugging, return sanitized message to user
+        logger.exception("MCP connection test failed")
+        return McpServerTestConnectionResponse(
+            success=False,
+            message="Connection failed: an unexpected error occurred",
+        )
 
 
 @router.post("", response_model=McpServerInfo, status_code=201)

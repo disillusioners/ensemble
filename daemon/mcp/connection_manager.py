@@ -369,6 +369,136 @@ class McpConnectionManager:
 
         await asyncio.gather(*close_tasks, return_exceptions=True)
 
+    async def create_test_session(
+        self,
+        config: dict[str, Any],
+        timeout: float = 15.0,
+    ) -> tuple[ManagedClientSession, Any]:
+        """
+        Create a temporary MCP session for testing connectivity.
+
+        This method creates a session WITHOUT tracking it in the connection manager,
+        allowing for clean test-and-disconnect workflows.
+
+        Args:
+            config: MCP server configuration dict (transport + transport-specific fields)
+            timeout: Connection timeout in seconds (default: 15s)
+
+        Returns:
+            Tuple of (ManagedClientSession, stream_context_manager)
+
+        Raises:
+            McpConfigValidationError: If config is invalid
+            ValueError: If transport type is unsupported
+            asyncio.TimeoutError: If connection times out
+            Exception: For other connection errors
+        """
+        validated_config = validate_mcp_server_config(config)
+
+        if isinstance(validated_config, McpStdioConfig):
+            effective_timeout = (
+                validated_config.timeout if validated_config.timeout is not None else STDIO_DEFAULT_TIMEOUT
+            )
+            return await self._create_test_stdio_session(validated_config, effective_timeout)
+        elif isinstance(validated_config, McpSseConfig):
+            return await self._create_test_sse_session(validated_config, timeout)
+        elif isinstance(validated_config, McpStreamableHttpConfig):
+            return await self._create_test_streamable_http_session(validated_config, timeout)
+        else:
+            raise ValueError(f"Unsupported transport type: {type(validated_config)}")
+
+    async def _create_test_stdio_session(
+        self,
+        config: McpStdioConfig,
+        timeout: float,
+    ) -> tuple[ManagedClientSession, Any]:
+        """Create a test session for STDIO transport."""
+        server_params = StdioServerParameters(
+            command=config.command,
+            args=config.args,
+            env=config.env,
+        )
+        streams_cm = mcp.stdio_client(server_params)
+        session = None
+        try:
+            async with asyncio.timeout(timeout):
+                read_stream, write_stream = await streams_cm.__aenter__()
+                session = ManagedClientSession(read_stream, write_stream)
+                await session.start()
+                await session.initialize()
+                return (session, streams_cm)
+        except Exception:
+            # Clean up session if it was created
+            if session is not None:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+            # Clean up streams
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
+
+    async def _create_test_sse_session(
+        self,
+        config: McpSseConfig,
+        timeout: float,
+    ) -> tuple[ManagedClientSession, Any]:
+        """Create a test session for SSE transport."""
+        streams_cm = sse_client(config.url, headers=config.headers or {})
+        session = None
+        try:
+            async with asyncio.timeout(timeout):
+                read_stream, write_stream = await streams_cm.__aenter__()
+                session = ManagedClientSession(read_stream, write_stream)
+                await session.start()
+                await session.initialize()
+                return (session, streams_cm)
+        except Exception:
+            # Clean up session if it was created
+            if session is not None:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+            # Clean up streams
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
+
+    async def _create_test_streamable_http_session(
+        self,
+        config: McpStreamableHttpConfig,
+        timeout: float,
+    ) -> tuple[ManagedClientSession, Any]:
+        """Create a test session for Streamable HTTP transport."""
+        streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
+        session = None
+        try:
+            async with asyncio.timeout(timeout):
+                read_stream, write_stream, _ = await streams_cm.__aenter__()
+                session = ManagedClientSession(read_stream, write_stream)
+                await session.start()
+                await session.initialize()
+                return (session, streams_cm)
+        except Exception:
+            # Clean up session if it was created
+            if session is not None:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+            # Clean up streams
+            try:
+                await streams_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            raise
+
 
 def get_mcp_connection_manager() -> McpConnectionManager:
     """
