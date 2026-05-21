@@ -1,6 +1,36 @@
 import { signal, computed } from '@angular/core';
 import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate, ConfigSchemaField } from '../../models';
 
+// MCP Server templates (mirrors component)
+const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
+  stdio: {
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@example/mcp-server']
+  },
+  sse: {
+    transport: 'sse',
+    url: 'http://localhost:3000/sse'
+  },
+  'streamable-http': {
+    transport: 'streamable-http',
+    url: 'http://localhost:3000/mcp'
+  }
+};
+
+// Mock MatSnackBar
+class MockMatSnackBar {
+  static lastOpen: { message: string; action?: string; options?: object } | null = null;
+
+  open(message: string, action?: string, options?: { duration?: number; panelClass?: string }): void {
+    MockMatSnackBar.lastOpen = { message, action, options };
+  }
+
+  static reset(): void {
+    MockMatSnackBar.lastOpen = null;
+  }
+}
+
 // Mock MatDialogRef
 class MockMatDialogRef<T = unknown> {
   private closeFn: ((result?: T) => void) | null = null;
@@ -30,6 +60,8 @@ class TestableMcpServerDialogComponent {
   protected readonly isActive = signal(true);
   protected readonly error = signal<string | null>(null);
   protected readonly configJsonError = signal<string | null>(null);
+  protected readonly saving = signal(false);
+  protected readonly selectedTemplate = signal<string | null>(null);
 
   // Schema form state
   protected readonly schemaFormValues = signal<Record<string, unknown>>({});
@@ -37,6 +69,7 @@ class TestableMcpServerDialogComponent {
 
   private readonly dialogRef: MockMatDialogRef<McpServerCreate | McpServerUpdate | null>;
   protected readonly data: DialogData | null;
+  protected readonly snackBar = new MockMatSnackBar();
 
   protected readonly isEditMode: () => boolean;
   protected readonly isBuiltinConfigureMode: () => boolean;
@@ -95,6 +128,62 @@ class TestableMcpServerDialogComponent {
   onIsActiveChange(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.isActive.set(target.checked);
+  }
+
+  selectTemplate(type: string): void {
+    // If clicking the same template, just deselect (keep content)
+    if (this.selectedTemplate() === type) {
+      this.selectedTemplate.set(null);
+      return;
+    }
+
+    // Apply new template
+    const preset = MCP_TEMPLATES[type];
+    if (preset) {
+      this.configJson.set(JSON.stringify(preset, null, 2));
+      this.selectedTemplate.set(type);
+      this.validateConfigJson();
+    }
+  }
+
+  formatJson(): void {
+    const json = this.configJson().trim();
+    if (!json) return;
+
+    try {
+      const parsed = JSON.parse(json);
+      this.configJson.set(JSON.stringify(parsed, null, 2));
+      this.validateConfigJson();
+    } catch {
+      // If JSON is invalid, don't format
+    }
+  }
+
+  onConfigKeydown(event: KeyboardEvent): void {
+    // Handle Tab key to insert 2 spaces instead of moving focus
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      const target = event.target as HTMLTextAreaElement;
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      const value = this.configJson();
+
+      // Insert 2 spaces at cursor position
+      const newValue = value.substring(0, start) + '  ' + value.substring(end);
+      this.configJson.set(newValue);
+
+      // Move cursor after the inserted spaces
+      requestAnimationFrame(() => {
+        target.selectionStart = target.selectionEnd = start + 2;
+      });
+    }
+  }
+
+  handleError(context: string, err: unknown): void {
+    this.saving.set(false);
+    console.error(`Failed to ${context}:`, err);
+    const message = (err as any)?.error?.detail || (err as any)?.message || `Failed to ${context}`;
+    this.snackBar.open(message, 'Close', { duration: 5000, panelClass: 'error-snackbar' });
   }
 
   private validateConfigJson(): boolean {
@@ -1029,6 +1118,347 @@ describe('McpServerDialogComponent', () => {
 
       component.onSchemaValidChange(true);
       expect(component.isSubmitDisabled()).toBe(false);
+    });
+  });
+
+  describe('template selection', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+      MockMatSnackBar.reset();
+    });
+
+    it('should select stdio template and fill correct JSON', () => {
+      component.selectTemplate('stdio');
+
+      expect(component.selectedTemplate()).toBe('stdio');
+      const config = JSON.parse(component.configJson());
+      expect(config).toEqual({
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@example/mcp-server']
+      });
+    });
+
+    it('should select sse template and fill correct JSON', () => {
+      component.selectTemplate('sse');
+
+      expect(component.selectedTemplate()).toBe('sse');
+      const config = JSON.parse(component.configJson());
+      expect(config).toEqual({
+        transport: 'sse',
+        url: 'http://localhost:3000/sse'
+      });
+    });
+
+    it('should select streamable-http template and fill correct JSON', () => {
+      component.selectTemplate('streamable-http');
+
+      expect(component.selectedTemplate()).toBe('streamable-http');
+      const config = JSON.parse(component.configJson());
+      expect(config).toEqual({
+        transport: 'streamable-http',
+        url: 'http://localhost:3000/mcp'
+      });
+    });
+
+    it('should clear previous config when selecting new template', () => {
+      component.configJson.set('{"old": "config"}');
+      component.selectTemplate('stdio');
+
+      const config = JSON.parse(component.configJson());
+      expect(config).toEqual({
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@example/mcp-server']
+      });
+      expect(config.old).toBeUndefined();
+    });
+
+    it('should deselect template when clicking the same template again', () => {
+      component.selectTemplate('stdio');
+      expect(component.selectedTemplate()).toBe('stdio');
+
+      component.selectTemplate('stdio');
+      expect(component.selectedTemplate()).toBeNull();
+    });
+
+    it('should keep content when deselecting template', () => {
+      component.selectTemplate('stdio');
+      const originalJson = component.configJson();
+
+      component.selectTemplate('stdio');
+
+      expect(component.configJson()).toBe(originalJson);
+    });
+
+    it('should switch templates when clicking different template', () => {
+      component.selectTemplate('stdio');
+      expect(component.selectedTemplate()).toBe('stdio');
+
+      component.selectTemplate('sse');
+      expect(component.selectedTemplate()).toBe('sse');
+      const config = JSON.parse(component.configJson());
+      expect(config.transport).toBe('sse');
+    });
+  });
+
+  describe('formatJson', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should pretty-print single-line JSON', () => {
+      component.configJson.set('{"key":"value","number":42}');
+
+      component.formatJson();
+
+      const expected = JSON.stringify({ key: 'value', number: 42 }, null, 2);
+      expect(component.configJson()).toBe(expected);
+    });
+
+    it('should preserve already formatted JSON', () => {
+      const formatted = JSON.stringify({ key: 'value' }, null, 2);
+      component.configJson.set(formatted);
+
+      component.formatJson();
+
+      expect(component.configJson()).toBe(formatted);
+    });
+
+    it('should handle nested objects', () => {
+      component.configJson.set('{"outer":{"inner":"value"}}');
+
+      component.formatJson();
+
+      const config = JSON.parse(component.configJson());
+      expect(config).toEqual({ outer: { inner: 'value' } });
+      // Verify it's multi-line (contains newlines)
+      expect(component.configJson()).toContain('\n');
+    });
+
+    it('should handle arrays', () => {
+      component.configJson.set('[1,2,3]');
+
+      component.formatJson();
+
+      expect(component.configJson()).toBe(JSON.stringify([1, 2, 3], null, 2));
+    });
+
+    it('should do nothing for empty config', () => {
+      component.configJson.set('');
+
+      component.formatJson();
+
+      expect(component.configJson()).toBe('');
+    });
+
+    it('should do nothing for whitespace-only config', () => {
+      component.configJson.set('   ');
+
+      component.formatJson();
+
+      expect(component.configJson()).toBe('   ');
+    });
+
+    it('should not format invalid JSON', () => {
+      component.configJson.set('{invalid}');
+
+      component.formatJson();
+
+      expect(component.configJson()).toBe('{invalid}');
+    });
+
+    it('should clear previous validation error when formatting valid JSON', () => {
+      component.configJsonError.set('Previous error');
+      component.configJson.set('{"valid":true}');
+
+      component.formatJson();
+
+      expect(component.configJsonError()).toBeNull();
+    });
+  });
+
+  describe('onConfigKeydown', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should insert 2 spaces on Tab key', () => {
+      component.configJson.set('line1\ncursor');
+      // Position 6 is after the newline, so spaces go at start of second line
+      const event = {
+        key: 'Tab',
+        target: { selectionStart: 6, selectionEnd: 6 },
+        preventDefault: jest.fn()
+      } as unknown as KeyboardEvent;
+
+      component.onConfigKeydown(event);
+
+      expect(event.preventDefault).toHaveBeenCalled();
+      expect(component.configJson()).toBe('line1\n  cursor');
+    });
+
+    it('should replace selected text with 2 spaces', () => {
+      component.configJson.set('beforeSELECTafter');
+      const event = {
+        key: 'Tab',
+        target: { selectionStart: 6, selectionEnd: 12 },
+        preventDefault: jest.fn()
+      } as unknown as KeyboardEvent;
+
+      component.onConfigKeydown(event);
+
+      expect(component.configJson()).toBe('before  after');
+    });
+
+    it('should not handle non-Tab keys', () => {
+      component.configJson.set('original');
+      const event = {
+        key: 'Enter',
+        target: { selectionStart: 0, selectionEnd: 0 },
+        preventDefault: jest.fn()
+      } as unknown as KeyboardEvent;
+
+      component.onConfigKeydown(event);
+
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(component.configJson()).toBe('original');
+    });
+
+    it('should handle Tab at start of text', () => {
+      component.configJson.set('text');
+      const event = {
+        key: 'Tab',
+        target: { selectionStart: 0, selectionEnd: 0 },
+        preventDefault: jest.fn()
+      } as unknown as KeyboardEvent;
+
+      component.onConfigKeydown(event);
+
+      expect(component.configJson()).toBe('  text');
+    });
+
+    it('should handle Tab at end of text', () => {
+      component.configJson.set('text');
+      const event = {
+        key: 'Tab',
+        target: { selectionStart: 4, selectionEnd: 4 },
+        preventDefault: jest.fn()
+      } as unknown as KeyboardEvent;
+
+      component.onConfigKeydown(event);
+
+      expect(component.configJson()).toBe('text  ');
+    });
+  });
+
+  describe('handleError', () => {
+    let component: TestableMcpServerDialogComponent;
+    let consoleErrorSpy: jest.SpyInstance;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+      MockMatSnackBar.reset();
+      consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+    });
+
+    afterEach(() => {
+      consoleErrorSpy.mockRestore();
+    });
+
+    it('should set saving to false', () => {
+      component.saving.set(true);
+
+      component.handleError('test operation', new Error('test error'));
+
+      expect(component.saving()).toBe(false);
+    });
+
+    it('should log error to console', () => {
+      const error = new Error('test error');
+
+      component.handleError('test operation', error);
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to test operation:', error);
+    });
+
+    it('should open snackbar with error message from Error object', () => {
+      const error = new Error('Something went wrong');
+
+      component.handleError('save data', error);
+
+      expect(MockMatSnackBar.lastOpen).toEqual({
+        message: 'Something went wrong',
+        action: 'Close',
+        options: { duration: 5000, panelClass: 'error-snackbar' }
+      });
+    });
+
+    it('should open snackbar with detail from HTTP error', () => {
+      const error = { error: { detail: 'Server unavailable' } };
+
+      component.handleError('connect', error);
+
+      expect(MockMatSnackBar.lastOpen?.message).toBe('Server unavailable');
+    });
+
+    it('should open snackbar with generic message when no specific error', () => {
+      const error = { code: 'UNKNOWN' };
+
+      component.handleError('process', error);
+
+      expect(MockMatSnackBar.lastOpen?.message).toBe('Failed to process');
+    });
+
+    it('should handle null/undefined error gracefully', () => {
+      expect(() => component.handleError('do something', null)).not.toThrow();
+      expect(() => component.handleError('do something', undefined)).not.toThrow();
+    });
+
+    it('should handle error with message property', () => {
+      const error = { message: 'Custom error message' };
+
+      component.handleError('custom operation', error);
+
+      expect(MockMatSnackBar.lastOpen?.message).toBe('Custom error message');
+    });
+  });
+
+  describe('saving signal', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should initialize with saving as false', () => {
+      expect(component.saving()).toBe(false);
+    });
+
+    it('should be settable', () => {
+      component.saving.set(true);
+      expect(component.saving()).toBe(true);
+
+      component.saving.set(false);
+      expect(component.saving()).toBe(false);
+    });
+  });
+
+  describe('selectedTemplate signal', () => {
+    let component: TestableMcpServerDialogComponent;
+
+    beforeEach(() => {
+      component = new TestableMcpServerDialogComponent(dialogRef);
+    });
+
+    it('should initialize with null', () => {
+      expect(component.selectedTemplate()).toBeNull();
     });
   });
 });
