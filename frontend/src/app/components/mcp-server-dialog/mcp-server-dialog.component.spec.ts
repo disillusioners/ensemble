@@ -10,11 +10,17 @@ const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
   },
   sse: {
     transport: 'sse',
-    url: 'http://localhost:3000/sse'
+    url: 'http://localhost:3000/sse',
+    headers: {
+      Authorization: 'Bearer YOUR_TOKEN_HERE'
+    }
   },
   'streamable-http': {
     transport: 'streamable-http',
-    url: 'http://localhost:3000/mcp'
+    url: 'http://localhost:3000/mcp',
+    headers: {
+      Authorization: 'Bearer YOUR_TOKEN_HERE'
+    }
   }
 };
 
@@ -1148,7 +1154,10 @@ describe('McpServerDialogComponent', () => {
       const config = JSON.parse(component.configJson());
       expect(config).toEqual({
         transport: 'sse',
-        url: 'http://localhost:3000/sse'
+        url: 'http://localhost:3000/sse',
+        headers: {
+          Authorization: 'Bearer YOUR_TOKEN_HERE'
+        }
       });
     });
 
@@ -1159,7 +1168,10 @@ describe('McpServerDialogComponent', () => {
       const config = JSON.parse(component.configJson());
       expect(config).toEqual({
         transport: 'streamable-http',
-        url: 'http://localhost:3000/mcp'
+        url: 'http://localhost:3000/mcp',
+        headers: {
+          Authorization: 'Bearer YOUR_TOKEN_HERE'
+        }
       });
     });
 
