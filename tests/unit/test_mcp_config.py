@@ -37,13 +37,13 @@ class TestMcpStdioConfig:
 
 
 class TestMcpSseConfig:
-    def test_valid_config(self, allow_loopback):
+    def test_valid_config(self, allow_local):
         config = {"transport": "sse", "url": "http://localhost:8080/sse"}
         result = McpSseConfig.model_validate(config)
         assert result.transport == "sse"
         assert result.url == "http://localhost:8080/sse"
 
-    def test_with_headers(self, allow_loopback):
+    def test_with_headers(self, allow_local):
         config = {"transport": "sse", "url": "http://localhost:8080/sse", "headers": {"Authorization": "Bearer token"}}
         result = McpSseConfig.model_validate(config)
         assert result.headers == {"Authorization": "Bearer token"}
@@ -54,7 +54,7 @@ class TestMcpSseConfig:
 
 
 class TestMcpStreamableHttpConfig:
-    def test_valid_config(self, allow_loopback):
+    def test_valid_config(self, allow_local):
         config = {"transport": "streamable-http", "url": "http://localhost:8080/mcp"}
         result = McpStreamableHttpConfig.model_validate(config)
         assert result.transport == "streamable-http"
@@ -69,11 +69,11 @@ class TestValidateMcpServerConfig:
         result = validate_mcp_server_config({"transport": "stdio", "command": "python"})
         assert isinstance(result, McpStdioConfig)
 
-    def test_valid_sse(self, allow_loopback):
+    def test_valid_sse(self, allow_local):
         result = validate_mcp_server_config({"transport": "sse", "url": "http://localhost:8080/sse"})
         assert isinstance(result, McpSseConfig)
 
-    def test_valid_streamable_http(self, allow_loopback):
+    def test_valid_streamable_http(self, allow_local):
         result = validate_mcp_server_config({"transport": "streamable-http", "url": "http://localhost:8080/mcp"})
         assert isinstance(result, McpStreamableHttpConfig)
 
@@ -151,7 +151,7 @@ class TestStreamableHttpConfigSSRFProtection:
             McpStreamableHttpConfig.model_validate(config)
         assert "restricted address" in str(exc_info.value)
 
-    def test_allows_loopback_when_env_set(self, allow_loopback):
+    def test_allows_loopback_when_env_set(self, allow_local):
         config = {"transport": "streamable-http", "url": "http://localhost:8080/mcp"}
         result = McpStreamableHttpConfig.model_validate(config)
         assert result.url == "http://localhost:8080/mcp"

@@ -95,12 +95,11 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     timeout = 15.0
 
     try:
-        async with asyncio.timeout(timeout):
-            # Create a temporary session (validation happens inside create_test_session)
-            session, streams_cm = await conn_mgr.create_test_session(
-                test_request.config,
-                timeout=timeout,
-            )
+        # Create a temporary session (validation + timeout handled inside create_test_session)
+        session, streams_cm = await conn_mgr.create_test_session(
+            test_request.config,
+            timeout=timeout,
+        )
 
             # Session created successfully — now try to list tools
             try:

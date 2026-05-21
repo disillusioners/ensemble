@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
-_ENV_ALLOW_LOOPBACK = "MCP_ALLOW_LOOPBACK"
+_ENV_ALLOW_LOCAL = "MCP_ALLOW_LOCAL"
+_ENV_ALLOW_LOOPBACK_FALLBACK = "MCP_ALLOW_LOOPBACK"
 
 
 class McpConfigValidationError(ValueError):
@@ -22,13 +23,13 @@ class McpConfigValidationError(ValueError):
     pass
 
 
-def _is_restricted_ip(ip_str: str, allow_loopback: bool) -> bool:
+def _is_restricted_ip(ip_str: str, allow_local: bool) -> bool:
     """
     Check if an IP address is restricted (private, loopback, link-local, reserved).
 
     Args:
         ip_str: IP address string to check
-        allow_loopback: Whether to allow loopback addresses (for local dev)
+        allow_local: Whether to allow loopback and private network addresses (for local dev)
 
     Returns:
         True if the IP is restricted, False otherwise
@@ -41,11 +42,11 @@ def _is_restricted_ip(ip_str: str, allow_loopback: bool) -> bool:
 
     # Check loopback (127.x.x.x, ::1)
     if ip.is_loopback:
-        return not allow_loopback
+        return not allow_local
 
     # Check private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
     if ip.is_private:
-        return not allow_loopback
+        return not allow_local
 
     # Check link-local (169.254.x.x, fe80::)
     if ip.is_link_local:
@@ -86,8 +87,9 @@ def _validate_url_not_ssrf(url: str) -> str:
         # No hostname (e.g., relative URL) - let it pass, connection will fail anyway
         return url
 
-    # Allow loopback only when env var is set (for local dev)
-    allow_loopback = os.environ.get(_ENV_ALLOW_LOOPBACK, "false").lower() == "true"
+    # Allow local addresses only when env var is set (for local dev)
+    # Check MCP_ALLOW_LOCAL first, fall back to MCP_ALLOW_LOOPBACK for backwards compat
+    allow_local = os.environ.get(_ENV_ALLOW_LOCAL, os.environ.get(_ENV_ALLOW_LOOPBACK_FALLBACK, "false")).lower() == "true"
 
     try:
         # Resolve hostname to IP addresses
@@ -97,11 +99,11 @@ def _validate_url_not_ssrf(url: str) -> str:
         for family, _, _, _, sockaddr in addr_info:
             ip_str = sockaddr[0]
 
-            if _is_restricted_ip(ip_str, allow_loopback):
+            if _is_restricted_ip(ip_str, allow_local):
                 raise McpConfigValidationError(
                     f"URL resolves to a restricted address: {ip_str}. "
                     f"This may indicate an SSRF attempt. "
-                    f"Set MCP_ALLOW_LOOPBACK=true to allow loopback for local development."
+                    f"Set MCP_ALLOW_LOCAL=true to allow local addresses for local development."
                 )
     except socket.gaierror:
         # Cannot resolve hostname - let the connection attempt handle this

@@ -2,7 +2,7 @@ import { Injectable, inject, signal } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { MatSnackBar } from '@angular/material/snack-bar';
 import { Observable, tap, map, finalize, catchError, throwError } from 'rxjs';
-import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse, BuiltinServerTemplate, BuiltinTemplateListResponse, BuiltinServerConfigure } from '../models';
+import type { McpServer, McpServerCreate, McpServerUpdate, McpServerListResponse, McpServerDeleteResponse, McpServerTestConnectionResponse, BuiltinServerTemplate, BuiltinTemplateListResponse, BuiltinServerConfigure } from '../models';
 
 @Injectable({
   providedIn: 'root'
@@ -135,7 +135,7 @@ export class McpServerService {
   /**
    * POST /api/mcp-servers/test-connection
    */
-  testConnection(config: Record<string, unknown>): Observable<{ success: boolean; message: string; tools_count?: number }> {
-    return this.http.post<{ success: boolean; message: string; tools_count?: number }>(`${this.API_BASE}/test-connection`, { config });
+  testConnection(config: Record<string, unknown>): Observable<McpServerTestConnectionResponse> {
+    return this.http.post<McpServerTestConnectionResponse>(`${this.API_BASE}/test-connection`, { config });
   }
 }

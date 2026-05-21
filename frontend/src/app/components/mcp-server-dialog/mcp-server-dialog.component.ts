@@ -4,7 +4,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { MatDialogRef, MAT_DIALOG_DATA, MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
-import type { McpServer, McpServerCreate, McpServerUpdate, BuiltinServerTemplate } from '../../models';
+import type { McpServer, McpServerCreate, McpServerUpdate, McpServerTestConnectionResponse, BuiltinServerTemplate } from '../../models';
 import { ConfigSchemaFormComponent } from '../config-schema-form/config-schema-form.component';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { McpServerService } from '../../services/mcp-server.service';
@@ -56,7 +56,7 @@ export class McpServerDialogComponent implements OnInit {
   protected readonly saving = signal(false);
   protected readonly selectedTemplate = signal<string | null>(null);
   protected readonly testingConnection = signal(false);
-  protected readonly testResult = signal<{ success: boolean; message: string } | null>(null);
+  protected readonly testResult = signal<McpServerTestConnectionResponse | null>(null);
   protected readonly templateTypes = ['stdio', 'sse', 'streamable-http'];
 
   // Schema form state

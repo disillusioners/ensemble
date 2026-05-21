@@ -73,7 +73,7 @@ class TestConnectionManagerTimeoutConstants:
         effective_timeout = config.timeout if config.timeout is not None else STDIO_DEFAULT_TIMEOUT
         assert effective_timeout == 45.0
 
-    def test_sse_connections_use_passed_timeout(self, allow_loopback):
+    def test_sse_connections_use_passed_timeout(self, allow_local):
         """SSE connections should use the passed per_server_timeout, not STDIO_DEFAULT_TIMEOUT."""
         config = McpSseConfig(url="http://localhost:8080/sse")
         # SSE doesn't have a timeout field, so it uses the passed timeout

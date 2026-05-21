@@ -275,6 +275,12 @@ export interface McpServerDeleteResponse {
   id: string;
 }
 
+export interface McpServerTestConnectionResponse {
+  success: boolean;
+  message: string;
+  tools_count?: number;
+}
+
 // Built-in MCP Server Template types
 export interface BuiltinServerTemplate {
   name: string;
