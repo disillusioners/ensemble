@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-20 MCP Warmup Pool Tool Adaptation + Scan Ordering Fix)
+## Test Results (Latest: 2026-05-21 MCP Restore After Daemon Restart)
+
+### MCP Restore After Restart Fix (2026-05-21)
+- **Branch**: fix/mcp-tools-not-available-to-llm (commit 43e208b + quick fix e36d76e)
+- **E2E Restore Test**: 16/16 PASS — MCP tools survive daemon restart on same instance
+- **Unit Tests**: 224/224 MCP-related PASS (642/653 core — 11 pre-existing langgraph import failures)
+- **ensure.md**: PASS — dev.sh stable 41s+, MCP warmup pool works
+- **Quick Fixes**: 1 (docstring indentation in ensure_mcp_preloaded)
+- **Root Cause**: ensure_mcp_preloaded() skipped all in-memory instances, even those without cached MCP tools
+- **New Test**: tests/e2e/test_mcp_tools_restore.py (full restore E2E test)
+- See `.agents/tester/RESULTS/2026-05-21-mcp-restore-after-restart.md` for full report
+
+### MCP Restore After Restart Status: ✅ READY (all tests pass, E2E verified, no regressions)
 
 ### MCP Warmup Pool Tool Adaptation + Scan Ordering Fix (2026-05-20)
 - **Branch**: fix/mcp-tools-not-available-to-llm (commit 73be23f)

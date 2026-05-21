@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 51 packs
-- Unit: 43 | Integration: 1 | Mock: 2 | E2E: 5
+- Total: 52 packs
+- Unit: 43 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
 
@@ -72,6 +72,7 @@
 | pause_ttl_cold_resume_e2e_test | test/packs/pause_ttl_cold_resume_e2e_test.py | Pause TTL + Cold Resume: pause→paused_at set→daemon restart→cold resume→completed, status transitions | 5 min | 2026-05-16 | ✅ PASS (9/9 steps, cold resume from checkpoint verified) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
 | mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-20 | ✅ PASS (8/8 checks, fix/mcp-tools-not-available-to-llm) |
+| mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-21 | ✅ PASS (16/16 checks, fix/mcp-tools-not-available-to-llm commit 43e208b) |
 
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton | 2 min | 2026-05-20 | ✅ PASS (17/17, notification system) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |
