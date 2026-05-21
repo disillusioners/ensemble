@@ -79,9 +79,7 @@
               <button
                 type="button"
                 class="template-pill"
-                [class.active-stdio]="selectedTemplate() === 'stdio' && tpl === 'stdio'"
-                [class.active-sse]="selectedTemplate() === 'sse' && tpl === 'sse'"
-                [class.active-streamable]="selectedTemplate() === 'streamable-http' && tpl === 'streamable-http'"
+                [class.active]="selectedTemplate() === tpl"
                 (click)="selectTemplate(tpl)"
               >
                 {{ tpl }}

@@ -17,8 +17,7 @@ export const MCP_TEMPLATES: Record<string, Record<string, unknown>> = {
   stdio: {
     transport: 'stdio',
     command: 'npx',
-    args: ['-y', '@example/mcp-server'],
-    env: {}
+    args: ['-y', '@example/mcp-server']
   },
   sse: {
     transport: 'sse',

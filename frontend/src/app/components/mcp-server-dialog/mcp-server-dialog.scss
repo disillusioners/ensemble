@@ -209,12 +209,11 @@ $accent-blue: #3b82f6;
     color: $text-primary;
   }
 
-  &.active-stdio,
-  &.active-sse,
-  &.active-streamable {
+  &.active {
     background-color: rgba($accent-cyan, 0.2);
     border-color: $accent-cyan;
     color: $accent-cyan;
+    font-weight: 600;
   }
 }
 
