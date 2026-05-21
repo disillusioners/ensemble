@@ -72,7 +72,12 @@ export class McpServerDialogComponent implements OnInit {
     return this.data?.template;
   }
 
-  constructor() {}
+  private handleError(context: string, err: unknown): void {
+    this.saving.set(false);
+    console.error(`Failed to ${context}:`, err);
+    const message = (err as any)?.error?.detail || (err as any)?.message || `Failed to ${context}`;
+    this.snackBar.open(message, 'Close', { duration: 5000, panelClass: 'error-snackbar' });
+  }
 
   ngOnInit(): void {
     if (this.data?.server && !this.data.server.is_builtin) {
@@ -124,9 +129,9 @@ export class McpServerDialogComponent implements OnInit {
     }
 
     // Apply new template
-    const template = MCP_TEMPLATES[type];
-    if (template) {
-      this.configJson.set(JSON.stringify(template, null, 2));
+    const preset = MCP_TEMPLATES[type];
+    if (preset) {
+      this.configJson.set(JSON.stringify(preset, null, 2));
       this.selectedTemplate.set(type);
       this.validateConfigJson();
     }
@@ -238,15 +243,7 @@ export class McpServerDialogComponent implements OnInit {
         });
         this.dialogRef.close({ type: 'builtin-update', server: updatedServer });
       },
-      error: (err) => {
-        this.saving.set(false);
-        console.error('Failed to save builtin configuration:', err);
-        const message = err?.error?.detail || err?.message || 'Failed to save configuration';
-        this.snackBar.open(message, 'Close', {
-          duration: 5000,
-          panelClass: 'error-snackbar'
-        });
-      }
+      error: (err) => this.handleError('save builtin configuration', err)
     });
   }
 
@@ -267,15 +264,7 @@ export class McpServerDialogComponent implements OnInit {
         });
         this.dialogRef.close({ type: 'template-create', server: newServer });
       },
-      error: (err) => {
-        this.saving.set(false);
-        console.error('Failed to configure template:', err);
-        const message = err?.error?.detail || err?.message || 'Failed to configure template';
-        this.snackBar.open(message, 'Close', {
-          duration: 5000,
-          panelClass: 'error-snackbar'
-        });
-      }
+      error: (err) => this.handleError('configure template', err)
     });
   }
 
@@ -349,15 +338,7 @@ export class McpServerDialogComponent implements OnInit {
           }
         }
       },
-      error: (err) => {
-        this.saving.set(false);
-        console.error('Failed to reset builtin configuration:', err);
-        const message = err?.error?.detail || err?.message || 'Failed to reset configuration';
-        this.snackBar.open(message, 'Close', {
-          duration: 5000,
-          panelClass: 'error-snackbar'
-        });
-      }
+      error: (err) => this.handleError('reset builtin configuration', err)
     });
   }
 
