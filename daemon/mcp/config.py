@@ -66,10 +66,10 @@ def _validate_url_not_ssrf(url: str) -> str:
     Validate that a URL does not point to a restricted/internal address.
 
     This prevents SSRF attacks by blocking connections to:
-    - Loopback addresses (127.x.x.x, ::1) unless MCP_ALLOW_LOOPBACK=true
-    - Private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x) unless MCP_ALLOW_LOOPBACK=true
-    - Link-local addresses (169.254.x.x, fe80::)
-    - Reserved IP addresses
+    - Link-local addresses (169.254.x.x, fe80::) - always blocked (cloud metadata protection)
+    - Reserved IP addresses - always blocked
+    - Loopback (127.x.x.x, ::1) and private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+      unless MCP_ALLOW_LOCAL=false (default is to allow local addresses since most MCP servers run locally)
 
     DNS hostnames are resolved and the resolved IP is checked.
 
@@ -89,9 +89,10 @@ def _validate_url_not_ssrf(url: str) -> str:
         # No hostname (e.g., relative URL) - let it pass, connection will fail anyway
         return url
 
-    # Allow local addresses only when env var is set (for local dev)
+    # Allow local addresses by default (most MCP servers run locally)
     # Check MCP_ALLOW_LOCAL first, fall back to MCP_ALLOW_LOOPBACK for backwards compat
-    allow_local = os.environ.get(_ENV_ALLOW_LOCAL, os.environ.get(_ENV_ALLOW_LOOPBACK_FALLBACK, "false")).lower() == "true"
+    # Default is "true" - users can set MCP_ALLOW_LOCAL=false for strict SSRF blocking
+    allow_local = os.environ.get(_ENV_ALLOW_LOCAL, os.environ.get(_ENV_ALLOW_LOOPBACK_FALLBACK, "true")).lower() == "true"
 
     try:
         # Resolve hostname to IP addresses
@@ -105,7 +106,8 @@ def _validate_url_not_ssrf(url: str) -> str:
                 raise McpConfigValidationError(
                     f"URL resolves to a restricted address: {ip_str}. "
                     f"This may indicate an SSRF attempt. "
-                    f"Set MCP_ALLOW_LOCAL=true to allow local addresses for local development."
+                    f"Local addresses are allowed by default for MCP servers. "
+                    f"Set MCP_ALLOW_LOCAL=false for strict SSRF blocking (not recommended for local MCP servers)."
                 )
     except socket.gaierror:
         # Cannot resolve hostname - let the connection attempt handle this

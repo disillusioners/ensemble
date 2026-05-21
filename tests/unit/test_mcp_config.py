@@ -95,31 +95,53 @@ class TestValidateMcpServerConfig:
 class TestSseConfigSSRFProtection:
     """Tests for SSRF protection on SSE config URLs."""
 
-    def test_blocks_loopback_ipv4(self):
+    def test_allows_loopback_ipv4(self):
+        """127.0.0.1 is allowed by default (MCP servers run locally)."""
+        config = {"transport": "sse", "url": "http://127.0.0.1:8080/sse"}
+        result = McpSseConfig.model_validate(config)
+        assert result.url == "http://127.0.0.1:8080/sse"
+
+    def test_allows_private_10_network(self):
+        """10.x.x.x is allowed by default (MCP servers run locally)."""
+        config = {"transport": "sse", "url": "http://10.0.0.1:8080/sse"}
+        result = McpSseConfig.model_validate(config)
+        assert result.url == "http://10.0.0.1:8080/sse"
+
+    def test_allows_private_172_network(self):
+        """172.16.x.x is allowed by default (MCP servers run locally)."""
+        config = {"transport": "sse", "url": "http://172.16.0.1:8080/sse"}
+        result = McpSseConfig.model_validate(config)
+        assert result.url == "http://172.16.0.1:8080/sse"
+
+    def test_allows_private_192_network(self):
+        """192.168.x.x is allowed by default (MCP servers run locally)."""
+        config = {"transport": "sse", "url": "http://192.168.1.1:8080/sse"}
+        result = McpSseConfig.model_validate(config)
+        assert result.url == "http://192.168.1.1:8080/sse"
+
+    def test_blocks_link_local(self):
+        """Link-local (169.254.x.x) is always blocked (cloud metadata protection)."""
+        config = {"transport": "sse", "url": "http://169.254.0.1:8080/sse"}
+        with pytest.raises(ValidationError) as exc_info:
+            McpSseConfig.model_validate(config)
+        assert "restricted address" in str(exc_info.value)
+
+    def test_blocks_loopback_in_strict_mode(self, strict_local):
+        """127.0.0.1 is blocked when MCP_ALLOW_LOCAL=false (strict mode)."""
         config = {"transport": "sse", "url": "http://127.0.0.1:8080/sse"}
         with pytest.raises(ValidationError) as exc_info:
             McpSseConfig.model_validate(config)
         assert "restricted address" in str(exc_info.value)
 
-    def test_blocks_private_10_network(self):
-        config = {"transport": "sse", "url": "http://10.0.0.1:8080/sse"}
-        with pytest.raises(ValidationError) as exc_info:
-            McpSseConfig.model_validate(config)
-        assert "restricted address" in str(exc_info.value)
-
-    def test_blocks_private_172_network(self):
-        config = {"transport": "sse", "url": "http://172.16.0.1:8080/sse"}
-        with pytest.raises(ValidationError) as exc_info:
-            McpSseConfig.model_validate(config)
-        assert "restricted address" in str(exc_info.value)
-
-    def test_blocks_private_192_network(self):
+    def test_blocks_private_in_strict_mode(self, strict_local):
+        """Private IPs are blocked when MCP_ALLOW_LOCAL=false (strict mode)."""
         config = {"transport": "sse", "url": "http://192.168.1.1:8080/sse"}
         with pytest.raises(ValidationError) as exc_info:
             McpSseConfig.model_validate(config)
         assert "restricted address" in str(exc_info.value)
 
-    def test_blocks_link_local(self):
+    def test_blocks_link_local_even_in_strict_mode(self, strict_local):
+        """Link-local (169.254.x.x) is always blocked regardless of MCP_ALLOW_LOCAL."""
         config = {"transport": "sse", "url": "http://169.254.0.1:8080/sse"}
         with pytest.raises(ValidationError) as exc_info:
             McpSseConfig.model_validate(config)
@@ -139,19 +161,34 @@ class TestSseConfigSSRFProtection:
 class TestStreamableHttpConfigSSRFProtection:
     """Tests for SSRF protection on Streamable HTTP config URLs."""
 
-    def test_blocks_loopback_ipv4(self):
+    def test_allows_loopback_ipv4(self):
+        """127.0.0.1 is allowed by default (MCP servers run locally)."""
+        config = {"transport": "streamable-http", "url": "http://127.0.0.1:8080/mcp"}
+        result = McpStreamableHttpConfig.model_validate(config)
+        assert result.url == "http://127.0.0.1:8080/mcp"
+
+    def test_allows_localhost(self):
+        """localhost is allowed by default (MCP servers run locally)."""
+        config = {"transport": "streamable-http", "url": "http://localhost:8080/mcp"}
+        result = McpStreamableHttpConfig.model_validate(config)
+        assert result.url == "http://localhost:8080/mcp"
+
+    def test_allows_loopback_in_strict_mode(self, strict_local):
+        """127.0.0.1 is blocked when MCP_ALLOW_LOCAL=false (strict mode)."""
         config = {"transport": "streamable-http", "url": "http://127.0.0.1:8080/mcp"}
         with pytest.raises(ValidationError) as exc_info:
             McpStreamableHttpConfig.model_validate(config)
         assert "restricted address" in str(exc_info.value)
 
-    def test_blocks_localhost_when_not_allowed(self):
-        config = {"transport": "streamable-http", "url": "http://localhost:8080/mcp"}
-        with pytest.raises(ValidationError) as exc_info:
-            McpStreamableHttpConfig.model_validate(config)
-        assert "restricted address" in str(exc_info.value)
-
     def test_allows_loopback_when_env_set(self, allow_local):
+        """With MCP_ALLOW_LOCAL=true, localhost is allowed."""
         config = {"transport": "streamable-http", "url": "http://localhost:8080/mcp"}
         result = McpStreamableHttpConfig.model_validate(config)
         assert result.url == "http://localhost:8080/mcp"
+
+    def test_blocks_link_local(self):
+        """Link-local (169.254.x.x) is always blocked (cloud metadata protection)."""
+        config = {"transport": "streamable-http", "url": "http://169.254.0.1:8080/mcp"}
+        with pytest.raises(ValidationError) as exc_info:
+            McpStreamableHttpConfig.model_validate(config)
+        assert "restricted address" in str(exc_info.value)

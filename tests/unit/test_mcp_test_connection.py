@@ -161,40 +161,66 @@ class TestValidateUrlNotSsrf:
         with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("13.107.42.14",))]):
             assert _validate_url_not_ssrf("https://api.openai.com") == "https://api.openai.com"
 
-    def test_blocks_localhost(self):
-        """localhost resolves to 127.0.0.1 and is blocked."""
+    def test_allows_localhost(self):
+        """localhost resolves to 127.0.0.1 and is allowed by default (MCP servers run locally)."""
         with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1",))]):
-            with pytest.raises(McpConfigValidationError) as exc_info:
-                _validate_url_not_ssrf("http://localhost:8080")
-            assert "SSRF attempt" in str(exc_info.value)
-            assert "127.0.0.1" in str(exc_info.value)
+            result = _validate_url_not_ssrf("http://localhost:8080")
+            assert result == "http://localhost:8080"
 
-    def test_blocks_localhost_ipv6(self):
-        """localhost resolving to ::1 is blocked."""
+    def test_allows_localhost_ipv6(self):
+        """localhost resolving to ::1 is allowed by default (MCP servers run locally)."""
         with patch(
             "socket.getaddrinfo",
             return_value=[(30, 1, 6, "", ("::1",))]
         ):
-            with pytest.raises(McpConfigValidationError) as exc_info:
-                _validate_url_not_ssrf("http://localhost")
-            assert "::1" in str(exc_info.value)
+            result = _validate_url_not_ssrf("http://localhost")
+            assert result == "http://localhost"
 
-    def test_blocks_private_ip_direct(self):
-        """URL with private IP directly is blocked."""
+    def test_allows_private_ip_direct(self):
+        """URL with private IP directly is allowed by default (MCP servers run locally)."""
         with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("192.168.1.1",))]):
-            with pytest.raises(McpConfigValidationError) as exc_info:
-                _validate_url_not_ssrf("http://192.168.1.1:8080")
-            assert "192.168.1.1" in str(exc_info.value)
+            result = _validate_url_not_ssrf("http://192.168.1.1:8080")
+            assert result == "http://192.168.1.1:8080"
 
-    def test_blocks_private_ip_dns_resolution(self):
-        """URL resolving to private IP via DNS is blocked."""
+    def test_allows_private_ip_dns_resolution(self):
+        """URL resolving to private IP via DNS is allowed by default (MCP servers run locally)."""
         with patch(
             "socket.getaddrinfo",
             return_value=[(2, 1, 6, "", ("10.0.0.5",))]
         ):
-            with pytest.raises(McpConfigValidationError) as exc_info:
-                _validate_url_not_ssrf("http://my-internal-service.local")
-            assert "10.0.0.5" in str(exc_info.value)
+            result = _validate_url_not_ssrf("http://my-internal-service.local")
+            assert result == "http://my-internal-service.local"
+
+    def test_blocks_localhost_in_strict_mode(self):
+        """localhost is blocked when MCP_ALLOW_LOCAL=false (strict mode)."""
+        original = os.environ.get("MCP_ALLOW_LOCAL")
+        try:
+            os.environ["MCP_ALLOW_LOCAL"] = "false"
+            with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1",))]):
+                with pytest.raises(McpConfigValidationError) as exc_info:
+                    _validate_url_not_ssrf("http://localhost:8080")
+                assert "SSRF attempt" in str(exc_info.value)
+                assert "127.0.0.1" in str(exc_info.value)
+        finally:
+            if original is None:
+                os.environ.pop("MCP_ALLOW_LOCAL", None)
+            else:
+                os.environ["MCP_ALLOW_LOCAL"] = original
+
+    def test_blocks_private_ip_in_strict_mode(self):
+        """Private IP is blocked when MCP_ALLOW_LOCAL=false (strict mode)."""
+        original = os.environ.get("MCP_ALLOW_LOCAL")
+        try:
+            os.environ["MCP_ALLOW_LOCAL"] = "false"
+            with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("10.0.0.1",))]):
+                with pytest.raises(McpConfigValidationError) as exc_info:
+                    _validate_url_not_ssrf("http://10.0.0.1:8080")
+                assert "10.0.0.1" in str(exc_info.value)
+        finally:
+            if original is None:
+                os.environ.pop("MCP_ALLOW_LOCAL", None)
+            else:
+                os.environ["MCP_ALLOW_LOCAL"] = original
 
     def test_handles_dns_resolution_failure(self):
         """URL that cannot be resolved passes through (connection will fail later)."""
@@ -275,14 +301,30 @@ class TestValidateUrlNotSsrf:
 class TestMcpSseConfigSsrfValidation:
     """Tests that SSE config validates URLs against SSRF."""
 
-    def test_sse_config_rejects_localhost_url(self):
-        """SSE config with localhost URL raises validation error."""
+    def test_sse_config_allows_localhost_url(self):
+        """SSE config with localhost URL is allowed by default (MCP servers run locally)."""
+        config = McpSseConfig(url="http://localhost:8080", transport="sse")
+        assert config.url == "http://localhost:8080"
+
+    def test_sse_config_allows_private_ip_url(self):
+        """SSE config with private IP URL is allowed by default (MCP servers run locally)."""
+        config = McpSseConfig(url="http://192.168.1.1:8080", transport="sse")
+        assert config.url == "http://192.168.1.1:8080"
+
+    def test_sse_config_rejects_link_local_url(self):
+        """SSE config with link-local URL is always rejected (cloud metadata protection)."""
+        with pytest.raises(ValidationError) as exc_info:
+            McpSseConfig(url="http://169.254.0.1:8080", transport="sse")
+        assert "restricted" in str(exc_info.value).lower()
+
+    def test_sse_config_rejects_localhost_in_strict_mode(self, strict_local):
+        """SSE config with localhost URL is rejected in strict mode (MCP_ALLOW_LOCAL=false)."""
         with pytest.raises(ValidationError) as exc_info:
             McpSseConfig(url="http://localhost:8080", transport="sse")
         assert "SSRF" in str(exc_info.value) or "restricted" in str(exc_info.value)
 
-    def test_sse_config_rejects_private_ip_url(self):
-        """SSE config with private IP URL raises validation error."""
+    def test_sse_config_rejects_private_ip_in_strict_mode(self, strict_local):
+        """SSE config with private IP URL is rejected in strict mode (MCP_ALLOW_LOCAL=false)."""
         with pytest.raises(ValidationError) as exc_info:
             McpSseConfig(url="http://192.168.1.1:8080", transport="sse")
         assert "restricted" in str(exc_info.value).lower()
@@ -297,14 +339,30 @@ class TestMcpSseConfigSsrfValidation:
 class TestMcpStreamableHttpConfigSsrfValidation:
     """Tests that Streamable HTTP config validates URLs against SSRF."""
 
-    def test_streamable_http_config_rejects_localhost_url(self):
-        """Streamable HTTP config with localhost URL raises validation error."""
+    def test_streamable_http_config_allows_localhost_url(self):
+        """Streamable HTTP config with localhost URL is allowed by default (MCP servers run locally)."""
+        config = McpStreamableHttpConfig(url="http://localhost:8080", transport="streamable-http")
+        assert config.url == "http://localhost:8080"
+
+    def test_streamable_http_config_allows_private_ip_url(self):
+        """Streamable HTTP config with private IP URL is allowed by default (MCP servers run locally)."""
+        config = McpStreamableHttpConfig(url="http://10.0.0.1:8080", transport="streamable-http")
+        assert config.url == "http://10.0.0.1:8080"
+
+    def test_streamable_http_config_rejects_link_local_url(self):
+        """Streamable HTTP config with link-local URL is always rejected (cloud metadata protection)."""
+        with pytest.raises(ValidationError) as exc_info:
+            McpStreamableHttpConfig(url="http://169.254.0.1:8080", transport="streamable-http")
+        assert "restricted" in str(exc_info.value).lower()
+
+    def test_streamable_http_config_rejects_localhost_in_strict_mode(self, strict_local):
+        """Streamable HTTP config with localhost URL is rejected in strict mode (MCP_ALLOW_LOCAL=false)."""
         with pytest.raises(ValidationError) as exc_info:
             McpStreamableHttpConfig(url="http://localhost:8080", transport="streamable-http")
         assert "SSRF" in str(exc_info.value) or "restricted" in str(exc_info.value).lower()
 
-    def test_streamable_http_config_rejects_private_ip_url(self):
-        """Streamable HTTP config with private IP URL raises validation error."""
+    def test_streamable_http_config_rejects_private_ip_in_strict_mode(self, strict_local):
+        """Streamable HTTP config with private IP URL is rejected in strict mode (MCP_ALLOW_LOCAL=false)."""
         with pytest.raises(ValidationError) as exc_info:
             McpStreamableHttpConfig(url="http://10.0.0.1:8080", transport="streamable-http")
         assert "restricted" in str(exc_info.value).lower()
