@@ -95,49 +95,41 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     timeout = 15.0
 
     try:
-        # Validate the config format first
-        try:
-            validate_mcp_server_config(test_request.config)
-        except McpConfigValidationError as e:
-            return McpServerTestConnectionResponse(
-                success=False,
-                message=f"Invalid configuration: {e}",
+        async with asyncio.timeout(timeout):
+            # Create a temporary session (validation happens inside create_test_session)
+            session, streams_cm = await conn_mgr.create_test_session(
+                test_request.config,
+                timeout=timeout,
             )
 
-        # Create a temporary session
-        session, streams_cm = await conn_mgr.create_test_session(
-            test_request.config,
-            timeout=timeout,
-        )
-
-        # Session created successfully — now try to list tools
-        try:
-            tools = await session.list_tools()
-            tools_count = len(tools)
-
-            # Success message
-            if tools_count == 0:
-                message = "Connection successful — server responded with no tools"
-            elif tools_count == 1:
-                message = "Connection successful — server responded with 1 tool"
-            else:
-                message = f"Connection successful — server responded with {tools_count} tools"
-
-            return McpServerTestConnectionResponse(
-                success=True,
-                message=message,
-                tools_count=tools_count,
-            )
-        finally:
-            # Always clean up the session
+            # Session created successfully — now try to list tools
             try:
-                await session.stop()
-            except Exception:
-                pass
-            try:
-                await streams_cm.__aexit__(None, None, None)
-            except Exception:
-                pass
+                tools = await session.list_tools()
+                tools_count = len(tools) if tools else 0
+
+                # Success message
+                if tools_count == 0:
+                    message = "Connection successful — server responded with no tools"
+                elif tools_count == 1:
+                    message = "Connection successful — server responded with 1 tool"
+                else:
+                    message = f"Connection successful — server responded with {tools_count} tools"
+
+                return McpServerTestConnectionResponse(
+                    success=True,
+                    message=message,
+                    tools_count=tools_count,
+                )
+            finally:
+                # Always clean up the session
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+                try:
+                    await streams_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
 
     except asyncio.TimeoutError:
         return McpServerTestConnectionResponse(
@@ -149,6 +141,11 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
             success=False,
             message="Connection failed: connection refused",
         )
+    except McpConfigValidationError as e:
+        return McpServerTestConnectionResponse(
+            success=False,
+            message=f"Invalid configuration: {e}",
+        )
     except OSError as e:
         if "ECONNREFUSED" in str(e):
             return McpServerTestConnectionResponse(
@@ -156,14 +153,17 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
                 message="Connection failed: connection refused",
             )
         elif "ENOENT" in str(e) or "No such file" in str(e):
+            logger.warning("Connection failed: command not found — %s", e)
             return McpServerTestConnectionResponse(
                 success=False,
-                message=f"Connection failed: command not found — {e}",
+                message="Connection failed: the specified command was not found",
             )
-        return McpServerTestConnectionResponse(
-            success=False,
-            message=f"Connection failed: {e}",
-        )
+        else:
+            logger.warning("Connection failed: %s", e)
+            return McpServerTestConnectionResponse(
+                success=False,
+                message="Connection failed: an unexpected error occurred",
+            )
     except Exception as e:
         # Log full exception for debugging, return sanitized message to user
         logger.exception("MCP connection test failed")
