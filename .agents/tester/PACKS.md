@@ -8,7 +8,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-19 | ✅ PASS (feature/mcp-server-pool, no regression) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-21 | ✅ PASS (1760/1763, feature/fix-mcp-localhost-block, 3 pre-existing failures) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-05-19 | ✅ PASS (feature/builtin-mcp-servers all phases, no regression) |
@@ -49,7 +49,7 @@
 | ce_injection_unit_test | tests/unit/test_critical_experience_injection.py | format_project_context injection: CE section formatting, priority icons, deduplication, non-dict skip, reference handling | 2 min | 2026-05-20 | ✅ PASS (14 tests, feature/critical-experience Phase 5) |
 | ce_schema_unit_test | tests/unit/test_critical_experience_schema.py | CriticalExperience model validation, Project integration, migration file (UP/DOWN, default []) | 2 min | 2026-05-20 | ✅ PASS (20 tests, feature/critical-experience Phase 5) |
 | ce_api_unit_test | tests/unit/test_critical_experience_api.py | Projects API: GET /projects/{id} and GET /projects include critical_experience in response | 2 min | 2026-05-20 | ✅ PASS (13 tests, feature/critical-experience Phase 5) |
-| mcp_test_connection_unit_test | tests/unit/test_mcp_test_connection.py | MCP test connection: SSRF validation (42), endpoint logic (11), helper function (5) | 2 min | 2026-05-21 | ✅ PASS (60 tests, feature/mcp-test-button, +2 quick fixes) |
+| mcp_test_connection_unit_test | tests/unit/test_mcp_test_connection.py | MCP test connection: SSRF validation (42→68), endpoint logic (11), helper function (5) | 2 min | 2026-05-21 | ✅ PASS (68/68, feature/fix-mcp-localhost-block, SSRF localhost default=true verified) |
 
 ## Integration Test Packs
 

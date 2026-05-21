@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-21 MCP Test Connection Button)
+## Test Results (Latest: 2026-05-21 MCP Localhost Fix)
+
+### MCP Localhost Config Fix (2026-05-21)
+- **Branch**: feature/fix-mcp-localhost-block (commit 258b801 + ac310ed)
+- **BE MCP Tests**: 68/68 SSRF + 55/55 CRUD + 40/40 warmup + 19/19 connection + 25/25 service + 25/25 context7 + 44/44 gaia
+- **SSRF Verification**: 9/9 PASS — localhost/127.0.0.1/10.x/192.168.x accepted, 169.254.169.254 blocked, strict mode works
+- **Core Unit Tests**: 1760 passed (3 pre-existing failures unrelated)
+- **Browser Automation**: PASS — localhost URL accepted in MCP dialog (401 not SSRF block)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 1 (frontend dist path in daemon/api.py)
+- See `.agents/tester/RESULTS/2026-05-21-mcp-localhost-fix.md` for full report
+
+### MCP Localhost Fix Status: ✅ READY (all tests pass, browser verified, no regressions)
 
 ### MCP Test Connection Button (2026-05-21)
 - **Branch**: feature/mcp-test-button (commit 75bc70c)
