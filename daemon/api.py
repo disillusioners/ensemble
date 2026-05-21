@@ -76,7 +76,8 @@ if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
 else:
     BASE_DIR = Path(__file__).parent.parent
-FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+# Angular builds to frontend/dist/frontend/browser/
+FRONTEND_DIST = BASE_DIR / "frontend" / "dist" / "frontend" / "browser"
 
 
 @asynccontextmanager
