@@ -60,9 +60,21 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-21 MCP Restore After Daemon Restart)
+## Test Results (Latest: 2026-05-21 MCP Test Connection Button)
 
-### MCP Restore After Restart Fix (2026-05-21)
+### MCP Test Connection Button (2026-05-21)
+- **Branch**: feature/mcp-test-button (commit 75bc70c)
+- **BE New Tests**: 60/60 PASS — SSRF validation (42), endpoint logic (11), helper function (5)
+- **FE New Tests**: 23 new (577/577 total PASS) — dialog (15), service (8)
+- **FE Build**: PASS (4.27s)
+- **Browser Automation**: 7/7 PASS — button visibility, loading, result, auto-clear
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 2 (SSRF validation order + indentation bug)
+- See `.agents/tester/RESULTS/2026-05-21-mcp-test-button.md` for full report
+
+### MCP Test Connection Button Status: ✅ READY (all tests pass, browser verified, no regressions)
+
+### MCP Restore After Daemon Restart (2026-05-21)
 - **Branch**: fix/mcp-tools-not-available-to-llm (commit 43e208b + quick fix e36d76e)
 - **E2E Restore Test**: 16/16 PASS — MCP tools survive daemon restart on same instance
 - **Unit Tests**: 224/224 MCP-related PASS (642/653 core — 11 pre-existing langgraph import failures)
