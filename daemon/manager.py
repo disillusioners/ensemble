@@ -1031,19 +1031,25 @@ class InstanceManager:
         )
 
     async def ensure_mcp_preloaded(self, instance_id: str) -> None:
-        """Ensure MCP tools are preloaded for an instance.
+"""Ensure MCP tools are preloaded for an instance.
 
-        Only preloads if the instance is NOT already in memory (avoids wasted work
-        for already-loaded instances). Also safe if _mcp_service doesn't exist yet.
+Preloads if the instance is not in memory OR if it's in memory but lacks
+cached MCP tools (e.g., restored by router without preload). Safe if
+_mcp_service doesn't exist yet.
 
-        This method is idempotent — safe to call multiple times for the same instance.
+This method is idempotent — safe to call multiple times for the same instance.
 
-        Args:
-            instance_id: The instance to preload MCP tools for.
-        """
-        # Skip if instance already loaded — no need to preload
+Args:
+    instance_id: The instance to preload MCP tools for.
+"""
+        # Skip if instance already loaded with MCP tools cached — no need to preload
         if instance_id in self.instances:
-            return
+            if self._mcp_service:
+                cached = self._mcp_service.get_mcp_tools(instance_id)
+                if cached:
+                    return  # Has tools — truly no need to preload
+            else:
+                return  # No MCP service — nothing to preload
 
         # Skip if MCP service not initialized
         if not hasattr(self, '_mcp_service') or not self._mcp_service:
