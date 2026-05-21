@@ -56,6 +56,8 @@ mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
 mock_mcp = create_mock_module("mcp", {"__path__": ["mcp"]})
 mock_mcp.ClientSession = MagicMock()
 mock_mcp.StdioServerParameters = MagicMock()
+mock_mcp.ListToolsResult = MagicMock()
+mock_mcp.Tool = MagicMock()
 mock_mcp.stdio_client = MagicMock()
 
 # Create mock mcp.shared module

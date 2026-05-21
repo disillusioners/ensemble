@@ -26,6 +26,18 @@ from daemon.routers.mcp_servers import router as mcp_servers_router
 from daemon.models import McpServerTestConnectionRequest, McpServerTestConnectionResponse
 
 
+def _make_list_tools_result(tool_names: list[str]):
+    """Create a mock ListToolsResult with tools having the given names."""
+    mock_tools = []
+    for name in tool_names:
+        mock_tool = MagicMock()
+        mock_tool.name = name
+        mock_tools.append(mock_tool)
+    mock_result = MagicMock()
+    mock_result.tools = mock_tools
+    return mock_result
+
+
 # =============================================================================
 # Section A: SSRF URL Validation Tests
 # =============================================================================
@@ -402,11 +414,9 @@ class TestTestConnectionEndpoint:
     def test_success_returns_tools_list(self, test_client):
         """Successful connection returns tools count."""
         mock_session = MagicMock()
-        mock_session.list_tools = AsyncMock(return_value=[
-            MagicMock(name="tool1"),
-            MagicMock(name="tool2"),
-            MagicMock(name="tool3"),
-        ])
+        mock_session.list_tools = AsyncMock(
+            return_value=_make_list_tools_result(["tool1", "tool2", "tool3"])
+        )
 
         mock_streams_cm = MagicMock()
         mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
@@ -441,7 +451,9 @@ class TestTestConnectionEndpoint:
     def test_success_with_no_tools(self, test_client):
         """Connection succeeds but server has no tools."""
         mock_session = MagicMock()
-        mock_session.list_tools = AsyncMock(return_value=[])
+        mock_session.list_tools = AsyncMock(
+            return_value=_make_list_tools_result([])
+        )
 
         mock_streams_cm = MagicMock()
         mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
@@ -470,7 +482,9 @@ class TestTestConnectionEndpoint:
     def test_success_with_one_tool(self, test_client):
         """Connection succeeds with exactly one tool."""
         mock_session = MagicMock()
-        mock_session.list_tools = AsyncMock(return_value=[MagicMock(name="only-tool")])
+        mock_session.list_tools = AsyncMock(
+            return_value=_make_list_tools_result(["only-tool"])
+        )
 
         mock_streams_cm = MagicMock()
         mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
@@ -677,7 +691,9 @@ class TestTestConnectionEndpoint:
     def test_sse_transport_success(self, test_client):
         """SSE transport type works correctly."""
         mock_session = MagicMock()
-        mock_session.list_tools = AsyncMock(return_value=[MagicMock(name="sse-tool")])
+        mock_session.list_tools = AsyncMock(
+            return_value=_make_list_tools_result(["sse-tool"])
+        )
 
         mock_streams_cm = MagicMock()
         mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
@@ -713,7 +729,9 @@ class TestTestConnectionEndpoint:
     def test_streamable_http_transport_success(self, test_client):
         """Streamable HTTP transport type works correctly."""
         mock_session = MagicMock()
-        mock_session.list_tools = AsyncMock(return_value=[MagicMock(name="http-tool")])
+        mock_session.list_tools = AsyncMock(
+            return_value=_make_list_tools_result(["http-tool"])
+        )
 
         mock_streams_cm = MagicMock()
         mock_streams_cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))

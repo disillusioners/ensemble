@@ -105,7 +105,7 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
         # Session created successfully — now try to list tools
         try:
             tools = await session.list_tools()
-            tools_count = len(tools) if tools else 0
+            tools_count = len(tools.tools) if tools and tools.tools else 0
 
             # Success message
             if tools_count == 0:
