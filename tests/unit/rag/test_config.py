@@ -24,11 +24,6 @@ from daemon.rag import (
 # =============================================================================
 
 
-def reset_rag_state():
-    """Reset the module-level RAG state before each test."""
-    enable_rag()
-
-
 @pytest.fixture(autouse=True)
 def clean_rag_state():
     """Ensure RAG state is clean before and after each test."""
@@ -337,7 +332,7 @@ class TestAutoTestRagRemoteProtocolError:
     """Tests for auto_test_rag when server disconnects."""
 
     @pytest.mark.asyncio
-    async def test_returns_false(self, configured_env, caplog):
+    async def test_auto_test_rag_returns_false_on_remote_protocol_error(self, configured_env, caplog):
         """When httpx.RemoteProtocolError is raised, auto_test_rag returns False."""
         with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -352,7 +347,7 @@ class TestAutoTestRagRemoteProtocolError:
         assert any("disconnect" in record.message.lower() for record in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_disables_rag(self, configured_env):
+    async def test_auto_test_rag_disables_on_remote_protocol_error(self, configured_env):
         """When httpx.RemoteProtocolError is raised, RAG is disabled."""
         with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()

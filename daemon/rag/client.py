@@ -1,7 +1,6 @@
 """Async HTTP client for LightRAG API."""
 
 import logging
-import re
 from typing import Any
 
 import httpx
@@ -9,12 +8,7 @@ import httpx
 httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
 
-
-def _sanitize_workspace(workspace: str) -> str:
-    """Match LightRAG's workspace sanitization: alphanumeric + underscore only."""
-    return re.sub(r'[^a-zA-Z0-9_]', '_', workspace)
-
-from .config import RAGConfig
+from .config import RAGConfig, _sanitize_workspace
 from .endpoints import (
     CREATE_ENTITY,
     CREATE_RELATION,
