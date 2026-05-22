@@ -139,10 +139,10 @@ install: pyinstaller
 		cp $(ENV_FILE) $(INSTALL_DIR)/.env 2>/dev/null || \
 		cp .env.example $(INSTALL_DIR)/.env 2>/dev/null || true
 	
-	# Copy frontend build (copy browser contents directly to dist)
+	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
-	mkdir -p $(INSTALL_DIR)/frontend/dist
-	cp -r $(FRONTEND_DIST)/* $(INSTALL_DIR)/frontend/dist/ || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
+	mkdir -p $(INSTALL_DIR)/frontend/dist/frontend/browser
+	cp -r $(FRONTEND_DIST)/* $(INSTALL_DIR)/frontend/dist/frontend/browser/ || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
 	
 	@echo "$(GREEN)Installation complete!$(NC)"
 	@echo ""
