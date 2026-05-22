@@ -467,7 +467,8 @@ class TestWebFetchBootstrapIntegration:
         """Create mock Config for InstanceManager."""
         from daemon.config import (
             Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig,
-            QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig
+            QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig,
+            McpPoolConfig
         )
         from unittest.mock import MagicMock
 
@@ -516,6 +517,13 @@ class TestWebFetchBootstrapIntegration:
 
         config.agents = MagicMock(spec=AgentsConfig)
         config.agents.directory = "./agents"
+
+        config.mcp_pool = MagicMock(spec=McpPoolConfig)
+        config.mcp_pool.enabled = True
+        config.mcp_pool.default_pool_size = 1
+        config.mcp_pool.servers = {}
+        config.mcp_pool.health_check_interval = 60
+        config.mcp_pool.health_check_timeout = 5
 
         config.job_system = MagicMock(spec=JobSystemConfig)
         config.job_system.default_max_retries = 3

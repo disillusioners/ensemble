@@ -1,6 +1,7 @@
 """Project Queue API endpoints."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
@@ -12,6 +13,8 @@ from .schemas import (
     ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest,
     ProjectHistoryEntryResponse, ProjectHistoryListResponse, ProjectHistoryAddRequest, ProjectHistorySearchResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -71,8 +74,16 @@ def set_job_queue_mgmt_service(service: JobQueueMgmtService) -> None:
     _job_queue_mgmt_service = service
 
 
-def _project_to_response(project) -> ProjectResponse:
-    """Convert Project model to ProjectResponse."""
+def _project_to_response(project, recent_history: list[dict] | None = None) -> ProjectResponse:
+    """Convert Project model to ProjectResponse.
+    
+    Args:
+        project: The project model instance.
+        recent_history: Optional list of recent history entries to include.
+    
+    Returns:
+        ProjectResponse instance.
+    """
     return ProjectResponse(
         project_id=project.project_id,
         name=project.name,
@@ -87,12 +98,31 @@ def _project_to_response(project) -> ProjectResponse:
         metadata=project.project_metadata or {},
         relationships=project.relationships or {},
         critical_experience=project.critical_experience or [],
+        recent_history=recent_history,
         creator_instance_id=project.creator_instance_id,
         creator_agent_id=project.creator_agent_id,
         created_at=project.created_at,
         updated_at=project.updated_at,
         is_system=(project.name == SYSTEM_DEFAULT_PROJECT_NAME),
     )
+
+
+def _get_recent_history_safe(repo: SQLModelProjectRepository, project_id: str, limit: int = 10) -> list[dict]:
+    """Fetch recent history for a project with graceful error handling.
+    
+    Args:
+        repo: The project repository instance.
+        project_id: The project ID to fetch history for.
+        limit: Maximum number of history entries to return.
+    
+    Returns:
+        List of recent history entries, or empty list on error.
+    """
+    try:
+        return repo.get_recent_history(project_id, limit=limit)
+    except Exception as e:
+        logger.warning(f"Failed to fetch recent history for project {project_id}: {e}")
+        return []
 
 
 # ==================== Endpoints ====================
@@ -155,7 +185,8 @@ async def create_project(
         project.project_id
     )
     
-    return _project_to_response(project)
+    recent_history = _get_recent_history_safe(repo, project.project_id)
+    return _project_to_response(project, recent_history=recent_history)
 
 
 @router.get(
@@ -187,7 +218,8 @@ async def get_project(
             ).model_dump()
         )
     
-    return _project_to_response(project)
+    recent_history = _get_recent_history_safe(repo, project_id)
+    return _project_to_response(project, recent_history=recent_history)
 
 
 @router.get(
@@ -211,8 +243,15 @@ async def list_projects(
     if exclude_system:
         projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
+    # Fetch recent history for each project in parallel
+    def fetch_history(p):
+        return p.project_id, _get_recent_history_safe(repo, p.project_id)
+    
+    history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
+    history_map = dict(history_results)
+    
     return ProjectListResponse(
-        projects=[_project_to_response(p) for p in projects],
+        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id)) for p in projects],
         total=len(projects)
     )
 
@@ -233,8 +272,15 @@ async def list_projects_trailing(
     if exclude_system:
         projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
+    # Fetch recent history for each project in parallel
+    def fetch_history(p):
+        return p.project_id, _get_recent_history_safe(repo, p.project_id)
+    
+    history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
+    history_map = dict(history_results)
+    
     return ProjectListResponse(
-        projects=[_project_to_response(p) for p in projects],
+        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id)) for p in projects],
         total=len(projects)
     )
 
@@ -291,7 +337,8 @@ async def set_queue_status(
             detail={"error": "Failed to update project", "message": "Update operation returned None"}
         )
     
-    return _project_to_response(updated)
+    recent_history = _get_recent_history_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history)
 
 
 @router.post(
@@ -330,7 +377,8 @@ async def pause_queue(
             detail={"error": "Failed to update project", "message": "Update operation returned None"}
         )
     
-    return _project_to_response(updated)
+    recent_history = _get_recent_history_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history)
 
 
 @router.post(
@@ -369,7 +417,8 @@ async def resume_queue(
             detail={"error": "Failed to update project", "message": "Update operation returned None"}
         )
     
-    return _project_to_response(updated)
+    recent_history = _get_recent_history_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history)
 
 
 # ==================== Project History Endpoints ====================

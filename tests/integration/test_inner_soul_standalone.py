@@ -223,13 +223,14 @@ async def _run_remember_test(config, agent_dir: str):
     memories_before = list(memories_dir.glob("*.md"))
     print(f"Memories before: {len(memories_before)}")
     
-    # Patch get_registry in daemon.manager where it's captured at import time
-    # We need to patch both locations and reload daemon.manager to ensure the patch takes effect
+    # Patch get_registry in daemon.manager and daemon.services.instance_lifecycle
     # because daemon.manager captures a direct reference to get_registry at import time
+    # We need to patch where it's used (instance_lifecycle), not just where it's defined
     import importlib
     
     with patch("daemon.manager.get_registry", return_value=mock_registry), \
-         patch("daemon.registry.get_registry", return_value=mock_registry):
+         patch("daemon.registry.get_registry", return_value=mock_registry), \
+         patch("daemon.services.instance_lifecycle.get_registry", return_value=mock_registry):
         # Reload daemon.manager to pick up the patch (it was imported before the patch)
         if "daemon.manager" in sys.modules:
             importlib.reload(sys.modules["daemon.manager"])
@@ -327,12 +328,13 @@ async def _run_workflow_test(config, agent_dir: str):
     mock_registry.resolve_to_id.return_value = "test_agent"
     mock_registry.get.return_value = agent_metadata
     
-    # Patch get_registry in daemon.manager where it's captured at import time
-    # We need to patch both locations and reload daemon.manager to ensure the patch takes effect
+    # Patch get_registry in daemon.manager and daemon.services.instance_lifecycle
+    # because daemon.manager captures a direct reference to get_registry at import time
     import importlib
     
     with patch("daemon.manager.get_registry", return_value=mock_registry), \
-         patch("daemon.registry.get_registry", return_value=mock_registry):
+         patch("daemon.registry.get_registry", return_value=mock_registry), \
+         patch("daemon.services.instance_lifecycle.get_registry", return_value=mock_registry):
         # Reload daemon.manager to pick up the patch
         if "daemon.manager" in sys.modules:
             importlib.reload(sys.modules["daemon.manager"])

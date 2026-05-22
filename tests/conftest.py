@@ -24,7 +24,7 @@ mock_langgraph_graph = create_mock_module("langgraph.graph", {
     "StateGraph": MagicMock(),
     "MessagesState": MagicMock(),
     "START": MagicMock(),
-    "END": MagicMock(),
+    "END": "__end__",  # Must be string for should_continue() and graph building
     "CompiledGraph": MagicMock(),
 })
 mock_langgraph_graph_state = create_mock_module("langgraph.graph.state", {
