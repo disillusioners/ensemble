@@ -88,7 +88,7 @@ Returns:
 
 def _is_valid_entry_type(entry_type: str) -> bool:
     """Check if entry_type is a valid HistoryEntryType value."""
-    return entry_type in {e.value for e in HistoryEntryType}
+    return entry_type in HistoryEntryType._value2member_map_
 
 
 def create_project_history_tools(
@@ -104,24 +104,28 @@ def create_project_history_tools(
         summary: str,
         details: str | None = None,
         entry_metadata: dict | None = None,
-    ) -> list[dict]:
+    ) -> dict:
         """Add a history entry to a project. Use tool_help() for details."""
         # Step 1: Validate entry_type
         if not _is_valid_entry_type(entry_type):
             valid_types = [e.value for e in HistoryEntryType]
-            return [{"error": f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"}]
+            return {"error": f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"}
 
         # Step 2: Validate project exists
         project = store.get(project_id)
         if not project:
-            return [{"error": f"Project '{project_id}' not found"}]
+            return {"error": f"Project '{project_id}' not found"}
 
-        # Step 3: Truncate inputs
+        # Step 3: Validate non-empty summary
+        if not summary or not summary.strip():
+            return {"error": "Summary cannot be empty"}
+
+        # Step 4: Truncate inputs
         summary = summary[:_MAX_SUMMARY_LEN]
         if details:
             details = details[:_MAX_DETAILS_LEN]
 
-        # Step 4: Add entry via store (returns dict already)
+        # Step 5: Add entry via store (returns dict already)
         entry = store.add_history_entry(
             project_id=project_id,
             entry_type=entry_type,
@@ -132,7 +136,7 @@ def create_project_history_tools(
             entry_metadata=entry_metadata,
         )
 
-        return [entry]
+        return entry
     project_history_add._full_doc_ = _FULL_DOCS["project_history_add"]
 
     @register_tool_category(CATEGORY_NAME)
@@ -142,20 +146,21 @@ def create_project_history_tools(
         limit: int = 20,
         offset: int = 0,
         entry_type: str | None = None,
-    ) -> list[dict]:
+    ) -> dict:
         """List history entries for a project. Use tool_help() for details."""
         # Validate project exists
         project = store.get(project_id)
         if not project:
-            return [{"error": f"Project '{project_id}' not found"}]
+            return {"error": f"Project '{project_id}' not found"}
 
-        # Cap limit at 100
-        limit = min(limit, 100)
+        # Clamp and cap limit at 100
+        limit = max(1, min(limit, 100))
+        offset = max(0, offset)
 
         # Validate entry_type if provided
         if entry_type is not None and not _is_valid_entry_type(entry_type):
             valid_types = [e.value for e in HistoryEntryType]
-            return [{"error": f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"}]
+            return {"error": f"Invalid entry_type '{entry_type}'. Valid: {valid_types}"}
 
         # Call store (returns dict with entries, total, limit, offset)
         result = store.list_history_entries(
@@ -165,7 +170,7 @@ def create_project_history_tools(
             offset=offset,
         )
 
-        return [result]
+        return result
     project_history_list._full_doc_ = _FULL_DOCS["project_history_list"]
 
     @register_tool_category(CATEGORY_NAME)
@@ -175,15 +180,16 @@ def create_project_history_tools(
         query: str,
         limit: int = 20,
         offset: int = 0,
-    ) -> list[dict]:
+    ) -> dict:
         """Search history entries by query. Use tool_help() for details."""
         # Validate project exists
         project = store.get(project_id)
         if not project:
-            return [{"error": f"Project '{project_id}' not found"}]
+            return {"error": f"Project '{project_id}' not found"}
 
-        # Cap limit at 100
-        limit = min(limit, 100)
+        # Clamp and cap limit at 100
+        limit = max(1, min(limit, 100))
+        offset = max(0, offset)
 
         # Call store (returns dict with entries, total, limit, offset, query)
         result = store.search_history_entries(
@@ -193,7 +199,7 @@ def create_project_history_tools(
             offset=offset,
         )
 
-        return [result]
+        return result
     project_history_search._full_doc_ = _FULL_DOCS["project_history_search"]
 
     @register_tool_category(CATEGORY_NAME)
@@ -201,20 +207,20 @@ def create_project_history_tools(
     def project_history_delete(
         project_id: str,
         entry_id: str,
-    ) -> list[dict]:
+    ) -> dict:
         """Delete a history entry by ID. Use tool_help() for details."""
         # Validate project exists
         project = store.get(project_id)
         if not project:
-            return [{"error": f"Project '{project_id}' not found"}]
+            return {"error": f"Project '{project_id}' not found"}
 
         # Delete entry
         deleted = store.delete_history_entry(entry_id, project_id=project_id)
 
         if not deleted:
-            return [{"error": f"Entry '{entry_id}' not found in project '{project_id}'"}]
+            return {"error": f"Entry '{entry_id}' not found in project '{project_id}'"}
 
-        return [{"success": True, "deleted_entry_id": entry_id}]
+        return {"success": True, "deleted_entry_id": entry_id}
     project_history_delete._full_doc_ = _FULL_DOCS["project_history_delete"]
 
     return [project_history_add, project_history_list, project_history_search, project_history_delete]
