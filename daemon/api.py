@@ -106,7 +106,12 @@ async def lifespan(app: FastAPI):
     
     # Load config first
     config = load_config()
-    
+
+    # Run RAG auto-test to verify LightRAG connectivity
+    # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)
+    from daemon.rag import auto_test_rag
+    await auto_test_rag()
+
     # Initialize InstanceManager
     manager = InstanceManager(config)
     await manager.initialize()

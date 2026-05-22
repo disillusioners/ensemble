@@ -1,7 +1,13 @@
 """RAG (Retrieval-Augmented Generation) module for LightRAG integration."""
 
 from .client import AsyncLightRAGClient
-from .config import RAGConfig, is_rag_enabled
+from .config import (
+    RAGConfig,
+    auto_test_rag,
+    disable_rag,
+    enable_rag,
+    is_rag_enabled,
+)
 from .exceptions import (
     RAGConnectionError,
     RAGError,
@@ -34,5 +40,8 @@ __all__ = [
     "RAGNotConfiguredError",
     "RAGResponseError",
     "RAGTimeoutError",
+    "auto_test_rag",
+    "disable_rag",
+    "enable_rag",
     "is_rag_enabled",
 ]
