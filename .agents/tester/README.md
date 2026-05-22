@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-22 Project History E2E)
+## Test Results (Latest: 2026-05-22 MCP Cold-Load Race Condition Fix)
+
+### MCP Cold-Load Race Condition Fix (2026-05-22)
+- **Branch**: feature/fix-mcp-cold-load (commits cfe5416 + cbab340)
+- **Unit Tests**: 4433/4433 PASS (0 failures, 27 skipped)
+- **New Race Condition Tests**: 6/6 PASS — cold-load preload ordering, hot path no-preload, graceful degradation
+- **E2E MCP Tests**: 24/24 PASS — 8 (tools available) + 16 (restore after restart)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 2 (import path fix in daemon/persistence.py + conftest mock)
+- See `.agents/tester/RESULTS/2026-05-22-mcp-cold-load-race-fix.md` for full report
+
+### MCP Cold-Load Fix Status: ✅ READY (all tests pass, race condition verified fixed)
 
 ### Project History E2E (2026-05-22)
 - **Feature**: project_history (4 phases: model, repository, tools, API, injection)

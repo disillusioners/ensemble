@@ -1,14 +1,14 @@
 # Test Packs
 
 ## Summary
-- Total: 56 packs
-- Unit: 47 | Integration: 1 | Mock: 2 | E2E: 6
+- Total: 57 packs
+- Unit: 48 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-21 | ✅ PASS (1760/1763, feature/fix-mcp-localhost-block, 3 pre-existing failures) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-05-22 | ✅ PASS (4433/4433, feature/fix-mcp-cold-load, 0 failures) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-05-19 | ✅ PASS (feature/builtin-mcp-servers all phases, no regression) |
@@ -51,6 +51,7 @@
 | ce_api_unit_test | tests/unit/test_critical_experience_api.py | Projects API: GET /projects/{id} and GET /projects include critical_experience in response | 2 min | 2026-05-20 | ✅ PASS (13 tests, feature/critical-experience Phase 5) |
 | mcp_test_connection_unit_test | tests/unit/test_mcp_test_connection.py | MCP test connection: SSRF validation (42→68), endpoint logic (11), helper function (5) | 2 min | 2026-05-21 | ✅ PASS (68/68, feature/fix-mcp-localhost-block, SSRF localhost default=true verified) |
 | mcp_disable_flags_unit_test | tests/unit/test_builtin_mcp_servers.py | MCP disable flags: is_builtin_disabled helper, bootstrap disable/enable, API protection, config validation, registry, model schema (12 classes, 74 tests) | 2 min | 2026-05-22 | ✅ PASS (74/74, feature/mcp-disable-flags, no regressions) |
+| mcp_cold_load_race_unit_test | tests/unit/test_mcp_cold_load_race.py | MCP cold-load race condition: preload before restore, hot path no preload, graceful degradation, async delegation | 2 min | 2026-05-22 | ✅ PASS (6/6, feature/fix-mcp-cold-load) |
 | project_history_tools_unit_test | tests/unit/test_project_history_tools.py | Project history agent tools: add (validation, truncation, special chars), list (clamping, filter, pagination), search (format, special chars), delete (ownership), constants | 2 min | 2026-05-22 | ✅ PASS (38/38, project_history feature, no regressions) |
 | project_history_injection_unit_test | tests/unit/test_project_history_injection.py | Project history context injection: emoji icons, section rendering, limit 10, ordering, error handling, CE+history coexistence, ProjectResponse serialization | 2 min | 2026-05-22 | ✅ PASS (28/28, project_history feature, no regressions) |
 
@@ -75,8 +76,8 @@
 | stop_resume_spawn_e2e_test | test/packs/stop_resume_spawn_e2e_test.py | Stop→Resume→Spawn Instance: verify spawn_instance works after stop/resume, multiple cycles, no "no running event loop" | 5 min | 2026-05-15 | ✅ PASS (async def fix verified, spawn works after resume, 2 cycles, no errors) |
 | pause_ttl_cold_resume_e2e_test | test/packs/pause_ttl_cold_resume_e2e_test.py | Pause TTL + Cold Resume: pause→paused_at set→daemon restart→cold resume→completed, status transitions | 5 min | 2026-05-16 | ✅ PASS (9/9 steps, cold resume from checkpoint verified) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
-| mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-20 | ✅ PASS (8/8 checks, fix/mcp-tools-not-available-to-llm) |
-| mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-21 | ✅ PASS (16/16 checks, fix/mcp-tools-not-available-to-llm commit 43e208b) |
+| mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-22 | ✅ PASS (8/8 checks, feature/fix-mcp-cold-load) |
+| mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-22 | ✅ PASS (16/16 checks, feature/fix-mcp-cold-load) |
 
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton | 2 min | 2026-05-20 | ✅ PASS (17/17, notification system) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |
