@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 
 logger = logging.getLogger(__name__)
+
+
+def is_builtin_disabled(server_name: str) -> bool:
+    """Check if a built-in server is disabled via environment variable.
+
+    Looks for MCP_DISABLE_BUILT_IN_{SERVER_NAME} env var (uppercase).
+    If set to "true" (case-insensitive), the server is considered disabled.
+
+    Args:
+        server_name: Name of the built-in server (e.g., "context7", "webfetch").
+
+    Returns:
+        True if the server is disabled, False otherwise.
+    """
+    env_var = f"MCP_DISABLE_BUILT_IN_{server_name.upper()}"
+    return os.environ.get(env_var, "").lower() == "true"
 
 
 class BuiltinServerRegistry:

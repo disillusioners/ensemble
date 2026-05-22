@@ -1400,3 +1400,306 @@ class TestBuiltinServerIntegration:
         response = client.get("/api/mcp-servers/builtin-templates")
         assert response.status_code == 200
         assert "templates" in response.json()
+
+
+# =============================================================================
+# Group 11: is_builtin_disabled() Tests
+# =============================================================================
+
+
+class TestIsBuiltinDisabled:
+    """Tests for is_builtin_disabled() helper function."""
+
+    def test_is_builtin_disabled_not_set(self):
+        """Test that unset env var returns False (server not disabled)."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {}, clear=True):
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+            # Reload to pick up patched env
+            import importlib
+            importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+
+            assert is_builtin_disabled("context7") is False
+            assert is_builtin_disabled("webfetch") is False
+            assert is_builtin_disabled("unknown") is False
+
+    def test_is_builtin_disabled_true_lowercase(self):
+        """Test that MCP_DISABLE_BUILT_IN_X=true (lowercase) disables server."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"MCP_DISABLE_BUILT_IN_CONTEXT7": "true"}, clear=True):
+            import importlib
+            importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+
+            assert is_builtin_disabled("context7") is True
+            assert is_builtin_disabled("webfetch") is False  # Other servers not disabled
+
+    def test_is_builtin_disabled_true_uppercase(self):
+        """Test that MCP_DISABLE_BUILT_IN_X=TRUE (uppercase) disables server."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"MCP_DISABLE_BUILT_IN_WEBFETCH": "TRUE"}, clear=True):
+            import importlib
+            importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+
+            assert is_builtin_disabled("webfetch") is True
+            assert is_builtin_disabled("context7") is False
+
+    def test_is_builtin_disabled_mixed_case(self):
+        """Test that MCP_DISABLE_BUILT_IN_X=True (mixed case) disables server."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"MCP_DISABLE_BUILT_IN_CONTEXT7": "TrUe"}, clear=True):
+            import importlib
+            importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+
+            assert is_builtin_disabled("context7") is True
+
+    def test_is_builtin_disabled_false_string(self):
+        """Test that non-true values don't disable server."""
+        from unittest.mock import patch
+
+        false_values = ["false", "0", "no", "1", ""]
+        for val in false_values:
+            with patch.dict("os.environ", {"MCP_DISABLE_BUILT_IN_CONTEXT7": val}, clear=True):
+                import importlib
+                importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+                from daemon.mcp.builtin_servers import is_builtin_disabled
+
+                assert is_builtin_disabled("context7") is False, f"Value '{val}' should not disable server"
+
+    def test_is_builtin_disabled_case_insensitive_server_name(self):
+        """Test that server name is uppercased for env var lookup."""
+        from unittest.mock import patch
+
+        with patch.dict("os.environ", {"MCP_DISABLE_BUILT_IN_CONTEXT7": "true"}, clear=True):
+            import importlib
+            importlib.reload(importlib.import_module("daemon.mcp.builtin_servers"))
+            from daemon.mcp.builtin_servers import is_builtin_disabled
+
+            # Both lowercase and uppercase should work
+            assert is_builtin_disabled("context7") is True
+            assert is_builtin_disabled("CONTEXT7") is True
+            assert is_builtin_disabled("Context7") is True
+
+
+# =============================================================================
+# Group 12: Bootstrap Disable/Enable Tests
+# =============================================================================
+
+
+class TestBootstrapDisableEnable:
+    """Tests for bootstrap disable/enable behavior via env flags."""
+
+    @pytest.fixture
+    def bootstrap_engine(self):
+        """Create in-memory SQLite engine for bootstrap tests."""
+        engine = create_engine(
+            "sqlite:///:memory:",
+            echo=False,
+            connect_args={"check_same_thread": False},
+        )
+        SQLModel.metadata.create_all(engine)
+        yield engine
+        engine.dispose()
+
+    @pytest.fixture
+    def bootstrap_repo(self, bootstrap_engine):
+        """Create MCP server repository for bootstrap tests."""
+        return SQLModelMcpServerRepository(bootstrap_engine)
+
+    @pytest.fixture
+    def mock_config(self):
+        """Create mock Config for InstanceManager."""
+        from daemon.config import Config, LLMConfig, DaemonConfig, LimitsConfig, PersistenceConfig, QueueConfig, CompactionConfig, ServicesConfig, JobSystemConfig, AgentsConfig, McpPoolConfig
+
+        config = MagicMock(spec=Config)
+        config.llm = MagicMock(spec=LLMConfig)
+        config.llm.base_url = "https://api.openai.com/v1"
+        config.llm.api_key = "test-key"
+        config.llm.model = "gpt-4"
+        config.llm.model_vision = None
+        config.llm.temperature = 0.7
+        config.llm.request_timeout = 60
+
+        config.daemon = MagicMock(spec=DaemonConfig)
+        config.daemon.host = "0.0.0.0"
+        config.daemon.port = 8079
+
+        config.limits = MagicMock(spec=LimitsConfig)
+        config.limits.max_instances = 100
+        config.limits.max_children_per_instance = 10
+        config.limits.instance_timeout_minutes = 60
+        config.limits.message_rate_limit = 60
+        config.limits.graph_recursion_limit = 100
+        config.limits.llm_concurrency = 10
+
+        config.persistence = MagicMock(spec=PersistenceConfig)
+        config.persistence.db_path = ":memory:"
+        config.persistence.checkpointer_db_path = ":memory:"
+
+        config.queue = MagicMock(spec=QueueConfig)
+        config.queue.discard_on_startup = None
+        config.queue.llm_retry_transient_attempts = 10
+        config.queue.llm_retry_timeout_attempts = 3
+
+        config.compaction = MagicMock(spec=CompactionConfig)
+        config.compaction.enabled = False
+
+        config.services = MagicMock(spec=ServicesConfig)
+        config.services.worker_poll_interval = 0.5
+        config.services.stale_task_recovery_interval = 60
+        config.services.task_timeout_minutes = 60
+        config.services.max_task_retries = 3
+        config.services.task_retry_backoff_base = 60
+        config.services.task_retry_backoff_max = 3600
+        config.services.stale_task_cancel_grace_seconds = 10
+        config.services.graph_timeout_minutes = 55
+
+        config.agents = MagicMock(spec=AgentsConfig)
+        config.agents.directory = "./agents"
+
+        config.job_system = MagicMock(spec=JobSystemConfig)
+        config.job_system.default_max_retries = 3
+        config.job_system.retry_backoff_base_seconds = 60
+        config.job_system.retry_backoff_max_seconds = 3600
+        config.job_system.retry_backoff_multiplier = 2.0
+        config.job_system.dlq_enabled = True
+        config.job_system.event_dispatch_enabled = True
+        config.job_system.observer_health_check_interval_seconds = 300
+        config.job_system.idempotency_key_ttl_hours = 24
+        config.job_system.job_retry_scheduler_enabled = None
+
+        config.mcp_pool = MagicMock(spec=McpPoolConfig)
+        config.mcp_pool.enabled = True
+        config.mcp_pool.default_pool_size = 1
+        config.mcp_pool.servers = {}
+        config.mcp_pool.health_check_interval = 60
+        config.mcp_pool.health_check_timeout = 5
+
+        return config
+
+    @pytest.fixture
+    def instance_manager_with_repo(self, bootstrap_engine, bootstrap_repo, mock_config):
+        """Create InstanceManager with in-memory DB and test repository."""
+        from unittest.mock import patch, MagicMock
+
+        # Patch database engine creation to use our in-memory engine
+        with patch("daemon.manager.create_engine_from_config") as mock_create_engine, \
+             patch("daemon.manager.get_checkpointer") as mock_checkpointer, \
+             patch("daemon.migrations.runner.MigrationRunner") as mock_migration:
+
+            mock_create_engine.return_value = bootstrap_engine
+            mock_checkpointer.return_value = AsyncMock()
+
+            # Create mock migration runner
+            mock_runner_instance = MagicMock()
+            mock_runner_instance.run_pending_migration.return_value = []
+            mock_migration.return_value = mock_runner_instance
+
+            # Import here to avoid circular dependencies
+            from daemon.manager import InstanceManager
+
+            # Create manager
+            manager = InstanceManager(mock_config)
+
+            # Override the MCP server repository with our test repo
+            manager._mcp_server_repository = bootstrap_repo
+
+            yield manager
+
+            # Cleanup
+            if hasattr(manager, '_shutting_down'):
+                manager._shutting_down = True
+
+    def test_bootstrap_disabled_skips_creation(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that bootstrap skips creating a server when disabled via env var."""
+        from unittest.mock import patch
+
+        manager = instance_manager_with_repo
+
+        # Patch is_builtin_disabled to return True
+        with patch("daemon.manager.is_builtin_disabled", return_value=True):
+            # Call bootstrap
+            manager._bootstrap_builtin_servers()
+
+            # Server should NOT be created
+            server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+            assert server is None, "Disabled server should not be created"
+
+    def test_bootstrap_disabled_deactivates_existing(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that bootstrap deactivates existing server when disabled via env var."""
+        from unittest.mock import patch
+
+        manager = instance_manager_with_repo
+
+        # First, create the server normally (without disable flag)
+        manager._bootstrap_builtin_servers()
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server is not None
+        assert server.is_active is True
+
+        # Now disable via env var - patch the function directly in manager module
+        with patch("daemon.manager.is_builtin_disabled", return_value=True):
+            # Call bootstrap again
+            manager._bootstrap_builtin_servers()
+
+            # Server should be deactivated
+            server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+            assert server is not None
+            assert server.is_active is False, "Disabled server should be deactivated"
+
+    def test_bootstrap_reenable_reativates(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that removing disable flag reactivates server on next bootstrap."""
+        from unittest.mock import patch
+
+        manager = instance_manager_with_repo
+
+        # First, create the server normally (enabled)
+        with patch("daemon.manager.is_builtin_disabled", return_value=False):
+            manager._bootstrap_builtin_servers()
+
+        # Server should exist and be active
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server is not None
+        assert server.is_active is True
+
+        # Now disable via env var - server should be deactivated
+        with patch("daemon.manager.is_builtin_disabled", return_value=True):
+            manager._bootstrap_builtin_servers()
+
+        # Server should be deactivated
+        server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+        assert server is not None
+        assert server.is_active is False
+
+        # Now remove the disable flag - patch returns False
+        with patch("daemon.manager.is_builtin_disabled", return_value=False):
+            # Call bootstrap again
+            manager._bootstrap_builtin_servers()
+
+            # Server should be reactivated
+            server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+            assert server is not None
+            assert server.is_active is True, "Re-enabled server should be activated"
+
+    def test_bootstrap_enabled_creates_new(self, instance_manager_with_repo, registry_with_test_def):
+        """Test that bootstrap creates server when not disabled."""
+        from unittest.mock import patch
+
+        manager = instance_manager_with_repo
+
+        with patch.dict("os.environ", {}, clear=True):
+            # Call bootstrap
+            manager._bootstrap_builtin_servers()
+
+            # Server should be created
+            server = manager._mcp_server_repository.get_mcp_server_by_name("test-builtin")
+            assert server is not None
+            assert server.is_builtin is True
+            assert server.is_active is True

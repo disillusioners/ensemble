@@ -38,7 +38,7 @@ from .repositories import (
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
-from .mcp.builtin_servers import get_registry as get_mcp_registry
+from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
 from .mcp.warmup_pool import get_mcp_warmup_pool
 from .mcp.config import McpStdioConfig
 
@@ -574,11 +574,17 @@ class InstanceManager:
         """Bootstrap built-in MCP servers on daemon startup.
 
         For each registered built-in server definition:
-        1. Build default config from empty values
-        2. Check if server exists by name
-        3. If not exists → create with is_builtin=True
-        4. If exists and is_builtin=True and schema version differs → update schema (preserve user config)
-        5. If exists and is_builtin=False → log warning, skip
+        1. Check if server is disabled via MCP_DISABLE_BUILT_IN_{NAME} env var
+        2. If disabled:
+           - If DB record exists → deactivate it (set is_active=False)
+           - If no DB record → skip (don't create)
+        3. If not disabled:
+           - If no DB record → create with is_active=True
+           - If DB record exists and is_builtin=True:
+             - If schema version differs → update config (preserve is_active)
+             - If is_active=False (previously disabled) → reactivate (set is_active=True)
+             - Otherwise → no-op (idempotent)
+           - If DB record exists and is_builtin=False → log warning, skip
 
         Fault-tolerant: per-server try/except, logs errors and continues.
         Idempotent: safe to run multiple times.
@@ -593,6 +599,26 @@ class InstanceManager:
 
         for definition in definitions:
             try:
+                # Check if server is disabled via env var
+                if is_builtin_disabled(definition.name):
+                    existing = self._mcp_server_repository.get_mcp_server_by_name(definition.name)
+                    if existing is None:
+                        logger.info(f"Built-in MCP server '{definition.name}' disabled (MCP_DISABLE_BUILT_IN_{definition.name.upper()}), skipping creation")
+                        continue
+                    elif existing.is_builtin:
+                        # Deactivate existing record
+                        self._mcp_server_repository.update_mcp_server(
+                            existing.id,
+                            is_active=False,
+                        )
+                        logger.info(f"Built-in MCP server '{definition.name}' disabled (MCP_DISABLE_BUILT_IN_{definition.name.upper()}), deactivated existing record")
+                    else:
+                        logger.warning(
+                            f"Skipping built-in MCP server '{definition.name}': "
+                            f"a user-created server with this name already exists"
+                        )
+                    continue
+
                 default_config = definition.build_config({})
                 schema_dicts = definition.get_config_schema()
                 schema_version = definition.schema_version
@@ -611,8 +637,15 @@ class InstanceManager:
                     )
                     logger.info(f"Created built-in MCP server: {definition.name}")
                 elif existing.is_builtin:
+                    # Check if previously disabled (is_active=False) and reactivate
+                    if not existing.is_active:
+                        self._mcp_server_repository.update_mcp_server(
+                            existing.id,
+                            is_active=True,
+                        )
+                        logger.info(f"Reactivated built-in MCP server: {definition.name}")
                     # Check schema version drift
-                    if existing.config_schema_version != schema_version:
+                    elif existing.config_schema_version != schema_version:
                         self._mcp_server_repository.update_mcp_server(
                             existing.id,
                             config=default_config,  # refresh stale config with rebuilt defaults
@@ -645,6 +678,9 @@ class InstanceManager:
 
         Registers all built-in STDIO servers with the pool and starts background
         warmup. Does NOT block startup — warmup runs as a background task.
+
+        Skips servers that are inactive in the database (either disabled via
+        env var or manually deactivated).
         """
         if not self.config.mcp_pool.enabled:
             logger.info("MCP warm-up pool disabled by config")
@@ -658,6 +694,13 @@ class InstanceManager:
             config_dict = definition.get_base_config()
             if config_dict.get("transport") != "stdio":
                 continue
+
+            # Skip inactive servers (disabled via env var or manually deactivated)
+            existing = self._mcp_server_repository.get_mcp_server_by_name(name)
+            if existing is not None and not existing.is_active:
+                logger.debug(f"Skipping warmup for inactive MCP server: {name}")
+                continue
+
             pool_size = self.config.mcp_pool.servers.get(
                 name, self.config.mcp_pool.default_pool_size
             )
