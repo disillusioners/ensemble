@@ -141,6 +141,7 @@ install: pyinstaller
 	
 	# Copy frontend build (preserve frontend/dist/frontend/browser structure)
 	@echo "$(YELLOW)Copying frontend...$(NC)"
+	rm -rf $(INSTALL_DIR)/frontend/dist
 	mkdir -p $(INSTALL_DIR)/frontend/dist/frontend/browser
 	cp -r $(FRONTEND_DIST)/* $(INSTALL_DIR)/frontend/dist/frontend/browser/ || echo "$(YELLOW)Warning: Frontend not built. Run 'make build' first.$(NC)"
 	
