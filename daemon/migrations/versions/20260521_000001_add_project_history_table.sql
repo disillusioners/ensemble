@@ -11,8 +11,8 @@ CREATE TABLE IF NOT EXISTS project_history (
     entry_type TEXT NOT NULL,
     summary TEXT NOT NULL,
     details TEXT,
-    recorded_by_agent TEXT,
-    recorded_by_instance TEXT,
+    source_agent TEXT,
+    source_instance_id TEXT,
     entry_metadata JSON,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );

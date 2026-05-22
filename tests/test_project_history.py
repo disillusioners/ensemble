@@ -45,8 +45,8 @@ class TestAddHistoryEntry:
         assert entry["entry_type"] == "deployment"
         assert entry["summary"] == "Deployed API v2 to production"
         assert entry["details"] is None
-        assert entry["recorded_by_agent"] is None
-        assert entry["recorded_by_instance"] is None
+        assert entry["source_agent"] is None
+        assert entry["source_instance_id"] is None
         assert entry["entry_metadata"] is None
         assert "created_at" in entry
 
@@ -65,8 +65,8 @@ class TestAddHistoryEntry:
         assert entry["entry_type"] == "task"
         assert entry["summary"] == "Fixed critical bug"
         assert entry["details"] == "Fixed memory leak in worker process"
-        assert entry["recorded_by_agent"] == "coder"
-        assert entry["recorded_by_instance"] == "instance-123"
+        assert entry["source_agent"] == "coder"
+        assert entry["source_instance_id"] == "instance-123"
         assert entry["entry_metadata"] == {"severity": "critical", "bug_id": "BUG-456"}
 
     def test_add_history_entry_truncates_summary(self, store, project):

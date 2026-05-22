@@ -645,8 +645,8 @@ class SQLModelProjectRepository:
                 entry_type=entry_type,
                 summary=summary,
                 details=details,
-                recorded_by_agent=source_agent,
-                recorded_by_instance=source_instance_id,
+                source_agent=source_agent,
+                source_instance_id=source_instance_id,
                 entry_metadata=entry_metadata,
             )
             session.add(entry)

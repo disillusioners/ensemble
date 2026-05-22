@@ -218,8 +218,8 @@ class ProjectHistoryEntry(SQLModel, table=True):
     entry_type: str = Field()
     summary: str = Field(max_length=300)
     details: str | None = Field(default=None, max_length=5000)
-    recorded_by_agent: str | None = Field(default=None)
-    recorded_by_instance: str | None = Field(default=None)
+    source_agent: str | None = Field(default=None)
+    source_instance_id: str | None = Field(default=None)
     entry_metadata: dict | None = Field(
         default=None,
         sa_column=Column(JSON)
@@ -234,8 +234,8 @@ class ProjectHistoryEntry(SQLModel, table=True):
             "entry_type": self.entry_type,
             "summary": self.summary,
             "details": self.details,
-            "recorded_by_agent": self.recorded_by_agent,
-            "recorded_by_instance": self.recorded_by_instance,
+            "source_agent": self.source_agent,
+            "source_instance_id": self.source_instance_id,
             "entry_metadata": self.entry_metadata,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
