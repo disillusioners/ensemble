@@ -24,8 +24,8 @@ def is_builtin_disabled(server_name: str) -> bool:
     Returns:
         True if the server is disabled, False otherwise.
     """
-    env_var = f"MCP_DISABLE_BUILT_IN_{server_name.upper()}"
-    return os.environ.get(env_var, "").lower() == "true"
+    env_var = f"MCP_DISABLE_BUILT_IN_{server_name.upper().replace('-', '_')}"
+    return os.environ.get(env_var, "").strip().lower() == "true"
 
 
 class BuiltinServerRegistry:

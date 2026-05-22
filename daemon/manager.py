@@ -645,7 +645,7 @@ class InstanceManager:
                         )
                         logger.info(f"Reactivated built-in MCP server: {definition.name}")
                     # Check schema version drift
-                    elif existing.config_schema_version != schema_version:
+                    if existing.config_schema_version != schema_version:
                         self._mcp_server_repository.update_mcp_server(
                             existing.id,
                             config=default_config,  # refresh stale config with rebuilt defaults
