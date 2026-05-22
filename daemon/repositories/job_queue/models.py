@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import CheckConstraint, Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON, Text
 from sqlmodel import SQLModel, Field
@@ -36,13 +36,14 @@ class QueueType(str, enum.Enum):
     """Queue type enum."""
     FIFO = "fifo"
     PARALLEL = "parallel"
+    DEFER = "defer"
 
 
 class JobQueue(SQLModel, table=True):
     """Named job queue for per-project job isolation."""
     __tablename__ = "job_queues"
     __table_args__ = (
-        CheckConstraint("queue_type IN ('fifo', 'parallel')", name="ck_job_queues_queue_type"),
+        CheckConstraint("queue_type IN ('fifo', 'parallel', 'defer')", name="ck_job_queues_queue_type"),
         Index("idx_job_queues_project", "project_id"),
         UniqueConstraint("project_id", "queue_name_lower", name="uq_job_queues_project_name"),
     )
@@ -57,7 +58,7 @@ class JobQueue(SQLModel, table=True):
     project_id: str  # NOT NULL, FK target (no foreign_key= param)
     queue_name: str = Field(default="default", max_length=100)
     queue_name_lower: str = Field(default="default", max_length=100)  # For case-insensitive uniqueness
-    queue_type: str = Field(default=QueueType.FIFO.value)  # "fifo" or "parallel"
+    queue_type: str = Field(default=QueueType.FIFO.value)  # "fifo", "parallel", or "defer"
     
     # Queue configuration
     concurrency_limit: int = Field(default=1, ge=1, le=20)
@@ -69,6 +70,13 @@ class JobQueue(SQLModel, table=True):
     # Timestamps
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    @model_validator(mode="after")
+    def enforce_defer_concurrency_limit(self) -> "JobQueue":
+        """Defer queues must have concurrency_limit=1."""
+        if self.queue_type == QueueType.DEFER.value and self.concurrency_limit != 1:
+            raise ValueError("Defer queues must have concurrency_limit=1")
+        return self
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

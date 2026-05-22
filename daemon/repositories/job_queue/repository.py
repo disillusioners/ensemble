@@ -130,6 +130,27 @@ class JobRepository:
             job = db_session.exec(stmt).first()
             return job
 
+    def count_active_jobs_by_project(self, project_id: str) -> int:
+        """Count active jobs (PENDING + PROCESSING) for a project across all queues.
+        
+        Used for defer queue type to check if project already has active jobs.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Count of active jobs for the project.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(func.count())
+                .select_from(JobItem)
+                .where(JobItem.project_id == project_id)
+                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+                .where(JobItem.deleted_at.is_(None))
+            )
+            return db_session.exec(stmt).one()
+
     # --------------------------------------------------------
     # LIST
     # --------------------------------------------------------

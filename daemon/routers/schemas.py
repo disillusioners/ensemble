@@ -242,15 +242,15 @@ class JobQueueCreateRequest(BaseModel):
     """Request body for creating a new job queue."""
     
     queue_name: str = Field(..., min_length=1, max_length=100, description="Queue name")
-    queue_type: str = Field(default="fifo", description="Queue type: 'fifo' or 'parallel'")
+    queue_type: str = Field(default="fifo", description="Queue type: 'fifo', 'parallel', or 'defer'")
     concurrency_limit: int = Field(default=1, ge=1, le=20, description="Max concurrent jobs")
     description: str | None = Field(default=None, max_length=500, description="Queue description")
     
     @field_validator("queue_type")
     @classmethod
     def validate_queue_type(cls, v: str) -> str:
-        if v not in ("fifo", "parallel"):
-            raise ValueError("queue_type must be 'fifo' or 'parallel'")
+        if v not in ("fifo", "parallel", "defer"):
+            raise ValueError("queue_type must be 'fifo', 'parallel', or 'defer'")
         return v
     
     @field_validator("queue_name")
@@ -265,9 +265,11 @@ class JobQueueCreateRequest(BaseModel):
         return v
     
     @model_validator(mode="after")
-    def validate_fifo_concurrency(self) -> "JobQueueCreateRequest":
+    def validate_queue_concurrency(self) -> "JobQueueCreateRequest":
         if self.queue_type == "fifo" and self.concurrency_limit != 1:
             raise ValueError("FIFO queues must have concurrency_limit=1")
+        if self.queue_type == "defer" and self.concurrency_limit != 1:
+            raise ValueError("Defer queues must have concurrency_limit=1")
         return self
     
     model_config = {
@@ -286,7 +288,7 @@ class JobQueueUpdateRequest(BaseModel):
     """Request body for updating a job queue."""
     
     queue_name: str | None = Field(default=None, min_length=1, max_length=100, description="New queue name")
-    queue_type: str | None = Field(default=None, description="Queue type: 'fifo' or 'parallel'")
+    queue_type: str | None = Field(default=None, description="Queue type: 'fifo', 'parallel', or 'defer'")
     concurrency_limit: int | None = Field(default=None, ge=1, le=20, description="New concurrency limit")
     is_paused: bool | None = Field(default=None, description="Pause/unpause the queue")
     description: str | None = Field(default=None, max_length=500, description="New description")
@@ -294,8 +296,8 @@ class JobQueueUpdateRequest(BaseModel):
     @field_validator("queue_type")
     @classmethod
     def validate_queue_type(cls, v: str | None) -> str | None:
-        if v is not None and v not in ("fifo", "parallel"):
-            raise ValueError("queue_type must be 'fifo' or 'parallel'")
+        if v is not None and v not in ("fifo", "parallel", "defer"):
+            raise ValueError("queue_type must be 'fifo', 'parallel', or 'defer'")
         return v
     
     @field_validator("queue_name")
@@ -311,11 +313,13 @@ class JobQueueUpdateRequest(BaseModel):
         return v
     
     @model_validator(mode="after")
-    def validate_fifo_concurrency(self) -> "JobQueueUpdateRequest":
+    def validate_queue_concurrency(self) -> "JobQueueUpdateRequest":
         # Only validate when BOTH queue_type AND concurrency_limit are explicitly provided
         if self.queue_type is not None and self.concurrency_limit is not None:
             if self.queue_type == "fifo" and self.concurrency_limit != 1:
                 raise ValueError("FIFO queues must have concurrency_limit=1")
+            if self.queue_type == "defer" and self.concurrency_limit != 1:
+                raise ValueError("Defer queues must have concurrency_limit=1")
         return self
     
     model_config = {

@@ -166,7 +166,22 @@ class JobProcessor:
                 # This allows pausing specific queues while others continue
                 if queue.is_paused:
                     continue
-                
+
+                # Defer queue check: only process when project is completely idle
+                # Only applies to queues with queue_type attribute (skip mock/test objects)
+                if getattr(queue, 'queue_type', None) == "defer":
+                    pending = await asyncio.to_thread(
+                        self._queue_service._repository.list_pending_by_queue, queue.queue_id
+                    )
+                    if pending:
+                        # Check if any OTHER queue in the project has active jobs
+                        total_active = await asyncio.to_thread(
+                            self._queue_service._repository.count_active_jobs_by_project, queue.project_id
+                        )
+                        if total_active > len(pending):
+                            # Other queues have active jobs, skip this defer queue
+                            continue
+
                 # Get next pending job for this specific queue
                 pending = await asyncio.to_thread(
                     self._queue_service._repository.list_pending_by_queue, queue.queue_id

@@ -38,18 +38,20 @@ class TestQueueTypeEnum:
     """Tests for QueueType enum."""
 
     def test_queue_type_enum_values(self):
-        """Test QueueType enum has correct values for FIFO and PARALLEL."""
+        """Test QueueType enum has correct values for FIFO, PARALLEL, and DEFER."""
         assert QueueType.FIFO.value == "fifo"
         assert QueueType.PARALLEL.value == "parallel"
+        assert QueueType.DEFER.value == "defer"
 
     def test_queue_type_enum_is_string_enum(self):
         """Test QueueType is a string enum (can compare directly to strings)."""
         assert QueueType.FIFO == "fifo"
         assert QueueType.PARALLEL == "parallel"
+        assert QueueType.DEFER == "defer"
 
     def test_queue_type_enum_count(self):
-        """Test QueueType has exactly two values."""
-        assert len(QueueType) == 2
+        """Test QueueType has exactly three values."""
+        assert len(QueueType) == 3
 
 
 class TestJobQueueCreation:
@@ -115,6 +117,19 @@ class TestJobQueueCreation:
         
         assert queue.queue_type == "parallel"
         assert queue.concurrency_limit == 10
+
+    def test_job_queue_with_defer_type(self, engine):
+        """Test creating JobQueue with DEFER type (always concurrency=1)."""
+        queue = JobQueue(
+            project_id="project-abc",
+            queue_name="defer-queue",
+            queue_name_lower="defer-queue",
+            queue_type=QueueType.DEFER.value,
+            concurrency_limit=1,
+        )
+        
+        assert queue.queue_type == "defer"
+        assert queue.concurrency_limit == 1
 
     def test_job_queue_uuid_generation(self, engine):
         """Test that queue_id is auto-generated as UUID when not provided."""
@@ -329,3 +344,77 @@ class TestJobQueueIndex:
         # Should have idx_job_queues_project index
         index_names = [idx.name for idx in indexes]
         assert "idx_job_queues_project" in index_names
+
+
+class TestJobQueueDeferQueueConcurrencyLimit:
+    """Tests for defer queue concurrency_limit enforcement.
+
+    Defer queues are special queues that only process jobs when the entire
+    project is idle (no active jobs in any other queue). They must always
+    have concurrency_limit=1 to ensure serialized processing.
+    """
+
+    def test_defer_queue_allows_concurrency_limit_1(self, engine):
+        """Test that defer queue can be created with concurrency_limit=1."""
+        queue = JobQueue(
+            project_id="project-abc",
+            queue_name="defer-queue",
+            queue_name_lower="defer-queue",
+            queue_type=QueueType.DEFER.value,
+            concurrency_limit=1,
+        )
+        assert queue.queue_type == "defer"
+        assert queue.concurrency_limit == 1
+
+    def test_defer_queue_raises_on_concurrency_limit_2_or_more(self, engine):
+        """Test that defer queue raises ValueError if concurrency_limit >= 2.
+
+        Note: concurrency_limit=0 is caught by the SQLModel field validator (ge=1),
+        so this test covers the defer-specific validator for values >= 2.
+
+        SQLModel requires using model_validate() to trigger model validators
+        in some configurations, so we use that instead of direct instantiation.
+        """
+        with pytest.raises(ValueError, match="concurrency_limit=1"):
+            JobQueue.model_validate({
+                "project_id": "project-abc",
+                "queue_name": "defer-queue",
+                "queue_name_lower": "defer-queue",
+                "queue_type": QueueType.DEFER.value,
+                "concurrency_limit": 5,  # Invalid - must be 1
+            })
+
+    def test_defer_queue_allows_default_concurrency_limit(self, engine):
+        """Test that defer queue uses default concurrency_limit=1."""
+        queue = JobQueue(
+            project_id="project-abc",
+            queue_name="defer-queue",
+            queue_name_lower="defer-queue",
+            queue_type=QueueType.DEFER.value,
+            # concurrency_limit not specified - should use default 1
+        )
+        assert queue.concurrency_limit == 1
+
+    def test_fifo_queue_allows_higher_concurrency(self, engine):
+        """Test that FIFO queue allows higher concurrency limits."""
+        queue = JobQueue(
+            project_id="project-abc",
+            queue_name="fifo-queue",
+            queue_name_lower="fifo-queue",
+            queue_type=QueueType.FIFO.value,
+            concurrency_limit=10,  # Valid for FIFO
+        )
+        assert queue.queue_type == "fifo"
+        assert queue.concurrency_limit == 10
+
+    def test_parallel_queue_allows_higher_concurrency(self, engine):
+        """Test that PARALLEL queue allows higher concurrency limits."""
+        queue = JobQueue(
+            project_id="project-abc",
+            queue_name="parallel-queue",
+            queue_name_lower="parallel-queue",
+            queue_type=QueueType.PARALLEL.value,
+            concurrency_limit=20,  # Max allowed
+        )
+        assert queue.queue_type == "parallel"
+        assert queue.concurrency_limit == 20
