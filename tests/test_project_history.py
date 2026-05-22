@@ -129,17 +129,15 @@ class TestDeleteHistoryEntry:
             summary="To be deleted",
         )
 
-        deleted = store.delete_history_entry(entry["id"])
+        result = store.delete_history_entry(entry["id"])
 
-        assert deleted is not None
-        assert deleted["id"] == entry["id"]
-        assert deleted["summary"] == "To be deleted"
+        assert result is True
 
         # Verify it's gone
         assert store.get_history_entry(entry["id"]) is None
 
     def test_delete_history_entry_with_project_id_validation(self, store, project):
-        """Test that deleting with wrong project_id returns None."""
+        """Test that deleting with wrong project_id returns False."""
         entry = store.add_history_entry(
             project_id=project.project_id,
             entry_type="deployment",
@@ -149,16 +147,16 @@ class TestDeleteHistoryEntry:
         # Try to delete with different project_id
         result = store.delete_history_entry(entry["id"], project_id="different-project-id")
 
-        assert result is None
+        assert result is False
 
         # Verify entry still exists
         assert store.get_history_entry(entry["id"]) is not None
 
     def test_delete_history_entry_not_found(self, store, project):
-        """Test deleting non-existent entry returns None."""
+        """Test deleting non-existent entry returns False."""
         result = store.delete_history_entry("non-existent-entry-id")
 
-        assert result is None
+        assert result is False
 
 
 class TestListHistoryEntries:
@@ -393,3 +391,110 @@ class TestGetRecentHistory:
         result = store.get_recent_history(project.project_id, limit=10)
 
         assert len(result) == 3
+
+
+class TestCrossProjectIsolation:
+    """Tests for cross-project data isolation."""
+
+    def test_list_history_entries_isolated_by_project(self, store):
+        """Test that list_history_entries only returns entries for the specified project."""
+        project_a = store.create(name="Project A")
+        project_b = store.create(name="Project B")
+
+        # Add 3 entries to Project A
+        for i in range(3):
+            store.add_history_entry(
+                project_id=project_a.project_id,
+                entry_type="task",
+                summary=f"Project A entry {i}",
+            )
+
+        # Add 2 entries to Project B
+        for i in range(2):
+            store.add_history_entry(
+                project_id=project_b.project_id,
+                entry_type="deployment",
+                summary=f"Project B entry {i}",
+            )
+
+        result = store.list_history_entries(project_a.project_id)
+
+        assert result["total"] == 3
+        assert len(result["entries"]) == 3
+        for entry in result["entries"]:
+            assert entry["project_id"] == project_a.project_id
+
+    def test_search_history_entries_isolated_by_project(self, store):
+        """Test that search_history_entries only returns entries for the specified project."""
+        project_a = store.create(name="Project A")
+        project_b = store.create(name="Project B")
+
+        # Add entries with unique search terms
+        store.add_history_entry(
+            project_id=project_a.project_id,
+            entry_type="task",
+            summary="Alpha unique term",
+        )
+        store.add_history_entry(
+            project_id=project_b.project_id,
+            entry_type="task",
+            summary="Beta unique term",
+        )
+
+        result = store.search_history_entries(project_a.project_id, "Alpha")
+
+        assert result["total"] == 1
+        assert len(result["entries"]) == 1
+        assert result["entries"][0]["project_id"] == project_a.project_id
+        assert "Alpha" in result["entries"][0]["summary"]
+
+    def test_get_recent_history_isolated_by_project(self, store):
+        """Test that get_recent_history only returns entries for the specified project."""
+        project_a = store.create(name="Project A")
+        project_b = store.create(name="Project B")
+
+        # Add 3 entries to Project A
+        for i in range(3):
+            store.add_history_entry(
+                project_id=project_a.project_id,
+                entry_type="task",
+                summary=f"Project A recent {i}",
+            )
+
+        # Add 2 entries to Project B
+        for i in range(2):
+            store.add_history_entry(
+                project_id=project_b.project_id,
+                entry_type="task",
+                summary=f"Project B recent {i}",
+            )
+
+        result = store.get_recent_history(project_a.project_id)
+
+        assert len(result) == 3
+        for entry in result:
+            assert entry["project_id"] == project_a.project_id
+
+
+class TestEntryMetadataRoundTrip:
+    """Tests for entry_metadata round-trip preservation."""
+
+    def test_entry_metadata_complex_structure(self, store, project):
+        """Test that complex metadata is preserved exactly on round-trip."""
+        complex_metadata = {
+            "key": "value",
+            "nested": {"a": 1},
+            "list": [1, 2, 3],
+        }
+
+        entry = store.add_history_entry(
+            project_id=project.project_id,
+            entry_type="task",
+            summary="Test metadata",
+            entry_metadata=complex_metadata,
+        )
+
+        retrieved = store.get_history_entry(entry["id"])
+
+        assert retrieved is not None
+        assert retrieved["entry_metadata"] == complex_metadata

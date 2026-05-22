@@ -667,9 +667,7 @@ class SQLModelProjectRepository:
             entry = session.get(ProjectHistoryEntry, entry_id)
             return entry.to_dict() if entry else None
 
-    def delete_history_entry(
-        self, entry_id: str, project_id: str | None = None
-    ) -> dict | None:
+    def delete_history_entry(self, entry_id: str, project_id: str | None = None) -> bool:
         """Delete a history entry.
 
         Args:
@@ -677,20 +675,19 @@ class SQLModelProjectRepository:
             project_id: Optional project ID for ownership validation.
 
         Returns:
-            The deleted entry as a dict, or None if not found or ownership mismatch.
+            True if deleted, False if not found or ownership mismatch.
         """
         with Session(self.engine) as session:
             entry = session.get(ProjectHistoryEntry, entry_id)
             if entry is None:
-                return None
+                return False
 
             if project_id is not None and entry.project_id != project_id:
-                return None
+                return False
 
-            entry_dict = entry.to_dict()
             session.delete(entry)
             session.commit()
-            return entry_dict
+            return True
 
     def list_history_entries(
         self,
@@ -750,14 +747,15 @@ class SQLModelProjectRepository:
         Returns:
             Dict with entries, total count, limit, offset, and query.
         """
-        search_term = f"%{query}%"
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        search_term = f"%{escaped}%"
 
         with Session(self.engine) as session:
             # Build search condition for summary and details with NULL-safe handling
             stmt = select(ProjectHistoryEntry).where(
                 ProjectHistoryEntry.project_id == project_id,
                 or_(
-                    func.coalesce(ProjectHistoryEntry.summary, "").ilike(search_term),
+                    ProjectHistoryEntry.summary.ilike(search_term),
                     func.coalesce(ProjectHistoryEntry.details, "").ilike(search_term),
                 ),
             )
