@@ -412,6 +412,18 @@ async def list_project_history(
             ).model_dump()
         )
     
+    # Validate entry_type if provided
+    if entry_type is not None:
+        valid_types = {e.value for e in HistoryEntryType}
+        if entry_type not in valid_types:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": f"Invalid entry_type '{entry_type}'",
+                    "valid_types": list(valid_types),
+                }
+            )
+    
     result = await asyncio.to_thread(
         repo.list_history_entries,
         project_id,

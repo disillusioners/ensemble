@@ -390,7 +390,7 @@ async def test_search_history_by_details(client):
     # Add entry with searchable details
     repo.add_history_entry(
         project_id=project_id,
-        entry_type="task",
+        entry_type="note",
         summary="Updated component",
         details="Fixed memory leak issue",
     )
