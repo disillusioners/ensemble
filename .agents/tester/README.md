@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-22 MCP Cold-Load Race Condition Fix)
+## Test Results (Latest: 2026-05-22 RAG Auto-Test Feature)
+
+### RAG Auto-Test on Startup (2026-05-22)
+- **Feature**: RAG auto-test on startup — validates LightRAG connectivity, disables RAG gracefully on failure
+- **New Tests**: 27/27 PASS — auto_test_rag(), disable_rag(), enable_rag(), from_env() resilience
+- **Regression**: 95/95 PASS — RAG client (46) + tools (25) + workspace scoping (24), zero regressions
+- **Lifespan Integration**: Verified — api.py calls auto_test_rag() as first startup step
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0 (all tests pass as-is)
+- See `.agents/tester/RESULTS/2026-05-22-rag-auto-test.md` for full report
+
+### RAG Auto-Test Status: ✅ READY (122/122 tests pass, lifespan verified, no regressions)
 
 ### MCP Cold-Load Race Condition Fix (2026-05-22)
 - **Branch**: feature/fix-mcp-cold-load (commits cfe5416 + cbab340)

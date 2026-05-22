@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 57 packs
-- Unit: 48 | Integration: 1 | Mock: 2 | E2E: 6
+- Total: 58 packs
+- Unit: 49 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
 
@@ -23,9 +23,10 @@
 | phase5_jobs_router_test | tests/unit/test_phase5_jobs_router.py | Phase 5 jobs router split: route registration, _release_job_lock scenarios, backward compat, service dependency, sub-router structure | 2 min | 2026-04-23 | ✅ PASS (34 passed, Phase 6 no regression) |
 | phase4_manager_decomposition_test | tests/unit/test_phase4_manager_decomposition.py | Phase 4 manager decomposition: facade delegation, module-level functions, inner classes, service DI, fuzzy matching, cancellation service, title generation, circular imports | 2 min | 2026-04-23 | ✅ PASS (73 passed, Phase 6 no regression) |
 | rag_completion_registry_test | tests/unit/services/test_completion_registry.py | CompletionRegistry: register/complete/wait_for, buffered completions, timeout, thread safety, stale cleanup, invoke_agent_and_wait integration, semaphore deadlock prevention | 2 min | 2026-04-26 | ✅ PASS (feature/rag-knowledge-toolset, 0 failures) |
-| rag_client_test | tests/unit/rag/test_client.py | RAG HTTP client: config, headers, schemas, all API methods (insert/query/graph/entity/relation/docs/status), error handling, connection retry, is_rag_enabled edge cases | 2 min | 2026-05-07 | ✅ PASS (45 tests, feature/kb-disable-when-no-lightrag, +2 edge case tests) |
-| rag_tools_test | tests/unit/tools/test_rag_tools.py | 16 RAG tools: factory pattern, graceful disable, defensive attribute access, mock client, output formatting, error handling | 2 min | 2026-05-04 | ✅ PASS (25 tests, fix/rag-tools-5-bugs, +2 get_entity tests) |
-| rag_workspace_scoping_test | tests/unit/rag/test_workspace_scoping.py | LightRAG workspace scoping: project name resolution, _sanitize_workspace, fallback to project_id, edge cases | 2 min | 2026-05-04 | ✅ PASS (25 tests, fix/rag-search-workspace-mismatch, no regression) |
+| rag_config_auto_test | tests/unit/rag/test_config.py | RAG auto-test on startup: auto_test_rag(), disable_rag(), enable_rag(), from_env() resilience, auth failure, timeout, connection refused, invalid LIGHTRAG_TIMEOUT | 2 min | 2026-05-22 | ✅ PASS (27/27, RAG auto-test feature, 0 failures) |
+| rag_client_test | tests/unit/rag/test_client.py | RAG HTTP client: config, headers, schemas, all API methods (insert/query/graph/entity/relation/docs/status), error handling, connection retry, is_rag_enabled edge cases | 2 min | 2026-05-22 | ✅ PASS (46 tests, RAG auto-test regression, no regressions) |
+| rag_tools_test | tests/unit/tools/test_rag_tools.py | 16 RAG tools: factory pattern, graceful disable, defensive attribute access, mock client, output formatting, error handling | 2 min | 2026-05-22 | ✅ PASS (25 tests, RAG auto-test regression, no regressions) |
+| rag_workspace_scoping_test | tests/unit/rag/test_workspace_scoping.py | LightRAG workspace scoping: project name resolution, _sanitize_workspace, fallback to project_id, edge cases | 2 min | 2026-05-22 | ✅ PASS (24 tests, RAG auto-test regression, no regressions) |
 | llm_model_override_test | tests/unit/test_llm_config_override.py | Per-agent LLM model override: _build_llm_config, registry llm_model parsing, spawn_instance integration | 2 min | 2026-04-27 | ✅ PASS (feature/agent-llm-model, 9 tests, 0 failures) |
 | title_generation_trigger_test | tests/unit/services/test_title_generation_trigger.py | Title generation trigger: 3 completion paths, non-blocking, idempotency, edge cases, fire-and-forget, enqueue/send_message triggers | 2 min | 2026-05-18 | ✅ PASS (26 tests: 13 existing + 13 new timing triggers, fix/title-generation-timing) |
 | reasoning_content_roundtrip_test | tests/unit/test_reasoning_content_roundtrip.py | reasoning_content passback: _get_request_payload preserves reasoning in AIMessages, empty strings, mixed types, tool messages | 2 min | 2026-05-04 | ✅ PASS (8 tests, 0 failures) |
