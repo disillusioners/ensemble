@@ -173,7 +173,7 @@ class JobProcessor:
                     self._queue_service._repository.list_pending_by_queue, queue.queue_id
                 )
                 
-                if getattr(queue, 'queue_type', None) == "defer" and pending:
+                if queue.queue_type == "defer" and pending:
                     # Count active jobs in NON-defer queues only to avoid deadlock.
                     # 
                     # TOCTOU Trade-off: Between counting active jobs and actual dequeue,

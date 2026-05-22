@@ -10,7 +10,7 @@ from sqlalchemy import delete as sql_delete, func, select as sql_select
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
-from .models import JobItem, JobStatus
+from .models import JobItem, JobQueue, JobStatus, QueueType
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +131,8 @@ class JobRepository:
             return job
 
     def count_active_jobs_by_project(self, project_id: str) -> int:
-        """Count active jobs (PENDING + PROCESSING) for a project across all queues.
-        
-        Used for defer queue type to check if project already has active jobs.
+        """Count active jobs (PENDING + PROCESSING) for a project across all queues,
+        excluding soft-deleted jobs.
         
         Args:
             project_id: Project identifier.
@@ -174,7 +173,7 @@ class JobRepository:
                 .where(JobItem.project_id == project_id)
                 .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobQueue.queue_type != "defer")
+                .where(JobQueue.queue_type != QueueType.DEFER.value)
             )
             return db_session.exec(stmt).one()
 

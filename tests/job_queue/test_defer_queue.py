@@ -96,6 +96,20 @@ def mock_queue_repo():
     return repo
 
 
+@pytest.fixture
+def processor(mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo):
+    """Create JobProcessor with mocked dependencies (shared by multiple test classes)."""
+    mock_queue_service.complete_job = AsyncMock()
+    mock_queue_service.start_job = AsyncMock()
+    return JobProcessor(
+        queue_service=mock_queue_service,
+        instance_manager=mock_instance_manager,
+        project_repo=mock_project_repo,
+        queue_repo=mock_queue_repo,
+        poll_interval=0.1,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Repository Tests for count_active_jobs_by_project
 # ─────────────────────────────────────────────────────────────────────────────
@@ -308,19 +322,6 @@ class TestDeferQueueIdleCheck:
     The defer queue idle check ensures that defer queues only process jobs
     when the ENTIRE project is idle (no active jobs in any other queue).
     """
-
-    @pytest.fixture
-    def processor(self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo):
-        """Create JobProcessor with mocked dependencies."""
-        mock_queue_service.complete_job = AsyncMock()
-        mock_queue_service.start_job = AsyncMock()
-        return JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
 
     @pytest.mark.asyncio
     async def test_defer_queue_skips_when_other_queue_has_processing_job(
@@ -697,19 +698,6 @@ class TestDeferQueueIdleCheck:
 
 class TestDeferQueueIntegration:
     """Integration-style tests for defer queue behavior."""
-
-    @pytest.fixture
-    def processor(self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo):
-        """Create JobProcessor with mocked dependencies."""
-        mock_queue_service.complete_job = AsyncMock()
-        mock_queue_service.start_job = AsyncMock()
-        return JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
 
     @pytest.mark.asyncio
     async def test_full_idle_cycle(

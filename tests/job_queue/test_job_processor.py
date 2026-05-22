@@ -29,12 +29,14 @@ class MockQueue:
         queue_name: str = "default",
         is_paused: bool = False,
         concurrency_limit: int = 1,
+        queue_type: str = "fifo",
     ):
         self.queue_id = queue_id
         self.project_id = project_id
         self.queue_name = queue_name
         self.is_paused = is_paused
         self.concurrency_limit = concurrency_limit
+        self.queue_type = queue_type
 
 
 class MockJob:

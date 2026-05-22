@@ -42,7 +42,7 @@ class JobQueueRepository:
         Args:
             project_id: Project ID that owns this queue.
             queue_name: Human-readable queue name.
-            queue_type: Queue type ("fifo" or "parallel").
+            queue_type: Queue type ("fifo", "parallel", or "defer").
             concurrency_limit: Max concurrent jobs (1-20).
             is_system: Whether this is a system queue.
             is_paused: Whether the queue is paused.
