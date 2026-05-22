@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 53 packs
-- Unit: 44 | Integration: 1 | Mock: 2 | E2E: 6
+- Total: 54 packs
+- Unit: 45 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
 
@@ -50,6 +50,7 @@
 | ce_schema_unit_test | tests/unit/test_critical_experience_schema.py | CriticalExperience model validation, Project integration, migration file (UP/DOWN, default []) | 2 min | 2026-05-20 | ✅ PASS (20 tests, feature/critical-experience Phase 5) |
 | ce_api_unit_test | tests/unit/test_critical_experience_api.py | Projects API: GET /projects/{id} and GET /projects include critical_experience in response | 2 min | 2026-05-20 | ✅ PASS (13 tests, feature/critical-experience Phase 5) |
 | mcp_test_connection_unit_test | tests/unit/test_mcp_test_connection.py | MCP test connection: SSRF validation (42→68), endpoint logic (11), helper function (5) | 2 min | 2026-05-21 | ✅ PASS (68/68, feature/fix-mcp-localhost-block, SSRF localhost default=true verified) |
+| mcp_disable_flags_unit_test | tests/unit/test_builtin_mcp_servers.py | MCP disable flags: is_builtin_disabled helper, bootstrap disable/enable, API protection, config validation, registry, model schema (12 classes, 74 tests) | 2 min | 2026-05-22 | ✅ PASS (74/74, feature/mcp-disable-flags, no regressions) |
 
 ## Integration Test Packs
 

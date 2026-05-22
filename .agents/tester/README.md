@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-21 MCP Localhost Fix)
+## Test Results (Latest: 2026-05-22 MCP Disable Flags)
+
+### MCP Disable Flags (2026-05-22)
+- **Branch**: feature/mcp-disable-flags (commit 5b7fe77 + cf9a247)
+- **New Tests**: 74/74 PASS — is_builtin_disabled helper, bootstrap disable/enable, API protection, config validation
+- **MCP Regression**: 251/251 PASS — all 7 MCP test files pass, zero regressions
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0 (all tests pass as-is)
+- See `.agents/tester/RESULTS/2026-05-22-mcp-disable-flags.md` for full report
+
+### MCP Disable Flags Status: ✅ READY (all tests pass, no regressions)
 
 ### MCP Localhost Config Fix (2026-05-21)
 - **Branch**: feature/fix-mcp-localhost-block (commit 258b801 + ac310ed)
