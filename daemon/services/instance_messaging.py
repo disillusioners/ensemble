@@ -799,7 +799,7 @@ class InstanceMessagingService:
                         matched_project = self._project_repository.get(existing_project_id)
                         if matched_project:
                             from ..manager import format_project_context
-                            project_context = format_project_context(matched_project)
+                            project_context = format_project_context(matched_project, store=self._manager.project_store)
                             message = project_context + message
                             injection_succeeded = True
                             logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
@@ -820,7 +820,7 @@ class InstanceMessagingService:
                                 
                                 # Prepend project context to message
                                 from ..manager import format_project_context
-                                project_context = format_project_context(matched_project)
+                                project_context = format_project_context(matched_project, store=self._manager.project_store)
                                 message = project_context + message
                                 injection_succeeded = True
                                 

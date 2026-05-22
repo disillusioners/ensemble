@@ -7,7 +7,7 @@ import re
 import time
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -153,14 +153,67 @@ def extract_project_keywords(message: str) -> list[str]:
     return list(keywords)
 
 
-def format_project_context(project) -> str:
+def _format_relative_time(dt: datetime | str | None) -> str:
+    """Format a datetime as a human-readable relative time string.
+    
+    Args:
+        dt: datetime object or ISO format string.
+        
+    Returns:
+        Human-readable relative time like "2 hours ago", "3 days ago".
+    """
+    if dt is None:
+        return "unknown time"
+    
+    # Parse datetime if it's a string
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return "unknown time"
+    
+    # Make sure we have timezone-aware datetime for comparison
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    delta = now - dt
+    total_seconds = int(delta.total_seconds())
+    
+    if total_seconds < 0:
+        return "just now"
+    
+    if total_seconds < 60:
+        return "just now"
+    if total_seconds < 3600:
+        minutes = total_seconds // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    if total_seconds < 86400:
+        hours = total_seconds // 3600
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    if total_seconds < 604800:
+        days = total_seconds // 86400
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    if total_seconds < 2592000:
+        weeks = total_seconds // 604800
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    if total_seconds < 31536000:
+        months = total_seconds // 2592000
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = total_seconds // 31536000
+    return f"{years} year{'s' if years != 1 else ''} ago"
+
+
+def format_project_context(project, store=None) -> str:
     """Format project info as context block for prepending to message.
     
     Args:
         project: ProjectData instance from repository.
+        store: Optional project store/repository for history access.
     
     Returns:
-        Formatted string with project JSON info and structured critical experience.
+        Formatted string with project JSON info, structured critical experience,
+        and optional recent history.
     """
     import json
     
@@ -184,6 +237,33 @@ def format_project_context(project) -> str:
             ref_str = f" *(ref: {reference})*" if reference else ""
             ce_section += f"- {priority_icon} **[{category}]** {summary}{ref_str}\n"
     
+    # Build recent history section if store is provided
+    history_section = ""
+    if store is not None:
+        try:
+            history_entries = store.get_recent_history(project.project_id, limit=10)
+            if history_entries:
+                history_section = "\n### 📜 Recent History\n"
+                entry_type_icons = {
+                    "milestone": "🏆",
+                    "commit": "📦",
+                    "phase": "🔀",
+                    "bugfix": "🐛",
+                    "deployment": "🚀",
+                    "note": "📝",
+                    "config_change": "⚙️",
+                    "other": "❓",
+                }
+                for entry in history_entries:
+                    entry_type = entry.get("entry_type", "other")
+                    emoji = entry_type_icons.get(entry_type, "❓")
+                    summary = entry.get("summary", "")
+                    created_at = entry.get("created_at")
+                    relative_time = _format_relative_time(created_at)
+                    history_section += f"- {emoji} **[{entry_type}]** {summary} — _{relative_time}_\n"
+        except Exception:
+            logger.warning("History injection failed", exc_info=True)
+    
     # Exclude critical_experience from JSON dump to avoid duplication
     # (it's already displayed in the formatted section below)
     data = {k: v for k, v in project_dict.items() if k != "critical_experience"}
@@ -193,7 +273,7 @@ def format_project_context(project) -> str:
 ```json
 {json.dumps(data, indent=2)}
 ```
-{ce_section}
+{ce_section}{history_section}
 """
 
 
