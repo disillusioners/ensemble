@@ -67,7 +67,7 @@ async def get_instance_messages(
         List of message dictionaries with role, content, thinking, tool_calls.
     """
     from typing import cast
-    from langgraph.checkpoint.base import CheckpointTuple
+    from langgraph.checkpoint.memory import CheckpointTuple
     
     from daemon.utils import serialize_message
     

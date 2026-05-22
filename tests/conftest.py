@@ -36,7 +36,10 @@ mock_langgraph_prebuilt = create_mock_module("langgraph.prebuilt", {
 mock_langgraph_constants = create_mock_module("langgraph.constants", {
     "CompiledGraph": MagicMock()
 })
-mock_langgraph_checkpoint = create_mock_module("langgraph.checkpoint")
+mock_langgraph_checkpoint = create_mock_module("langgraph.checkpoint", {"__path__": []})
+mock_langgraph_checkpoint_memory = create_mock_module("langgraph.checkpoint.memory", {
+    "CheckpointTuple": MagicMock()
+})
 mock_langgraph_checkpoint_sqlite = create_mock_module("langgraph.checkpoint.sqlite", {
     "SqliteSaver": MagicMock()
 })
@@ -130,6 +133,7 @@ _mock_modules = {
     "langgraph.prebuilt": mock_langgraph_prebuilt,
     "langgraph.constants": mock_langgraph_constants,
     "langgraph.checkpoint": mock_langgraph_checkpoint,
+    "langgraph.checkpoint.memory": mock_langgraph_checkpoint_memory,
     "langgraph.checkpoint.sqlite": mock_langgraph_checkpoint_sqlite,
     "langgraph.checkpoint.sqlite.aio": mock_langgraph_checkpoint_sqlite_aio,
     "daemon.mcp.tool_adapter": mock_mcp_tool_adapter,
