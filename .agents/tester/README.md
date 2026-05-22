@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-22 MCP Disable Flags)
+## Test Results (Latest: 2026-05-22 Project History E2E)
+
+### Project History E2E (2026-05-22)
+- **Feature**: project_history (4 phases: model, repository, tools, API, injection)
+- **Existing Tests**: 86/86 PASS — 27 repo + 26 API + 33 integration (no regressions)
+- **New Tool Tests**: 38/38 PASS — add (15), list (8), search (8), delete (4), constants (2)
+- **New Injection Tests**: 28/28 PASS — rendering (22), serialization (6)
+- **Total**: 152/152 PASS across 5 test files
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0 (all tests pass as-is)
+- See `.agents/tester/RESULTS/2026-05-22-project-history-e2e.md` for full report
+
+### Project History E2E Status: ✅ READY (all 152 tests pass, no regressions)
 
 ### MCP Disable Flags (2026-05-22)
 - **Branch**: feature/mcp-disable-flags (commit 5b7fe77 + cf9a247)
