@@ -169,28 +169,30 @@ class JobProcessor:
 
                 # Defer queue check: only process when project is completely idle
                 # Only applies to queues with queue_type attribute (skip mock/test objects)
-                if getattr(queue, 'queue_type', None) == "defer":
-                    pending = await asyncio.to_thread(
-                        self._queue_service._repository.list_pending_by_queue, queue.queue_id
-                    )
-                    if pending:
-                        # Check if any OTHER queue in the project has active jobs
-                        total_active = await asyncio.to_thread(
-                            self._queue_service._repository.count_active_jobs_by_project, queue.project_id
-                        )
-                        if total_active > len(pending):
-                            # Other queues have active jobs, skip this defer queue
-                            continue
-
-                # Get next pending job for this specific queue
                 pending = await asyncio.to_thread(
                     self._queue_service._repository.list_pending_by_queue, queue.queue_id
                 )
+                
+                if getattr(queue, 'queue_type', None) == "defer" and pending:
+                    # Count active jobs in NON-defer queues only to avoid deadlock.
+                    # 
+                    # TOCTOU Trade-off: Between counting active jobs and actual dequeue,
+                    # a new job could be enqueued to a non-defer queue. This is acceptable because:
+                    # - Periodic polling inherently tolerates slight staleness
+                    # - Lock-first pattern prevents double-processing
+                    # - Self-corrects on next poll cycle
+                    non_defer_active = await asyncio.to_thread(
+                        self._queue_service._repository.count_active_jobs_in_non_defer_queues, queue.project_id
+                    )
+                    if non_defer_active > 0:
+                        # Project has active work in non-defer queues, skip this defer queue
+                        continue
+
                 if not pending:
-                    # FIX: Also check for PROCESSING jobs started by trigger_next_job()
-                    # that have instance_id set but no spawned instance yet.
-                    # These jobs were transitioned to PROCESSING by trigger_next_job()
-                    # but the JobProcessor missed them (event-driven or polling gap).
+                    # Also check for PROCESSING jobs that have instance_id set but no
+                    # spawned instance yet. These jobs were transitioned to PROCESSING
+                    # by trigger_next_job() but the JobProcessor missed them due to
+                    # event-driven or polling timing gaps.
                     processing, _ = await asyncio.to_thread(
                         self._queue_service._repository.list_by_queue, queue.queue_id,
                         statuses=["processing"]

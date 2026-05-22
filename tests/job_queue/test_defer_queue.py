@@ -363,11 +363,9 @@ class TestDeferQueueIdleCheck:
             ([], 0),  # defer-queue has no PROCESSING jobs
         ]
 
-        # count_active_jobs_by_project returns 2:
-        # - 1 PROCESSING in fifo queue
-        # - 1 PENDING in defer queue
-        # This makes: 2 > 1 (len of defer pending), so defer queue is skipped
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 2
+        # count_active_jobs_in_non_defer_queues returns 1 (fifo processing job only)
+        # Since 1 > 0, defer queue is skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 1
 
         await processor._process_next_job()
 
@@ -412,11 +410,9 @@ class TestDeferQueueIdleCheck:
             ([], 0),  # defer-queue has no PROCESSING jobs
         ]
 
-        # count_active_jobs_by_project returns 2:
-        # - 1 PENDING in fifo queue
-        # - 1 PENDING in defer queue
-        # This makes: 2 > 1 (len of defer pending), so defer queue is skipped
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 2
+        # count_active_jobs_in_non_defer_queues returns 1 (fifo pending job only)
+        # Since 1 > 0, defer queue is skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 1
 
         await processor._process_next_job()
 
@@ -431,41 +427,10 @@ class TestDeferQueueIdleCheck:
     async def test_defer_queue_dequeues_when_project_idle(
         self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
     ):
-        """Defer queue DOES dequeue when project is idle (no active jobs in other queues).
+        """Defer queue dequeues when project has no active jobs in other queues.
 
-        When there are no other active jobs in the project, the defer queue
+        When the project is idle (no jobs in FIFO or PARALLEL queues), the defer queue
         should process its pending jobs.
-
-        The idle check: total_active (all jobs in project) > len(pending of defer).
-        Here: total_active=1 (only defer's own pending) > len(defer_pending)=1
-        But since defer queue's pending jobs ARE counted in total_active,
-        we need total_active=0 for the idle check to pass (0 > 1 is False).
-        However, the logic is: if there are NO other active jobs,
-        only defer queue's own jobs count. So we check with total_active=1,
-        and len(pending)=1, and the check 1 > 1 is False, so defer is NOT skipped.
-
-        Wait, that's not right either. Let me re-check the implementation...
-
-        The implementation at lines 176-183:
-        ```
-        if pending:
-            total_active = count_active_jobs_by_project(...)
-            if total_active > len(pending):
-                continue  # skip
-        ```
-
-        So the defer queue is skipped when total_active > len(pending).
-        If total_active=1 and len(pending)=1, then 1 > 1 is False, so NOT skipped.
-        This means the defer queue processes when it has jobs and there are
-        no OTHER active jobs (because if there were other jobs, total_active
-        would be > len(pending)).
-
-        Actually this is confusing. Let me just set up the test correctly:
-        - FIFO queue has no jobs
-        - Defer queue has 1 PENDING job
-        - total_active = 1 (defer's own pending)
-        - len(pending) = 1 (defer's own pending)
-        - 1 > 1 is False, so NOT skipped - defer queue processes
         """
         project = MockProject("project-1", job_queue_paused=False)
         fifo_queue = MockQueue("fifo-queue", "project-1", is_paused=False, queue_type="fifo")
@@ -494,9 +459,9 @@ class TestDeferQueueIdleCheck:
             ([], 0),  # defer-queue has no PROCESSING jobs
         ]
 
-        # count_active_jobs_by_project returns 1 (defer queue's own PENDING job)
-        # Since 1 > 1 is False, defer queue is NOT skipped
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 1
+        # Project is idle: count_active_jobs_in_non_defer_queues returns 0
+        # Since 0 > 0 is False, defer queue is NOT skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 0
 
         mock_queue_service.start_job.return_value = started_job
         mock_instance_manager.enqueue_message = AsyncMock()
@@ -534,8 +499,8 @@ class TestDeferQueueIdleCheck:
         # No PROCESSING jobs
         mock_queue_service._repository.list_by_queue.return_value = ([], 0)
 
-        # Project is idle (count_active_jobs_by_project returns 0)
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 0
+        # Project is idle (count_active_jobs_in_non_defer_queues returns 0)
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 0
 
         mock_queue_service.start_job.return_value = started_job
         mock_instance_manager.enqueue_message = AsyncMock()
@@ -572,9 +537,9 @@ class TestDeferQueueIdleCheck:
         # No PROCESSING jobs
         mock_queue_service._repository.list_by_queue.return_value = ([], 0)
 
-        # count_active_jobs_by_project returns 1 (the defer queue's own PENDING job)
-        # This equals len(pending) = 1, so the check passes (total_active > len(pending) is False)
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 1
+        # count_active_jobs_in_non_defer_queues returns 0 (defer queue's own job doesn't count)
+        # Since 0 > 0 is False, defer queue is NOT skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 0
 
         mock_queue_service.start_job.return_value = started_job
         mock_instance_manager.enqueue_message = AsyncMock()
@@ -617,11 +582,9 @@ class TestDeferQueueIdleCheck:
             ([], 0),  # defer-queue has no PROCESSING
         ]
 
-        # count_active_jobs_by_project returns 2:
-        # - 1 PROCESSING in fifo queue
-        # - 1 PENDING in defer queue
-        # 2 > 1 (len of defer's pending), so defer queue should SKIP
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 2
+        # count_active_jobs_in_non_defer_queues returns 1 (fifo processing job only)
+        # Since 1 > 0, defer queue should SKIP
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 1
 
         await processor._process_next_job()
 
@@ -652,8 +615,8 @@ class TestDeferQueueIdleCheck:
 
         # No jobs should be started (there are none to start)
         mock_queue_service.start_job.assert_not_called()
-        # count_active_jobs_by_project should NOT be called (skipped when no pending)
-        mock_queue_service._repository.count_active_jobs_by_project.assert_not_called()
+        # count_active_jobs_in_non_defer_queues should NOT be called (skipped when no pending)
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_defer_queue_paused_respects_pause(
@@ -681,53 +644,55 @@ class TestDeferQueueIdleCheck:
         mock_queue_service.start_job.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_multiple_defer_queues_both_check_idle(
+    async def test_two_defer_queues_no_deadlock(
         self, processor, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
     ):
-        """Multiple defer queues in the same project both check idle state.
+        """Two defer queues with pending jobs and no non-defer queues should both be able to process.
 
-        Each defer queue independently checks if the project is idle
-        (no active jobs in non-defer queues).
+        This verifies that the deadlock between two defer queues is resolved.
+        When there are no non-defer queues (or they have no active jobs),
+        count_active_jobs_in_non_defer_queues returns 0, allowing defer queues to process.
         """
         project = MockProject("project-1", job_queue_paused=False)
-        fifo_queue = MockQueue("fifo-queue", "project-1", is_paused=False, queue_type="fifo")
         defer_queue1 = MockQueue("defer-queue-1", "project-1", is_paused=False, queue_type="defer")
         defer_queue2 = MockQueue("defer-queue-2", "project-1", is_paused=False, queue_type="defer")
 
-        # FIFO has a PENDING job
-        fifo_pending = MockJob("job-fifo", project_id="project-1", queue_id="fifo-queue", status=JobStatus.PENDING.value)
         # Both defer queues have PENDING jobs
         defer1_pending = MockJob("job-defer-1", project_id="project-1", queue_id="defer-queue-1", status=JobStatus.PENDING.value)
         defer2_pending = MockJob("job-defer-2", project_id="project-1", queue_id="defer-queue-2", status=JobStatus.PENDING.value)
 
-        mock_project_repo.list_projects.return_value = [project]
-        mock_queue_repo.list_by_project.return_value = [fifo_queue, defer_queue1, defer_queue2]
+        started_job = MockJob("job-defer-1", project_id="project-1", queue_id="defer-queue-1", status=JobStatus.PROCESSING.value)
+        started_job.instance_id = "instance-123"
 
-        # Return jobs for each queue
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [defer_queue1, defer_queue2]
+
+        # Both defer queues have PENDING jobs
         mock_queue_service._repository.list_pending_by_queue.side_effect = [
-            [fifo_pending],  # fifo-queue
-            [defer1_pending],  # defer-queue-1
-            [defer2_pending],  # defer-queue-2
+            [defer1_pending],  # defer-queue-1 idle check
+            [defer1_pending],  # defer-queue-1 getting jobs
+            [defer2_pending],  # defer-queue-2 idle check
+            [defer2_pending],  # defer-queue-2 getting jobs
         ]
         # No PROCESSING jobs
         mock_queue_service._repository.list_by_queue.side_effect = [
-            ([], 0),  # fifo-queue
             ([], 0),  # defer-queue-1
             ([], 0),  # defer-queue-2
         ]
 
-        # count_active_jobs_by_project returns 3 (1 fifo + 2 defer)
-        # When checking defer-queue-1: 3 > 1 (len pending), skip
-        # When checking defer-queue-2: 3 > 1 (len pending), skip
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 3
+        # No non-defer queues have active jobs - this is the key to avoiding deadlock
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 0
+
+        mock_queue_service.start_job.return_value = started_job
+        mock_instance_manager.enqueue_message = AsyncMock()
 
         await processor._process_next_job()
 
-        # FIFO job should be started
-        mock_queue_service.start_job.assert_called_with("job-fifo")
-        # Defer jobs should NOT be started (project not idle from their perspective)
-        for call in mock_queue_service.start_job.call_args_list:
-            assert call[0][0] == "job-fifo", "Only FIFO job should be started"
+        # At least one defer job SHOULD be started (the first one processed)
+        mock_queue_service.start_job.assert_called()
+
+        # Verify that count_active_jobs_in_non_defer_queues was called
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.assert_called()
 
 
 class TestDeferQueueIntegration:
@@ -783,11 +748,9 @@ class TestDeferQueueIntegration:
             ([], 0),  # defer-queue: no PROCESSING
         ]
 
-        # count_active_jobs_by_project returns 2:
-        # - 1 PROCESSING in fifo queue
-        # - 1 PENDING in defer queue
-        # 2 > 1 (len pending), so defer queue is skipped
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 2
+        # count_active_jobs_in_non_defer_queues returns 1 (fifo processing job only)
+        # Since 1 > 0, defer queue is skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 1
 
         await processor._process_next_job()
 
@@ -810,8 +773,9 @@ class TestDeferQueueIntegration:
             ([], 0),  # fifo-queue: no PROCESSING (completed!)
             ([], 0),  # defer-queue: no PROCESSING
         ]
-        # Now only defer's pending job counts: 1 > 1 is False, so NOT skipped
-        mock_queue_service._repository.count_active_jobs_by_project.return_value = 1
+        # Project is now idle: count_active_jobs_in_non_defer_queues returns 0
+        # Since 0 > 0 is False, defer queue is NOT skipped
+        mock_queue_service._repository.count_active_jobs_in_non_defer_queues.return_value = 0
 
         started_job = MockJob("job-defer", project_id="project-1", queue_id="defer-queue", status=JobStatus.PROCESSING.value)
         started_job.instance_id = "defer-instance"

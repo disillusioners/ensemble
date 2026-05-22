@@ -151,6 +151,33 @@ class JobRepository:
             )
             return db_session.exec(stmt).one()
 
+    def count_active_jobs_in_non_defer_queues(self, project_id: str) -> int:
+        """Count active jobs (PENDING + PROCESSING) for a project in non-defer queues only.
+        
+        Used for defer queue idle check to avoid deadlock when multiple defer queues
+        exist. This JOINs with job_queues table to exclude defer queue types.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Count of active jobs in non-defer queues for the project.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # Import JobQueue model here to avoid circular imports
+            from .models import JobQueue
+            
+            stmt = (
+                select(func.count())
+                .select_from(JobItem)
+                .join(JobQueue, JobItem.queue_id == JobQueue.queue_id)
+                .where(JobItem.project_id == project_id)
+                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+                .where(JobItem.deleted_at.is_(None))
+                .where(JobQueue.queue_type != "defer")
+            )
+            return db_session.exec(stmt).one()
+
     # --------------------------------------------------------
     # LIST
     # --------------------------------------------------------

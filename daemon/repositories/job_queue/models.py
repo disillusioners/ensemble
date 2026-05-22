@@ -44,6 +44,7 @@ class JobQueue(SQLModel, table=True):
     __tablename__ = "job_queues"
     __table_args__ = (
         CheckConstraint("queue_type IN ('fifo', 'parallel', 'defer')", name="ck_job_queues_queue_type"),
+        CheckConstraint("queue_type != 'defer' OR concurrency_limit = 1", name="ck_job_queues_defer_concurrency"),
         Index("idx_job_queues_project", "project_id"),
         UniqueConstraint("project_id", "queue_name_lower", name="uq_job_queues_project_name"),
     )
@@ -107,6 +108,7 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_instance", "instance_id"),
         Index("idx_job_queue_project", "project_id"),
         Index("idx_job_queue_items_queue", "queue_id"),
+        Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
     )
 
     # Primary identification
