@@ -6,12 +6,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, insert
+from sqlalchemy import delete as sql_delete, insert, func, or_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
-from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType
+from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
 
@@ -607,3 +607,193 @@ class SQLModelProjectRepository:
                 "project_id": project_id,
                 "name": project.name
             }
+
+    # --------------------------------------------------------
+    # HISTORY
+    # --------------------------------------------------------
+
+    def add_history_entry(
+        self,
+        project_id: str,
+        entry_type: str,
+        summary: str,
+        details: str | None = None,
+        source_agent: str | None = None,
+        source_instance_id: str | None = None,
+        entry_metadata: dict | None = None,
+    ) -> dict:
+        """Add a history entry to a project.
+
+        Args:
+            project_id: The project ID.
+            entry_type: Type of history entry.
+            summary: Brief summary (truncated to 300 chars).
+            details: Optional detailed description (truncated to 5000 chars).
+            source_agent: Agent that recorded this entry.
+            source_instance_id: Instance that recorded this entry.
+            entry_metadata: Optional metadata dictionary.
+
+        Returns:
+            The created history entry as a dict.
+        """
+        summary = summary[:300]
+        details = details[:5000] if details else None
+
+        with Session(self.engine) as session:
+            entry = ProjectHistoryEntry(
+                project_id=project_id,
+                entry_type=entry_type,
+                summary=summary,
+                details=details,
+                recorded_by_agent=source_agent,
+                recorded_by_instance=source_instance_id,
+                entry_metadata=entry_metadata,
+            )
+            session.add(entry)
+            session.commit()
+            session.refresh(entry)
+            return entry.to_dict()
+
+    def get_history_entry(self, entry_id: str) -> dict | None:
+        """Get a history entry by ID.
+
+        Args:
+            entry_id: The history entry ID.
+
+        Returns:
+            The history entry as a dict, or None if not found.
+        """
+        with Session(self.engine) as session:
+            entry = session.get(ProjectHistoryEntry, entry_id)
+            return entry.to_dict() if entry else None
+
+    def delete_history_entry(
+        self, entry_id: str, project_id: str | None = None
+    ) -> dict | None:
+        """Delete a history entry.
+
+        Args:
+            entry_id: The history entry ID to delete.
+            project_id: Optional project ID for ownership validation.
+
+        Returns:
+            The deleted entry as a dict, or None if not found or ownership mismatch.
+        """
+        with Session(self.engine) as session:
+            entry = session.get(ProjectHistoryEntry, entry_id)
+            if entry is None:
+                return None
+
+            if project_id is not None and entry.project_id != project_id:
+                return None
+
+            entry_dict = entry.to_dict()
+            session.delete(entry)
+            session.commit()
+            return entry_dict
+
+    def list_history_entries(
+        self,
+        project_id: str,
+        entry_type: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """List history entries for a project.
+
+        Args:
+            project_id: The project ID.
+            entry_type: Optional filter by entry type.
+            limit: Maximum number of entries to return.
+            offset: Number of entries to skip.
+
+        Returns:
+            Dict with entries, total count, limit, and offset.
+        """
+        with Session(self.engine) as session:
+            stmt = select(ProjectHistoryEntry).where(
+                ProjectHistoryEntry.project_id == project_id
+            )
+            if entry_type:
+                stmt = stmt.where(ProjectHistoryEntry.entry_type == entry_type)
+
+            # Get total count
+            count_stmt = select(func.count()).select_from(stmt.subquery())
+            total = session.exec(count_stmt).one()
+
+            # Apply ordering and pagination
+            stmt = stmt.order_by(ProjectHistoryEntry.created_at.desc()).offset(offset).limit(limit)
+            entries = list(session.exec(stmt))
+
+            return {
+                "entries": [e.to_dict() for e in entries],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            }
+
+    def search_history_entries(
+        self,
+        project_id: str,
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict:
+        """Search history entries for a project.
+
+        Args:
+            project_id: The project ID.
+            query: Search query string.
+            limit: Maximum number of entries to return.
+            offset: Number of entries to skip.
+
+        Returns:
+            Dict with entries, total count, limit, offset, and query.
+        """
+        search_term = f"%{query}%"
+
+        with Session(self.engine) as session:
+            # Build search condition for summary and details with NULL-safe handling
+            stmt = select(ProjectHistoryEntry).where(
+                ProjectHistoryEntry.project_id == project_id,
+                or_(
+                    func.coalesce(ProjectHistoryEntry.summary, "").ilike(search_term),
+                    func.coalesce(ProjectHistoryEntry.details, "").ilike(search_term),
+                ),
+            )
+
+            # Get total count
+            count_stmt = select(func.count()).select_from(stmt.subquery())
+            total = session.exec(count_stmt).one()
+
+            # Apply ordering and pagination
+            stmt = stmt.order_by(ProjectHistoryEntry.created_at.desc()).offset(offset).limit(limit)
+            entries = list(session.exec(stmt))
+
+            return {
+                "entries": [e.to_dict() for e in entries],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "query": query,
+            }
+
+    def get_recent_history(self, project_id: str, limit: int = 10) -> list[dict]:
+        """Get recent history entries for a project.
+
+        Args:
+            project_id: The project ID.
+            limit: Maximum number of entries to return.
+
+        Returns:
+            List of history entries as dicts.
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(ProjectHistoryEntry)
+                .where(ProjectHistoryEntry.project_id == project_id)
+                .order_by(ProjectHistoryEntry.created_at.desc())
+                .limit(limit)
+            )
+            entries = list(session.exec(stmt))
+            return [e.to_dict() for e in entries]

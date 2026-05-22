@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column
+from sqlalchemy import Column, ForeignKey, String
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
@@ -93,6 +93,17 @@ class ProjectType(str, enum.Enum):
     @classmethod
     def is_valid(cls, project_type: str) -> bool:
         return project_type in cls._value2member_map_
+
+
+class HistoryEntryType(str, enum.Enum):
+    MILESTONE = "milestone"
+    COMMIT = "commit"
+    PHASE = "phase"
+    BUGFIX = "bugfix"
+    DEPLOYMENT = "deployment"
+    NOTE = "note"
+    CONFIG_CHANGE = "config_change"
+    OTHER = "other"
 
 
 class ProjectTagLink(SQLModel, table=True):
@@ -193,4 +204,38 @@ class Project(SQLModel, table=True):
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+        }
+
+
+class ProjectHistoryEntry(SQLModel, table=True):
+    """SQLModel ProjectHistoryEntry table - tracks project history entries."""
+    __tablename__ = "project_history"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(
+        sa_column=Column(String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    entry_type: str = Field()
+    summary: str = Field(max_length=300)
+    details: str | None = Field(default=None, max_length=5000)
+    recorded_by_agent: str | None = Field(default=None)
+    recorded_by_instance: str | None = Field(default=None)
+    entry_metadata: dict | None = Field(
+        default=None,
+        sa_column=Column(JSON)
+    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "entry_type": self.entry_type,
+            "summary": self.summary,
+            "details": self.details,
+            "recorded_by_agent": self.recorded_by_agent,
+            "recorded_by_instance": self.recorded_by_instance,
+            "entry_metadata": self.entry_metadata,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
