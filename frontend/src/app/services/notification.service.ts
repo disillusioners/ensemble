@@ -42,6 +42,11 @@ export class NotificationService implements OnDestroy {
   
   ngOnDestroy(): void {
     this.disconnect();
+    if (this.unlockHandler) {
+      document.removeEventListener('click', this.unlockHandler);
+      document.removeEventListener('keydown', this.unlockHandler);
+      this.unlockHandler = null;
+    }
   }
   
   private initAudio(): void {
