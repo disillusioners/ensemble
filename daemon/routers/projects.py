@@ -6,8 +6,12 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
+from daemon.repositories.project import HistoryEntryType
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
-from .schemas import ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest
+from .schemas import (
+    ProjectResponse, ProjectListResponse, ProjectNotFoundResponse, ProjectCreateRequest,
+    ProjectHistoryEntryResponse, ProjectHistoryListResponse, ProjectHistoryAddRequest, ProjectHistorySearchResponse,
+)
 
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -366,3 +370,226 @@ async def resume_queue(
         )
     
     return _project_to_response(updated)
+
+
+# ==================== Project History Endpoints ====================
+
+
+@router.get(
+    "/{project_id}/history",
+    response_model=ProjectHistoryListResponse,
+    responses={
+        200: {"description": "List of project history entries"},
+        404: {"model": ProjectNotFoundResponse, "description": "Project not found"},
+    },
+)
+async def list_project_history(
+    project_id: str,
+    limit: int = 20,
+    offset: int = 0,
+    entry_type: str | None = None,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> ProjectHistoryListResponse:
+    """List project history entries with optional filtering.
+    
+    Query params:
+        limit: Maximum entries per page (default: 20)
+        offset: Number of entries to skip (default: 0)
+        entry_type: Optional filter by entry type
+    
+    Returns:
+        200 with paginated list of history entries
+        404 if project doesn't exist
+    """
+    # Validate project exists
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id
+            ).model_dump()
+        )
+    
+    result = await asyncio.to_thread(
+        repo.list_history_entries,
+        project_id,
+        entry_type=entry_type,
+        limit=limit,
+        offset=offset,
+    )
+    
+    return ProjectHistoryListResponse(
+        entries=[ProjectHistoryEntryResponse(**e) for e in result["entries"]],
+        total=result["total"],
+        limit=result["limit"],
+        offset=result["offset"],
+    )
+
+
+@router.post(
+    "/{project_id}/history",
+    response_model=ProjectHistoryEntryResponse,
+    status_code=201,
+    responses={
+        201: {"description": "History entry created"},
+        400: {"description": "Invalid entry type"},
+        404: {"model": ProjectNotFoundResponse, "description": "Project not found"},
+    },
+)
+async def add_project_history(
+    project_id: str,
+    request: ProjectHistoryAddRequest,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> ProjectHistoryEntryResponse:
+    """Add a new history entry to a project.
+    
+    Request body:
+        entry_type: Type of history entry (milestone, commit, phase, bugfix, deployment, note, config_change, other)
+        summary: Brief summary (max 300 chars)
+        details: Optional detailed description (max 5000 chars)
+        entry_metadata: Optional metadata dictionary
+    
+    Returns:
+        201 with created history entry
+        400 if entry_type is invalid
+        404 if project doesn't exist
+    """
+    # Validate project exists
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id
+            ).model_dump()
+        )
+    
+    # Validate entry_type
+    valid_types = {e.value for e in HistoryEntryType}
+    if request.entry_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"Invalid entry_type '{request.entry_type}'",
+                "valid_types": list(valid_types),
+            }
+        )
+    
+    entry = await asyncio.to_thread(
+        repo.add_history_entry,
+        project_id=project_id,
+        entry_type=request.entry_type,
+        summary=request.summary,
+        details=request.details,
+        source_agent=None,
+        source_instance_id=None,
+        entry_metadata=request.entry_metadata,
+    )
+    
+    return ProjectHistoryEntryResponse(**entry)
+
+
+@router.get(
+    "/{project_id}/history/search",
+    response_model=ProjectHistorySearchResponse,
+    responses={
+        200: {"description": "Search results for project history entries"},
+        404: {"model": ProjectNotFoundResponse, "description": "Project not found"},
+    },
+)
+async def search_project_history(
+    project_id: str,
+    q: str,
+    limit: int = 20,
+    offset: int = 0,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> ProjectHistorySearchResponse:
+    """Search project history entries by query string.
+    
+    Query params:
+        q: Search query (required) - searches in summary and details
+        limit: Maximum entries per page (default: 20)
+        offset: Number of entries to skip (default: 0)
+    
+    Returns:
+        200 with search results
+        404 if project doesn't exist
+    """
+    # Validate project exists
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id
+            ).model_dump()
+        )
+    
+    result = await asyncio.to_thread(
+        repo.search_history_entries,
+        project_id,
+        query=q,
+        limit=limit,
+        offset=offset,
+    )
+    
+    return ProjectHistorySearchResponse(
+        entries=[ProjectHistoryEntryResponse(**e) for e in result["entries"]],
+        total=result["total"],
+        limit=result["limit"],
+        offset=result["offset"],
+        query=result["query"],
+    )
+
+
+@router.delete(
+    "/{project_id}/history/{entry_id}",
+    status_code=200,
+    responses={
+        200: {"description": "History entry deleted"},
+        404: {"description": "Project or entry not found"},
+    },
+)
+async def delete_project_history(
+    project_id: str,
+    entry_id: str,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> dict:
+    """Delete a project history entry.
+    
+    Returns:
+        200 with success message
+        404 if project or entry not found
+    """
+    # Validate project exists
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id
+            ).model_dump()
+        )
+    
+    # Fetch entry and validate it belongs to this project
+    entry = await asyncio.to_thread(repo.get_history_entry, entry_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "History entry not found", "entry_id": entry_id}
+        )
+    
+    if entry["project_id"] != project_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "History entry not found in this project", "entry_id": entry_id, "project_id": project_id}
+        )
+    
+    await asyncio.to_thread(repo.delete_history_entry, entry_id, project_id=project_id)
+    
+    return {"message": "History entry deleted", "entry_id": entry_id}

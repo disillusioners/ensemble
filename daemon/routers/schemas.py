@@ -460,3 +460,110 @@ class ProjectCreateRequest(BaseModel):
             }
         }
     }
+
+
+# ==================== Project History Schemas ====================
+
+
+class ProjectHistoryEntryResponse(BaseModel):
+    """Response schema for a single project history entry."""
+    id: str = Field(..., description="Unique entry ID")
+    project_id: str = Field(..., description="Owning project ID")
+    entry_type: str = Field(..., description="Type of history entry")
+    summary: str = Field(..., description="Brief summary of the entry")
+    details: str | None = Field(default=None, description="Detailed description")
+    source_agent: str | None = Field(default=None, description="Agent that created the entry")
+    source_instance_id: str | None = Field(default=None, description="Instance that created the entry")
+    entry_metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
+    created_at: str | None = Field(default=None, description="Creation timestamp")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "id": "entry-uuid",
+                "project_id": "project-uuid",
+                "entry_type": "milestone",
+                "summary": "Completed Phase 1 implementation",
+                "details": "Data layer and repository implementation",
+                "source_agent": "coder",
+                "source_instance_id": "session-uuid",
+                "entry_metadata": {"phase": 1},
+                "created_at": "2025-03-15T10:00:00+00:00"
+            }
+        }
+    }
+
+
+class ProjectHistoryListResponse(BaseModel):
+    """Paginated list of project history entries."""
+    entries: list[ProjectHistoryEntryResponse] = Field(default_factory=list, description="History entries")
+    total: int = Field(..., description="Total number of matching entries")
+    limit: int = Field(..., description="Maximum entries per page")
+    offset: int = Field(..., description="Number of entries skipped")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "entries": [
+                    {
+                        "id": "entry-uuid",
+                        "project_id": "project-uuid",
+                        "entry_type": "milestone",
+                        "summary": "Completed Phase 1",
+                        "created_at": "2025-03-15T10:00:00+00:00"
+                    }
+                ],
+                "total": 1,
+                "limit": 20,
+                "offset": 0
+            }
+        }
+    }
+
+
+class ProjectHistoryAddRequest(BaseModel):
+    """Request body for adding a project history entry."""
+    entry_type: str = Field(..., description="Type of history entry")
+    summary: str = Field(..., description="Brief summary of the entry")
+    details: str | None = Field(default=None, description="Detailed description")
+    entry_metadata: dict[str, Any] | None = Field(default=None, description="Additional metadata")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "entry_type": "milestone",
+                "summary": "Completed Phase 1 implementation",
+                "details": "Data layer and repository implementation",
+                "entry_metadata": {"phase": 1}
+            }
+        }
+    }
+
+
+class ProjectHistorySearchResponse(BaseModel):
+    """Search results for project history entries."""
+    entries: list[ProjectHistoryEntryResponse] = Field(default_factory=list, description="Matching history entries")
+    total: int = Field(..., description="Total number of matching entries")
+    limit: int = Field(..., description="Maximum entries per page")
+    offset: int = Field(..., description="Number of entries skipped")
+    query: str = Field(..., description="The search query used")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "entries": [
+                    {
+                        "id": "entry-uuid",
+                        "project_id": "project-uuid",
+                        "entry_type": "note",
+                        "summary": "TODO: Add tests",
+                        "created_at": "2025-03-15T10:00:00+00:00"
+                    }
+                ],
+                "total": 1,
+                "limit": 20,
+                "offset": 0,
+                "query": "tests"
+            }
+        }
+    }
