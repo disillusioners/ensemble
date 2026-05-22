@@ -333,6 +333,39 @@ class TestAutoTestRagConnectError:
         assert is_rag_enabled() is False
 
 
+class TestAutoTestRagRemoteProtocolError:
+    """Tests for auto_test_rag when server disconnects."""
+
+    @pytest.mark.asyncio
+    async def test_returns_false(self, configured_env, caplog):
+        """When httpx.RemoteProtocolError is raised, auto_test_rag returns False."""
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=httpx.RemoteProtocolError("Server disconnected")
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await auto_test_rag()
+
+        assert result is False
+        assert any("disconnect" in record.message.lower() for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_disables_rag(self, configured_env):
+        """When httpx.RemoteProtocolError is raised, RAG is disabled."""
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=httpx.RemoteProtocolError("Server disconnected")
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await auto_test_rag()
+
+        assert is_rag_enabled() is False
+
+
 class TestAutoTestRagUnexpectedError:
     """Tests for auto_test_rag when unexpected exceptions occur."""
 

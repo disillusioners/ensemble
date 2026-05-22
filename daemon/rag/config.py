@@ -44,11 +44,18 @@ class RAGConfig:
     @classmethod
     def from_env(cls) -> "RAGConfig":
         """Load configuration from environment variables."""
+        try:
+            timeout = float(os.getenv("LIGHTRAG_TIMEOUT", "120"))
+        except (ValueError, TypeError):
+            logger.warning(
+                "Invalid LIGHTRAG_TIMEOUT value, using default of 120.0 seconds"
+            )
+            timeout = 120.0
         return cls(
             host=os.getenv("LIGHTRAG_HOST"),
             api_key=os.getenv("LIGHTRAG_API_KEY"),
             workspace=os.getenv("LIGHTRAG_WORKSPACE", "").strip(),
-            timeout=float(os.getenv("LIGHTRAG_TIMEOUT", "120")),
+            timeout=timeout,
         )
 
 
@@ -69,7 +76,11 @@ def disable_rag() -> None:
 
 
 def enable_rag() -> None:
-    """Enable RAG functionality (resets auto-test disabled state)."""
+    """Re-enable RAG after a previous auto-test failure.
+
+    Warning: This bypasses auto-test validation. Intended for testing
+    or manual recovery only — RAG backend may still be unreachable.
+    """
     global _rag_enabled
     _rag_enabled = True
 
