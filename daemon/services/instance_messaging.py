@@ -395,7 +395,7 @@ class InstanceMessagingService:
         await self._manager.ensure_mcp_preloaded(instance_id)
         
         # Get instance graph (will lazy-load from DB if needed)
-        graph = self._manager.get_instance(instance_id)
+        graph = await self._manager.get_instance(instance_id)
         
         # Check if this is the first message (instance was IDLE)
         # This determines if we should trigger title generation
@@ -704,7 +704,7 @@ class InstanceMessagingService:
         # Only preload MCP if instance needs restore (not already in memory)
         await self._manager.ensure_mcp_preloaded(instance_id)
         
-        graph = self._manager.get_instance(instance_id)
+        graph = await self._manager.get_instance(instance_id)
         
         # Create activity callback for this message - use repository for activity updates
         activity_callback = ActivityCallbackHandler(
@@ -1082,7 +1082,7 @@ class InstanceMessagingService:
             KeyError: If instance is not found.
         """
         # Verify instance exists
-        self._manager.get_instance(instance_id)  # raises KeyError if not found
+        await self._manager.get_instance(instance_id)  # raises KeyError if not found
         
         if self._checkpointer:
             return await get_instance_messages(self._checkpointer, instance_id)

@@ -187,7 +187,7 @@ class JobProcessor:
                         # (e.g., by JobFeedbackObserver). Skip and let it complete.
                         if proc_job.instance_id:
                             try:
-                                self._instance_manager.get_instance(proc_job.instance_id)
+                                await self._instance_manager.get_instance(proc_job.instance_id)
                                 continue  # Instance exists, skip
                             except KeyError:
                                 # Instance has instance_id but doesn't exist in DB.

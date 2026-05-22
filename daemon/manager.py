@@ -1774,7 +1774,7 @@ class InstanceManager:
             parent_id=parent_id,
         )
 
-    def get_instance(self, instance_id: str) -> CompiledStateGraph:
+    async def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.
 
         Uses database as source of truth. If instance exists in DB but not in memory,
@@ -1789,7 +1789,7 @@ class InstanceManager:
         Raises:
             KeyError: If instance_id is not found in database.
         """
-        return self._lifecycle_service.get_instance(instance_id)
+        return await self._lifecycle_service.get_instance(instance_id)
 
     def _restore_instance(self, instance_id: str, meta: "Instance") -> CompiledStateGraph:
         """Restore an instance from database into memory.

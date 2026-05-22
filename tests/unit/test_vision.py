@@ -700,7 +700,7 @@ class TestImagesWithoutVisionConfig:
         # Create mock manager
         mock_manager = MagicMock()
         mock_manager.config = mock_config
-        mock_manager.get_instance = MagicMock()  # Instance exists
+        mock_manager.get_instance = AsyncMock()  # Instance exists
         
         # Create mock request with app.state.manager
         mock_request = MagicMock()
@@ -745,7 +745,7 @@ class TestImagesWithoutVisionConfig:
         # Create mock manager
         mock_manager = MagicMock()
         mock_manager.config = mock_config
-        mock_manager.get_instance = MagicMock()  # Instance exists
+        mock_manager.get_instance = AsyncMock()  # Instance exists
         mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
         
         # Create mock request with app.state.manager

@@ -69,6 +69,7 @@ def mock_instance_manager():
     manager = MagicMock()
     manager.spawn_instance_with_mcp = AsyncMock(return_value="instance-123")
     manager.enqueue_message = AsyncMock()
+    manager.get_instance = AsyncMock(return_value=MagicMock())
     return manager
 
 

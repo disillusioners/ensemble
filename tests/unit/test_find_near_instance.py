@@ -1,7 +1,7 @@
 """Unit tests for InstanceManager find_near_instance functionality."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 
 from daemon.utils import edit_distance
 
@@ -315,94 +315,102 @@ class TestResolveInstanceId:
 
     def _create_mock_manager(self):
         """Helper to create a mock manager."""
+        from unittest.mock import AsyncMock
         mock_manager = MagicMock()
+        mock_manager.get_instance = AsyncMock(return_value=MagicMock())
         return mock_manager
 
-    def test_exact_match_returns_instance_id(self):
+    @pytest.mark.asyncio
+    async def test_exact_match_returns_instance_id(self):
         """Test that exact match returns the instance_id unchanged."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
         # get_instance succeeds for exact match
-        mock_manager.get_instance.return_value = MagicMock()
+        mock_manager.get_instance = AsyncMock(return_value=MagicMock())
 
-        result = _resolve_instance_id(mock_manager, "exact-match-id")
+        result = await _resolve_instance_id(mock_manager, "exact-match-id")
 
         assert result == "exact-match-id"
         mock_manager.get_instance.assert_called_once_with("exact-match-id")
         mock_manager.find_near_instance.assert_not_called()
 
-    def test_near_match_single_suggests_correction(self):
+    @pytest.mark.asyncio
+    async def test_near_match_single_suggests_correction(self):
         """Test single near match raises ValueError with suggestion."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
         # get_instance fails (KeyError), find_near_instance returns 1 match
-        mock_manager.get_instance.side_effect = KeyError("not found")
+        mock_manager.get_instance = AsyncMock(side_effect=KeyError("not found"))
         mock_manager.find_near_instance.return_value = ["correct-id"]
 
         with pytest.raises(ValueError) as exc_info:
-            _resolve_instance_id(mock_manager, "incrrect-id")
+            await _resolve_instance_id(mock_manager, "incrrect-id")
 
         assert "Did you mean 'correct-id'?" in str(exc_info.value)
         assert "incrrect-id" in str(exc_info.value)
         mock_manager.find_near_instance.assert_called_once_with("incrrect-id", max_distance=7)
 
-    def test_near_match_multiple_lists_all_candidates(self):
+    @pytest.mark.asyncio
+    async def test_near_match_multiple_lists_all_candidates(self):
         """Test multiple near matches raises ValueError listing all candidates."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
         # get_instance fails (KeyError), find_near_instance returns 2 matches
-        mock_manager.get_instance.side_effect = KeyError("not found")
+        mock_manager.get_instance = AsyncMock(side_effect=KeyError("not found"))
         mock_manager.find_near_instance.return_value = ["candidate-1", "candidate-2"]
 
         with pytest.raises(ValueError) as exc_info:
-            _resolve_instance_id(mock_manager, "unknown-id")
+            await _resolve_instance_id(mock_manager, "unknown-id")
 
         error_msg = str(exc_info.value)
         assert "Multiple similar instances found" in error_msg
         assert "candidate-1" in error_msg
         assert "candidate-2" in error_msg
 
-    def test_no_match_raises_value_error(self):
+    @pytest.mark.asyncio
+    async def test_no_match_raises_value_error(self):
         """Test no matches raises ValueError with no-suggestion message."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
         # get_instance fails (KeyError), find_near_instance returns empty list
-        mock_manager.get_instance.side_effect = KeyError("not found")
+        mock_manager.get_instance = AsyncMock(side_effect=KeyError("not found"))
         mock_manager.find_near_instance.return_value = []
 
         with pytest.raises(ValueError) as exc_info:
-            _resolve_instance_id(mock_manager, "totally-unknown-id")
+            await _resolve_instance_id(mock_manager, "totally-unknown-id")
 
         error_msg = str(exc_info.value)
         assert "not found" in error_msg
         assert "no similar instance found" in error_msg
 
-    def test_empty_instance_id_raises_value_error(self):
+    @pytest.mark.asyncio
+    async def test_empty_instance_id_raises_value_error(self):
         """Test that empty string raises ValueError with 'cannot be empty'."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
 
         with pytest.raises(ValueError) as exc_info:
-            _resolve_instance_id(mock_manager, "")
+            await _resolve_instance_id(mock_manager, "")
 
         assert "cannot be empty" in str(exc_info.value)
         # Should not even try to look up the instance
         mock_manager.get_instance.assert_not_called()
         mock_manager.find_near_instance.assert_not_called()
 
-    def test_none_instance_id_raises_value_error(self):
+    @pytest.mark.asyncio
+    async def test_none_instance_id_raises_value_error(self):
         """Test that None raises ValueError with 'cannot be empty'."""
         from daemon.tools.instance import _resolve_instance_id
 
         mock_manager = self._create_mock_manager()
 
         with pytest.raises(ValueError) as exc_info:
-            _resolve_instance_id(mock_manager, None)
+            await _resolve_instance_id(mock_manager, None)
 
         assert "cannot be empty" in str(exc_info.value)
         # Should not even try to look up the instance

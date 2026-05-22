@@ -374,8 +374,8 @@ class TestColdResume:
         """Create a mock manager for testing cold resume."""
         from daemon.manager import InstanceManager
         from daemon.services.instance_lifecycle import InstanceLifecycleService
-        from unittest.mock import MagicMock, patch
-        
+        from unittest.mock import MagicMock, AsyncMock, patch
+
         manager = MagicMock()
         manager.instances = {}  # Maps instance_id -> (graph, agent_dir)
         manager._graph_tasks = {}  # Maps instance_id -> asyncio.Task
@@ -403,7 +403,10 @@ class TestColdResume:
         manager.config.queue.llm_retry_transient_attempts = 3
         manager.config.queue.llm_retry_timeout_attempts = 2
         manager._completion_registry = MagicMock()
-        
+        # Add async methods
+        manager.get_instance = AsyncMock()
+        manager.ensure_mcp_preloaded = AsyncMock()
+
         # Create lifecycle service with mocked manager
         cancellation_service = MagicMock()
         events_service = MagicMock()
@@ -413,7 +416,7 @@ class TestColdResume:
             events_service=events_service,
         )
         manager._lifecycle_service = lifecycle_service
-        
+
         return manager
 
     def _call_release_paused_instance(self, manager, instance_id):
@@ -421,9 +424,10 @@ class TestColdResume:
         from daemon.manager import InstanceManager
         return InstanceManager.release_paused_instance(manager, instance_id)
 
-    def test_cold_resume_flow_end_to_end(self, mock_manager):
+    @pytest.mark.asyncio
+    async def test_cold_resume_flow_end_to_end(self, mock_manager):
         """Verify cold resume: release from memory, then restore from checkpoint.
-        
+
         This test verifies the complete flow:
         1. Instance exists in memory (hot path)
         2. release_paused_instance() removes it from memory
@@ -433,11 +437,11 @@ class TestColdResume:
         instance_id = "test-instance-cold-resume"
         mock_graph = MagicMock()
         mock_agent_dir = "/agents/test"
-        
+
         # Step 1: Pre-condition - instance exists in memory
         mock_manager.instances[instance_id] = (mock_graph, mock_agent_dir)
         assert instance_id in mock_manager.instances
-        
+
         # Step 2: Create mock paused instance metadata
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_id = instance_id
@@ -446,77 +450,79 @@ class TestColdResume:
         mock_instance_meta.status = "paused"
         mock_instance_meta.paused_at = "2024-01-01T00:00:00"
         mock_manager._instance_repository.get.return_value = mock_instance_meta
-        
+
         # Step 3: Call release_paused_instance to remove from memory
         self._call_release_paused_instance(mock_manager, instance_id)
-        
+
         # Step 4: Verify instance is NO LONGER in memory
         assert instance_id not in mock_manager.instances
-        
+
         # Step 5: Mock _restore_instance to verify it gets called
         # (Full restore requires too many dependencies - we verify the call)
         mock_manager._lifecycle_service._restore_instance = MagicMock(return_value=mock_graph)
-        
+
         # Step 6: Call get_instance - should trigger cold resume
         from daemon.manager import InstanceManager
-        InstanceManager.get_instance(mock_manager, instance_id)
-        
+        await InstanceManager.get_instance(mock_manager, instance_id)
+
         # Step 7: Verify _restore_instance was called with correct args
         mock_manager._lifecycle_service._restore_instance.assert_called_once_with(
             instance_id, mock_instance_meta
         )
-        
+
         # Step 8: Verify graph is BACK in instances dict (via _restore_instance adding it)
         # Note: The actual restore adds the graph to instances dict internally
 
-    def test_get_instance_hot_path_skips_restore(self, mock_manager):
+    @pytest.mark.asyncio
+    async def test_get_instance_hot_path_skips_restore(self, mock_manager):
         """Verify get_instance uses hot path when instance is in memory."""
         instance_id = "test-instance-hot"
         mock_graph = MagicMock()
         mock_agent_dir = "/agents/test"
-        
+
         # Instance IS in memory
         mock_manager.instances[instance_id] = (mock_graph, mock_agent_dir)
-        
+
         # Mock _restore_instance on the lifecycle service to track if it's called
         mock_manager._lifecycle_service._restore_instance = MagicMock()
-        
+
         # Call get_instance
         from daemon.manager import InstanceManager
-        result = InstanceManager.get_instance(mock_manager, instance_id)
-        
+        result = await InstanceManager.get_instance(mock_manager, instance_id)
+
         # Should return the in-memory graph
         assert result == mock_graph
-        
+
         # _restore_instance should NOT be called (hot path)
         mock_manager._lifecycle_service._restore_instance.assert_not_called()
-        
+
         # Repository get should NOT be called (hot path)
         mock_manager._instance_repository.get.assert_not_called()
 
-    def test_get_instance_cold_resume_triggers_restore(self, mock_manager):
+    @pytest.mark.asyncio
+    async def test_get_instance_cold_resume_triggers_restore(self, mock_manager):
         """Verify get_instance triggers cold resume when instance is not in memory."""
         instance_id = "test-instance-cold"
         mock_graph = MagicMock()
         mock_agent_dir = "/agents/test"
-        
+
         # Instance is NOT in memory
         assert instance_id not in mock_manager.instances
-        
+
         # Create mock instance metadata
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_id = instance_id
         mock_instance_meta.agent_id = "test-agent"
         mock_instance_meta.agent_dir = mock_agent_dir
         mock_manager._instance_repository.get.return_value = mock_instance_meta
-        
+
         # Mock _restore_instance
         mock_manager._lifecycle_service._restore_instance = MagicMock(return_value=mock_graph)
-        
+
         # Call get_instance
         from daemon.manager import InstanceManager
-        result = InstanceManager.get_instance(mock_manager, instance_id)
-        
+        result = await InstanceManager.get_instance(mock_manager, instance_id)
+
         # Should call _restore_instance
         mock_manager._lifecycle_service._restore_instance.assert_called_once_with(
             instance_id, mock_instance_meta

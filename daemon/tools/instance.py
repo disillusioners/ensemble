@@ -186,7 +186,7 @@ def _is_null_workdir(value: str | None) -> bool:
     return str(value).strip().lower() in ("", "null", "none")
 
 
-def _resolve_instance_id(
+async def _resolve_instance_id(
     manager: "InstanceManager",
     instance_id: str | None,
 ) -> str:
@@ -212,7 +212,7 @@ def _resolve_instance_id(
 
     try:
         # First try exact match - this is the fast path
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
         return instance_id
     except KeyError:
         # Exact match failed - try fuzzy matching
@@ -451,7 +451,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         """Send a message to another instance's input queue. Use tool_help("send_message") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id)
+            await _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return str(e)
 
@@ -517,7 +517,7 @@ Returns:
         """Terminate an instance. Use with caution. Use tool_help("terminate_instance") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id)
+            await _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return {"error": str(e), "terminated": False}
         result = await manager.terminate_instance(instance_id)
@@ -547,11 +547,11 @@ Returns:
     
     @register_tool_category("instance")
     @tool
-    def get_instance_info(instance_id: str) -> dict:
+    async def get_instance_info(instance_id: str) -> dict:
         """Get information about a specific instance. Use tool_help("get_instance_info") for details."""
         # Validate instance exists with fuzzy matching for typos
         try:
-            _resolve_instance_id(manager, instance_id)
+            await _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return {"error": str(e)}
         return manager.get_instance_info(instance_id)

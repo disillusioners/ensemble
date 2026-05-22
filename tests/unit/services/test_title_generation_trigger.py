@@ -32,6 +32,7 @@ def reset_registry():
 @pytest.fixture
 def mock_manager():
     """Create a mock InstanceManager with required attributes."""
+    from unittest.mock import AsyncMock
     manager = MagicMock()
     manager._queue_repository = MagicMock()
     manager._instance_repository = MagicMock()
@@ -40,6 +41,7 @@ def mock_manager():
     manager._live_hub = MagicMock()
     manager._live_hub.stream_lifecycle = AsyncMock()
     manager._checkpointer = MagicMock()
+    manager.get_instance = AsyncMock()
     return manager
 
 
@@ -578,6 +580,7 @@ class TestInstanceMessagingTriggerTitleGeneration:
         # These are async methods that need to be mocked as AsyncMock
         manager.ensure_mcp_preloaded = AsyncMock()
         manager._maybe_compact_context = AsyncMock()
+        manager.get_instance = AsyncMock()
         return manager
 
     @pytest.fixture
@@ -783,7 +786,7 @@ class TestInstanceMessagingTriggerTitleGeneration:
         mock_graph = MagicMock()
         mock_graph.ainvoke = AsyncMock(side_effect=asyncio.CancelledError)
 
-        mock_messaging_manager.get_instance.return_value = mock_graph
+        mock_messaging_manager.get_instance = AsyncMock(return_value=mock_graph)
 
         # Create a proper MessageResult mock that accepts keyword arguments
         mock_message_result = MagicMock()

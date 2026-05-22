@@ -187,7 +187,7 @@ async def terminate_instance(
     
     # Check instance exists
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -213,7 +213,7 @@ async def pause_instance(
 
     # Check instance exists
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -252,7 +252,7 @@ async def get_messages(
     
     # Check instance exists
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,

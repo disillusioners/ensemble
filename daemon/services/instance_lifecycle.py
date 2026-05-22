@@ -566,7 +566,7 @@ class InstanceLifecycleService:
 
         return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
-    def get_instance(self, instance_id: str) -> CompiledStateGraph:
+    async def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.
 
         Uses database as source of truth. If instance exists in DB but not in memory,
@@ -581,20 +581,20 @@ class InstanceLifecycleService:
         Raises:
             KeyError: If instance_id is not found in database.
         """
-        # Access manager's state dynamically
-        instance_repository = self._manager._instance_repository
-        
-        # Check in-memory cache first
+        # Check in-memory cache first (sync, fast path)
         if instance_id in self._manager.instances:
             graph, _ = self._manager.instances[instance_id]
             return graph
 
-        # Not in memory - check database and restore if found
+        # Cold-load: ensure MCP tools are preloaded BEFORE restoring
+        await self._manager.ensure_mcp_preloaded(instance_id)
+
+        # Now restore from DB
+        instance_repository = self._manager._instance_repository
         meta = instance_repository.get(instance_id)
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
 
-        # Instance exists in DB but not in memory - restore it
         return self._restore_instance(instance_id, meta)
 
     def _restore_instance(self, instance_id: str, meta: Instance) -> CompiledStateGraph:

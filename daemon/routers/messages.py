@@ -30,7 +30,7 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
     
     # Check instance exists
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -91,7 +91,7 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
     
     # Check instance exists
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -125,7 +125,7 @@ async def stream_events(instance_id: str, request: Request):
         raise HTTPException(status_code=503, detail="Server is shutting down")
     
     try:
-        manager.get_instance(instance_id)
+        await manager.get_instance(instance_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Instance not found: {instance_id}")
     
