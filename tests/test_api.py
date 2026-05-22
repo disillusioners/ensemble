@@ -22,7 +22,7 @@ async def mock_manager():
     manager = Mock()
     manager.spawn_instance = Mock(return_value="test-instance-id")
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
-    manager.get_instance = Mock()
+    manager.get_instance = AsyncMock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_instance = AsyncMock(return_value=True)
     manager.pause_instance_cascade = AsyncMock(return_value={
@@ -466,7 +466,7 @@ async def test_get_instance_not_found(client, mock_manager):
 @pytest.mark.asyncio
 async def test_terminate_instance_success(client, mock_manager):
     """Test DELETE /instances/{id}."""
-    mock_manager.get_instance.return_value = Mock()  # Instance exists
+    mock_manager.get_instance.return_value = AsyncMock()  # Instance exists
     
     response = await client.delete("/instances/test-instance-id")
     
@@ -502,7 +502,7 @@ async def test_pause_instance_endpoint_exists(client, mock_manager):
 
     # Test 2: Instance exists - should return cascade pause result
     mock_manager.get_instance.side_effect = None
-    mock_manager.get_instance.return_value = Mock()
+    mock_manager.get_instance.return_value = AsyncMock()
 
     # Mock cascade pause with children
     mock_manager.pause_instance_cascade = AsyncMock(return_value={
@@ -527,7 +527,7 @@ async def test_pause_instance_endpoint_exists(client, mock_manager):
 async def test_stop_instance_deprecated_alias(client, mock_manager):
     """Test that deprecated POST /instances/{instance_id}/stop delegates to pause logic."""
     # Instance exists - should return same result as /pause endpoint
-    mock_manager.get_instance.return_value = Mock()
+    mock_manager.get_instance.return_value = AsyncMock()
 
     # Mock cascade pause with children
     mock_manager.pause_instance_cascade = AsyncMock(return_value={
@@ -605,7 +605,7 @@ async def test_get_messages(client, mock_manager):
 async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
     # Make enqueue_message raise an unexpected exception
-    mock_manager.get_instance.return_value = Mock()
+    mock_manager.get_instance.return_value = AsyncMock()
     mock_manager.enqueue_message.side_effect = RuntimeError("Unexpected error")
     
     response = await client.post(

@@ -309,7 +309,8 @@ class TestTerminateInstance:
 class TestGetInstance:
     """Tests for get_instance method."""
 
-    def test_get_instance_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
+    @pytest.mark.asyncio
+    async def test_get_instance_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
         """Test getting instance graph."""
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
@@ -320,18 +321,19 @@ class TestGetInstance:
             manager._instance_repository = mock_instance_repository
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
-            graph = manager.get_instance(instance_id)
+            graph = await manager.get_instance(instance_id)
             
             assert graph == mock_graph
 
-    def test_get_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
+    @pytest.mark.asyncio  
+    async def test_get_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
         """Test error when instance doesn't exist."""
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             manager = InstanceManager(mock_config)
             
             with pytest.raises(KeyError, match="Instance not found"):
-                manager.get_instance("non-existent-instance")
+                await manager.get_instance("non-existent-instance")
 
 
 class TestListInstances:

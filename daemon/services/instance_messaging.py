@@ -391,10 +391,8 @@ class InstanceMessagingService:
         """
         from ..manager import MessageResult
         
-        # Only preload MCP if instance needs restore (not already in memory)
-        await self._manager.ensure_mcp_preloaded(instance_id)
-        
         # Get instance graph (will lazy-load from DB if needed)
+        # Note: get_instance() now handles MCP preload internally
         graph = await self._manager.get_instance(instance_id)
         
         # Check if this is the first message (instance was IDLE)
@@ -701,9 +699,8 @@ class InstanceMessagingService:
         """
         from ..manager import MessageResult
         
-        # Only preload MCP if instance needs restore (not already in memory)
-        await self._manager.ensure_mcp_preloaded(instance_id)
-        
+        # Get instance graph (will lazy-load from DB if needed)
+        # Note: get_instance() now handles MCP preload internally
         graph = await self._manager.get_instance(instance_id)
         
         # Create activity callback for this message - use repository for activity updates

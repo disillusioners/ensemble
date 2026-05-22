@@ -44,7 +44,7 @@ def mock_manager():
     manager.spawn_instance_with_mcp = AsyncMock(return_value="spawned-instance-123")
     manager.enqueue_message = AsyncMock()
     manager.terminate_instance = AsyncMock()
-    manager.get_instance = MagicMock()
+    manager.get_instance = AsyncMock()
     # Mock live_hub for status_change emission in spawn_instance
     manager._live_hub = MagicMock()
     manager._live_hub.stream_status_change = AsyncMock()
@@ -118,7 +118,7 @@ async def test_explore_passes_invoked_as_tool_true(configured_env, mock_manager)
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project"}
-    mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager.get_instance = AsyncMock(return_value=mock_instance)
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
     explore_tool = next(t for t in tools if t.name == "explore")
@@ -156,7 +156,7 @@ async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manag
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project-123"}
-    mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager.get_instance = AsyncMock(return_value=mock_instance)
     mock_manager._job_queue_service = mock_job_queue_service
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
@@ -278,7 +278,7 @@ async def test_full_explore_flow_with_invoked_as_tool(configured_env, mock_manag
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project"}
-    mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager.get_instance = AsyncMock(return_value=mock_instance)
 
     # Track what spawn_instance_with_mcp was called with
     spawn_calls = []
@@ -315,7 +315,7 @@ async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_ma
 
     mock_instance = MagicMock()
     mock_instance.instance_metadata = {"project_id": "test-project-123"}
-    mock_manager.get_instance = MagicMock(return_value=mock_instance)
+    mock_manager.get_instance = AsyncMock(return_value=mock_instance)
     mock_manager._job_queue_service = mock_job_queue_service
     # Mock _instance_repository used by _get_project_id()
     mock_repo_instance = MagicMock()
@@ -352,7 +352,7 @@ async def test_explore_without_rag_still_returns_error(configured_env, mock_mana
     for key in ["LIGHTRAG_HOST", "LIGHTRAG_API_KEY", "LIGHTRAG_WORKSPACE", "LIGHTRAG_TIMEOUT"]:
         os.environ.pop(key, None)
 
-    mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={}))
+    mock_manager.get_instance = AsyncMock(return_value=MagicMock(instance_metadata={}))
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
     explore_tool = next(t for t in tools if t.name == "explore")
@@ -372,7 +372,7 @@ async def test_experience_without_rag_still_returns_error(configured_env, mock_m
     for key in ["LIGHTRAG_HOST", "LIGHTRAG_API_KEY", "LIGHTRAG_WORKSPACE", "LIGHTRAG_TIMEOUT"]:
         os.environ.pop(key, None)
 
-    mock_manager.get_instance = MagicMock(return_value=MagicMock(instance_metadata={}))
+    mock_manager.get_instance = AsyncMock(return_value=MagicMock(instance_metadata={}))
 
     tools = create_knowledge_tools(mock_manager, "parent-instance-id")
     experience_tool = next(t for t in tools if t.name == "experience")
