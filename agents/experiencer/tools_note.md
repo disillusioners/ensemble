@@ -299,37 +299,4 @@ rag_insert_text(
 )
 ```
 
----
 
-## Critical Experience Tools
-
-These tools manage a project's critical experience list — high-impact, concise knowledge
-that is always visible to all agents working on the project.
-
-### project_ce_add
-
-Adds or merges a critical experience entry. If a similar entry exists (same category + theme),
-it will be merged automatically. **Merge logic:** Triggers when same category + ≥2 keyword overlap
-(words >3 chars). Shorter summary wins. Timestamps are updated.
-
-**When to use:** After extracting knowledge that meets ALL critical experience criteria
-(actionable, concise, project-specific, high-impact).
-
-**Parameters:**
-- `project_id` — The project to add to
-- `category` — One of: convention, pattern, risk, decision, constraint
-- `priority` — One of: critical, high, medium
-- `summary` — Max 200 chars, actionable statement
-- `reference` — (optional) Link to source doc, file, or memory
-
-### project_ce_list
-
-Returns all critical experience entries for a project.
-
-**When to use:** To review current entries before adding (avoid duplicates).
-
-### project_ce_remove
-
-Removes a specific entry by ID.
-
-**When to use:** When an entry is outdated or incorrect.

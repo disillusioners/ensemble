@@ -1,12 +1,12 @@
 {
   "id": "experiencer",
   "name": "Experiencer",
-  "description": "Specializes in extracting entities and relationships from text and recording them into the RAG knowledge base, and routing critical project knowledge to the project's critical experience list",
+  "description": "Specializes in extracting entities and relationships from text and recording them into the RAG knowledge base",
   "icon": "🧠",
   "color": "accent-purple",
   "version": "1.1.0",
   "llm_model": "quick",
   "tools": {
-    "allow": ["rag", "help", "time", "mcp", "critical_experience"]
+    "allow": ["rag", "help", "time", "mcp"]
   }
 }

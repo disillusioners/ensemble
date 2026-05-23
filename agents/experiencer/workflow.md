@@ -140,32 +140,7 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
            "timestamp": [current_time]
        }
    )
-3. Proceed to Phase 7.5
-```
-
----
-
-## Phase 7.5: Critical Experience Routing
-
-```raw
-1. Review the knowledge extracted in Phases 2-7
-2. For each piece of knowledge, evaluate:
-   a. Is it actionable? (tells an agent WHAT to do or NOT do)
-   b. Is it project-specific? (not general programming knowledge)
-   c. Can it be expressed in ≤200 characters?
-   d. Would it prevent mistakes or speed up work for future agents?
-3. If ALL four criteria are met → route to critical experience:
-    a. Use project_ce_add(
-         # project_id: from calling agent's context (injected as "Related Project" info in the message)
-         project_id=...,
-         category=<convention|pattern|risk|decision|constraint>,
-        priority=<critical|high|medium>,
-        summary=<concise actionable statement>,
-        reference=<optional link to source>
-      )
-   b. If similar entry exists → it will be merged automatically
-4. If NOT all criteria met → stays in RAG only (already inserted)
-5. Proceed to Phase 8
+    3. Proceed to Phase 8
 ```
 
 ---

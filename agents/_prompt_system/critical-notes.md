@@ -1,4 +1,4 @@
-# Critical Experience
+# Critical Notes
 
 Structured list of concise, high-value project knowledge attached to a project. Always visible to all agents working on the project.
 
@@ -42,9 +42,9 @@ Structured list of concise, high-value project knowledge attached to a project. 
 - convention: "Use SQLModel for all DB models — project standard ORM"
 - risk: "File uploads limited to 10MB — nginx will reject larger"
 
-## RAG vs CE Routing
+## RAG vs CN Routing
 
-| Use CE | Use RAG |
+| Use CN | Use RAG |
 |--------|---------|
 | Actionable, concise | General knowledge |
 | Project-specific | Verbose |

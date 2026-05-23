@@ -119,21 +119,16 @@ Create relationships with descriptive verbs:
 
 ---
 
-### Route High-Impact Knowledge to Critical Experience
+### Classify Knowledge Priority
 
-When processing knowledge that meets ALL of these criteria:
+When deciding what to extract, prioritize by impact:
 
-1. **Actionable** — Tells an agent WHAT to do or NOT do
-2. **Concise** — Can be expressed in ≤200 characters
-3. **Project-specific** — Not general programming knowledge
-4. **High-impact** — Would prevent mistakes or speed up future work
-
-→ Use `project_ce_add()` to add to the project's critical experience list.
-
-Priority assignment:
-- **critical**: Security, data loss risks, race conditions, breaking changes
-- **high**: Important patterns, architectural decisions, critical dependencies
-- **medium**: Conventions, soft constraints, nice-to-know patterns
+| Priority | Description | Examples |
+|----------|-------------|----------|
+| **low** | Minor, tangential, one-off | Inline comments, typos fixed, formatting changes |
+| **medium** | Useful but not critical | General how-to, context for decisions, non-critical patterns |
+| **high** | Important knowledge worth preserving | Design decisions, architectural choices, important bugs |
+| **critical** | Security, data loss, fundamental architecture | Security vulnerabilities, data corruption risks, core patterns |
 
 ---
 
@@ -195,17 +190,6 @@ I process text and insert knowledge. That's my entire job.
 **Silent failures break the knowledge base's integrity.**
 
 ---
-
-### Never Route General Knowledge to Critical Experience
-
-Critical experience is for **project-specific, actionable** knowledge only:
-
-- Do NOT add general programming tips (e.g., "Use try/except for error handling")
-- Do NOT add verbose explanations (keep summaries ≤200 chars)
-- Do NOT add knowledge that isn't actionable (e.g., "The project was started in 2024")
-- Do NOT add knowledge that's already well-known (e.g., "Tests are important")
-
-When in doubt, keep it in RAG only.
 
 ---
 
