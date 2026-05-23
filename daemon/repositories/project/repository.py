@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
-from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry
+from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
 
@@ -795,3 +795,145 @@ class SQLModelProjectRepository:
             )
             entries = list(session.exec(stmt))
             return [e.to_dict() for e in entries]
+
+    # --------------------------------------------------------
+    # CRITICAL NOTES
+    # --------------------------------------------------------
+
+    def list_critical_notes(self, project_id: str) -> list[CriticalNoteModel]:
+        """List all critical notes for a project.
+        
+        Args:
+            project_id: The project ID.
+            
+        Returns:
+            List of CriticalNoteModel instances.
+        """
+        with Session(self.engine) as session:
+            notes = list(session.exec(
+                select(CriticalNoteModel)
+                .where(CriticalNoteModel.project_id == project_id)
+                .order_by(CriticalNoteModel.created_at.desc())
+            ))
+            return notes
+
+    def add_critical_note(
+        self,
+        project_id: str,
+        source_agent: str,
+        category: str,
+        priority: str,
+        summary: str,
+        reference: str | None = None,
+    ) -> CriticalNoteModel:
+        """Add a new critical note to a project.
+        
+        Args:
+            project_id: The project ID.
+            source_agent: The agent adding the note.
+            category: Note category.
+            priority: Note priority.
+            summary: Note summary text.
+            reference: Optional reference URL/path.
+            
+        Returns:
+            The created CriticalNoteModel instance.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with Session(self.engine) as session:
+            note = CriticalNoteModel(
+                project_id=project_id,
+                source_agent=source_agent,
+                category=category,
+                priority=priority,
+                summary=summary,
+                reference=reference,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(note)
+            session.commit()
+            session.refresh(note)
+            return note
+
+    def get_critical_note(self, project_id: str, entry_id: str) -> CriticalNoteModel | None:
+        """Get a specific critical note by ID.
+        
+        Args:
+            project_id: The project ID.
+            entry_id: The note entry ID.
+            
+        Returns:
+            The CriticalNoteModel if found and belongs to project, None otherwise.
+        """
+        with Session(self.engine) as session:
+            note = session.get(CriticalNoteModel, entry_id)
+            if note is None or note.project_id != project_id:
+                return None
+            return note
+
+    def remove_critical_note(self, project_id: str, entry_id: str) -> bool:
+        """Remove a critical note by ID.
+        
+        Args:
+            project_id: The project ID.
+            entry_id: The note entry ID to remove.
+            
+        Returns:
+            True if removed, False if not found.
+        """
+        with Session(self.engine) as session:
+            note = session.get(CriticalNoteModel, entry_id)
+            if note is None or note.project_id != project_id:
+                return False
+            session.delete(note)
+            session.commit()
+            return True
+
+    def update_critical_note(
+        self,
+        project_id: str,
+        entry_id: str,
+        **updates,
+    ) -> CriticalNoteModel | None:
+        """Update a critical note's fields.
+        
+        Args:
+            project_id: The project ID.
+            entry_id: The note entry ID to update.
+            **updates: Fields to update (source_agent, category, priority, summary, reference).
+            
+        Returns:
+            The updated CriticalNoteModel if found, None otherwise.
+        """
+        with Session(self.engine) as session:
+            note = session.get(CriticalNoteModel, entry_id)
+            if note is None or note.project_id != project_id:
+                return None
+            
+            now = datetime.now(timezone.utc).isoformat()
+            for key, value in updates.items():
+                if hasattr(note, key) and value is not None:
+                    setattr(note, key, value)
+            note.updated_at = now
+            
+            session.commit()
+            session.refresh(note)
+            return note
+
+    def count_critical_notes(self, project_id: str) -> int:
+        """Count critical notes for a project.
+        
+        Args:
+            project_id: The project ID.
+            
+        Returns:
+            Number of critical notes.
+        """
+        with Session(self.engine) as session:
+            count = session.exec(
+                select(func.count())
+                .select_from(CriticalNoteModel)
+                .where(CriticalNoteModel.project_id == project_id)
+            ).one()
+            return count

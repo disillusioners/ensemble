@@ -74,12 +74,35 @@ def set_job_queue_mgmt_service(service: JobQueueMgmtService) -> None:
     _job_queue_mgmt_service = service
 
 
-def _project_to_response(project, recent_history: list[dict] | None = None) -> ProjectResponse:
+def _get_critical_notes_safe(repo: SQLModelProjectRepository, project_id: str) -> list[dict]:
+    """Fetch critical notes for a project with graceful error handling.
+    
+    Args:
+        repo: The project repository instance.
+        project_id: The project ID to fetch notes for.
+    
+    Returns:
+        List of critical note dicts, or empty list on error.
+    """
+    try:
+        notes = repo.list_critical_notes(project_id)
+        return [note.to_dict() for note in notes]
+    except Exception as e:
+        logger.warning(f"Failed to fetch critical notes for project {project_id}: {e}")
+        return []
+
+
+def _project_to_response(
+    project,
+    recent_history: list[dict] | None = None,
+    critical_notes: list[dict] | None = None,
+) -> ProjectResponse:
     """Convert Project model to ProjectResponse.
     
     Args:
         project: The project model instance.
         recent_history: Optional list of recent history entries to include.
+        critical_notes: Optional list of critical notes to include (fetched from repo).
     
     Returns:
         ProjectResponse instance.
@@ -97,7 +120,7 @@ def _project_to_response(project, recent_history: list[dict] | None = None) -> P
         shortnames=project.shortnames or [],
         metadata=project.project_metadata or {},
         relationships=project.relationships or {},
-        critical_notes=project.critical_notes or [],
+        critical_notes=critical_notes or [],  # Use provided notes or empty list
         recent_history=recent_history,
         creator_instance_id=project.creator_instance_id,
         creator_agent_id=project.creator_agent_id,
@@ -186,7 +209,8 @@ async def create_project(
     )
     
     recent_history = _get_recent_history_safe(repo, project.project_id)
-    return _project_to_response(project, recent_history=recent_history)
+    critical_notes = _get_critical_notes_safe(repo, project.project_id)
+    return _project_to_response(project, recent_history=recent_history, critical_notes=critical_notes)
 
 
 @router.get(
@@ -219,7 +243,8 @@ async def get_project(
         )
     
     recent_history = _get_recent_history_safe(repo, project_id)
-    return _project_to_response(project, recent_history=recent_history)
+    critical_notes = _get_critical_notes_safe(repo, project_id)
+    return _project_to_response(project, recent_history=recent_history, critical_notes=critical_notes)
 
 
 @router.get(
@@ -250,13 +275,17 @@ async def list_projects(
     history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
     history_map = dict(history_results)
     
+    # Fetch critical notes for each project in parallel
+    def fetch_critical_notes(p):
+        return p.project_id, _get_critical_notes_safe(repo, p.project_id)
+    
+    notes_results = await asyncio.gather(*[asyncio.to_thread(fetch_critical_notes, p) for p in projects])
+    notes_map = dict(notes_results)
+    
     return ProjectListResponse(
-        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id)) for p in projects],
+        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id), critical_notes=notes_map.get(p.project_id)) for p in projects],
         total=len(projects)
     )
-
-
-# Also support trailing slash for compatibility
 @router.get(
     "/",
     response_model=ProjectListResponse,
@@ -279,8 +308,15 @@ async def list_projects_trailing(
     history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
     history_map = dict(history_results)
     
+    # Fetch critical notes for each project in parallel
+    def fetch_critical_notes(p):
+        return p.project_id, _get_critical_notes_safe(repo, p.project_id)
+    
+    notes_results = await asyncio.gather(*[asyncio.to_thread(fetch_critical_notes, p) for p in projects])
+    notes_map = dict(notes_results)
+    
     return ProjectListResponse(
-        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id)) for p in projects],
+        projects=[_project_to_response(p, recent_history=history_map.get(p.project_id), critical_notes=notes_map.get(p.project_id)) for p in projects],
         total=len(projects)
     )
 
@@ -338,7 +374,8 @@ async def set_queue_status(
         )
     
     recent_history = _get_recent_history_safe(repo, project_id)
-    return _project_to_response(updated, recent_history=recent_history)
+    critical_notes = _get_critical_notes_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history, critical_notes=critical_notes)
 
 
 @router.post(
@@ -378,7 +415,8 @@ async def pause_queue(
         )
     
     recent_history = _get_recent_history_safe(repo, project_id)
-    return _project_to_response(updated, recent_history=recent_history)
+    critical_notes = _get_critical_notes_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history, critical_notes=critical_notes)
 
 
 @router.post(
@@ -418,7 +456,8 @@ async def resume_queue(
         )
     
     recent_history = _get_recent_history_safe(repo, project_id)
-    return _project_to_response(updated, recent_history=recent_history)
+    critical_notes = _get_critical_notes_safe(repo, project_id)
+    return _project_to_response(updated, recent_history=recent_history, critical_notes=critical_notes)
 
 
 # ==================== Project History Endpoints ====================

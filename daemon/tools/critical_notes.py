@@ -16,6 +16,8 @@ from ..repositories.project.models import (
     CriticalNotesCategory,
     CriticalNotesPriority,
 )
+from ..repositories.project.repository import SQLModelProjectRepository
+from ..repositories.project.models import CriticalNoteModel
 from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "critical_notes"
@@ -96,9 +98,9 @@ def _evict_if_needed(entries: list[CriticalNotes]) -> list[CriticalNotes]:
 
 
 def create_critical_notes_tools(
-    store, current_instance_id: str = "", agent_id: str = ""
+    repo: SQLModelProjectRepository, current_instance_id: str = "", agent_id: str = ""
 ) -> list:
-    """Create critical notes management tools bound to a project store."""
+    """Create critical notes management tools bound to a project repository."""
 
     @register_tool_category(CATEGORY_NAME)
     @tool
@@ -120,21 +122,23 @@ def create_critical_notes_tools(
         if not summary.strip():
             return {"error": "Summary cannot be empty"}
 
-        # Step 2: Load project + current entries
-        project = store.get(project_id)
+        # Step 2: Check project exists
+        project = repo.get(project_id)
         if not project:
             return {"error": f"Project '{project_id}' not found"}
 
+        # Step 3: Load current entries
+        notes_list = repo.list_critical_notes(project_id)
         entries = [
-            CriticalNotes(**e) if isinstance(e, dict) else e
-            for e in (project.critical_notes or [])
+            CriticalNotes(**note.to_dict()) if isinstance(note, CriticalNoteModel) else note
+            for note in notes_list
         ]
 
-        # Step 3: Check for merge
+        # Step 4: Check for merge
         similar = _find_similar_entry(entries, category, summary)
 
         if similar is not None:
-            # Step 4: MERGE PATH
+            # Step 5: MERGE PATH
             merged = _merge_entries(similar, CriticalNotes(
                 category=category,
                 priority=priority,
@@ -142,25 +146,48 @@ def create_critical_notes_tools(
                 reference=reference,
                 source_agent=agent_id,
             ))
-            entries = [merged if e.id == similar.id else e for e in entries]
-            result = merged
+            # Update via repository
+            updated = repo.update_critical_note(
+                project_id,
+                merged.id,
+                priority=merged.priority,
+                summary=merged.summary,
+                reference=merged.reference,
+            )
+            if updated:
+                return updated.to_dict()
+            return merged.to_dict()
         else:
-            # Step 5: NEW ENTRY PATH — evict first, then append
+            # Step 6: NEW ENTRY PATH — evict first, then add
+            original_count = len(entries)
+
+            # Identify the entry to evict before calling _evict_if_needed
+            evicted_entry_id = None
+            if original_count >= _MAX_ENTRIES:
+                # Find the entry that would be evicted (oldest, lowest priority)
+                sorted_entries = sorted(
+                    entries,
+                    key=lambda e: (_PRIORITY_ORDER.get(e.priority, 2), e.created_at),
+                )
+                evicted_entry_id = sorted_entries[0].id
+
             entries = _evict_if_needed(entries)
-            new_entry = CriticalNotes(
+
+            # Remove evicted entry from repository if needed
+            if evicted_entry_id:
+                repo.remove_critical_note(project_id, evicted_entry_id)
+
+            # Add new entry via repository
+            added = repo.add_critical_note(
+                project_id,
+                source_agent=agent_id,
                 category=category,
                 priority=priority,
                 summary=summary,
                 reference=reference,
-                source_agent=agent_id,
             )
-            entries.append(new_entry)
-            result = new_entry
-
-        # Step 6: Save + return
-        project.critical_notes = [e.to_dict() for e in entries]
-        store.update(project_id, critical_notes=project.critical_notes)
-        return result.to_dict()
+            # Return as CriticalNotes dict
+            return CriticalNotes(**added.to_dict()).to_dict()
 
     project_cn_add._full_doc_ = """Add or update a critical notes entry for a project.
 
@@ -182,13 +209,14 @@ Returns:
     @tool
     def project_cn_list(project_id: str) -> dict:
         """List all critical notes entries for a project. Use tool_help() for details."""
-        project = store.get(project_id)
+        project = repo.get(project_id)
         if not project:
             return {"error": f"Project '{project_id}' not found"}
 
+        notes_list = repo.list_critical_notes(project_id)
         entries = [
-            CriticalNotes(**e) if isinstance(e, dict) else e
-            for e in (project.critical_notes or [])
+            CriticalNotes(**note.to_dict()) if isinstance(note, CriticalNoteModel) else note
+            for note in notes_list
         ]
         return {
             "project_id": project_id,
@@ -208,36 +236,24 @@ Returns:
     @tool
     def project_cn_remove(project_id: str, entry_id: str) -> dict:
         """Remove a specific critical notes entry by ID. Use tool_help() for details."""
-        project = store.get(project_id)
+        project = repo.get(project_id)
         if not project:
             return {"error": f"Project '{project_id}' not found"}
 
-        entries = [
-            CriticalNotes(**e) if isinstance(e, dict) else e
-            for e in (project.critical_notes or [])
-        ]
-
-        original_len = len(entries)
-
-        # Find the entry before removing
-        removed_entry = None
-        for e in entries:
-            if e.id == entry_id:
-                removed_entry = e
-                break
-
+        # Get the entry first to return its details
+        removed_entry = repo.get_critical_note(project_id, entry_id)
         if removed_entry is None:
             return {"error": f"Entry '{entry_id}' not found"}
 
-        entries = [e for e in entries if e.id != entry_id]
+        summary = removed_entry.summary
 
-        project.critical_notes = [e.to_dict() for e in entries]
-        store.update(project_id, critical_notes=project.critical_notes)
+        # Remove via repository
+        removed = repo.remove_critical_note(project_id, entry_id)
 
         return {
-            "removed": True,
+            "removed": removed,
             "entry_id": entry_id,
-            "summary": removed_entry.summary,
+            "summary": summary,
         }
 
     project_cn_remove._full_doc_ = """Remove a specific critical notes entry by ID.

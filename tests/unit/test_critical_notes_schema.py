@@ -150,36 +150,22 @@ class TestCriticalNotesModel:
 
 
 class TestProjectCriticalNotes:
-    """Tests for Project model critical_notes field."""
+    """Tests for Project model critical_notes integration (now via repository)."""
 
-    def test_project_critical_notes_default(self):
-        """New Project should have critical_notes=[]."""
-        project = Project(name="Test Project")
-        assert project.critical_notes == []
-
-    def test_project_to_dict_includes_critical_notes(self):
-        """to_dict() should include 'critical_notes' key."""
+    def test_project_to_dict_does_not_include_critical_notes(self):
+        """to_dict() should NOT include critical_notes key (now in dedicated table)."""
         project = Project(name="Test Project")
         d = project.to_dict()
-        assert "critical_notes" in d
+        # critical_notes is no longer on Project model - it's in a separate table
+        assert "critical_notes" not in d
 
-    def test_project_to_dict_empty_list(self):
-        """Empty list should be returned as empty list."""
+    def test_project_to_dict_excludes_critical_notes_field(self):
+        """to_dict() should not have critical_notes key (migrated to separate table)."""
         project = Project(name="Test Project")
         d = project.to_dict()
-        assert d["critical_notes"] == []
-
-    def test_project_to_dict_with_entries(self):
-        """to_dict() should return critical_notes entries."""
-        project = Project(
-            name="Test Project",
-            critical_notes=[
-                {"category": "convention", "priority": "high", "summary": "Test"}
-            ]
-        )
-        d = project.to_dict()
-        assert len(d["critical_notes"]) == 1
-        assert d["critical_notes"][0]["summary"] == "Test"
+        # The comment in to_dict says "critical_notes removed - now in dedicated table"
+        # So critical_notes should NOT appear in to_dict output
+        assert "critical_notes" not in d
 
 
 class TestMigrationFile:
@@ -203,7 +189,7 @@ class TestMigrationFile:
         content = self.MIGRATION_PATH.read_text()
         assert "-- DOWN" in content
 
-    def test_migration_up_adds_column(self):
+    def test_migration_up_adds_critical_experience_column(self):
         """UP section should add critical_experience column."""
         content = self.MIGRATION_PATH.read_text()
         up_section = content.split("-- DOWN")[0]
@@ -219,3 +205,43 @@ class TestMigrationFile:
         """Default value should be empty array '[]'."""
         content = self.MIGRATION_PATH.read_text()
         assert "DEFAULT '[]'" in content
+
+
+class TestCriticalNoteModel:
+    """Tests for CriticalNoteModel SQLModel table."""
+
+    def test_critical_note_model_has_required_fields(self):
+        """CriticalNoteModel should have all required fields."""
+        from daemon.repositories.project.models import CriticalNoteModel
+        # Check the model has the expected fields
+        assert hasattr(CriticalNoteModel, 'id')
+        assert hasattr(CriticalNoteModel, 'project_id')
+        assert hasattr(CriticalNoteModel, 'created_at')
+        assert hasattr(CriticalNoteModel, 'updated_at')
+        assert hasattr(CriticalNoteModel, 'source_agent')
+        assert hasattr(CriticalNoteModel, 'category')
+        assert hasattr(CriticalNoteModel, 'priority')
+        assert hasattr(CriticalNoteModel, 'summary')
+        assert hasattr(CriticalNoteModel, 'reference')
+
+    def test_critical_note_model_to_dict(self):
+        """CriticalNoteModel.to_dict() should return all fields."""
+        from daemon.repositories.project.models import CriticalNoteModel
+        note = CriticalNoteModel(
+            project_id="test-project",
+            source_agent="test-agent",
+            category="convention",
+            priority="high",
+            summary="Test summary",
+            reference="https://example.com",
+        )
+        d = note.to_dict()
+        assert d["project_id"] == "test-project"
+        assert d["source_agent"] == "test-agent"
+        assert d["category"] == "convention"
+        assert d["priority"] == "high"
+        assert d["summary"] == "Test summary"
+        assert d["reference"] == "https://example.com"
+        assert "id" in d
+        assert "created_at" in d
+        assert "updated_at" in d

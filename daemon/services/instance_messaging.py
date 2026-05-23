@@ -798,7 +798,14 @@ class InstanceMessagingService:
                         matched_project = self._project_repository.get(existing_project_id)
                         if matched_project:
                             from ..manager import format_project_context
-                            project_context = format_project_context(matched_project, store=self._manager.project_store)
+                            # Fetch critical notes from repository
+                            critical_notes = []
+                            try:
+                                cn_list = self._project_repository.list_critical_notes(matched_project.project_id)
+                                critical_notes = [note.to_dict() for note in cn_list]
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch critical notes for project {matched_project.project_id}: {e}")
+                            project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
                             message = project_context + message
                             injection_succeeded = True
                             logger.info(f"Project context injection: using stored project_id '{existing_project_id}' for instance {instance_id[:8]}...")
@@ -817,9 +824,17 @@ class InstanceMessagingService:
                                     f"from keywords: {keywords[:5]}..."
                                 )
                                 
+                                # Fetch critical notes from repository
+                                critical_notes = []
+                                try:
+                                    cn_list = self._project_repository.list_critical_notes(matched_project.project_id)
+                                    critical_notes = [note.to_dict() for note in cn_list]
+                                except Exception as e:
+                                    logger.warning(f"Failed to fetch critical notes for project {matched_project.project_id}: {e}")
+                                
                                 # Prepend project context to message
                                 from ..manager import format_project_context
-                                project_context = format_project_context(matched_project, store=self._manager.project_store)
+                                project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
                                 message = project_context + message
                                 injection_succeeded = True
                                 

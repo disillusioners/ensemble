@@ -204,12 +204,14 @@ def _format_relative_time(dt: datetime | str | None) -> str:
     return f"{years} year{'s' if years != 1 else ''} ago"
 
 
-def format_project_context(project, store=None) -> str:
+def format_project_context(project, store=None, critical_notes=None) -> str:
     """Format project info as context block for prepending to message.
     
     Args:
         project: ProjectData instance from repository.
         store: Optional project store/repository for history access.
+        critical_notes: Optional list of critical note dicts (fetched from repository).
+                       If not provided, falls back to project.critical_notes for backward compat.
     
     Returns:
         Formatted string with project JSON info, structured critical notes,
@@ -221,7 +223,11 @@ def format_project_context(project, store=None) -> str:
     project_dict = project.to_dict() if hasattr(project, 'to_dict') else vars(project)
     
     # Build structured critical notes section (REQUIRED for agent visibility)
-    cn_entries = project_dict.get("critical_notes", [])
+    # Use provided notes if available, otherwise fall back to project dict
+    if critical_notes is not None:
+        cn_entries = critical_notes
+    else:
+        cn_entries = project_dict.get("critical_notes", [])
     cn_section = ""
     if cn_entries:
         cn_section = "\n### ⚡ Critical Notes\n"

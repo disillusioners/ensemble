@@ -16,6 +16,7 @@ from daemon.repositories.project.models import (
     CriticalNotes,
     CriticalNotesCategory,
     CriticalNotesPriority,
+    CriticalNoteModel,
 )
 
 
@@ -35,21 +36,69 @@ def create_entry(category: str, priority: str, summary: str, reference: str | No
     )
 
 
-def make_mock_store(initial_entries: list = None):
-    """Create a properly isolated mock store."""
-    store = MagicMock()
+def make_mock_repo(initial_entries: list = None):
+    """Create a properly isolated mock repository."""
+    repo = MagicMock()
     project = MagicMock()
-    project.critical_notes = initial_entries if initial_entries is not None else []
-    store.get.return_value = project
+    repo.get.return_value = project
 
-    # Create a mutable reference for entries
-    entries = project.critical_notes
+    # Create mutable storage for notes
+    notes_storage = []
 
-    def update_handler(pid, **kwargs):
-        entries[:] = kwargs.get('critical_notes', entries)
+    # Initialize with any provided entries
+    if initial_entries:
+        for entry in initial_entries:
+            if isinstance(entry, dict):
+                notes_storage.append(CriticalNoteModel(**entry))
+            elif isinstance(entry, CriticalNotes):
+                notes_storage.append(CriticalNoteModel(**entry.to_dict()))
+            elif isinstance(entry, CriticalNoteModel):
+                notes_storage.append(entry)
 
-    store.update.side_effect = update_handler
-    return store
+    def list_critical_notes(pid):
+        return list(notes_storage)
+
+    def add_critical_note(pid, source_agent, category, priority, summary, reference=None):
+        note = CriticalNoteModel(
+            project_id=pid,
+            source_agent=source_agent,
+            category=category,
+            priority=priority,
+            summary=summary,
+            reference=reference,
+        )
+        notes_storage.append(note)
+        return note
+
+    def update_critical_note(pid, entry_id, **updates):
+        for note in notes_storage:
+            if note.id == entry_id and note.project_id == pid:
+                for key, value in updates.items():
+                    if value is not None and hasattr(note, key):
+                        setattr(note, key, value)
+                return note
+        return None
+
+    def get_critical_note(pid, entry_id):
+        for note in notes_storage:
+            if note.id == entry_id and note.project_id == pid:
+                return note
+        return None
+
+    def remove_critical_note(pid, entry_id):
+        for i, note in enumerate(notes_storage):
+            if note.id == entry_id and note.project_id == pid:
+                notes_storage.pop(i)
+                return True
+        return False
+
+    repo.list_critical_notes.side_effect = list_critical_notes
+    repo.add_critical_note.side_effect = add_critical_note
+    repo.update_critical_note.side_effect = update_critical_note
+    repo.get_critical_note.side_effect = get_critical_note
+    repo.remove_critical_note.side_effect = remove_critical_note
+
+    return repo
 
 
 def unique_summary(index: int) -> str:
@@ -99,15 +148,15 @@ def unique_summary(index: int) -> str:
 
 
 @pytest.fixture
-def mock_store():
-    """Mock store with a project that has empty critical_notes."""
-    return make_mock_store()
+def mock_repo():
+    """Mock repository with a project that has empty critical_notes."""
+    return make_mock_repo()
 
 
 @pytest.fixture
-def cn_tools(mock_store):
-    """Create critical notes tools with mock store."""
-    return create_critical_notes_tools(mock_store, agent_id="test_agent")
+def cn_tools(mock_repo):
+    """Create critical notes tools with mock repository."""
+    return create_critical_notes_tools(mock_repo, agent_id="test_agent")
 
 
 @pytest.fixture
@@ -145,7 +194,7 @@ def remove_tool(cn_tools):
 class TestProjectCNAdd:
     """Tests for the project_cn_add tool."""
 
-    def test_add_to_empty_project(self, add_tool, mock_store):
+    def test_add_to_empty_project(self, add_tool, mock_repo):
         """Add entry to project with empty critical_notes -> succeeds, returns dict with all fields."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -163,12 +212,12 @@ class TestProjectCNAdd:
         assert result["summary"] == "Use async/await for all database operations"
         assert result["reference"] is None
 
-    def test_add_all_categories(self, mock_store):
+    def test_add_all_categories(self, mock_repo):
         """Add entry with each of the 5 categories -> each valid."""
         categories = ["convention", "pattern", "risk", "decision", "constraint"]
         for category in categories:
-            store = make_mock_store()
-            tools = create_critical_notes_tools(store, agent_id="test_agent")
+            repo = make_mock_repo()
+            tools = create_critical_notes_tools(repo, agent_id="test_agent")
             add_tool = next(t for t in tools if t.name == "project_cn_add")
             result = add_tool.invoke({
                 "project_id": "test_project",
@@ -179,12 +228,12 @@ class TestProjectCNAdd:
             assert "error" not in result
             assert result["category"] == category
 
-    def test_add_all_priorities(self, mock_store):
+    def test_add_all_priorities(self, mock_repo):
         """Add entry with each priority (critical, high, medium) -> each valid."""
         priorities = ["critical", "high", "medium"]
         for priority in priorities:
-            store = make_mock_store()
-            tools = create_critical_notes_tools(store, agent_id="test_agent")
+            repo = make_mock_repo()
+            tools = create_critical_notes_tools(repo, agent_id="test_agent")
             add_tool = next(t for t in tools if t.name == "project_cn_add")
             result = add_tool.invoke({
                 "project_id": "test_project",
@@ -195,7 +244,7 @@ class TestProjectCNAdd:
             assert "error" not in result
             assert result["priority"] == priority
 
-    def test_add_summary_too_long(self, add_tool, mock_store):
+    def test_add_summary_too_long(self, add_tool, mock_repo):
         """Summary > 200 chars -> error dict with message."""
         long_summary = "A" * 201
         result = add_tool.invoke({
@@ -209,7 +258,7 @@ class TestProjectCNAdd:
         assert f"Summary must be <= {_MAX_SUMMARY_LEN} chars" in result["error"]
         assert "201" in result["error"]
 
-    def test_add_invalid_category(self, add_tool, mock_store):
+    def test_add_invalid_category(self, add_tool, mock_repo):
         """Invalid category -> error dict."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -221,7 +270,7 @@ class TestProjectCNAdd:
         assert "error" in result
         assert "Invalid category 'unknown'" in result["error"]
 
-    def test_add_invalid_priority(self, add_tool, mock_store):
+    def test_add_invalid_priority(self, add_tool, mock_repo):
         """Invalid priority -> error dict."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -233,7 +282,7 @@ class TestProjectCNAdd:
         assert "error" in result
         assert "Invalid priority 'unknown'" in result["error"]
 
-    def test_add_with_reference(self, add_tool, mock_store):
+    def test_add_with_reference(self, add_tool, mock_repo):
         """Add with optional reference -> reference stored in returned dict."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -246,7 +295,7 @@ class TestProjectCNAdd:
         assert "error" not in result
         assert result["reference"] == "https://docs.example.com/api-patterns"
 
-    def test_add_without_reference(self, add_tool, mock_store):
+    def test_add_without_reference(self, add_tool, mock_repo):
         """Add without reference -> reference is None in returned dict."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -258,7 +307,7 @@ class TestProjectCNAdd:
         assert "error" not in result
         assert result["reference"] is None
 
-    def test_add_empty_summary(self, add_tool, mock_store):
+    def test_add_empty_summary(self, add_tool, mock_repo):
         """Empty/whitespace summary -> error dict."""
         result = add_tool.invoke({
             "project_id": "test_project",
@@ -270,9 +319,9 @@ class TestProjectCNAdd:
         assert "error" in result
         assert "Summary cannot be empty" in result["error"]
 
-    def test_add_project_not_found(self, add_tool, mock_store):
-        """Store.get returns None -> error dict."""
-        mock_store.get.return_value = None
+    def test_add_project_not_found(self, add_tool, mock_repo):
+        """Repo.get returns None -> error dict."""
+        mock_repo.get.return_value = None
 
         result = add_tool.invoke({
             "project_id": "nonexistent",
@@ -293,9 +342,9 @@ class TestProjectCNAdd:
 class TestMergeLogic:
     """Tests for the merge logic (_find_similar_entry, _merge_entries)."""
 
-    def test_merge_similar_entries(self, mock_store):
+    def test_merge_similar_entries(self, mock_repo):
         """Add A, then add B with same category + >=2 keyword overlap -> B merges into A."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add first entry
@@ -320,9 +369,9 @@ class TestMergeLogic:
         assert result2["id"] == original_id
         assert result2["updated_at"] != original_created_at
 
-    def test_merge_preserves_shorter_summary(self, mock_store):
+    def test_merge_preserves_shorter_summary(self, mock_repo):
         """Existing has long summary, new has short -> merged has short summary."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add first entry with long summary
@@ -343,9 +392,9 @@ class TestMergeLogic:
 
         assert result["summary"] == "Short summary"
 
-    def test_merge_keeps_existing_id(self, mock_store):
+    def test_merge_keeps_existing_id(self, mock_repo):
         """After merge, the entry ID is the original one."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         result1 = add_tool.invoke({
@@ -365,9 +414,9 @@ class TestMergeLogic:
 
         assert result2["id"] == original_id
 
-    def test_merge_no_overlap(self, mock_store):
+    def test_merge_no_overlap(self, mock_repo):
         """Add A, then add B with same category but 0 keyword overlap -> both entries exist."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -391,9 +440,9 @@ class TestMergeLogic:
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == 2
 
-    def test_merge_different_category(self, mock_store):
+    def test_merge_different_category(self, mock_repo):
         """Add A, then add B with different category but similar keywords -> both entries exist."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -417,9 +466,9 @@ class TestMergeLogic:
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == 2
 
-    def test_merge_updates_reference(self, mock_store):
+    def test_merge_updates_reference(self, mock_repo):
         """Existing has no reference, new has reference -> merged has new's reference."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry without reference
@@ -441,9 +490,9 @@ class TestMergeLogic:
 
         assert result["reference"] == "https://style.guide.com"
 
-    def test_merge_preserves_existing_reference(self, mock_store):
+    def test_merge_preserves_existing_reference(self, mock_repo):
         """Existing has reference, new has no reference -> merged keeps existing reference."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with reference
@@ -465,9 +514,9 @@ class TestMergeLogic:
 
         assert result["reference"] == "https://error-handling.example.com"
 
-    def test_merge_new_higher_priority_wins(self, mock_store):
+    def test_merge_new_higher_priority_wins(self, mock_repo):
         """Existing is medium, new is critical -> merged is critical."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with medium priority
@@ -488,9 +537,9 @@ class TestMergeLogic:
 
         assert result["priority"] == "critical"
 
-    def test_merge_new_lower_priority_keeps_existing(self, mock_store):
+    def test_merge_new_lower_priority_keeps_existing(self, mock_repo):
         """Existing is critical, new is medium -> merged stays critical."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with critical priority
@@ -511,9 +560,9 @@ class TestMergeLogic:
 
         assert result["priority"] == "critical"
 
-    def test_merge_fewer_than_2_keywords(self, mock_store):
+    def test_merge_fewer_than_2_keywords(self, mock_repo):
         """Summary has only 1 keyword (word > 3 chars) -> no merge, new entry created."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -546,9 +595,9 @@ class TestMergeLogic:
 class TestEvictionLogic:
     """Tests for the eviction logic (_evict_if_needed)."""
 
-    def test_eviction_at_max(self, mock_store):
+    def test_eviction_at_max(self, mock_repo):
         """Fill to 30 entries, add 31st -> oldest lowest-priority evicted, total stays 30."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -578,9 +627,9 @@ class TestEvictionLogic:
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == _MAX_ENTRIES
 
-    def test_eviction_priority_order(self, mock_store):
+    def test_eviction_priority_order(self, mock_repo):
         """Mix of critical/high/medium -> medium evicted first."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -619,9 +668,9 @@ class TestEvictionLogic:
         assert len(critical_entries) == 1
         assert critical_entries[0]["summary"] == "Critical security vulnerability found"
 
-    def test_eviction_all_critical(self, mock_store):
+    def test_eviction_all_critical(self, mock_repo):
         """30 critical entries, add 31st critical -> oldest critical evicted."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -651,9 +700,9 @@ class TestEvictionLogic:
         for entry in list_result["entries"]:
             assert entry["priority"] == "critical"
 
-    def test_no_eviction_under_max(self, mock_store):
+    def test_no_eviction_under_max(self, mock_repo):
         """29 entries, add 30th -> no eviction, total 30."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -678,9 +727,9 @@ class TestEvictionLogic:
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == 30
 
-    def test_eviction_oldest_of_same_priority(self, mock_store):
+    def test_eviction_oldest_of_same_priority(self, mock_repo):
         """Multiple medium entries -> oldest medium evicted."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -718,9 +767,9 @@ class TestEvictionLogic:
         summaries = [e["summary"] for e in list_result["entries"]]
         assert first_summary not in summaries
 
-    def test_merge_at_max_no_eviction(self, mock_store):
+    def test_merge_at_max_no_eviction(self, mock_repo):
         """At 30 entries, add similar entry -> merge happens, no eviction needed."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -759,7 +808,7 @@ class TestEvictionLogic:
 class TestProjectCNList:
     """Tests for the project_cn_list tool."""
 
-    def test_list_empty_project(self, list_tool, mock_store):
+    def test_list_empty_project(self, list_tool, mock_repo):
         """Returns dict with project_id, count=0, entries=[]."""
         result = list_tool.invoke({"project_id": "test_project"})
 
@@ -767,9 +816,9 @@ class TestProjectCNList:
         assert result["count"] == 0
         assert result["entries"] == []
 
-    def test_list_with_entries(self, mock_store):
+    def test_list_with_entries(self, mock_repo):
         """Returns all entries with correct count."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
@@ -789,9 +838,9 @@ class TestProjectCNList:
         assert result["count"] == 3
         assert len(result["entries"]) == 3
 
-    def test_list_nonexistent_project(self, list_tool, mock_store):
+    def test_list_nonexistent_project(self, list_tool, mock_repo):
         """Returns error dict for nonexistent project."""
-        mock_store.get.return_value = None
+        mock_repo.get.return_value = None
 
         result = list_tool.invoke({"project_id": "nonexistent"})
 
@@ -807,9 +856,9 @@ class TestProjectCNList:
 class TestProjectCNRemove:
     """Tests for the project_cn_remove tool."""
 
-    def test_remove_existing_entry(self, mock_store):
+    def test_remove_existing_entry(self, mock_repo):
         """Entry gone after remove, count decreases."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
         remove_tool = next(t for t in tools if t.name == "project_cn_remove")
@@ -840,7 +889,7 @@ class TestProjectCNRemove:
         list_result = list_tool.invoke({"project_id": "test_project"})
         assert list_result["count"] == 0
 
-    def test_remove_nonexistent_entry(self, remove_tool, mock_store):
+    def test_remove_nonexistent_entry(self, remove_tool, mock_repo):
         """Returns error dict for nonexistent entry."""
         result = remove_tool.invoke({
             "project_id": "test_project",
@@ -850,7 +899,7 @@ class TestProjectCNRemove:
         assert "error" in result
         assert "Entry 'nonexistent-id' not found" in result["error"]
 
-    def test_remove_from_empty_list(self, remove_tool, mock_store):
+    def test_remove_from_empty_list(self, remove_tool, mock_repo):
         """Returns error dict when removing from empty list."""
         result = remove_tool.invoke({
             "project_id": "test_project",
@@ -860,9 +909,9 @@ class TestProjectCNRemove:
         assert "error" in result
         assert "Entry 'some-id' not found" in result["error"]
 
-    def test_remove_nonexistent_project(self, remove_tool, mock_store):
+    def test_remove_nonexistent_project(self, remove_tool, mock_repo):
         """Returns error dict for nonexistent project."""
-        mock_store.get.return_value = None
+        mock_repo.get.return_value = None
 
         result = remove_tool.invoke({
             "project_id": "nonexistent",
@@ -872,9 +921,9 @@ class TestProjectCNRemove:
         assert "error" in result
         assert "Project 'nonexistent' not found" in result["error"]
 
-    def test_remove_returns_summary(self, mock_store):
+    def test_remove_returns_summary(self, mock_repo):
         """Remove returns dict with removed=True, entry_id, and summary."""
-        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         remove_tool = next(t for t in tools if t.name == "project_cn_remove")
 

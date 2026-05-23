@@ -10,6 +10,7 @@ from datetime import datetime
 
 from daemon.routers.projects import (
     _project_to_response,
+    _get_critical_notes_safe,
     get_project,
     list_projects,
 )
@@ -43,6 +44,13 @@ def create_mock_project(
     return project
 
 
+def create_mock_critical_note(note_dict: dict) -> MagicMock:
+    """Create a mock CriticalNote that has to_dict() method."""
+    mock_note = MagicMock()
+    mock_note.to_dict.return_value = note_dict
+    return mock_note
+
+
 class TestProjectAPICriticalNotes:
     """Test critical_notes field in Projects API responses."""
 
@@ -62,6 +70,11 @@ class TestProjectAPICriticalNotes:
 
         mock_repo = MagicMock()
         mock_repo.get = MagicMock(return_value=mock_project)
+        # Mock list_critical_notes to return mock notes with to_dict() method
+        mock_repo.list_critical_notes = MagicMock(return_value=[
+            create_mock_critical_note(cn_entries[0]),
+            create_mock_critical_note(cn_entries[1]),
+        ])
 
         # Act
         response = await get_project(project_id="test-project-123", repo=mock_repo)
@@ -71,6 +84,7 @@ class TestProjectAPICriticalNotes:
         assert len(response.critical_notes) == 2
         assert response.critical_notes[0]["summary"] == "Use virtualenv for isolation"
         mock_repo.get.assert_called_once_with("test-project-123")
+        mock_repo.list_critical_notes.assert_called_once_with("test-project-123")
 
     @pytest.mark.asyncio
     async def test_get_project_empty_critical_notes(self):
@@ -116,6 +130,18 @@ class TestProjectAPICriticalNotes:
 
         mock_repo = MagicMock()
         mock_repo.list_projects = MagicMock(return_value=[project1, project2, project3])
+        # Mock list_critical_notes to return appropriate notes for each project
+        def mock_list_notes(project_id):
+            if project_id == "proj-1":
+                return [create_mock_critical_note({"id": "e1", "summary": "Follow PEP 8", "category": "convention", "priority": "medium"})]
+            elif project_id == "proj-2":
+                return [
+                    create_mock_critical_note({"id": "e2", "summary": "Use type hints", "category": "pattern", "priority": "high"}),
+                    create_mock_critical_note({"id": "e3", "summary": "Write tests", "category": "constraint", "priority": "critical"}),
+                ]
+            else:
+                return []
+        mock_repo.list_critical_notes = MagicMock(side_effect=mock_list_notes)
 
         # Act
         response = await list_projects(exclude_system=False, repo=mock_repo)
@@ -163,8 +189,8 @@ class TestProjectAPICriticalNotes:
         ]
         mock_project = create_mock_project(critical_notes=cn_entries)
 
-        # Act
-        response = _project_to_response(mock_project)
+        # Act - pass critical_notes parameter since the function now accepts it
+        response = _project_to_response(mock_project, critical_notes=cn_entries)
 
         # Assert
         assert isinstance(response, ProjectResponse)
@@ -212,8 +238,8 @@ class TestProjectAPICriticalNotes:
         ]
         mock_project = create_mock_project(critical_notes=cn_entries)
 
-        # Act
-        response = _project_to_response(mock_project)
+        # Act - pass critical_notes parameter since the function now accepts it
+        response = _project_to_response(mock_project, critical_notes=cn_entries)
 
         # Assert
         assert len(response.critical_notes) == 5
@@ -228,8 +254,8 @@ class TestProjectAPICriticalNotes:
         ]
         mock_project = create_mock_project(critical_notes=cn_entries)
 
-        # Act
-        response = _project_to_response(mock_project)
+        # Act - pass critical_notes parameter since the function now accepts it
+        response = _project_to_response(mock_project, critical_notes=cn_entries)
 
         # Assert - verify critical_notes is included alongside other fields
         assert response.project_id == "test-project-123"
