@@ -101,6 +101,11 @@ Need to do something?
   - If still fails → Report to user and stop
 - **SemiAuto mode:** Report to user immediately and stop
 
+### Task Completion Recording
+- **ALWAYS record task completion for SMALL+ scope** using `experience()`
+- **TINY scope may skip** — too small to warrant recording
+- This ensures project knowledge persists for future sessions
+
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks
