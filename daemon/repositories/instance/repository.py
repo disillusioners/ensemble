@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func
+from sqlalchemy import delete as sql_delete, func, not_
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session as SQLModelSession, select, col
@@ -188,6 +188,7 @@ class SQLModelInstanceRepository:
         project_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        exclude_kb: bool = True,
     ) -> tuple[list[Instance], int]:
         """List instances with optional status filter and pagination.
         
@@ -196,6 +197,7 @@ class SQLModelInstanceRepository:
             project_id: Optional project ID filter.
             limit: Maximum number of instances to return.
             offset: Number of instances to skip.
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
             
         Returns:
             Tuple of (list of instances, total count).
@@ -207,6 +209,8 @@ class SQLModelInstanceRepository:
                 count_stmt = count_stmt.where(Instance.status == status)
             if project_id is not None:
                 count_stmt = count_stmt.where(Instance.project_id == project_id)
+            if exclude_kb:
+                count_stmt = count_stmt.where(Instance.agent_id.not_in(['experiencer', 'kb-importer']))
             total = db_session.exec(count_stmt).one()
 
             # Get paginated instances
@@ -215,6 +219,8 @@ class SQLModelInstanceRepository:
                 stmt = stmt.where(Instance.status == status)
             if project_id is not None:
                 stmt = stmt.where(Instance.project_id == project_id)
+            if exclude_kb:
+                stmt = stmt.where(Instance.agent_id.not_in(['experiencer', 'kb-importer']))
             
             stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
             instances = list(db_session.exec(stmt))

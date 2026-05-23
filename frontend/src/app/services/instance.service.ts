@@ -32,10 +32,15 @@ export class InstanceService {
   readonly totalInstances: WritableSignal<number> = signal(0);
   readonly isLoadingMore: WritableSignal<boolean> = signal(false);
   readonly loading: WritableSignal<boolean> = signal(false);
+  readonly showKb: WritableSignal<boolean> = signal(false);
 
   readonly hasMoreInstances: Signal<boolean> = computed(
     () => this.instances().length < this.totalInstances()
   );
+
+  toggleKb(): void {
+    this.showKb.update(v => !v);
+  }
 
   constructor() {
     // Subscribe to SSE status change events for optimistic updates
@@ -132,7 +137,7 @@ export class InstanceService {
 
     try {
       const response = await firstValueFrom(
-        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId)
+        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId, !this.showKb())
       );
 
       if (append) {

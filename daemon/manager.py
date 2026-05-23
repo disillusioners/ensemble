@@ -1807,7 +1807,7 @@ class InstanceManager:
         return self._lifecycle_service._restore_instance(instance_id, meta)
 
     def list_instances(
-        self, limit: int = 20, offset: int = 0, project_id: str | None = None
+        self, limit: int = 20, offset: int = 0, project_id: str | None = None, exclude_kb: bool = True
     ) -> tuple[list[dict], int]:
         """List instances with pagination.
 
@@ -1815,12 +1815,13 @@ class InstanceManager:
             limit: Maximum number of instances to return (default: 20).
             offset: Number of instances to skip (default: 0).
             project_id: Filter by project ID (optional).
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
 
         Returns:
             Tuple of (list of instance info dictionaries, total count).
         """
         return self._lifecycle_service.list_instances(
-            limit=limit, offset=offset, project_id=project_id
+            limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb
         )
 
     def get_instance_info(self, instance_id: str) -> dict:

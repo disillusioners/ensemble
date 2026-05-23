@@ -667,13 +667,14 @@ class InstanceLifecycleService:
 
         return graph
 
-    def list_instances(self, limit: int = 20, offset: int = 0, project_id: str | None = None) -> tuple[list[dict], int]:
+    def list_instances(self, limit: int = 20, offset: int = 0, project_id: str | None = None, exclude_kb: bool = True) -> tuple[list[dict], int]:
         """List instances with pagination.
 
         Args:
             limit: Maximum number of instances to return (default: 20).
             offset: Number of instances to skip (default: 0).
             project_id: Filter by project ID (default: None, returns all projects).
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
 
         Returns:
             Tuple of (list of instance info dictionaries, total count).
@@ -681,7 +682,7 @@ class InstanceLifecycleService:
         # Access manager's state dynamically
         instance_repository = self._manager._instance_repository
         
-        instances, total = instance_repository.list(limit=limit, offset=offset, project_id=project_id)
+        instances, total = instance_repository.list(limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb)
         # Convert Instance objects to dicts for backward compatibility
         return [i.to_dict() for i in instances], total
 

@@ -20,6 +20,14 @@
     </div>
     <p class="subtitle">
       {{ instances().length }} active instance{{ instances().length !== 1 ? 's' : '' }}
+      <label class="kb-toggle">
+        <input
+          type="checkbox"
+          [checked]="instanceService.showKb()"
+          (change)="instanceService.toggleKb(); instanceService.loadInstances()"
+        />
+        <span>Show KB instances</span>
+      </label>
     </p>
   </div>
 

@@ -96,6 +96,7 @@ async def list_instances(
     limit: int = DEFAULT_PAGE_LIMIT,
     offset: int = 0,
     project_id: str | None = Query(None, description="Filter instances by project ID"),
+    exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
 ) -> InstanceListResponse:
     """List instances with pagination.
     
@@ -104,6 +105,7 @@ async def list_instances(
         limit: Maximum number of instances to return (default: 20, max: 100).
         offset: Number of instances to skip (default: 0, min: 0).
         project_id: Filter instances by project ID (optional).
+        exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
     """
     manager = _get_manager(request)
     
@@ -112,7 +114,7 @@ async def list_instances(
     offset = max(0, offset)  # Ensure non-negative
     
     instances_data, total = manager.list_instances(
-        limit=limit, offset=offset, project_id=project_id
+        limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb
     )
     instances = []
     for inst in instances_data:
