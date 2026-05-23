@@ -25,8 +25,13 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
      Signals: "we chose...", "decided to...", "going with...", "trade-off", "instead of X we use Y", ADR-style content
    - convention — Project-specific rule, pattern, or coding standard
      Signals: "always use...", "never do...", "in this project we...", "follow the pattern of..."
-   - knowledge (default) — General factual/technical knowledge
-     Signals: descriptions, explanations, factual statements
+    - knowledge (default) — General factual/technical knowledge
+      Signals: descriptions, explanations, factual statements
+
+> The signal phrases indicate how the information was **acquired**, not just keywords present. `experience` = a lesson learned from specific work or incidents. `knowledge` = a general property or fact about a system, even if discovered through work.
+>
+> Example: "We found the queue uses 7 states" is `knowledge` (describing a system property). "Queue jobs get stuck when worker crashes" is `experience` (a lesson about a failure mode).
+
 5. Proceed to Phase 2
 ```
 
@@ -55,6 +60,7 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
 3. Identify the primary entity:
    - The main subject of the text gets the type from Phase 1 classification
    - Supporting entities (mentioned in passing) use their natural types
+   - If the main subject is a module or component, it still gets its natural type — the experience is a **separate entity** that captures the lesson. Example: text about 'job queue stuck bug' → create entity 'JobQueue stuck bug' with type `experience`, AND create/reuse entity 'JobQueue' with type `module`.
 4. Draft entity metadata:
    - Label (the name)
    - Type (entity classification)

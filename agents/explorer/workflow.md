@@ -37,6 +37,7 @@ Call `rag_query_data` with the parsed query and selected mode. This returns raw 
 
 ```
 - **AuthService** (Service): Handles JWT token generation and validation
+- **JobQueue stuck bug** (experience): Queue jobs get stuck when worker crashes mid-processing
 ```
 
 **Relation structure** (use to trace connections):
@@ -66,11 +67,16 @@ After receiving RAG results, scan for experience-type entities:
 - **Separate these** from regular knowledge entities for the "Related Experience" section
 
 **Intelligent follow-up (optional):**
-If the query topic would benefit from experiences (debugging, deployment, configuration, architecture) and you found few or none, you MAY do 1-2 targeted queries:
+If the query topic would benefit from experiences and you found few or none, you MAY do 1-2 targeted queries:
 ```
 rag_query_data("experience " + original_query, "local")
-rag_get_graph(key_entity_name, max_depth=2)  # to find connected experiences
+rag_get_graph(label=key_entity_name, max_depth=2)  # to find connected experiences
 ```
+If this query returns similar results to the original (no new experience-type entities), skip further follow-up queries.
+
+**DO follow up:** debugging queries, deployment questions, configuration issues, architecture decisions, error troubleshooting.
+**DON'T follow up:** simple lookups ("what is X?"), factual queries ("list the endpoints"), high-confidence results.
+
 This is judgment-based. Don't do this for every query — only when experiences would add value.
 
 ---
@@ -208,7 +214,7 @@ The main entry point is `AuthService.login()` which validates credentials agains
 - Never mention RAG knowledge base status (empty, full, stale, etc.)
 - Never suggest workflows, actions, or next steps to the caller (e.g., "should be upserted", "consider running experience()", "run exploration again")
 - Never mention the exploration process itself
-- **Always include** `## Related Experience:` section — if no experiences found, state "No related experiences found for this topic."
+- **Always include** the `## Related Experience` section. If no experiences were found, include: "No related experiences found for this topic."
 
 **Formatting rules:**
 - Lead with the answer
@@ -272,7 +278,8 @@ HIGH      MEDIUM/LOW
 |-------|---------------|
 | HIGH confidence path | 1-2 (just RAG query) |
 | MEDIUM/LOW path | 2-4 (RAG + 1-2 files) |
-| Experience follow-up | +1-2 if doing targeted query (optional) |
 | Total before return | 3 max (prefer 2) |
+
+**Shared speed budget:** Follow-up experience queries (Step 2b) and file browsing (Step 4b) share the same budget — they don't stack. If you used follow-up queries, reduce file browsing calls accordingly.
 
 **Remember:** Someone is waiting. Don't over-research.
