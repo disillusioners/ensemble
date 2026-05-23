@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-23 QueueShutDown 500 Error Fix)
+## Test Results (Latest: 2026-05-24 Defer Queue UI)
+
+### Defer Queue UI (2026-05-24)
+- **Branch**: feature/defer-queue-ui (commits f38bf92 + 104e15f)
+- **Unit Tests**: 661/661 PASS — All frontend tests pass (+45 new tests from 616)
+- **Model Tests**: getQueueTypeIcon('defer') → 'schedule', getQueueTypeLabel('defer') → 'Defer' ✅
+- **ensure.md**: PASS — dev.sh stable 30s+, API healthy, /jobs page loads
+- **Quick Fixes**: 0 (all tests pass as-is)
+- **Regressions**: 0
+- See `.agents/tester/RESULTS/2026-05-24-defer-queue-ui.md` for full report
+
+### Defer Queue UI Status: ✅ READY (661/661 tests pass, dev.sh stable, no regressions)
 
 ### QueueShutDown 500 Error Fix (2026-05-23)
 - **Bugs Fixed**: 2 — QueueShutDown exception in live_event_hub.py + Session binding in instance_messaging.py
