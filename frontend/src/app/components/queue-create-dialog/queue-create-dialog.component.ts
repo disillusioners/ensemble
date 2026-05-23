@@ -11,7 +11,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { QueueType } from '../../models/job-queue.model';
 
 // Reserved system queue names that cannot be used
-const RESERVED_QUEUE_NAMES = ['system_fifo_queue', 'system_parallel_queue'];
+const RESERVED_QUEUE_NAMES = ['system_fifo_queue', 'system_parallel_queue', 'system_kb_fifo_queue', 'system_defer_queue'];
 
 /**
  * Custom validator to check for reserved queue names

@@ -18,7 +18,7 @@ from daemon.repositories.job_queue.models import JobQueue, JobStatus
 
 
 # Reserved system queue names that cannot be created or deleted
-RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue"}
+RESERVED_QUEUE_NAMES = {"system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue"}
 
 
 class JobQueueMgmtService:
@@ -55,10 +55,11 @@ class JobQueueMgmtService:
     async def auto_provision_system_queues(self, project_id: str) -> list[JobQueue]:
         """Create system queues for a project if they don't exist.
         
-        Creates three system queues:
+        Creates four system queues:
         - system_fifo_queue: FIFO queue with concurrency_limit=1
         - system_parallel_queue: Parallel queue with concurrency_limit=5
         - system_kb_fifo_queue: FIFO queue for KB import jobs with concurrency_limit=1
+        - system_defer_queue: Defer queue with concurrency_limit=1
         
         Idempotent: skips creation if queue already exists.
         
@@ -121,6 +122,19 @@ class JobQueueMgmtService:
                 description="System FIFO queue for Knowledge Base import jobs",
             )
         system_queues.append(kb_fifo_queue)
+        
+        # Check and create system defer queue
+        defer_queue = await asyncio.to_thread(
+            self._queue_repo.get_by_name, project_id, "system_defer_queue",
+        )
+        if defer_queue is None:
+            defer_queue = await asyncio.to_thread(
+                self._queue_repo.create,
+                project_id=project_id, queue_name="system_defer_queue",
+                queue_type="defer", concurrency_limit=1, is_system=True,
+                description="System defer queue - only processes when project is idle",
+            )
+        system_queues.append(defer_queue)
         
         return system_queues
     

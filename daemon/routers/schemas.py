@@ -259,7 +259,7 @@ class JobQueueCreateRequest(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("Queue name cannot be empty or whitespace-only")
-        reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue")
+        reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue")
         if v.lower() in reserved:
             raise ValueError(f"'{v}' is a reserved queue name")
         return v
@@ -307,7 +307,7 @@ class JobQueueUpdateRequest(BaseModel):
             v = v.strip()
             if not v:
                 raise ValueError("Queue name cannot be empty or whitespace-only")
-            reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue")
+            reserved = ("system_fifo_queue", "system_parallel_queue", "system_kb_fifo_queue", "system_defer_queue")
             if v.lower() in reserved:
                 raise ValueError(f"'{v}' is a reserved queue name")
         return v
