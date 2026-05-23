@@ -150,4 +150,9 @@ export class InstanceListComponent {
   onLoadMore(): void {
     this.loadMore.emit();
   }
+
+  onToggleKb(): void {
+    this.instanceService.toggleKb();
+    this.instanceService.loadInstances();
+  }
 }

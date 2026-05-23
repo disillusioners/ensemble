@@ -15,7 +15,7 @@ from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
 
-# KB agent IDs to exclude from instance listings
+# Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
 
 
