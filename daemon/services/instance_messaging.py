@@ -608,8 +608,10 @@ class InstanceMessagingService:
             # Also clear paused_at when transitioning away from PAUSED status
             status_changed_to_running = False
             is_idle_to_running = False
+            instance_agent_id = None
             instance = session.get(Instance, instance_id)
             if instance:
+                instance_agent_id = instance.agent_id
                 previous_status = instance.status
                 if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
                     instance.status = InstanceStatus.RUNNING.value
@@ -646,7 +648,7 @@ class InstanceMessagingService:
         
         # Emit status_change event if status was changed to running
         if status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=instance.agent_id if instance else None)
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id)
         
         # Trigger title generation for first user message (fire-and-forget)
         # This fires when instance transitions from IDLE -> RUNNING with a user message
