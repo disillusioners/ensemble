@@ -14,7 +14,7 @@ from ._tool_registry import register_tool_category
 CATEGORY_NAME = "project_history"
 CATEGORY_DOC = """Manage project history entries — record milestones, commits, phase completions,
 bugfixes, deployments, and other project events. History provides a chronological record of
-what happened in a project, complementing critical experience (which tracks learned lessons)."""
+what happened in a project, complementing critical notes (which tracks learned lessons)."""
 
 _MAX_SUMMARY_LEN = 300
 _MAX_DETAILS_LEN = 5000

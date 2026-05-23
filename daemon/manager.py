@@ -212,7 +212,7 @@ def format_project_context(project, store=None) -> str:
         store: Optional project store/repository for history access.
     
     Returns:
-        Formatted string with project JSON info, structured critical experience,
+        Formatted string with project JSON info, structured critical notes,
         and optional recent history.
     """
     import json
