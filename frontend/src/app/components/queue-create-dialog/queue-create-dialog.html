@@ -62,6 +62,8 @@
         <p class="form-hint">
           @if (selectedQueueType === 'fifo') {
             FIFO queues process jobs in order, one at a time.
+          } @else if (selectedQueueType === 'defer') {
+            Defer queues process jobs in the background, one at a time.
           } @else {
             Parallel queues can process multiple jobs concurrently.
           }

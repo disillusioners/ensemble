@@ -9,8 +9,8 @@ import {
 describe('Job Queue Model', () => {
   describe('QueueType type', () => {
     it('should have all expected type values', () => {
-      const types: QueueType[] = ['fifo', 'parallel'];
-      expect(types).toHaveLength(2);
+      const types: QueueType[] = ['fifo', 'parallel', 'defer'];
+      expect(types).toHaveLength(3);
     });
   });
 
@@ -42,6 +42,10 @@ describe('Job Queue Model', () => {
     it('should return account_tree for parallel type', () => {
       expect(getQueueTypeIcon('parallel')).toBe('account_tree');
     });
+
+    it('should return schedule for defer type', () => {
+      expect(getQueueTypeIcon('defer')).toBe('schedule');
+    });
   });
 
   describe('getQueueTypeLabel', () => {
@@ -51,6 +55,10 @@ describe('Job Queue Model', () => {
 
     it('should return Parallel for parallel type', () => {
       expect(getQueueTypeLabel('parallel')).toBe('Parallel');
+    });
+
+    it('should return Defer for defer type', () => {
+      expect(getQueueTypeLabel('defer')).toBe('Defer');
     });
   });
 });

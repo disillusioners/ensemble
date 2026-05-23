@@ -9,7 +9,7 @@ import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { QueueService } from '../../services/queue.service';
 import { ProjectService } from '../../services/project.service';
-import { JobQueue, getQueueStatusColor, getQueueStatusLabel, getQueueTypeIcon, getQueueTypeLabel } from '../../models/job-queue.model';
+import { JobQueue, QueueType, getQueueStatusColor, getQueueStatusLabel, getQueueTypeIcon, getQueueTypeLabel } from '../../models/job-queue.model';
 import { QueueCreateDialogComponent, QueueCreateDialogResult } from '../queue-create-dialog/queue-create-dialog.component';
 
 @Component({
@@ -301,11 +301,11 @@ export class QueueListComponent {
     return getQueueStatusLabel(paused);
   }
 
-  protected getTypeIcon(type: 'fifo' | 'parallel'): string {
+  protected getTypeIcon(type: QueueType): string {
     return getQueueTypeIcon(type);
   }
 
-  protected getTypeLabel(type: 'fifo' | 'parallel'): string {
+  protected getTypeLabel(type: QueueType): string {
     return getQueueTypeLabel(type);
   }
 

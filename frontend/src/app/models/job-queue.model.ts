@@ -1,6 +1,6 @@
 // Job Queue Models for Frontend
 
-export type QueueType = 'fifo' | 'parallel';
+export type QueueType = 'fifo' | 'parallel' | 'defer';
 
 export interface JobQueue {
   queue_id: string;
@@ -47,9 +47,23 @@ export function getQueueStatusLabel(paused: boolean): string {
 }
 
 export function getQueueTypeIcon(type: QueueType): string {
-  return type === 'fifo' ? 'view_list' : 'account_tree';
+  switch (type) {
+    case 'fifo':
+      return 'view_list';
+    case 'parallel':
+      return 'account_tree';
+    case 'defer':
+      return 'schedule';
+  }
 }
 
 export function getQueueTypeLabel(type: QueueType): string {
-  return type === 'fifo' ? 'FIFO' : 'Parallel';
+  switch (type) {
+    case 'fifo':
+      return 'FIFO';
+    case 'parallel':
+      return 'Parallel';
+    case 'defer':
+      return 'Defer';
+  }
 }

@@ -8,6 +8,8 @@ import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 
+import { QueueType } from '../../models/job-queue.model';
+
 // Reserved system queue names that cannot be used
 const RESERVED_QUEUE_NAMES = ['system_fifo_queue', 'system_parallel_queue'];
 
@@ -29,7 +31,7 @@ export interface QueueCreateDialogData {
 
 export interface QueueCreateDialogResult {
   queue_name: string;
-  queue_type: 'fifo' | 'parallel';
+  queue_type: QueueType;
   concurrency_limit: number;
   description?: string;
 }
@@ -62,7 +64,8 @@ export class QueueCreateDialogComponent implements OnInit {
 
   protected readonly queueTypes = [
     { value: 'fifo', label: 'FIFO (First In, First Out)' },
-    { value: 'parallel', label: 'Parallel (Concurrent execution)' }
+    { value: 'parallel', label: 'Parallel (Concurrent execution)' },
+    { value: 'defer', label: 'Defer (Background execution)' }
   ];
 
   protected readonly form: FormGroup = this.fb.group({
@@ -80,8 +83,8 @@ export class QueueCreateDialogComponent implements OnInit {
   ngOnInit(): void {
     // Listen to queue_type changes to update concurrency validation
     this.form.get('queue_type')?.valueChanges.subscribe((type) => {
-      if (type === 'fifo') {
-        // FIFO always uses concurrency of 1
+      if (type === 'fifo' || type === 'defer') {
+        // FIFO and Defer always use concurrency of 1
         this.form.get('concurrency_limit')?.setValue(1);
         this.form.get('concurrency_limit')?.disable();
       } else {
@@ -99,7 +102,7 @@ export class QueueCreateDialogComponent implements OnInit {
   }
 
   protected isConcurrencyDisabled(): boolean {
-    return this.selectedQueueType === 'fifo';
+    return this.selectedQueueType === 'fifo' || this.selectedQueueType === 'defer';
   }
 
   protected handleClose(): void {
@@ -119,8 +122,8 @@ export class QueueCreateDialogComponent implements OnInit {
       
       const result: QueueCreateDialogResult = {
         queue_name: formValue.queue_name!.trim(),
-        queue_type: formValue.queue_type as 'fifo' | 'parallel',
-        concurrency_limit: formValue.queue_type === 'fifo' ? 1 : formValue.concurrency_limit!,
+        queue_type: formValue.queue_type as QueueType,
+        concurrency_limit: (formValue.queue_type === 'fifo' || formValue.queue_type === 'defer') ? 1 : formValue.concurrency_limit!,
         description: formValue.description?.trim() || undefined
       };
 

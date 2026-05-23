@@ -1,5 +1,5 @@
 // Inline queue model types to avoid module resolution issues
-export type QueueType = 'fifo' | 'parallel';
+export type QueueType = 'fifo' | 'parallel' | 'defer';
 
 export interface JobQueue {
   queue_id: string;
