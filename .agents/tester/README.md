@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-22 RAG Auto-Test Feature)
+## Test Results (Latest: 2026-05-23 QueueShutDown 500 Error Fix)
+
+### QueueShutDown 500 Error Fix (2026-05-23)
+- **Bugs Fixed**: 2 — QueueShutDown exception in live_event_hub.py + Session binding in instance_messaging.py
+- **Unit Tests**: 45/45 PASS — LiveEventHub (40 existing + 5 new QueueShutDown tests)
+- **API Integration**: ✅ PASS — POST /api/instances/:id/messages returns 200 (was 500)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 2 (new QueueShutDown tests + session binding capture)
+- **Commits**: 1ca33ca (tests) + c1b86015 (session fix)
+- See `.agents/tester/RESULTS/2026-05-23-queueshutdown-500fix.md` for full report
+
+### QueueShutDown Fix Status: ✅ READY (45/45 unit tests pass, API returns 200, dev.sh stable)
 
 ### RAG Auto-Test on Startup (2026-05-22)
 - **Feature**: RAG auto-test on startup — validates LightRAG connectivity, disables RAG gracefully on failure
