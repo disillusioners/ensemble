@@ -475,6 +475,87 @@ class TestLifecycleEvents:
 
 
 # ============================================================================
+# Test KB Agent Filtering
+# ============================================================================
+
+
+class TestKBAgentFiltering:
+    """Tests for KB agent ID filtering in status change events.
+
+    KB agents (experiencer, kb-importer) should not broadcast status changes
+    to avoid polluting SSE with internal agent events.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_experiencer_filtered(self):
+        """Status change for 'experiencer' agent is not broadcast."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="running", agent_id="experiencer")
+
+        # Queue should remain empty - no event delivered
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_kb_importer_filtered(self):
+        """Status change for 'kb-importer' agent is not broadcast."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="running", agent_id="kb-importer")
+
+        # Queue should remain empty - no event delivered
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_none_agent_broadcasts(self):
+        """Status change with agent_id=None is still broadcast."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="running", agent_id=None)
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "status_change"
+        assert event["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_other_agent_broadcasts(self):
+        """Status change for non-KB agents is broadcast normally."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_status_change("instance-1", status="running", agent_id="other-agent")
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "status_change"
+        assert event["status"] == "running"
+        assert event["agent_id"] == "other-agent"
+
+    @pytest.mark.asyncio
+    async def test_stream_status_change_multiple_connections_kb_filtered(self):
+        """KB agent filtering works with multiple registered connections."""
+        hub = LiveEventHub()
+        queue1 = asyncio.Queue()
+        queue2 = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue1)
+        await hub.add_connection("instance-1", queue2)
+        await hub.stream_status_change("instance-1", status="running", agent_id="experiencer")
+
+        # Both queues should remain empty
+        assert queue1.empty()
+        assert queue2.empty()
+
+
+# ============================================================================
 # Test Cleanup
 # ============================================================================
 

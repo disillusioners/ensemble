@@ -7,6 +7,8 @@ import asyncio
 import logging
 from typing import Any
 
+from daemon.repositories.instance.repository import KB_AGENT_IDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -190,6 +192,10 @@ class LiveEventHub:
             status: The new status value.
             agent_id: The agent ID (optional, for filtering KB instances on frontend).
         """
+        # Skip KB agents to avoid polluting SSE with internal agent events
+        if agent_id is not None and agent_id in KB_AGENT_IDS:
+            return
+
         event: dict[str, Any] = {
             "instance_id": instance_id,
             "event_type": "status_change",
