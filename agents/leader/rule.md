@@ -101,6 +101,9 @@ Need to do something?
   - If still fails → Report to user and stop
 - **SemiAuto mode:** Report to user immediately and stop
 
+### Project History
+After completing a meaningful task (feature, fix, architectural change), consider recording it with `project_history_add()` so future sessions have context. Use your judgment — not every task needs recording, but significant outcomes should not vanish.
+
 ## Must Not
 
 ### ❌ Over-Planning Small Tasks
