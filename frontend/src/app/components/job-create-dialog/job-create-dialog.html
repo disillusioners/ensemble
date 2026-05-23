@@ -102,7 +102,7 @@
               <option value="">Default queue</option>
               @for (queue of queues(); track queue.queue_id) {
                 <option [value]="queue.queue_id">
-                  {{ queue.queue_name }} ({{ queue.queue_type }})
+                  {{ queue.queue_name }} ({{ getQueueTypeLabel(queue.queue_type) }})
                 </option>
               }
             </select>

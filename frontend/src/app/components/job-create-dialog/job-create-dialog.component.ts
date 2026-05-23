@@ -14,7 +14,7 @@ import { ProjectService } from '../../services/project.service';
 import { QueueService } from '../../services/queue.service';
 import type { Agent } from '../../models';
 import type { Project } from '../../models/project.model';
-import { JobQueue } from '../../models/job-queue.model';
+import { JobQueue, getQueueTypeLabel } from '../../models/job-queue.model';
 
 export interface JobCreateDialogData {
   editMode?: boolean;
@@ -204,6 +204,8 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
   protected isSubmitDisabled(): boolean {
     return this.isLoading() || this.form.invalid;
   }
+
+  protected getQueueTypeLabel = getQueueTypeLabel;
 
   protected getAgentDisplayName(agent: Agent): string {
     return `${agent.icon} ${agent.name}`;

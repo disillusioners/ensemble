@@ -166,6 +166,14 @@ describe('QueueService', () => {
       expect(service.queues().length).toBe(initialCount + 1);
       expect(service.queues()[0].queue_name).toBe('New Queue');
     });
+
+    it('should add new defer queue to start of queues array', () => {
+      const initialCount = service.queues().length;
+      service.createQueue('project-1', { queue_name: 'Defer Queue', queue_type: 'defer' }).pipe().subscribe(() => {});
+      expect(service.queues().length).toBe(initialCount + 1);
+      expect(service.queues()[0].queue_name).toBe('Defer Queue');
+      expect(service.queues()[0].queue_type).toBe('defer');
+    });
   });
 
   describe('getQueue', () => {
