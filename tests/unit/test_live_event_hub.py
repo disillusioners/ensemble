@@ -650,3 +650,109 @@ class TestEdgeCases:
         # Final state should be consistent
         count = await hub.get_connection_count("instance-1")
         assert count in [0, 1, 2]  # Could be any valid state
+
+
+# ============================================================================
+# Test Queue ShutDown Handling
+# ============================================================================
+
+
+class TestQueueShutDownHandling:
+    """Tests for handling of shut-down queues (dead connections)."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_queue_removed_gracefully(self):
+        """Shut-down queue triggers connection cleanup without raising."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+        queue.shutdown()
+
+        await hub.add_connection("instance-1", queue)
+        assert await hub.get_connection_count("instance-1") == 1
+
+        # Stream should mark queue as dead and remove it without raising
+        await hub.stream_message("instance-1", {"content": "test"}, event_type="message")
+
+        # Connection should be removed
+        assert await hub.get_connection_count("instance-1") == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_queue_does_not_affect_healthy_queues(self):
+        """When one queue is shut down, healthy queues still receive events."""
+        hub = LiveEventHub()
+        dead_queue = asyncio.Queue()
+        dead_queue.shutdown()
+        healthy_queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", dead_queue)
+        await hub.add_connection("instance-1", healthy_queue)
+        assert await hub.get_connection_count("instance-1") == 2
+
+        # Stream should remove dead_queue, keep healthy_queue
+        await hub.stream_message("instance-1", {"content": "test"}, event_type="message")
+
+        assert await hub.get_connection_count("instance-1") == 1
+
+        # Healthy queue should still receive the event
+        event = await asyncio.wait_for(healthy_queue.get(), timeout=1.0)
+        assert event["message"]["content"] == "test"
+
+    @pytest.mark.asyncio
+    async def test_mixed_full_and_shutdown_queues(self):
+        """Multiple dead queues: one QueueFull, one QueueShutDown, and one healthy."""
+        hub = LiveEventHub(max_queue_size=1)
+        full_queue = asyncio.Queue(maxsize=1)
+        shutdown_queue = asyncio.Queue()
+        healthy_queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", full_queue)
+        await hub.add_connection("instance-1", shutdown_queue)
+        await hub.add_connection("instance-1", healthy_queue)
+
+        # Fill the full queue and shut down the shutdown queue
+        await full_queue.put("dummy")
+        shutdown_queue.shutdown()
+
+        # Stream should remove both dead queues, keep healthy queue
+        await hub.stream_message("instance-1", {"content": "test"}, event_type="message")
+
+        assert await hub.get_connection_count("instance-1") == 1
+
+        # Healthy queue should still receive the event
+        event = await asyncio.wait_for(healthy_queue.get(), timeout=1.0)
+        assert event["message"]["content"] == "test"
+
+    @pytest.mark.asyncio
+    async def test_all_queues_shutdown(self):
+        """All queues shut down - no exception raised and count drops to 0."""
+        hub = LiveEventHub()
+        queue1 = asyncio.Queue()
+        queue2 = asyncio.Queue()
+
+        queue1.shutdown()
+        queue2.shutdown()
+
+        await hub.add_connection("instance-1", queue1)
+        await hub.add_connection("instance-1", queue2)
+        assert await hub.get_connection_count("instance-1") == 2
+
+        # Stream should remove all dead queues without raising
+        await hub.stream_message("instance-1", {"content": "test"}, event_type="message")
+
+        assert await hub.get_connection_count("instance-1") == 0
+
+    @pytest.mark.asyncio
+    async def test_shutdown_queue_via_stream_status_change(self):
+        """Shut-down queue is removed via stream_status_change, not just stream_message."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+        queue.shutdown()
+
+        await hub.add_connection("instance-1", queue)
+        assert await hub.get_connection_count("instance-1") == 1
+
+        # stream_status_change should also remove dead queues
+        await hub.stream_status_change("instance-1", status="running")
+
+        # Connection should be removed
+        assert await hub.get_connection_count("instance-1") == 0
