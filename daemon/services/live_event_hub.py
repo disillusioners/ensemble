@@ -153,7 +153,7 @@ class LiveEventHub:
             for queue in connections:
                 try:
                     queue.put_nowait(event)
-                except asyncio.QueueFull:
+                except (asyncio.QueueFull, asyncio.QueueShutDown):
                     dead_queues.append(queue)
             
             # Clean up dead connections (queues that are full = slow consumer)
