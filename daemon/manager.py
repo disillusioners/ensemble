@@ -223,11 +223,7 @@ def format_project_context(project, store=None, critical_notes=None) -> str:
     project_dict = project.to_dict() if hasattr(project, 'to_dict') else vars(project)
     
     # Build structured critical notes section (REQUIRED for agent visibility)
-    # Use provided notes if available, otherwise fall back to project dict
-    if critical_notes is not None:
-        cn_entries = critical_notes
-    else:
-        cn_entries = project_dict.get("critical_notes", [])
+    cn_entries = critical_notes if critical_notes is not None else []
     cn_section = ""
     if cn_entries:
         cn_section = "\n### ⚡ Critical Notes\n"

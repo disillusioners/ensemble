@@ -243,16 +243,13 @@ class TestProjectHistoryInjection:
 
     def test_both_cn_and_history_sections_present(self, mock_project, mock_store, base_project_dict):
         """When both CN and history exist, both sections should be present."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "convention", "priority": "high", "summary": "Use snake_case"}
-            ]
-        }
+        critical_notes = [
+            {"category": "convention", "priority": "high", "summary": "Use snake_case"}
+        ]
         mock_store.get_recent_history.return_value = [
             {"entry_type": "milestone", "summary": "Released v1.0", "created_at": "2025-01-15T10:00:00"}
         ]
-        result = format_project_context(mock_project, store=mock_store)
+        result = format_project_context(mock_project, store=mock_store, critical_notes=critical_notes)
 
         assert "### ⚡ Critical Notes" in result
         assert "### 📜 Recent History" in result

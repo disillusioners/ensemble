@@ -890,6 +890,9 @@ class SQLModelProjectRepository:
             session.commit()
             return True
 
+    # Allowed fields for update (security: prevent overwriting id/project_id)
+    _ALLOWED_UPDATES = {"source_agent", "category", "priority", "summary", "reference", "created_at", "updated_at"}
+
     def update_critical_note(
         self,
         project_id: str,
@@ -913,7 +916,7 @@ class SQLModelProjectRepository:
             
             now = datetime.now(timezone.utc).isoformat()
             for key, value in updates.items():
-                if hasattr(note, key) and value is not None:
+                if key in self._ALLOWED_UPDATES and value is not None:
                     setattr(note, key, value)
             note.updated_at = now
             

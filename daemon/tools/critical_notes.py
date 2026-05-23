@@ -153,6 +153,7 @@ def create_critical_notes_tools(
                 priority=merged.priority,
                 summary=merged.summary,
                 reference=merged.reference,
+                source_agent=merged.source_agent,
             )
             if updated:
                 return updated.to_dict()

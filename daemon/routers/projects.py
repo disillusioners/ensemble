@@ -148,6 +148,31 @@ def _get_recent_history_safe(repo: SQLModelProjectRepository, project_id: str, l
         return []
 
 
+def _fetch_project_critical_notes(repo: SQLModelProjectRepository, project) -> tuple:
+    """Fetch critical notes for a single project.
+    
+    Args:
+        repo: The project repository instance.
+        project: Project instance.
+    
+    Returns:
+        Tuple of (project_id, notes_list).
+    """
+    return project.project_id, _get_critical_notes_safe(repo, project.project_id)
+
+def _fetch_project_history(repo: SQLModelProjectRepository, project) -> tuple:
+    """Fetch recent history for a single project.
+    
+    Args:
+        repo: The project repository instance.
+        project: Project instance.
+    
+    Returns:
+        Tuple of (project_id, history_list).
+    """
+    return project.project_id, _get_recent_history_safe(repo, project.project_id)
+
+
 # ==================== Endpoints ====================
 
 
@@ -269,23 +294,19 @@ async def list_projects(
         projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
     # Fetch recent history for each project in parallel
-    def fetch_history(p):
-        return p.project_id, _get_recent_history_safe(repo, p.project_id)
-    
-    history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
+    history_results = await asyncio.gather(*[asyncio.to_thread(_fetch_project_history, repo, p) for p in projects])
     history_map = dict(history_results)
     
     # Fetch critical notes for each project in parallel
-    def fetch_critical_notes(p):
-        return p.project_id, _get_critical_notes_safe(repo, p.project_id)
-    
-    notes_results = await asyncio.gather(*[asyncio.to_thread(fetch_critical_notes, p) for p in projects])
+    notes_results = await asyncio.gather(*[asyncio.to_thread(_fetch_project_critical_notes, repo, p) for p in projects])
     notes_map = dict(notes_results)
     
     return ProjectListResponse(
         projects=[_project_to_response(p, recent_history=history_map.get(p.project_id), critical_notes=notes_map.get(p.project_id)) for p in projects],
         total=len(projects)
     )
+
+
 @router.get(
     "/",
     response_model=ProjectListResponse,
@@ -302,17 +323,11 @@ async def list_projects_trailing(
         projects = [p for p in projects if p.name != SYSTEM_DEFAULT_PROJECT_NAME]
     
     # Fetch recent history for each project in parallel
-    def fetch_history(p):
-        return p.project_id, _get_recent_history_safe(repo, p.project_id)
-    
-    history_results = await asyncio.gather(*[asyncio.to_thread(fetch_history, p) for p in projects])
+    history_results = await asyncio.gather(*[asyncio.to_thread(_fetch_project_history, repo, p) for p in projects])
     history_map = dict(history_results)
     
     # Fetch critical notes for each project in parallel
-    def fetch_critical_notes(p):
-        return p.project_id, _get_critical_notes_safe(repo, p.project_id)
-    
-    notes_results = await asyncio.gather(*[asyncio.to_thread(fetch_critical_notes, p) for p in projects])
+    notes_results = await asyncio.gather(*[asyncio.to_thread(_fetch_project_critical_notes, repo, p) for p in projects])
     notes_map = dict(notes_results)
     
     return ProjectListResponse(

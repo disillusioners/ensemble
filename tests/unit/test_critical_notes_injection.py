@@ -33,13 +33,10 @@ class TestCriticalNotesInjection:
 
     def test_entries_produce_section(self, mock_project, base_project_dict):
         """Project with entries should produce the Critical Notes section."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "convention", "priority": "high", "summary": "Use snake_case"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "convention", "priority": "high", "summary": "Use snake_case"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "### ⚡ Critical Notes" in result
 
     def test_json_dump_no_critical_notes(self, mock_project, base_project_dict):
@@ -65,28 +62,21 @@ class TestCriticalNotesInjection:
             {"category": "convention", "priority": "high", "summary": "Use snake_case"},
             {"category": "pattern", "priority": "critical", "summary": "Use repository pattern"},
         ]
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": entries
-        }
-        result = format_project_context(mock_project)
+        result = format_project_context(mock_project, critical_notes=entries)
 
         assert "Use snake_case" in result
         assert "Use repository pattern" in result
 
     def test_non_dict_entry_skipped(self, mock_project, base_project_dict):
         """Entry that's not a dict should be skipped gracefully (no crash)."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                "invalid string entry",
-                42,
-                None,
-                {"category": "convention", "priority": "high", "summary": "Valid entry"}
-            ]
-        }
+        entries = [
+            "invalid string entry",
+            42,
+            None,
+            {"category": "convention", "priority": "high", "summary": "Valid entry"}
+        ]
         # Should not raise
-        result = format_project_context(mock_project)
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "Valid entry" in result
         # Should not contain the invalid entries
         assert "invalid string entry" not in result
@@ -94,98 +84,74 @@ class TestCriticalNotesInjection:
 
     def test_entry_with_reference(self, mock_project, base_project_dict):
         """Entry with reference should contain the ref string."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {
-                    "category": "pattern",
-                    "priority": "high",
-                    "summary": "Use caching",
-                    "reference": "https://example.com/caching"
-                }
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {
+                "category": "pattern",
+                "priority": "high",
+                "summary": "Use caching",
+                "reference": "https://example.com/caching"
+            }
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "*(ref: https://example.com/caching)*" in result
 
     def test_entry_without_reference(self, mock_project, base_project_dict):
         """Entry without reference should not contain ref string."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {
-                    "category": "convention",
-                    "priority": "high",
-                    "summary": "Use type hints"
-                }
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {
+                "category": "convention",
+                "priority": "high",
+                "summary": "Use type hints"
+            }
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "*(ref:" not in result
 
     def test_priority_icons(self, mock_project, base_project_dict):
         """Priority icons should map correctly: critical=🔴, high=🟡, medium=🟢."""
         # Test critical
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "risk", "priority": "critical", "summary": "Critical issue"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "risk", "priority": "critical", "summary": "Critical issue"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "🔴" in result
 
         # Test high
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "convention", "priority": "high", "summary": "High priority"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "convention", "priority": "high", "summary": "High priority"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "🟡" in result
 
         # Test medium
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "pattern", "priority": "medium", "summary": "Medium priority"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "pattern", "priority": "medium", "summary": "Medium priority"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "🟢" in result
 
     def test_unknown_priority_icon(self, mock_project, base_project_dict):
         """Entry with unknown priority should use ⚪."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "constraint", "priority": "urgent", "summary": "Unknown priority"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "constraint", "priority": "urgent", "summary": "Unknown priority"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "⚪" in result
 
     def test_category_formatting(self, mock_project, base_project_dict):
         """Category should be shown as **[category]**."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "convention", "priority": "high", "summary": "Test"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "convention", "priority": "high", "summary": "Test"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "**[convention]**" in result
 
     def test_summary_formatting(self, mock_project, base_project_dict):
         """Summary should be shown after category."""
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": [
-                {"category": "decision", "priority": "high", "summary": "Use async/await"}
-            ]
-        }
-        result = format_project_context(mock_project)
+        entries = [
+            {"category": "decision", "priority": "high", "summary": "Use async/await"}
+        ]
+        result = format_project_context(mock_project, critical_notes=entries)
         assert "Use async/await" in result
 
     def test_multiple_entries(self, mock_project, base_project_dict):
@@ -195,11 +161,7 @@ class TestCriticalNotesInjection:
             {"category": "pattern", "priority": "high", "summary": "Second entry"},
             {"category": "risk", "priority": "medium", "summary": "Third entry"},
         ]
-        mock_project.to_dict.return_value = {
-            **base_project_dict,
-            "critical_notes": entries
-        }
-        result = format_project_context(mock_project)
+        result = format_project_context(mock_project, critical_notes=entries)
 
         # All entries present
         assert "First entry" in result
