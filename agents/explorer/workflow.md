@@ -57,6 +57,24 @@ rag_query_data("explain the API endpoints", "hybrid")
 
 ---
 
+## Step 2b: Extract Experiences
+
+After receiving RAG results, scan for experience-type entities:
+
+- **Types to look for:** `experience`, `decision`, `convention`
+- **How to identify:** Check the `type` field of each returned entity
+- **Separate these** from regular knowledge entities for the "Related Experience" section
+
+**Intelligent follow-up (optional):**
+If the query topic would benefit from experiences (debugging, deployment, configuration, architecture) and you found few or none, you MAY do 1-2 targeted queries:
+```
+rag_query_data("experience " + original_query, "local")
+rag_get_graph(key_entity_name, max_depth=2)  # to find connected experiences
+```
+This is judgment-based. Don't do this for every query — only when experiences would add value.
+
+---
+
 ## Step 3: Assess Confidence
 
 Rate the RAG response quality based on signal strength:
@@ -137,22 +155,42 @@ Merge RAG answer + file browsing results into a structured response:
 ## Answer
 [Main response — combine RAG and file findings]
 
+## Related Experience
+[Experience-type entities: gotchas, decisions, conventions]
+[If none: "No related experiences found for this topic."]
+
 ## Sources
 - RAG knowledge base (mode: {mode})
 - File: {path} (if browsed during fallback)
 ```
 
+**Experience formatting (for "Related Experience" section):**
+
+| Entity Type | Emoji | Content |
+|-------------|-------|---------|
+| `experience` | ⚠️ | Gotchas, warnings from past work |
+| `decision` | 📋 | Design decisions, architectural choices |
+| `convention` | 📏 | Coding standards, practices |
+
+Format each entry concisely: entity name + key point from description.
+
 **Complete response example:**
 
 ```markdown
-## Confidence: LOW
-## Need Update KB: true
+## Confidence: MEDIUM
+## Need Update KB: false
 
 ## Answer
 The authentication module is located at `src/auth/`. It uses JWT tokens with RS256 signing.
 The main entry point is `AuthService.login()` which validates credentials against the user table.
 
+## Related Experience
+⚠️ **AuthService token expiry**: Tokens expire after 1 hour — handle refresh gracefully
+📋 **JWT signing decision**: Chose RS256 over HS256 for service-to-service auth
+📏 **Auth convention**: Always validate tokens on every protected endpoint
+
 ## Sources
+- RAG knowledge base (mode: hybrid)
 - File: src/auth/auth_service.py
 - File: src/auth/jwt_handler.py
 ```
@@ -170,6 +208,7 @@ The main entry point is `AuthService.login()` which validates credentials agains
 - Never mention RAG knowledge base status (empty, full, stale, etc.)
 - Never suggest workflows, actions, or next steps to the caller (e.g., "should be upserted", "consider running experience()", "run exploration again")
 - Never mention the exploration process itself
+- **Always include** `## Related Experience:` section — if no experiences found, state "No related experiences found for this topic."
 
 **Formatting rules:**
 - Lead with the answer
@@ -191,6 +230,12 @@ Start: Query received
         ▼
 ┌───────────────┐
 │ Query RAG     │ → rag_query_data(query, mode)
+└───────────────┘
+        │
+        ▼
+┌───────────────┐
+│ Extract       │ → Scan for experience/decision/
+│ Experiences   │   convention entities
 └───────────────┘
         │
         ▼
@@ -227,6 +272,7 @@ HIGH      MEDIUM/LOW
 |-------|---------------|
 | HIGH confidence path | 1-2 (just RAG query) |
 | MEDIUM/LOW path | 2-4 (RAG + 1-2 files) |
+| Experience follow-up | +1-2 if doing targeted query (optional) |
 | Total before return | 3 max (prefer 2) |
 
 **Remember:** Someone is waiting. Don't over-research.

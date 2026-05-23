@@ -18,8 +18,26 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
    - Simple fact → Quick extract
    - Technical description → Full extract
    - Long narrative → Key entities + full insert
-4. Proceed to Phase 2
+4. Classify the primary intent:
+   - experience — Lesson learned, gotcha, bug insight, production incident, hard-won knowledge
+     Signals: "we found that...", "turns out...", "gotcha:", "make sure to...", "doesn't work when...", error/bug with resolution
+   - decision — Architecture or design choice with rationale
+     Signals: "we chose...", "decided to...", "going with...", "trade-off", "instead of X we use Y", ADR-style content
+   - convention — Project-specific rule, pattern, or coding standard
+     Signals: "always use...", "never do...", "in this project we...", "follow the pattern of..."
+   - knowledge (default) — General factual/technical knowledge
+     Signals: descriptions, explanations, factual statements
+5. Proceed to Phase 2
 ```
+
+**Classification Examples:**
+
+| Type | Example Text |
+|------|--------------|
+| `experience` | "Queue jobs get stuck when worker crashes mid-processing — must implement timeout-based cleanup" |
+| `decision` | "We chose SQLite over PostgreSQL for job queue storage — simpler deployment, single-file backup" |
+| `convention` | "Always use 'from daemon.models import ...' not individual submodule imports" |
+| `knowledge` | "The job queue uses a 7-state lifecycle with lock-first pattern for concurrency" |
 
 ---
 
@@ -33,11 +51,15 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
 2. Classify each entity type:
    - Person, Project, Module, API, Function
    - Pattern, Bug, Decision, Concept, Document
-3. Draft entity metadata:
+   - experience, decision, convention (for primary subject entities)
+3. Identify the primary entity:
+   - The main subject of the text gets the type from Phase 1 classification
+   - Supporting entities (mentioned in passing) use their natural types
+4. Draft entity metadata:
    - Label (the name)
    - Type (entity classification)
    - Description (what it is)
-4. Proceed to Phase 3
+5. Proceed to Phase 3
 ```
 
 ---
@@ -100,7 +122,10 @@ My primary workflow: receive text, analyze, extract, deduplicate, insert, confir
    - Target entity (using recorded ID)
    - Relationship type
    - Context description (optional but recommended)
-3. Proceed to Phase 6
+3. For experience and decision entities: prioritize relations to related knowledge entities
+   - This makes discoveries traversable via graph queries
+   - "This gotcha APPLIES_TO Module X" is more useful than isolated experience nodes
+4. Proceed to Phase 6
 ```
 
 ---
