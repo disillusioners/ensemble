@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-24 Defer Queue UI)
+## Test Results (Latest: 2026-05-25 system_defer_queue Auto-Provision)
+
+### system_defer_queue Auto-Provision (2026-05-25)
+- **Branch**: feature/defer-queue-ui (commits f38bf92 + 104e15f + 8c0d781)
+- **Backend Unit Tests**: 4485/4485 PASS (+52 new, including 5 system_defer_queue auto-provision tests)
+- **Frontend Unit Tests**: 661/661 PASS (0 regressions)
+- **Browser Verification**: 6/6 PASS — system_defer_queue in sidebar, schedule icon, DEFER badge, start/stop toggle, no delete button for system queues, defer queue creation works, reserved name protection works
+- **ensure.md**: PASS — dev.sh stable 30s+, auto-provisioned system queues for 34 projects
+- **Quick Fixes**: 0
+- **Regressions**: 0
+- See `.agents/tester/RESULTS/2026-05-25-system-defer-queue-auto-provision.md` for full report
+
+### system_defer_queue Auto-Provision Status: ✅ READY (4485 backend + 661 frontend tests pass, browser verified, no regressions)
 
 ### Defer Queue UI (2026-05-24)
 - **Branch**: feature/defer-queue-ui (commits f38bf92 + 104e15f)
@@ -70,8 +82,6 @@ tests/
 - **Quick Fixes**: 0 (all tests pass as-is)
 - **Regressions**: 0
 - See `.agents/tester/RESULTS/2026-05-24-defer-queue-ui.md` for full report
-
-### Defer Queue UI Status: ✅ READY (661/661 tests pass, dev.sh stable, no regressions)
 
 ### QueueShutDown 500 Error Fix (2026-05-23)
 - **Bugs Fixed**: 2 — QueueShutDown exception in live_event_hub.py + Session binding in instance_messaging.py
