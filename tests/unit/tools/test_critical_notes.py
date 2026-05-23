@@ -1,11 +1,11 @@
-"""Tests for critical experience tools: add, list, remove, merge, eviction."""
+"""Tests for critical notes tools: add, list, remove, merge, eviction."""
 
 import time
 import pytest
 from unittest.mock import MagicMock
 
-from daemon.tools.critical_experience import (
-    create_critical_experience_tools,
+from daemon.tools.critical_notes import (
+    create_critical_notes_tools,
     _find_similar_entry,
     _merge_entries,
     _evict_if_needed,
@@ -13,9 +13,9 @@ from daemon.tools.critical_experience import (
     _MAX_SUMMARY_LEN,
 )
 from daemon.repositories.project.models import (
-    CriticalExperience,
-    CriticalExperienceCategory,
-    CriticalExperiencePriority,
+    CriticalNotes,
+    CriticalNotesCategory,
+    CriticalNotesPriority,
 )
 
 
@@ -24,9 +24,9 @@ from daemon.repositories.project.models import (
 # =============================================================================
 
 
-def create_entry(category: str, priority: str, summary: str, reference: str | None = None) -> CriticalExperience:
-    """Create a CriticalExperience entry for testing."""
-    return CriticalExperience(
+def create_entry(category: str, priority: str, summary: str, reference: str | None = None) -> CriticalNotes:
+    """Create a CriticalNotes entry for testing."""
+    return CriticalNotes(
         category=category,
         priority=priority,
         summary=summary,
@@ -39,14 +39,14 @@ def make_mock_store(initial_entries: list = None):
     """Create a properly isolated mock store."""
     store = MagicMock()
     project = MagicMock()
-    project.critical_experience = initial_entries if initial_entries is not None else []
+    project.critical_notes = initial_entries if initial_entries is not None else []
     store.get.return_value = project
 
     # Create a mutable reference for entries
-    entries = project.critical_experience
+    entries = project.critical_notes
 
     def update_handler(pid, **kwargs):
-        entries[:] = kwargs.get('critical_experience', entries)
+        entries[:] = kwargs.get('critical_notes', entries)
 
     store.update.side_effect = update_handler
     return store
@@ -100,53 +100,53 @@ def unique_summary(index: int) -> str:
 
 @pytest.fixture
 def mock_store():
-    """Mock store with a project that has empty critical_experience."""
+    """Mock store with a project that has empty critical_notes."""
     return make_mock_store()
 
 
 @pytest.fixture
-def ce_tools(mock_store):
-    """Create critical experience tools with mock store."""
-    return create_critical_experience_tools(mock_store, agent_id="test_agent")
+def cn_tools(mock_store):
+    """Create critical notes tools with mock store."""
+    return create_critical_notes_tools(mock_store, agent_id="test_agent")
 
 
 @pytest.fixture
-def add_tool(ce_tools):
-    """Get the project_ce_add tool."""
-    for tool in ce_tools:
-        if tool.name == "project_ce_add":
+def add_tool(cn_tools):
+    """Get the project_cn_add tool."""
+    for tool in cn_tools:
+        if tool.name == "project_cn_add":
             return tool
-    raise ValueError("project_ce_add tool not found")
+    raise ValueError("project_cn_add tool not found")
 
 
 @pytest.fixture
-def list_tool(ce_tools):
-    """Get the project_ce_list tool."""
-    for tool in ce_tools:
-        if tool.name == "project_ce_list":
+def list_tool(cn_tools):
+    """Get the project_cn_list tool."""
+    for tool in cn_tools:
+        if tool.name == "project_cn_list":
             return tool
-    raise ValueError("project_ce_list tool not found")
+    raise ValueError("project_cn_list tool not found")
 
 
 @pytest.fixture
-def remove_tool(ce_tools):
-    """Get the project_ce_remove tool."""
-    for tool in ce_tools:
-        if tool.name == "project_ce_remove":
+def remove_tool(cn_tools):
+    """Get the project_cn_remove tool."""
+    for tool in cn_tools:
+        if tool.name == "project_cn_remove":
             return tool
-    raise ValueError("project_ce_remove tool not found")
+    raise ValueError("project_cn_remove tool not found")
 
 
 # =============================================================================
-# Test Class: TestProjectCEAdd
+# Test Class: TestProjectCNAdd
 # =============================================================================
 
 
-class TestProjectCEAdd:
-    """Tests for the project_ce_add tool."""
+class TestProjectCNAdd:
+    """Tests for the project_cn_add tool."""
 
     def test_add_to_empty_project(self, add_tool, mock_store):
-        """Add entry to project with empty critical_experience -> succeeds, returns dict with all fields."""
+        """Add entry to project with empty critical_notes -> succeeds, returns dict with all fields."""
         result = add_tool.invoke({
             "project_id": "test_project",
             "category": "convention",
@@ -168,8 +168,8 @@ class TestProjectCEAdd:
         categories = ["convention", "pattern", "risk", "decision", "constraint"]
         for category in categories:
             store = make_mock_store()
-            tools = create_critical_experience_tools(store, agent_id="test_agent")
-            add_tool = next(t for t in tools if t.name == "project_ce_add")
+            tools = create_critical_notes_tools(store, agent_id="test_agent")
+            add_tool = next(t for t in tools if t.name == "project_cn_add")
             result = add_tool.invoke({
                 "project_id": "test_project",
                 "category": category,
@@ -184,8 +184,8 @@ class TestProjectCEAdd:
         priorities = ["critical", "high", "medium"]
         for priority in priorities:
             store = make_mock_store()
-            tools = create_critical_experience_tools(store, agent_id="test_agent")
-            add_tool = next(t for t in tools if t.name == "project_ce_add")
+            tools = create_critical_notes_tools(store, agent_id="test_agent")
+            add_tool = next(t for t in tools if t.name == "project_cn_add")
             result = add_tool.invoke({
                 "project_id": "test_project",
                 "category": "convention",
@@ -295,8 +295,8 @@ class TestMergeLogic:
 
     def test_merge_similar_entries(self, mock_store):
         """Add A, then add B with same category + >=2 keyword overlap -> B merges into A."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add first entry
         result1 = add_tool.invoke({
@@ -322,8 +322,8 @@ class TestMergeLogic:
 
     def test_merge_preserves_shorter_summary(self, mock_store):
         """Existing has long summary, new has short -> merged has short summary."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add first entry with long summary
         add_tool.invoke({
@@ -345,8 +345,8 @@ class TestMergeLogic:
 
     def test_merge_keeps_existing_id(self, mock_store):
         """After merge, the entry ID is the original one."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         result1 = add_tool.invoke({
             "project_id": "test_project",
@@ -367,9 +367,9 @@ class TestMergeLogic:
 
     def test_merge_no_overlap(self, mock_store):
         """Add A, then add B with same category but 0 keyword overlap -> both entries exist."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Add first entry
         add_tool.invoke({
@@ -393,9 +393,9 @@ class TestMergeLogic:
 
     def test_merge_different_category(self, mock_store):
         """Add A, then add B with different category but similar keywords -> both entries exist."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Add first entry
         add_tool.invoke({
@@ -419,8 +419,8 @@ class TestMergeLogic:
 
     def test_merge_updates_reference(self, mock_store):
         """Existing has no reference, new has reference -> merged has new's reference."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry without reference
         add_tool.invoke({
@@ -443,8 +443,8 @@ class TestMergeLogic:
 
     def test_merge_preserves_existing_reference(self, mock_store):
         """Existing has reference, new has no reference -> merged keeps existing reference."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with reference
         add_tool.invoke({
@@ -467,8 +467,8 @@ class TestMergeLogic:
 
     def test_merge_new_higher_priority_wins(self, mock_store):
         """Existing is medium, new is critical -> merged is critical."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with medium priority
         add_tool.invoke({
@@ -490,8 +490,8 @@ class TestMergeLogic:
 
     def test_merge_new_lower_priority_keeps_existing(self, mock_store):
         """Existing is critical, new is medium -> merged stays critical."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
 
         # Add entry with critical priority
         add_tool.invoke({
@@ -513,9 +513,9 @@ class TestMergeLogic:
 
     def test_merge_fewer_than_2_keywords(self, mock_store):
         """Summary has only 1 keyword (word > 3 chars) -> no merge, new entry created."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Add first entry
         add_tool.invoke({
@@ -548,9 +548,9 @@ class TestEvictionLogic:
 
     def test_eviction_at_max(self, mock_store):
         """Fill to 30 entries, add 31st -> oldest lowest-priority evicted, total stays 30."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Fill to 30 entries with unique summaries (no keyword overlap)
         for i in range(_MAX_ENTRIES):
@@ -580,9 +580,9 @@ class TestEvictionLogic:
 
     def test_eviction_priority_order(self, mock_store):
         """Mix of critical/high/medium -> medium evicted first."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Fill with 29 medium entries
         for i in range(29):
@@ -621,9 +621,9 @@ class TestEvictionLogic:
 
     def test_eviction_all_critical(self, mock_store):
         """30 critical entries, add 31st critical -> oldest critical evicted."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Fill with 30 critical entries with no keyword overlap
         for i in range(_MAX_ENTRIES):
@@ -653,9 +653,9 @@ class TestEvictionLogic:
 
     def test_no_eviction_under_max(self, mock_store):
         """29 entries, add 30th -> no eviction, total 30."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Add 29 entries with no keyword overlap
         for i in range(29):
@@ -680,9 +680,9 @@ class TestEvictionLogic:
 
     def test_eviction_oldest_of_same_priority(self, mock_store):
         """Multiple medium entries -> oldest medium evicted."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Fill with 30 medium entries, keeping track of first
         first_summary = unique_summary(0)
@@ -720,9 +720,9 @@ class TestEvictionLogic:
 
     def test_merge_at_max_no_eviction(self, mock_store):
         """At 30 entries, add similar entry -> merge happens, no eviction needed."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Fill to 30 entries with unique summaries (no keyword overlap)
         for i in range(_MAX_ENTRIES):
@@ -752,12 +752,12 @@ class TestEvictionLogic:
 
 
 # =============================================================================
-# Test Class: TestProjectCEList
+# Test Class: TestProjectCNList
 # =============================================================================
 
 
-class TestProjectCEList:
-    """Tests for the project_ce_list tool."""
+class TestProjectCNList:
+    """Tests for the project_cn_list tool."""
 
     def test_list_empty_project(self, list_tool, mock_store):
         """Returns dict with project_id, count=0, entries=[]."""
@@ -769,9 +769,9 @@ class TestProjectCEList:
 
     def test_list_with_entries(self, mock_store):
         """Returns all entries with correct count."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
 
         # Add 3 entries with unique summaries (no keyword overlap)
         for i in range(3):
@@ -800,19 +800,19 @@ class TestProjectCEList:
 
 
 # =============================================================================
-# Test Class: TestProjectCERemove
+# Test Class: TestProjectCNRemove
 # =============================================================================
 
 
-class TestProjectCERemove:
-    """Tests for the project_ce_remove tool."""
+class TestProjectCNRemove:
+    """Tests for the project_cn_remove tool."""
 
     def test_remove_existing_entry(self, mock_store):
         """Entry gone after remove, count decreases."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        list_tool = next(t for t in tools if t.name == "project_ce_list")
-        remove_tool = next(t for t in tools if t.name == "project_ce_remove")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
+        remove_tool = next(t for t in tools if t.name == "project_cn_remove")
 
         # Add an entry
         add_result = add_tool.invoke({
@@ -874,9 +874,9 @@ class TestProjectCERemove:
 
     def test_remove_returns_summary(self, mock_store):
         """Remove returns dict with removed=True, entry_id, and summary."""
-        tools = create_critical_experience_tools(mock_store, agent_id="test_agent")
-        add_tool = next(t for t in tools if t.name == "project_ce_add")
-        remove_tool = next(t for t in tools if t.name == "project_ce_remove")
+        tools = create_critical_notes_tools(mock_store, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        remove_tool = next(t for t in tools if t.name == "project_cn_remove")
 
         # Add an entry
         add_result = add_tool.invoke({

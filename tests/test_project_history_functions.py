@@ -156,7 +156,7 @@ class MockProject:
         self.job_queue_paused = kwargs.get("job_queue_paused", False)
         self.project_metadata = kwargs.get("project_metadata", {})
         self.relationships = kwargs.get("relationships", {})
-        self.critical_experience = kwargs.get("critical_experience", [])
+        self.critical_notes = kwargs.get("critical_notes", [])
         self.creator_instance_id = kwargs.get("creator_instance_id", None)
         self.creator_agent_id = kwargs.get("creator_agent_id", None)
         self.created_at = kwargs.get("created_at", "2024-01-01T00:00:00")
@@ -177,7 +177,7 @@ class MockProject:
             "shortnames": [],
             "metadata": self.project_metadata,
             "relationships": self.relationships,
-            "critical_experience": self.critical_experience,
+            "critical_notes": self.critical_notes,
             "creator_instance_id": self.creator_instance_id,
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,
@@ -346,8 +346,8 @@ class TestFormatProjectContextWithHistory:
         assert "Related Project" in result
         assert "```json" in result
 
-    def test_critical_experience_section_present(self):
-        """Test that critical experience section renders when present."""
+    def test_critical_notes_section_present(self):
+        """Test that critical notes section renders when present."""
         format_project_context = self._get_function_under_test()
 
         mock_store = MagicMock()
@@ -355,7 +355,7 @@ class TestFormatProjectContextWithHistory:
 
         project = MockProject(
             project_id="proj-1",
-            critical_experience=[
+            critical_notes=[
                 {
                     "priority": "critical",
                     "category": "database",
@@ -365,7 +365,7 @@ class TestFormatProjectContextWithHistory:
         )
         result = format_project_context(project, store=mock_store)
 
-        assert "Critical Experience" in result
+        assert "Critical Notes" in result
         assert "database" in result
         assert "Always use transactions" in result
 

@@ -220,12 +220,12 @@ def format_project_context(project, store=None) -> str:
     # ProjectData has to_dict() method
     project_dict = project.to_dict() if hasattr(project, 'to_dict') else vars(project)
     
-    # Build structured critical experience section (REQUIRED for agent visibility)
-    ce_entries = project_dict.get("critical_experience", [])
-    ce_section = ""
-    if ce_entries:
-        ce_section = "\n### ⚡ Critical Experience\n"
-        for entry in ce_entries:
+    # Build structured critical notes section (REQUIRED for agent visibility)
+    cn_entries = project_dict.get("critical_notes", [])
+    cn_section = ""
+    if cn_entries:
+        cn_section = "\n### ⚡ Critical Notes\n"
+        for entry in cn_entries:
             if not isinstance(entry, dict):
                 continue
             priority_icon = {
@@ -235,7 +235,7 @@ def format_project_context(project, store=None) -> str:
             summary = entry.get("summary", "")
             reference = entry.get("reference")
             ref_str = f" *(ref: {reference})*" if reference else ""
-            ce_section += f"- {priority_icon} **[{category}]** {summary}{ref_str}\n"
+            cn_section += f"- {priority_icon} **[{category}]** {summary}{ref_str}\n"
     
     # Build recent history section if store is provided
     history_section = ""
@@ -264,16 +264,16 @@ def format_project_context(project, store=None) -> str:
         except Exception:
             logger.warning("History injection failed", exc_info=True)
     
-    # Exclude critical_experience from JSON dump to avoid duplication
+    # Exclude critical_notes from JSON dump to avoid duplication
     # (it's already displayed in the formatted section below)
-    data = {k: v for k, v in project_dict.items() if k != "critical_experience"}
+    data = {k: v for k, v in project_dict.items() if k != "critical_notes"}
 
     return f"""## Related Project
 
 ```json
 {json.dumps(data, indent=2)}
 ```
-{ce_section}{history_section}
+{cn_section}{history_section}
 """
 
 

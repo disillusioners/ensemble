@@ -1,4 +1,4 @@
-"""Tests for critical experience injection in format_project_context()."""
+"""Tests for critical notes injection in format_project_context()."""
 
 import json
 import pytest
@@ -7,12 +7,12 @@ from unittest.mock import MagicMock
 from daemon.manager import format_project_context
 
 
-class TestFormatProjectContextInjection:
-    """Tests for format_project_context() critical experience injection."""
+class TestCriticalNotesInjection:
+    """Tests for format_project_context() critical notes injection."""
 
     @pytest.fixture
     def base_project_dict(self):
-        """Base project dict without critical_experience."""
+        """Base project dict without critical_notes."""
         return {
             "project_id": "test-123",
             "name": "Test Project",
@@ -23,30 +23,30 @@ class TestFormatProjectContextInjection:
     def mock_project(self, base_project_dict):
         """Create a mock project with to_dict method."""
         project = MagicMock()
-        project.to_dict.return_value = {**base_project_dict, "critical_experience": []}
+        project.to_dict.return_value = {**base_project_dict, "critical_notes": []}
         return project
 
-    def test_empty_critical_experience_no_section(self, mock_project):
-        """Project with empty critical_experience=[] should not contain the section."""
+    def test_empty_critical_notes_no_section(self, mock_project):
+        """Project with empty critical_notes=[] should not contain the section."""
         result = format_project_context(mock_project)
-        assert "### ⚡ Critical Experience" not in result
+        assert "### ⚡ Critical Notes" not in result
 
     def test_entries_produce_section(self, mock_project, base_project_dict):
-        """Project with entries should produce the Critical Experience section."""
+        """Project with entries should produce the Critical Notes section."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "convention", "priority": "high", "summary": "Use snake_case"}
             ]
         }
         result = format_project_context(mock_project)
-        assert "### ⚡ Critical Experience" in result
+        assert "### ⚡ Critical Notes" in result
 
-    def test_json_dump_no_critical_experience(self, mock_project, base_project_dict):
-        """JSON block should NOT contain 'critical_experience' key (deduplication)."""
+    def test_json_dump_no_critical_notes(self, mock_project, base_project_dict):
+        """JSON block should NOT contain 'critical_notes' key (deduplication)."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "convention", "priority": "high", "summary": "Use snake_case"}
             ]
         }
@@ -57,7 +57,7 @@ class TestFormatProjectContextInjection:
         json_end = result.index("\n```", json_start)
         json_block = json.loads(result[json_start:json_end])
 
-        assert "critical_experience" not in json_block
+        assert "critical_notes" not in json_block
 
     def test_section_contains_entries(self, mock_project, base_project_dict):
         """Formatted section should contain all entry summaries."""
@@ -67,7 +67,7 @@ class TestFormatProjectContextInjection:
         ]
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": entries
+            "critical_notes": entries
         }
         result = format_project_context(mock_project)
 
@@ -78,7 +78,7 @@ class TestFormatProjectContextInjection:
         """Entry that's not a dict should be skipped gracefully (no crash)."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 "invalid string entry",
                 42,
                 None,
@@ -96,7 +96,7 @@ class TestFormatProjectContextInjection:
         """Entry with reference should contain the ref string."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {
                     "category": "pattern",
                     "priority": "high",
@@ -112,7 +112,7 @@ class TestFormatProjectContextInjection:
         """Entry without reference should not contain ref string."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {
                     "category": "convention",
                     "priority": "high",
@@ -128,7 +128,7 @@ class TestFormatProjectContextInjection:
         # Test critical
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "risk", "priority": "critical", "summary": "Critical issue"}
             ]
         }
@@ -138,7 +138,7 @@ class TestFormatProjectContextInjection:
         # Test high
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "convention", "priority": "high", "summary": "High priority"}
             ]
         }
@@ -148,7 +148,7 @@ class TestFormatProjectContextInjection:
         # Test medium
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "pattern", "priority": "medium", "summary": "Medium priority"}
             ]
         }
@@ -159,7 +159,7 @@ class TestFormatProjectContextInjection:
         """Entry with unknown priority should use ⚪."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "constraint", "priority": "urgent", "summary": "Unknown priority"}
             ]
         }
@@ -170,7 +170,7 @@ class TestFormatProjectContextInjection:
         """Category should be shown as **[category]**."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "convention", "priority": "high", "summary": "Test"}
             ]
         }
@@ -181,7 +181,7 @@ class TestFormatProjectContextInjection:
         """Summary should be shown after category."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "decision", "priority": "high", "summary": "Use async/await"}
             ]
         }
@@ -197,7 +197,7 @@ class TestFormatProjectContextInjection:
         ]
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": entries
+            "critical_notes": entries
         }
         result = format_project_context(mock_project)
 
@@ -219,14 +219,14 @@ class TestFormatProjectContextInjection:
             def __init__(self, data):
                 self.project_id = data["project_id"]
                 self.name = data["name"]
-                self.critical_experience = data["critical_experience"]
+                self.critical_notes = data["critical_notes"]
 
-        project = SimpleProject({**base_project_dict, "critical_experience": []})
+        project = SimpleProject({**base_project_dict, "critical_notes": []})
         result = format_project_context(project)
         assert "## Related Project" in result
 
-    def test_missing_critical_experience_key(self, base_project_dict):
-        """Project dict without critical_experience key should be treated as empty."""
+    def test_missing_critical_notes_key(self, base_project_dict):
+        """Project dict without critical_notes key should be treated as empty."""
         class SimpleProject:
             def __init__(self, data):
                 self.project_id = data["project_id"]
@@ -237,4 +237,4 @@ class TestFormatProjectContextInjection:
 
         project = SimpleProject(base_project_dict)
         result = format_project_context(project)
-        assert "### ⚡ Critical Experience" not in result
+        assert "### ⚡ Critical Notes" not in result

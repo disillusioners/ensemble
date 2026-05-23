@@ -1,4 +1,4 @@
-"""Tests for CriticalExperience model, Project integration, and migration."""
+"""Tests for CriticalNotes model, Project integration, and migration."""
 
 import uuid
 import pytest
@@ -6,19 +6,19 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from daemon.repositories.project.models import (
-    CriticalExperience,
-    CriticalExperienceCategory,
-    CriticalExperiencePriority,
+    CriticalNotes,
+    CriticalNotesCategory,
+    CriticalNotesPriority,
     Project,
 )
 
 
-class TestCriticalExperienceModel:
-    """Tests for CriticalExperience Pydantic model."""
+class TestCriticalNotesModel:
+    """Tests for CriticalNotes Pydantic model."""
 
     def test_create_valid_entry(self):
         """Create with valid fields should succeed."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="convention",
             priority="high",
             summary="Use snake_case for variables"
@@ -29,7 +29,7 @@ class TestCriticalExperienceModel:
 
     def test_default_id_is_uuid(self):
         """ID should be a valid UUID string by default."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="pattern",
             priority="critical",
             summary="Use repository pattern"
@@ -39,7 +39,7 @@ class TestCriticalExperienceModel:
 
     def test_default_timestamps(self):
         """created_at and updated_at should be ISO timestamps."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="decision",
             priority="medium",
             summary="Use async/await"
@@ -55,7 +55,7 @@ class TestCriticalExperienceModel:
     def test_invalid_category_raises(self):
         """Category='unknown' should raise ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
-            CriticalExperience(
+            CriticalNotes(
                 category="unknown",
                 priority="high",
                 summary="Test summary"
@@ -65,7 +65,7 @@ class TestCriticalExperienceModel:
     def test_invalid_priority_raises(self):
         """Priority='urgent' should raise ValidationError."""
         with pytest.raises(ValidationError) as exc_info:
-            CriticalExperience(
+            CriticalNotes(
                 category="convention",
                 priority="urgent",
                 summary="Test summary"
@@ -76,7 +76,7 @@ class TestCriticalExperienceModel:
         """Summary with 201 chars should raise ValidationError with ≤200 chars message."""
         long_summary = "x" * 201
         with pytest.raises(ValidationError) as exc_info:
-            CriticalExperience(
+            CriticalNotes(
                 category="convention",
                 priority="high",
                 summary=long_summary
@@ -85,8 +85,8 @@ class TestCriticalExperienceModel:
 
     def test_all_categories_valid(self):
         """Each category value should create successfully."""
-        for cat in CriticalExperienceCategory:
-            entry = CriticalExperience(
+        for cat in CriticalNotesCategory:
+            entry = CriticalNotes(
                 category=cat.value,
                 priority="high",
                 summary="Test summary"
@@ -95,8 +95,8 @@ class TestCriticalExperienceModel:
 
     def test_all_priorities_valid(self):
         """Each priority value should create successfully."""
-        for pri in CriticalExperiencePriority:
-            entry = CriticalExperience(
+        for pri in CriticalNotesPriority:
+            entry = CriticalNotes(
                 category="convention",
                 priority=pri.value,
                 summary="Test summary"
@@ -105,7 +105,7 @@ class TestCriticalExperienceModel:
 
     def test_to_dict_returns_all_fields(self):
         """to_dict() should return all 8 fields."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="pattern",
             priority="critical",
             summary="Use adapter pattern",
@@ -123,7 +123,7 @@ class TestCriticalExperienceModel:
 
     def test_reference_default_none(self):
         """Reference should default to None."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="convention",
             priority="high",
             summary="Test"
@@ -132,7 +132,7 @@ class TestCriticalExperienceModel:
 
     def test_source_agent_default_empty(self):
         """source_agent should default to empty string."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="convention",
             priority="high",
             summary="Test"
@@ -141,7 +141,7 @@ class TestCriticalExperienceModel:
 
     def test_empty_summary_allowed(self):
         """Empty string summary should be allowed at model level."""
-        entry = CriticalExperience(
+        entry = CriticalNotes(
             category="convention",
             priority="high",
             summary=""
@@ -149,41 +149,41 @@ class TestCriticalExperienceModel:
         assert entry.summary == ""
 
 
-class TestProjectCriticalExperience:
-    """Tests for Project model critical_experience field."""
+class TestProjectCriticalNotes:
+    """Tests for Project model critical_notes field."""
 
-    def test_project_critical_experience_default(self):
-        """New Project should have critical_experience=[]."""
+    def test_project_critical_notes_default(self):
+        """New Project should have critical_notes=[]."""
         project = Project(name="Test Project")
-        assert project.critical_experience == []
+        assert project.critical_notes == []
 
-    def test_project_to_dict_includes_critical_experience(self):
-        """to_dict() should include 'critical_experience' key."""
+    def test_project_to_dict_includes_critical_notes(self):
+        """to_dict() should include 'critical_notes' key."""
         project = Project(name="Test Project")
         d = project.to_dict()
-        assert "critical_experience" in d
+        assert "critical_notes" in d
 
     def test_project_to_dict_empty_list(self):
         """Empty list should be returned as empty list."""
         project = Project(name="Test Project")
         d = project.to_dict()
-        assert d["critical_experience"] == []
+        assert d["critical_notes"] == []
 
     def test_project_to_dict_with_entries(self):
-        """to_dict() should return critical_experience entries."""
+        """to_dict() should return critical_notes entries."""
         project = Project(
             name="Test Project",
-            critical_experience=[
+            critical_notes=[
                 {"category": "convention", "priority": "high", "summary": "Test"}
             ]
         )
         d = project.to_dict()
-        assert len(d["critical_experience"]) == 1
-        assert d["critical_experience"][0]["summary"] == "Test"
+        assert len(d["critical_notes"]) == 1
+        assert d["critical_notes"][0]["summary"] == "Test"
 
 
 class TestMigrationFile:
-    """Tests for critical_experience migration file."""
+    """Tests for critical_notes migration file."""
 
     MIGRATION_PATH = Path(
         "daemon/migrations/versions/20260520_000001_add_critical_experience_to_projects.sql"

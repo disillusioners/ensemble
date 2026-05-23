@@ -12,7 +12,7 @@ class TestProjectHistoryInjection:
 
     @pytest.fixture
     def base_project_dict(self):
-        """Base project dict without critical_experience."""
+        """Base project dict without critical_notes."""
         return {
             "project_id": "test-123",
             "name": "Test Project",
@@ -24,7 +24,7 @@ class TestProjectHistoryInjection:
         """Create a mock project with to_dict method."""
         project = MagicMock()
         project.project_id = "test-123"
-        project.to_dict.return_value = {**base_project_dict, "critical_experience": []}
+        project.to_dict.return_value = {**base_project_dict, "critical_notes": []}
         return project
 
     @pytest.fixture
@@ -241,11 +241,11 @@ class TestProjectHistoryInjection:
 
     # --- Integration with both sections ---
 
-    def test_both_ce_and_history_sections_present(self, mock_project, mock_store, base_project_dict):
-        """When both CE and history exist, both sections should be present."""
+    def test_both_cn_and_history_sections_present(self, mock_project, mock_store, base_project_dict):
+        """When both CN and history exist, both sections should be present."""
         mock_project.to_dict.return_value = {
             **base_project_dict,
-            "critical_experience": [
+            "critical_notes": [
                 {"category": "convention", "priority": "high", "summary": "Use snake_case"}
             ]
         }
@@ -254,7 +254,7 @@ class TestProjectHistoryInjection:
         ]
         result = format_project_context(mock_project, store=mock_store)
 
-        assert "### ⚡ Critical Experience" in result
+        assert "### ⚡ Critical Notes" in result
         assert "### 📜 Recent History" in result
         assert "Use snake_case" in result
         assert "Released v1.0" in result
