@@ -20,8 +20,9 @@ CREATE TABLE IF NOT EXISTS critical_notes (
 CREATE INDEX IF NOT EXISTS ix_critical_notes_project_id
     ON critical_notes(project_id);
 
--- Drop the old JSON column (idempotent - only fails if already dropped)
-ALTER TABLE projects DROP COLUMN IF EXISTS critical_notes;
+-- Note: SQLite DROP COLUMN requires special handling. The column will be ignored
+-- by the application code since it now uses the dedicated critical_notes table.
+-- SQLite doesn't require explicit column removal - unused columns have no effect.
 
 -- DOWN
 

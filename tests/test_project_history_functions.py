@@ -353,17 +353,15 @@ class TestFormatProjectContextWithHistory:
         mock_store = MagicMock()
         mock_store.get_recent_history.return_value = []
 
-        project = MockProject(
-            project_id="proj-1",
-            critical_notes=[
-                {
-                    "priority": "critical",
-                    "category": "database",
-                    "summary": "Always use transactions for writes",
-                }
-            ],
-        )
-        result = format_project_context(project, store=mock_store)
+        project = MockProject(project_id="proj-1", name="Test")
+        critical_notes = [
+            {
+                "priority": "critical",
+                "category": "database",
+                "summary": "Always use transactions for writes",
+            }
+        ]
+        result = format_project_context(project, store=mock_store, critical_notes=critical_notes)
 
         assert "Critical Notes" in result
         assert "database" in result
