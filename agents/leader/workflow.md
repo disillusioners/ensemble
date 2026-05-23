@@ -125,12 +125,6 @@ I support two workflows. The user may invoke them sequentially within a single s
          - APPROVED → Plan is ready
 6. Terminate Planner, Reviewer, and Approver instances
 7. Report approved plan to user
-8. **Record Task Completion (SMALL+ scope only):**
-   - Use `experience()` to record a brief summary for project knowledge
-   - Template: `experience(title="[What was done]", content="Completed [feature/fix/change]. Affected: [key files/components]. Notable: [decisions/trade-offs if any].")`
-   - Example: `experience(title="API Design Plan", content="Completed API design for notifications. Affected: .agents/shared/planning/notifications/plan.md. Notable: Chose REST over WebSocket for simplicity.")`
-   - Keep it brief — 1-2 sentences max. Future sessions just need to know what happened.
-   - Skip this step for TINY scope.
 ```
 
 **Instance reuse:** The same Planner and Reviewer instances are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
@@ -240,13 +234,6 @@ I support two workflows. The user may invoke them sequentially within a single s
        → Leader Decision on test review:
            - Issues found → Back to Tester with feedback
            - Approved → Done, report to user
-
-8. **Record Task Completion (SMALL+ scope only):**
-   - Use `experience()` to record a brief summary for project knowledge
-   - Template: `experience(title="[What was done]", content="Completed [feature/fix/change]. Affected: [key files/components]. Notable: [decisions/trade-offs if any].")`
-   - Example: `experience(title="User Authentication", content="Implemented JWT-based auth. Affected: auth.py, middleware.py, tests/. Notable: Chose JWT over sessions for stateless design.")`
-   - Keep it brief — 1-2 sentences max. Future sessions just need to know what happened.
-   - Skip this step for TINY scope.
 
 ### Tester Escalation: `TESTER_CANT_OPTIMIZE_TEST_PACK`
 
