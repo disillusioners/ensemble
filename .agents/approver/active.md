@@ -1,5 +1,5 @@
-Current Plan: Project History Feature
-Tracking File: project-history-feature-tracking.md
-Iteration: 002
+Current Plan: Critical Notes Rename
+Tracking File: critical-notes-rename-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-05-22 04:36
+Last Updated: 2026-05-23 10:45

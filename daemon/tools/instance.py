@@ -35,7 +35,7 @@ from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
 from .rag_tools import create_rag_tools
-from .critical_experience import create_critical_experience_tools
+from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
@@ -609,11 +609,11 @@ Returns:
     # Add project management tools (available in all instances)
     tools.extend(project_tools)
 
-    # Critical experience tools (project-scoped experience management)
-    ce_tools = create_critical_experience_tools(
+    # Critical notes tools (project-scoped notes management)
+    cn_tools = create_critical_notes_tools(
         manager.project_store, current_instance_id, agent_id
     )
-    tools.extend(ce_tools)
+    tools.extend(cn_tools)
 
     # Project history tools (chronological project event tracking)
     history_tools = create_project_history_tools(

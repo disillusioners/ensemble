@@ -17,23 +17,23 @@ from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
 
 
-CRITICAL_EXPERIENCE_MAX_ENTRIES = 30
+CRITICAL_NOTES_MAX_ENTRIES = 30
 
 
-class CriticalExperienceCategory(str, enum.Enum):
+class CriticalNotesCategory(str, enum.Enum):
     CONVENTION = "convention"
     PATTERN = "pattern"
     RISK = "risk"
     DECISION = "decision"
     CONSTRAINT = "constraint"
 
-class CriticalExperiencePriority(str, enum.Enum):
+class CriticalNotesPriority(str, enum.Enum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
 
-class CriticalExperience(BaseModel):
-    """A single critical experience entry for a project."""
+class CriticalNotes(BaseModel):
+    """A single critical notes entry for a project."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -46,7 +46,7 @@ class CriticalExperience(BaseModel):
     @field_validator('category')
     @classmethod
     def validate_category(cls, v):
-        valid = [e.value for e in CriticalExperienceCategory]
+        valid = [e.value for e in CriticalNotesCategory]
         if v not in valid:
             raise ValueError(f"Invalid category '{v}', must be one of {valid}")
         return v
@@ -54,7 +54,7 @@ class CriticalExperience(BaseModel):
     @field_validator('priority')
     @classmethod
     def validate_priority(cls, v):
-        valid = [e.value for e in CriticalExperiencePriority]
+        valid = [e.value for e in CriticalNotesPriority]
         if v not in valid:
             raise ValueError(f"Invalid priority '{v}', must be one of {valid}")
         return v
@@ -153,7 +153,7 @@ class Project(SQLModel, table=True):
         sa_column=Column(JSON)
     )
 
-    critical_experience: list[dict] = Field(
+    critical_notes: list[dict] = Field(
         default_factory=list,
         sa_column=Column(JSON)
     )
@@ -199,7 +199,7 @@ class Project(SQLModel, table=True):
             "shortnames": list(self._shortnames),
             "metadata": dict(self.project_metadata),
             "relationships": dict(self.relationships),
-            "critical_experience": self.critical_experience if self.critical_experience else [],
+            "critical_notes": self.critical_notes if self.critical_notes else [],
             "creator_instance_id": self.creator_instance_id,
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,

@@ -368,7 +368,7 @@ class ProjectResponse(BaseModel):
     shortnames: list[str] = Field(default_factory=list, description="Project shortnames")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Project metadata")
     relationships: dict[str, list[str]] = Field(default_factory=dict, description="Project relationships")
-    critical_experience: list[dict] | None = Field(default=None, description="Critical experience entries")
+    critical_notes: list[dict] | None = Field(default=None, description="Critical notes entries")
     recent_history: list[dict] | None = Field(default=None, description="Recent history entries")
     creator_instance_id: str | None = Field(default=None, description="Creator instance ID")
     creator_agent_id: str | None = Field(default=None, description="Creator agent ID")
