@@ -6,7 +6,6 @@ that capture important lessons learned during project work.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 
 from langchain_core.tools import tool
@@ -15,9 +14,9 @@ from ..repositories.project.models import (
     CriticalNotes,
     CriticalNotesCategory,
     CriticalNotesPriority,
+    CriticalNoteModel,
 )
 from ..repositories.project.repository import SQLModelProjectRepository
-from ..repositories.project.models import CriticalNoteModel
 from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "critical_notes"
@@ -79,22 +78,8 @@ def _merge_entries(existing: CriticalNotes, new: CriticalNotes) -> CriticalNotes
         reference=merged_reference,
         source_agent=new.source_agent,
         created_at=existing.created_at,
-        updated_at=datetime.utcnow().isoformat(),
+        updated_at=datetime.now(timezone.utc).isoformat(),
     )
-
-
-def _evict_if_needed(entries: list[CriticalNotes]) -> list[CriticalNotes]:
-    """Evict oldest lowest-priority entry if at max capacity."""
-    if len(entries) < _MAX_ENTRIES:
-        return entries
-
-    priority_order = _PRIORITY_ORDER
-    sorted_entries = sorted(
-        entries,
-        key=lambda e: (priority_order.get(e.priority, 2), e.created_at),
-    )
-    # Remove the first one (lowest priority, oldest)
-    return sorted_entries[1:]
 
 
 def create_critical_notes_tools(
@@ -171,8 +156,6 @@ def create_critical_notes_tools(
                     key=lambda e: (_PRIORITY_ORDER.get(e.priority, 2), e.created_at),
                 )
                 evicted_entry_id = sorted_entries[0].id
-
-            entries = _evict_if_needed(entries)
 
             # Remove evicted entry from repository if needed
             if evicted_entry_id:

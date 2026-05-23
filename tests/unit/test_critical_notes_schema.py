@@ -172,7 +172,7 @@ class TestMigrationFile:
     """Tests for critical_notes migration file."""
 
     MIGRATION_PATH = Path(
-        "daemon/migrations/versions/20260520_000001_add_critical_experience_to_projects.sql"
+        "daemon/migrations/versions/20260524_000001_create_critical_notes_table.sql"
     )
 
     def test_migration_file_exists(self):
@@ -189,22 +189,29 @@ class TestMigrationFile:
         content = self.MIGRATION_PATH.read_text()
         assert "-- DOWN" in content
 
-    def test_migration_up_adds_critical_experience_column(self):
-        """UP section should add critical_experience column."""
+    def test_migration_up_creates_critical_notes_table(self):
+        """UP section should create the critical_notes table."""
         content = self.MIGRATION_PATH.read_text()
         up_section = content.split("-- DOWN")[0]
-        assert "ALTER TABLE projects ADD COLUMN critical_experience" in up_section
+        assert "CREATE TABLE IF NOT EXISTS critical_notes" in up_section
 
-    def test_migration_down_drops_column(self):
-        """DOWN section should drop critical_experience column."""
+    def test_migration_down_drops_table(self):
+        """DOWN section should drop the critical_notes table."""
         content = self.MIGRATION_PATH.read_text()
         down_section = content.split("-- DOWN")[1]
-        assert "ALTER TABLE projects DROP COLUMN critical_experience" in down_section
+        assert "DROP TABLE IF EXISTS critical_notes" in down_section
 
-    def test_migration_default_empty_array(self):
-        """Default value should be empty array '[]'."""
+    def test_migration_has_project_id_foreign_key(self):
+        """Migration should include project_id foreign key to projects table."""
         content = self.MIGRATION_PATH.read_text()
-        assert "DEFAULT '[]'" in content
+        up_section = content.split("-- DOWN")[0]
+        assert "project_id TEXT NOT NULL REFERENCES projects" in up_section
+
+    def test_migration_creates_project_id_index(self):
+        """Migration should create an index on project_id."""
+        content = self.MIGRATION_PATH.read_text()
+        up_section = content.split("-- DOWN")[0]
+        assert "CREATE INDEX IF NOT EXISTS ix_critical_notes_project_id" in up_section
 
 
 class TestCriticalNoteModel:

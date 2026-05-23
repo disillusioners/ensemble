@@ -8,7 +8,6 @@ from daemon.tools.critical_notes import (
     create_critical_notes_tools,
     _find_similar_entry,
     _merge_entries,
-    _evict_if_needed,
     _MAX_ENTRIES,
     _MAX_SUMMARY_LEN,
 )
@@ -593,7 +592,7 @@ class TestMergeLogic:
 
 
 class TestEvictionLogic:
-    """Tests for the eviction logic (_evict_if_needed)."""
+    """Tests for the eviction logic in project_cn_add."""
 
     def test_eviction_at_max(self, mock_repo):
         """Fill to 30 entries, add 31st -> oldest lowest-priority evicted, total stays 30."""

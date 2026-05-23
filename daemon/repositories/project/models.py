@@ -130,8 +130,8 @@ class CriticalNoteModel(SQLModel, table=True):
     project_id: str = Field(
         sa_column=Column(String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True)
     )
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     source_agent: str = Field(default="")
     category: str = Field(default="")
     priority: str = Field(default="")
@@ -225,7 +225,6 @@ class Project(SQLModel, table=True):
             "shortnames": list(self._shortnames),
             "metadata": dict(self.project_metadata),
             "relationships": dict(self.relationships),
-            # critical_notes removed - now in dedicated table
             "creator_instance_id": self.creator_instance_id,
             "creator_agent_id": self.creator_agent_id,
             "created_at": self.created_at,

@@ -265,6 +265,14 @@ class InstanceMessagingService:
         except Exception:
             return 0
 
+    def _fetch_critical_notes_safe(self, project_id: str) -> list[dict]:
+        """Fetch critical notes for a project, returning empty list on failure."""
+        try:
+            return [n.to_dict() for n in self._project_repository.list_critical_notes(project_id)]
+        except Exception as e:
+            logger.warning(f"Failed to fetch critical notes for project {project_id}: {e}")
+            return []
+
     async def _maybe_compact_context(
         self,
         instance_id: str,
@@ -798,13 +806,7 @@ class InstanceMessagingService:
                         matched_project = self._project_repository.get(existing_project_id)
                         if matched_project:
                             from ..manager import format_project_context
-                            # Fetch critical notes from repository
-                            critical_notes = []
-                            try:
-                                cn_list = self._project_repository.list_critical_notes(matched_project.project_id)
-                                critical_notes = [note.to_dict() for note in cn_list]
-                            except Exception as e:
-                                logger.warning(f"Failed to fetch critical notes for project {matched_project.project_id}: {e}")
+                            critical_notes = self._fetch_critical_notes_safe(matched_project.project_id)
                             project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
                             message = project_context + message
                             injection_succeeded = True
@@ -825,12 +827,7 @@ class InstanceMessagingService:
                                 )
                                 
                                 # Fetch critical notes from repository
-                                critical_notes = []
-                                try:
-                                    cn_list = self._project_repository.list_critical_notes(matched_project.project_id)
-                                    critical_notes = [note.to_dict() for note in cn_list]
-                                except Exception as e:
-                                    logger.warning(f"Failed to fetch critical notes for project {matched_project.project_id}: {e}")
+                                critical_notes = self._fetch_critical_notes_safe(matched_project.project_id)
                                 
                                 # Prepend project context to message
                                 from ..manager import format_project_context

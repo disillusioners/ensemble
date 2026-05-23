@@ -891,7 +891,7 @@ class SQLModelProjectRepository:
             return True
 
     # Allowed fields for update (security: prevent overwriting id/project_id)
-    _ALLOWED_UPDATES = {"source_agent", "category", "priority", "summary", "reference", "created_at", "updated_at"}
+    _ALLOWED_UPDATES = {"source_agent", "category", "priority", "summary", "reference"}
 
     def update_critical_note(
         self,
