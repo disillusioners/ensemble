@@ -12,13 +12,16 @@ interface MockInstanceListResponse {
 
 // Mock ApiService
 class MockApiService {
-  listInstances(limit: number, offset: number, projectId?: string): Observable<MockInstanceListResponse> {
+  listInstances(limit: number, offset: number, projectId?: string, excludeKb?: boolean): Observable<MockInstanceListResponse> {
     return of({
       instances: [],
       total: 0,
     });
   }
 }
+
+// KB agent IDs to filter when showKb is false
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
 
 // Testable InstanceService implementation (mirrors actual service)
 class TestableInstanceService {
@@ -40,10 +43,15 @@ class TestableInstanceService {
   readonly totalInstances = signal<number>(0);
   readonly isLoadingMore = signal<boolean>(false);
   readonly loading = signal<boolean>(false);
+  readonly showKb = signal<boolean>(false);
 
   readonly hasMoreInstances = computed(
     () => this.instances().length < this.totalInstances()
   );
+
+  toggleKb(): void {
+    this.showKb.update(v => !v);
+  }
 
   constructor(private api: MockApiService) {}
 
@@ -78,7 +86,7 @@ class TestableInstanceService {
 
     try {
       const response = await firstValueFrom(
-        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId)
+        this.api.listInstances(PAGE_SIZE, this.currentOffset, projectId, !this.showKb())
       );
 
       if (append) {
@@ -242,7 +250,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances('project-123');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'project-123');
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'project-123', true);
     });
 
     it('should handle API errors gracefully', async () => {
@@ -348,7 +356,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances('my-project');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'my-project');
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'my-project', true);
     });
 
     it('should not pass projectId when undefined', async () => {
@@ -358,7 +366,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, true);
     });
   });
 
@@ -434,7 +442,7 @@ describe('InstanceService', () => {
 
       jest.advanceTimersByTime(11000);
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'test-project');
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'test-project', true);
     });
 
     it('should stop existing polling before starting new', () => {
@@ -633,6 +641,91 @@ describe('InstanceService', () => {
       expect(result).toHaveLength(2);
       expect(result.find(i => i.instance_id === 'local-only')).toBeDefined();
       expect(result.find(i => i.instance_id === 'inst-1')).toBeDefined();
+    });
+  });
+
+  describe('showKb signal', () => {
+    it('should default to false', () => {
+      expect(service.showKb()).toBe(false);
+    });
+
+    it('should be a writable signal', () => {
+      service.showKb.set(true);
+      expect(service.showKb()).toBe(true);
+    });
+  });
+
+  describe('toggleKb', () => {
+    it('should flip showKb signal from false to true', () => {
+      expect(service.showKb()).toBe(false);
+
+      service.toggleKb();
+
+      expect(service.showKb()).toBe(true);
+    });
+
+    it('should flip showKb signal from true to false', () => {
+      service.showKb.set(true);
+      expect(service.showKb()).toBe(true);
+
+      service.toggleKb();
+
+      expect(service.showKb()).toBe(false);
+    });
+
+    it('should toggle multiple times', () => {
+      expect(service.showKb()).toBe(false);
+
+      service.toggleKb();
+      expect(service.showKb()).toBe(true);
+
+      service.toggleKb();
+      expect(service.showKb()).toBe(false);
+
+      service.toggleKb();
+      expect(service.showKb()).toBe(true);
+    });
+  });
+
+  describe('loadInstances with excludeKb', () => {
+    it('should pass excludeKb=true to API when showKb is false', async () => {
+      service.showKb.set(false);
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0 })
+      );
+
+      await service.loadInstances();
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, true);
+    });
+
+    it('should pass excludeKb=false to API when showKb is true', async () => {
+      service.showKb.set(true);
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0 })
+      );
+
+      await service.loadInstances();
+
+      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, false);
+    });
+
+    it('should respect showKb state changes between calls', async () => {
+      mockApi.listInstances = jest.fn().mockReturnValue(
+        of({ instances: [], total: 0 })
+      );
+
+      service.showKb.set(false);
+      await service.loadInstances();
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
+
+      service.showKb.set(true);
+      await service.loadInstances();
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, false);
+
+      service.showKb.set(false);
+      await service.loadInstances();
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
     });
   });
 });

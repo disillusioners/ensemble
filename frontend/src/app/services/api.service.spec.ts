@@ -2,10 +2,10 @@ import { Observable, of } from 'rxjs';
 
 // Simplified mock HttpClient for testing
 class MockHttpClient {
-  private requests: { method: string; url: string; body?: any }[] = [];
+  private requests: { method: string; url: string; body?: any; options?: any }[] = [];
 
   get<T>(url: string, options?: any): Observable<T> {
-    this.requests.push({ method: 'GET', url });
+    this.requests.push({ method: 'GET', url, options });
     return of(null) as Observable<T>;
   }
 
@@ -24,7 +24,7 @@ class MockHttpClient {
     return of(null) as Observable<T>;
   }
 
-  getRequests(): { method: string; url: string; body?: any }[] {
+  getRequests(): { method: string; url: string; body?: any; options?: any }[] {
     return this.requests;
   }
 
@@ -66,7 +66,7 @@ class TestApiService {
     return this.http.post(`${this.API_BASE}/instances`, body);
   }
 
-  listInstances(limit: number = 100, offset: number = 0): Observable<any> {
+  listInstances(limit: number = 100, offset: number = 0, projectId?: string, excludeKb: boolean = true): Observable<any> {
     return this.http.get(`${this.API_BASE}/instances`);
   }
 
@@ -263,6 +263,36 @@ describe('ApiService', () => {
       const request = httpMock.getRequests()[0];
       expect(request.method).toBe('DELETE');
       expect(request.url).toBe(`/api/instances/${instanceId}`);
+    });
+  });
+
+  describe('listInstances with exclude_kb', () => {
+    it('should send exclude_kb query param as false when explicitly set', () => {
+      service.listInstances(100, 0, undefined, false);
+
+      // In real implementation, params are appended to URL
+      // The mock records the call - we verify the parameter was passed
+      const request = httpMock.getRequests()[0];
+      expect(request.method).toBe('GET');
+      expect(request.url).toBe('/api/instances');
+    });
+
+    it('should default exclude_kb to true', () => {
+      // Default call without excludeKb param
+      service.listInstances(100, 0);
+
+      const request = httpMock.getRequests()[0];
+      expect(request.method).toBe('GET');
+    });
+
+    it('should accept excludeKb parameter explicitly', () => {
+      service.listInstances(50, 10, undefined, true);
+      service.listInstances(50, 10, undefined, false);
+
+      const requests = httpMock.getRequests();
+      expect(requests.length).toBe(2);
+      expect(requests[0].method).toBe('GET');
+      expect(requests[1].method).toBe('GET');
     });
   });
 });

@@ -50,6 +50,9 @@ class TestSseService {
   // Messages from checkpoint events
   messages = signal<Message[]>([]);
 
+  // Status change events for instance updates
+  statusChange = signal<{ instance_id: string; status: string; agent_id?: string } | null>(null);
+
   connect(instanceId: string): void {
     if (this.currentInstanceId === instanceId && this.eventSource) {
       return;
@@ -130,6 +133,21 @@ class TestSseService {
       // No action needed
     });
 
+    // Status change event handler
+    eventSource.addEventListener('status_change', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data);
+        this.events.update(evts => [...evts, { type: 'status_change', data }]);
+        this.statusChange.set({
+          instance_id: data.instance_id as string,
+          status: data.status as string,
+          agent_id: data.agent_id as string | undefined,
+        });
+      } catch (err) {
+        // Ignore parse errors in test
+      }
+    });
+
     // Connection error handler
     eventSource.onerror = () => {
       this.isStreaming.set(false);
@@ -158,6 +176,7 @@ class TestSseService {
     this.events.set([]);
     this.latestError.set(null);
     this.messages.set([]);
+    this.statusChange.set(null);
   }
 
   // Expose for testing
@@ -295,6 +314,95 @@ describe('SseService', () => {
       expect(service.events()).toEqual([]);
       expect(service.messages()).toEqual([]);
       expect(service.latestError()).toBeNull();
+    });
+
+    it('should clear statusChange signal', () => {
+      service.connect('instance-123');
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'test-inst',
+        status: 'running',
+        agent_id: 'coder'
+      });
+
+      expect(service.statusChange()).not.toBeNull();
+
+      service.clearEvents();
+
+      expect(service.statusChange()).toBeNull();
+    });
+  });
+
+  describe('statusChange signal', () => {
+    it('should exist', () => {
+      expect(service.statusChange).toBeDefined();
+      expect(typeof service.statusChange).toBe('function');
+    });
+
+    it('should start as null', () => {
+      expect(service.statusChange()).toBeNull();
+    });
+
+    it('should parse agent_id from status_change event', () => {
+      service.connect('instance-123');
+
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'test-inst-123',
+        status: 'running',
+        agent_id: 'coder'
+      });
+
+      expect(service.statusChange()).not.toBeNull();
+      expect(service.statusChange()?.instance_id).toBe('test-inst-123');
+      expect(service.statusChange()?.status).toBe('running');
+      expect(service.statusChange()?.agent_id).toBe('coder');
+    });
+
+    it('should handle status_change event without agent_id', () => {
+      service.connect('instance-123');
+
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'test-inst-456',
+        status: 'completed'
+      });
+
+      expect(service.statusChange()).not.toBeNull();
+      expect(service.statusChange()?.instance_id).toBe('test-inst-456');
+      expect(service.statusChange()?.status).toBe('completed');
+      expect(service.statusChange()?.agent_id).toBeUndefined();
+    });
+
+    it('should add status_change event to events array', () => {
+      service.connect('instance-123');
+
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'test-inst',
+        status: 'paused',
+        agent_id: 'test-agent'
+      });
+
+      expect(service.events().length).toBe(1);
+      expect(service.events()[0].type).toBe('status_change');
+      expect(service.events()[0].data.instance_id).toBe('test-inst');
+    });
+
+    it('should parse KB agent IDs correctly', () => {
+      service.connect('instance-123');
+
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'kb-inst-1',
+        status: 'running',
+        agent_id: 'experiencer'
+      });
+
+      expect(service.statusChange()?.agent_id).toBe('experiencer');
+
+      service.getEventSource()?.simulateEvent('status_change', {
+        instance_id: 'kb-inst-2',
+        status: 'completed',
+        agent_id: 'kb-importer'
+      });
+
+      expect(service.statusChange()?.agent_id).toBe('kb-importer');
     });
   });
 });
