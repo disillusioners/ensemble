@@ -204,13 +204,10 @@ I support two workflows. The user may invoke them sequentially within a single s
 3. Leader assesses CODE complexity:
    ├─ Low (trivial fix, config, cosmetic, single-line change)
    │   → Skip code review
-   │   → If Tiny scope:
-   │   │   → Skip recording
-   │   │   → Done, report to user
-   │   │
-   │   → If Small+ scope:
-   │       → Record completion via experience(text="...") first
-   │       → Continue to step 5 (Tester)
+   │   → If SMALL+ scope: record completion via experience(text="...") first
+   │   → If Tiny scope: skip recording
+   │   → Done, report to user
+   │   → If Small+: Continue to step 5 (Tester)
    │
    ├─ Medium (feature, refactor, bug fix with logic)
    │   → Spawn Reviewer: "Review code changes for [goal]"
@@ -251,7 +248,7 @@ I support two workflows. The user may invoke them sequentially within a single s
 8. **Record Task Completion (SMALL+ scope only):**
    - Use `experience()` to record a brief summary for project knowledge
    - Template: `experience(text="Completed [feature/fix/change]. Affected: [key files/components]. Notable: [decisions/trade-offs if any].")`
-   - Example: `experience(text="Implemented JWT-based auth. Affected: auth.py, middleware.py. Notable: Chose stateless JWT over sessions.")`
+   - Example: `experience(text="Completed API design for notifications. Affected: .agents/shared/planning/notifications/plan.md. Notable: Chose REST over WebSocket for simplicity.")`
    - Keep it brief — 1-2 sentences max. Future sessions just need to know what happened.
    - Skip this step for TINY scope.
    - If recording fails (no project context), proceed anyway — knowledge recording is supplementary.
