@@ -6,6 +6,9 @@ import type { InstanceInfo, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 100;
 
+// KB agent IDs to filter when showKb is false
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
+
 // Terminal statuses are final states that should not be overwritten by polling
 const TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
   'completed',
@@ -46,10 +49,15 @@ export class InstanceService {
     // Subscribe to SSE status change events for optimistic updates
     effect(() => {
       const statusChange = this.sseService.statusChange();
-      if (statusChange) {
-        this.updateInstanceStatus(statusChange.instance_id, statusChange.status as InstanceStatus);
-        this.sseService.statusChange.set(null);  // Reset for re-trigger
+      if (!statusChange) return;
+
+      // Filter out KB instances when showKb is false
+      if (!this.showKb() && statusChange.agent_id && KB_AGENT_IDS.has(statusChange.agent_id)) {
+        return;
       }
+
+      this.updateInstanceStatus(statusChange.instance_id, statusChange.status as InstanceStatus);
+      this.sseService.statusChange.set(null);  // Reset for re-trigger
     });
   }
 

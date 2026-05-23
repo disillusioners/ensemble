@@ -19,7 +19,7 @@ export class SseService {
   messages = signal<Message[]>([]);
 
   // Status change events for instance updates
-  statusChange = signal<{ instance_id: string; status: string } | null>(null);
+  statusChange = signal<{ instance_id: string; status: string; agent_id?: string } | null>(null);
 
   constructor(private ngZone: NgZone) {}
 
@@ -167,6 +167,7 @@ export class SseService {
           this.statusChange.set({
             instance_id: data.instance_id as string,
             status: data.status as string,
+            agent_id: data.agent_id as string | undefined,
           });
         } catch (err) {
           console.error('[SSE] Failed to parse status_change:', err);

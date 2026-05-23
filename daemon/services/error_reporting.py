@@ -162,6 +162,9 @@ class ErrorReportingService:
                 if not instance:
                     return
                 
+                # Capture child agent_id before session closes
+                child_agent_id = instance.agent_id
+                
                 # b) Set child instance status to ERROR
                 instance.status = InstanceStatus.ERROR.value
                 instance.updated_at = datetime.now(timezone.utc).isoformat()
@@ -221,8 +224,9 @@ class ErrorReportingService:
                             parent.updated_at = datetime.now(timezone.utc).isoformat()
                             logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
                             
-                            # Capture parent_id for event publishing (outside transaction)
+                            # Capture parent_id and agent_id for event publishing (outside transaction)
                             completed_parent_id = parent.instance_id
+                            completed_parent_agent_id = parent.agent_id
                             completed_parent_parent_id = parent.parent_id
                             
                             session.commit()
@@ -230,7 +234,7 @@ class ErrorReportingService:
                             # Emit status_change SSE event for parent completed
                             if self._manager._live_hub:
                                 try:
-                                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed")
+                                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=completed_parent_agent_id)
                                 except Exception as e:
                                     logger.warning(f"Failed to emit status_change for completed parent: {e}")
                             
@@ -255,7 +259,7 @@ class ErrorReportingService:
                             # Emit status_change SSE event for parent waiting_children
                             if self._manager._live_hub:
                                 try:
-                                    await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children")
+                                    await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
                                 except Exception as e:
                                     logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
             
@@ -271,7 +275,7 @@ class ErrorReportingService:
             # Emit status_change SSE event for child error
             if self._manager._live_hub:
                 try:
-                    await self._manager._live_hub.stream_status_change(error_instance_id, "error")
+                    await self._manager._live_hub.stream_status_change(error_instance_id, "error", agent_id=child_agent_id)
                 except Exception as e:
                     logger.warning(f"Failed to emit status_change for error instance: {e}")
             

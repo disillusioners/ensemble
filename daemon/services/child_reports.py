@@ -432,7 +432,7 @@ Provide a concise summary:"""
                 # Emit status_change SSE event for parent waiting_children
                 if self._manager._live_hub:
                     try:
-                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children")
+                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
                     except Exception as e:
                         logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
                 return True, None, None
@@ -564,7 +564,7 @@ Provide a concise summary:"""
                     # Emit status_change SSE event
                     if self._manager._live_hub:
                         try:
-                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children")
+                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
@@ -594,7 +594,7 @@ Provide a concise summary:"""
                     # Emit status_change SSE event
                     if self._manager._live_hub:
                         try:
-                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children")
+                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
@@ -613,7 +613,7 @@ Provide a concise summary:"""
                 # Emit status_change SSE event for root instance completed
                 if self._manager._live_hub:
                     try:
-                        await self._manager._live_hub.stream_status_change(instance_id, "completed")
+                        await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=instance.agent_id)
                     except Exception as e:
                         logger.warning(f"Failed to emit status_change for completed root instance: {e}")
 
@@ -658,7 +658,7 @@ Provide a concise summary:"""
                 # Emit status_change SSE event for tool invocation completed
                 if self._manager._live_hub:
                     try:
-                        await self._manager._live_hub.stream_status_change(instance_id, "completed")
+                        await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=instance.agent_id)
                     except Exception as e:
                         logger.warning(f"Failed to emit status_change for completed tool invocation: {e}")
 
@@ -706,8 +706,16 @@ Provide a concise summary:"""
                 waiting_for_remaining,
             )
             
-            # Capture parent_id before session closes (instance will be detached)
+            # Capture parent_id and agent_id before session closes (instance will be detached)
             parent_id = instance.parent_id
+            child_agent_id = instance.agent_id
+            
+            # Capture parent's agent_id for status_change event
+            parent_agent_id = None
+            if completed_parent_id:
+                parent = session.get(Instance, completed_parent_id)
+                if parent:
+                    parent_agent_id = parent.agent_id
             
             session.commit()
 
@@ -719,7 +727,7 @@ Provide a concise summary:"""
         # Emit status_change SSE event for child completed
         if self._manager._live_hub:
             try:
-                await self._manager._live_hub.stream_status_change(instance_id, "completed")
+                await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=child_agent_id)
             except Exception as e:
                 logger.warning(f"Failed to emit status_change for completed instance: {e}")
         
@@ -741,7 +749,7 @@ Provide a concise summary:"""
             try:
                 # Emit status_change SSE event for parent completed
                 if self._manager._live_hub:
-                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed")
+                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=parent_agent_id)
             except Exception as e:
                 logger.warning(f"Failed to emit status_change for completed parent: {e}")
             

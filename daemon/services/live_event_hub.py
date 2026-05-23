@@ -182,18 +182,21 @@ class LiveEventHub:
         }
         await self._stream_to_connections(instance_id, event)
     
-    async def stream_status_change(self, instance_id: str, status: str) -> None:
+    async def stream_status_change(self, instance_id: str, status: str, agent_id: str | None = None) -> None:
         """Stream status change event to all active connections.
 
         Args:
             instance_id: The instance ID.
             status: The new status value.
+            agent_id: The agent ID (optional, for filtering KB instances on frontend).
         """
         event: dict[str, Any] = {
             "instance_id": instance_id,
             "event_type": "status_change",
             "status": status,
         }
+        if agent_id is not None:
+            event["agent_id"] = agent_id
         await self._stream_to_connections(instance_id, event)
 
     async def stream_lifecycle(

@@ -328,7 +328,7 @@ class InstanceLifecycleService:
         # (sync tools run via run_in_executor which doesn't have an event loop)
         from .main_loop_bridge import MainLoopBridge
         MainLoopBridge.run_async_no_wait(
-            self._manager._live_hub.stream_status_change(instance_id, "idle")
+            self._manager._live_hub.stream_status_change(instance_id, "idle", agent_id=resolved_agent_id)
         )
 
         return instance_id
@@ -400,7 +400,7 @@ class InstanceLifecycleService:
             self._manager._instance_repository.update_status(instance_id, "terminated")
 
         # 5.5. Emit status_change event
-        await self._manager._live_hub.stream_status_change(instance_id, "terminated")
+        await self._manager._live_hub.stream_status_change(instance_id, "terminated", agent_id=meta.agent_id if meta else None)
 
         # 6. Release project lock if JobQueueService is connected (async)
         if self._job_queue_service is not None:
@@ -560,7 +560,7 @@ class InstanceLifecycleService:
         if _pause_single(instance_id, prefetched_meta=meta):
             paused_ids.append(instance_id)
             # Emit status_change event for paused status
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.PAUSED.value)
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.PAUSED.value, agent_id=meta.agent_id if meta else None)
         else:
             skipped_ids.append(instance_id)
 

@@ -15,6 +15,9 @@ from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
 
+# KB agent IDs to exclude from instance listings
+KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
+
 
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
@@ -210,7 +213,7 @@ class SQLModelInstanceRepository:
             if project_id is not None:
                 count_stmt = count_stmt.where(Instance.project_id == project_id)
             if exclude_kb:
-                count_stmt = count_stmt.where(Instance.agent_id.not_in(['experiencer', 'kb-importer']))
+                count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
             total = db_session.exec(count_stmt).one()
 
             # Get paginated instances
@@ -220,7 +223,7 @@ class SQLModelInstanceRepository:
             if project_id is not None:
                 stmt = stmt.where(Instance.project_id == project_id)
             if exclude_kb:
-                stmt = stmt.where(Instance.agent_id.not_in(['experiencer', 'kb-importer']))
+                stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
             
             stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
             instances = list(db_session.exec(stmt))

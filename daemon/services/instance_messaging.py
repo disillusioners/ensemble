@@ -646,7 +646,7 @@ class InstanceMessagingService:
         
         # Emit status_change event if status was changed to running
         if status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value)
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=instance.agent_id if instance else None)
         
         # Trigger title generation for first user message (fire-and-forget)
         # This fires when instance transitions from IDLE -> RUNNING with a user message
