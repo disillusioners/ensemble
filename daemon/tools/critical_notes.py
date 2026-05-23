@@ -23,6 +23,7 @@ CATEGORY_DOC = "Manage critical notes entries for projects — lessons learned, 
 
 _MAX_ENTRIES = 30
 _MAX_SUMMARY_LEN = 200
+_PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2}
 
 
 def _is_valid_category(category: str) -> bool:
@@ -62,10 +63,9 @@ def _merge_entries(existing: CriticalNotes, new: CriticalNotes) -> CriticalNotes
     # Keep reference from whichever has one
     merged_reference = new.reference or existing.reference
     # Keep the higher priority
-    priority_order = {"critical": 0, "high": 1, "medium": 2}
     merged_priority = (
         existing.priority
-        if priority_order.get(existing.priority, 2) <= priority_order.get(new.priority, 2)
+        if _PRIORITY_ORDER.get(existing.priority, 2) <= _PRIORITY_ORDER.get(new.priority, 2)
         else new.priority
     )
 
@@ -86,7 +86,7 @@ def _evict_if_needed(entries: list[CriticalNotes]) -> list[CriticalNotes]:
     if len(entries) < _MAX_ENTRIES:
         return entries
 
-    priority_order = {"critical": 0, "high": 1, "medium": 2}
+    priority_order = _PRIORITY_ORDER
     sorted_entries = sorted(
         entries,
         key=lambda e: (priority_order.get(e.priority, 2), e.created_at),

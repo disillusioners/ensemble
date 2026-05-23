@@ -52,7 +52,7 @@ class TestProjectAPICriticalNotes:
 
     @pytest.mark.asyncio
     async def test_get_project_includes_critical_notes(self):
-        """GET /projects/{id} with project that has CE entries -> response.critical_notes is the list."""
+        """GET /projects/{id} with project that has critical notes entries -> response.critical_notes is the list."""
         # Arrange
         cn_entries = [
             {"id": "e1", "summary": "Use virtualenv for isolation", "category": "convention", "priority": "high"},
@@ -74,7 +74,7 @@ class TestProjectAPICriticalNotes:
 
     @pytest.mark.asyncio
     async def test_get_project_empty_critical_notes(self):
-        """GET /projects/{id} with project that has empty CE -> response.critical_notes is []."""
+        """GET /projects/{id} with project that has empty critical notes -> response.critical_notes is []."""
         # Arrange
         mock_project = create_mock_project(critical_notes=[])
 
