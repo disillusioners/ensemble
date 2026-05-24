@@ -55,7 +55,7 @@ class TestInstanceInfo:
         
         assert instance.instance_id == "test-instance-123"
         assert instance.agent_dir == "/path/to/agent"
-        assert instance.status == InstanceStatus.running
+        assert instance.status == InstanceStatus.RUNNING
         assert instance.parent_id is None
         assert instance.children == []
         assert instance.created_at == datetime(2024, 1, 1, 0, 0, 0)
@@ -242,16 +242,16 @@ class TestInstanceStatus:
 
     def test_instance_status_enum(self):
         """Test all InstanceStatus values."""
-        assert InstanceStatus.idle.value == "idle"
-        assert InstanceStatus.running.value == "running"
-        assert InstanceStatus.waiting.value == "waiting"
-        assert InstanceStatus.error.value == "error"
-        assert InstanceStatus.terminated.value == "terminated"
+        assert InstanceStatus.IDLE.value == "idle"
+        assert InstanceStatus.RUNNING.value == "running"
+        assert InstanceStatus.WAITING.value == "waiting"
+        assert InstanceStatus.ERROR.value == "error"
+        assert InstanceStatus.TERMINATED.value == "terminated"
 
     def test_instance_status_from_string(self):
         """Test InstanceStatus creation from string."""
         status = InstanceStatus("running")
-        assert status == InstanceStatus.running
+        assert status == InstanceStatus.RUNNING
 
     def test_instance_status_values(self):
         """Test InstanceStatus has correct number of values."""
@@ -324,14 +324,14 @@ class TestInstanceListResponse:
                 instance_id="instance-1",
                 agent_id="coder",
                 agent_dir="/path/to/agent1",
-                status=InstanceStatus.running,
+                status=InstanceStatus.RUNNING,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
             InstanceInfo(
                 instance_id="instance-2",
                 agent_id="coder",
                 agent_dir="/path/to/agent2",
-                status=InstanceStatus.idle,
+                status=InstanceStatus.IDLE,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
@@ -367,7 +367,7 @@ class TestInstanceListResponse:
                 instance_id="instance-1",
                 agent_id="coder",
                 agent_dir="/path/to/agent",
-                status=InstanceStatus.running,
+                status=InstanceStatus.RUNNING,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
         ]
@@ -445,7 +445,7 @@ class TestInstanceInfoProjectId:
             instance_id="test-instance",
             agent_id="coder",
             agent_dir="/path/to/agent",
-            status=InstanceStatus.running,
+            status=InstanceStatus.RUNNING,
             project_id="proj-123",
             created_at=datetime(2024, 1, 1, 0, 0, 0),
         )
@@ -457,7 +457,7 @@ class TestInstanceInfoProjectId:
             instance_id="test-instance",
             agent_id="coder",
             agent_dir="/path/to/agent",
-            status=InstanceStatus.running,
+            status=InstanceStatus.RUNNING,
             created_at=datetime(2024, 1, 1, 0, 0, 0),
         )
         assert instance.project_id is None
@@ -468,7 +468,7 @@ class TestInstanceInfoProjectId:
             instance_id="test-instance",
             agent_id="coder",
             agent_dir="/path/to/agent",
-            status=InstanceStatus.running,
+            status=InstanceStatus.RUNNING,
             project_id="proj-789",
             created_at=datetime(2024, 1, 1, 0, 0, 0),
         )
@@ -481,7 +481,7 @@ class TestInstanceInfoProjectId:
             instance_id="test-instance",
             agent_id="coder",
             agent_dir="/path/to/agent",
-            status=InstanceStatus.running,
+            status=InstanceStatus.RUNNING,
             created_at=datetime(2024, 1, 1, 0, 0, 0),
         )
         data = instance.model_dump()
