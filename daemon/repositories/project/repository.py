@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, insert, func, or_
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
@@ -378,6 +379,7 @@ class SQLModelProjectRepository:
 
             tags_update = updates.pop('tags', None)
             shortnames_update = updates.pop('shortnames', None)
+            metadata_update = updates.pop('project_metadata', None)
 
             for key, value in updates.items():
                 if hasattr(project, key):
@@ -392,6 +394,11 @@ class SQLModelProjectRepository:
                 self._sync_tags_bulk(session, project_id, tags_update)
             if shortnames_update is not None:
                 self._sync_shortnames_bulk(session, project_id, shortnames_update)
+            if metadata_update:
+                for k, v in metadata_update.items():
+                    self.set_metadata_record(session, project_id, k, v)
+                session.commit()
+                session.refresh(project)
 
             return self._enrich_project(session, project)
 
@@ -533,24 +540,22 @@ class SQLModelProjectRepository:
         ).first()
 
     def set_metadata_record(self, session: Session, project_id: str, key: str, value: Any) -> ProjectMetadataRecord:
-        """Insert or update a metadata record (upsert)."""
-        existing = self.get_metadata_record(session, project_id, key)
+        """Insert or update a metadata record (atomic upsert)."""
+        if not key or not key.strip():
+            raise ValueError("meta_key cannot be empty")
+
         now = datetime.now(timezone.utc).isoformat()
-        if existing:
-            existing.meta_value = value
-            existing.updated_at = now
-            session.add(existing)
-        else:
-            record = ProjectMetadataRecord(
-                project_id=project_id,
-                meta_key=key,
-                meta_value=value,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(record)
+        stmt = sqlite_insert(ProjectMetadataRecord).values(
+            project_id=project_id, meta_key=key, meta_value=value,
+            created_at=now, updated_at=now
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=['project_id', 'meta_key'],
+            set_={'meta_value': value, 'updated_at': now}
+        )
+        session.execute(stmt)
         session.flush()
-        return existing or record
+        return self.get_metadata_record(session, project_id, key)
 
     def delete_metadata_record(self, session: Session, project_id: str, key: str) -> bool:
         """Delete a metadata record by (project_id, key). Returns True if deleted."""
@@ -658,6 +663,9 @@ class SQLModelProjectRepository:
             )
             session.exec(
                 sql_delete(ProjectShortnameLink).where(ProjectShortnameLink.project_id == project_id)
+            )
+            session.exec(
+                sql_delete(ProjectMetadataRecord).where(ProjectMetadataRecord.project_id == project_id)
             )
 
             # Delete project

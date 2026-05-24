@@ -1,3 +1,6 @@
+-- Note: The old 'metadata' JSON column on projects remains but is no longer actively used.
+-- Metadata is now stored in project_metadata_records. SQLite cannot DROP COLUMN.
+
 -- Migration: create project_metadata_records table
 -- Created: 2026-05-24
 -- Author: system
