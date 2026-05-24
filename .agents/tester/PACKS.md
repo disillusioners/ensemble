@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 59 packs
-- Unit: 50 | Integration: 1 | Mock: 2 | E2E: 6
+- Total: 60 packs
+- Unit: 51 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
 
@@ -56,6 +56,7 @@
 | mcp_cold_load_race_unit_test | tests/unit/test_mcp_cold_load_race.py | MCP cold-load race condition: preload before restore, hot path no preload, graceful degradation, async delegation | 2 min | 2026-05-22 | ✅ PASS (6/6, feature/fix-mcp-cold-load) |
 | project_history_tools_unit_test | tests/unit/test_project_history_tools.py | Project history agent tools: add (validation, truncation, special chars), list (clamping, filter, pagination), search (format, special chars), delete (ownership), constants | 2 min | 2026-05-22 | ✅ PASS (38/38, project_history feature, no regressions) |
 | project_history_injection_unit_test | tests/unit/test_project_history_injection.py | Project history context injection: emoji icons, section rendering, limit 10, ordering, error handling, CE+history coexistence, ProjectResponse serialization | 2 min | 2026-05-22 | ✅ PASS (28/28, project_history feature, no regressions) |
+| project_metadata_table_unit_test | tests/unit/test_project_metadata_table.py | Project metadata table separation: CRUD, upsert, enrichment, create/update/delete integration, value types, migration | 2 min | 2026-05-25 | ✅ PASS (42/42, feature/metadata-table, 0 regressions) |
 
 ## Integration Test Packs
 

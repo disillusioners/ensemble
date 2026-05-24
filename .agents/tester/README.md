@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 message-api-job-queue)
+## Test Results (Latest: 2026-05-25 project-metadata-table)
+
+### Project Metadata Table Separation (2026-05-25)
+- **Branch**: feature/metadata-table (commits de4ad4f + d897fc8 + 0e59e21 + 9861040)
+- **New Tests**: 42/42 PASS — CRUD, upsert, enrichment, create/update/delete, value types, migration
+- **Regression**: 2593/2593 PASS (core 658 + api 201 + job_queue 1073 + frontend 661, 27 skipped)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 1 — test_models.py enum casing (running→RUNNING)
+- See `.agents/tester/RESULTS/2026-05-25-project-metadata-table.md` for full report
+
+### Project Metadata Table Status: ✅ READY (42 new tests pass, 2593 regression tests pass, dev.sh stable, 0 regressions)
 
 ### Message API → JobQueue (2026-05-25)
 - **Commits**: 914adaa + ee3bdca + 20b61f0 + 215629c + daf846e
