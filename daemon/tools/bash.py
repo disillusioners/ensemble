@@ -39,11 +39,11 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
 @tool
 async def bash(
     command: str | List[str],
-    timeout: int | None = 1800,
+    timeout: int | float | None = 1800,
     workdir: str | None = None,
     input: str | None = None,
 ) -> str:
-    """Execute a bash command and return the output. Timeout parameter is in seconds. Use tool_help("bash") for details."""
+    """Execute a bash command and return the output. Timeout is in seconds (0-1800, default 1800). Use tool_help("bash") for details."""
     # Validate timeout parameter
     if timeout is not None:
         if timeout < 0:
@@ -70,9 +70,11 @@ async def bash(
 
         try:
             stdin_bytes = input.encode() if input else None
+            # timeout=0 means "no timeout" — pass None to wait_for
+            actual_timeout = None if timeout == 0 else timeout
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(input=stdin_bytes),
-                timeout=timeout,
+                timeout=actual_timeout,
             )
         except asyncio.TimeoutError:
             await _kill_process(proc)

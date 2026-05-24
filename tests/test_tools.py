@@ -73,6 +73,51 @@ class TestBashTool:
         assert result.strip() != ""
         assert "echo $HOME" not in result  # Should expand the variable
 
+    @pytest.mark.asyncio
+    async def test_bash_negative_timeout_returns_error(self):
+        """Test that negative timeout returns an error with the timeout value."""
+        result = await bash.ainvoke({"command": "echo hello", "timeout": -5})
+
+        assert "ERROR" in result
+        assert "-5" in result
+        assert "Timeout must be ≥ 0 seconds" in result
+
+    @pytest.mark.asyncio
+    async def test_bash_timeout_exceeds_max_returns_error(self):
+        """Test that timeout > 1800 returns an error with the timeout value."""
+        result = await bash.ainvoke({"command": "echo hello", "timeout": 2000})
+
+        assert "ERROR" in result
+        assert "2000" in result
+        assert "Timeout must be ≤ 1800 seconds" in result
+
+    @pytest.mark.asyncio
+    async def test_bash_zero_timeout_means_no_timeout(self):
+        """Test that timeout=0 works correctly (no timeout limit)."""
+        # Use a command that would timeout with a short timeout but completes quickly
+        result = await bash.ainvoke({"command": "echo hello", "timeout": 0})
+
+        assert "hello" in result
+        assert "EXIT CODE: 0" in result
+        assert "timed out" not in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_bash_float_timeout_works(self):
+        """Test that float timeout (e.g., 30.5) is accepted and works correctly."""
+        # Use a reasonable float timeout that is less than 1800
+        result = await bash.ainvoke({"command": "echo float_test", "timeout": 30.5})
+
+        assert "float_test" in result
+        assert "EXIT CODE: 0" in result
+
+    @pytest.mark.asyncio
+    async def test_bash_float_timeout_with_short_duration(self):
+        """Test float timeout with a short duration still times out correctly."""
+        result = await bash.ainvoke({"command": "sleep 5", "timeout": 0.5})
+
+        assert "timed out" in result.lower()
+        assert "0.5" in result or "0.5" in result  # Error message should contain the timeout value
+
 
 class TestListDirectoryTool:
     """Tests for list_directory tool."""
