@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
-from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel
+from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel, ProjectMetadataRecord
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 
 
@@ -40,12 +40,18 @@ class SQLModelProjectRepository:
         ).all()
         return [link.shortname for link in links]
 
+    def _load_metadata(self, session: Session, project_id: str) -> dict[str, Any]:
+        """Load metadata from project_metadata_records table."""
+        records = self.list_metadata_records(session, project_id)
+        return {r.meta_key: r.meta_value for r in records}
+
     def _enrich_project(self, session: Session, project: Project | None) -> Project | None:
-        """Load tags/shortnames onto project."""
+        """Load tags/shortnames/metadata onto project."""
         if project is None:
             return None
         project.tags = self._load_tags(session, project.project_id)
         project.shortnames = self._load_shortnames(session, project.project_id)
+        project.project_metadata = self._load_metadata(session, project.project_id)
         return project
 
     def _enrich_projects(self, session: Session, projects: list[Project]) -> list[Project]:
@@ -53,6 +59,7 @@ class SQLModelProjectRepository:
         for p in projects:
             p.tags = self._load_tags(session, p.project_id)
             p.shortnames = self._load_shortnames(session, p.project_id)
+            p.project_metadata = self._load_metadata(session, p.project_id)
         return projects
 
     def _sync_tags_bulk(self, session: Session, project_id: str, tags: list[str]) -> None:
@@ -122,7 +129,7 @@ class SQLModelProjectRepository:
                 main_directory=main_directory,
                 related_directories=related_directories or [],
                 description=description,
-                project_metadata=metadata or {},
+                project_metadata={},  # Stored in project_metadata_records table; enriched on read
                 relationships={},
                 creator_instance_id=creator_instance_id,
                 creator_agent_id=creator_agent_id,
@@ -133,6 +140,13 @@ class SQLModelProjectRepository:
             session.add(project)
             session.commit()
             session.refresh(project)
+
+            # Store initial metadata in dedicated table
+            if metadata:
+                for key, value in metadata.items():
+                    self.set_metadata_record(session, project.project_id, key, value)
+                session.commit()
+                session.refresh(project)
 
             self._sync_tags_bulk(session, project.project_id, tags)
             self._sync_shortnames_bulk(session, project.project_id, shortnames)
@@ -179,12 +193,16 @@ class SQLModelProjectRepository:
                 project_type="system",
                 status=ProjectStatus.ACTIVE.value,
                 description="System default project for jobs without an explicit project",
-                project_metadata={"is_system": True},
+                project_metadata={},  # Stored in project_metadata_records table; enriched on read
                 relationships={},
                 created_at=now,
                 updated_at=now,
             )
             session.add(project)
+            session.commit()
+
+            # Store metadata in dedicated table
+            self.set_metadata_record(session, project_id, "is_system", True)
             session.commit()
 
         return project_id
@@ -505,6 +523,50 @@ class SQLModelProjectRepository:
     # METADATA
     # --------------------------------------------------------
 
+    def get_metadata_record(self, session: Session, project_id: str, key: str) -> ProjectMetadataRecord | None:
+        """Get a single metadata record."""
+        return session.exec(
+            select(ProjectMetadataRecord).where(
+                ProjectMetadataRecord.project_id == project_id,
+                ProjectMetadataRecord.meta_key == key
+            )
+        ).first()
+
+    def set_metadata_record(self, session: Session, project_id: str, key: str, value: Any) -> ProjectMetadataRecord:
+        """Insert or update a metadata record (upsert)."""
+        existing = self.get_metadata_record(session, project_id, key)
+        now = datetime.now(timezone.utc).isoformat()
+        if existing:
+            existing.meta_value = value
+            existing.updated_at = now
+            session.add(existing)
+        else:
+            record = ProjectMetadataRecord(
+                project_id=project_id,
+                meta_key=key,
+                meta_value=value,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(record)
+        session.flush()
+        return existing or record
+
+    def delete_metadata_record(self, session: Session, project_id: str, key: str) -> bool:
+        """Delete a metadata record by (project_id, key). Returns True if deleted."""
+        record = self.get_metadata_record(session, project_id, key)
+        if record:
+            session.delete(record)
+            session.flush()
+            return True
+        return False
+
+    def list_metadata_records(self, session: Session, project_id: str) -> list[ProjectMetadataRecord]:
+        """List all metadata records for a project."""
+        return session.exec(
+            select(ProjectMetadataRecord).where(ProjectMetadataRecord.project_id == project_id)
+        ).all()
+
     def set_metadata(self, project_id: str, key: str, value: Any) -> Project | None:
         """Set a metadata key-value pair."""
         with Session(self.engine) as session:
@@ -512,9 +574,9 @@ class SQLModelProjectRepository:
             if project is None:
                 return None
 
-            project.project_metadata[key] = value
+            self.set_metadata_record(session, project_id, key, value)
             project.updated_at = datetime.now(timezone.utc).isoformat()
-            flag_modified(project, "project_metadata")
+            session.add(project)
             session.commit()
             session.refresh(project)
 
@@ -527,9 +589,9 @@ class SQLModelProjectRepository:
             if project is None:
                 return None
 
-            project.project_metadata.pop(key, None)
+            self.delete_metadata_record(session, project_id, key)
             project.updated_at = datetime.now(timezone.utc).isoformat()
-            flag_modified(project, "project_metadata")
+            session.add(project)
             session.commit()
             session.refresh(project)
 

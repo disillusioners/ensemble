@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, String
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
@@ -151,6 +151,24 @@ class CriticalNoteModel(SQLModel, table=True):
             "summary": self.summary,
             "reference": self.reference,
         }
+
+
+class ProjectMetadataRecord(SQLModel, table=True):
+    """Dedicated table for project metadata key-value pairs."""
+    __tablename__ = "project_metadata_records"
+
+    id: int | None = Field(default=None, sa_column=Column(Integer, primary_key=True, autoincrement=True))
+    project_id: str = Field(
+        sa_column=Column(String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True)
+    )
+    meta_key: str = Field(sa_column=Column(String, nullable=False))
+    meta_value: Any = Field(sa_column=Column(JSON, nullable=True))
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "meta_key", name="uq_project_metadata_project_key"),
+    )
 
 
 class Project(SQLModel, table=True):
