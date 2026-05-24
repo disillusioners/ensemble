@@ -18,6 +18,7 @@ PYINSTALLER_SPEC = ensemble.spec
 # Binary name
 BINARY_NAME = ensemble-prod
 BACKUP_NAME = backup-$(BINARY_NAME)-$(shell date +%Y%m%d-%H%M%S).bak
+DATA_BACKUP_DIR = data-backup/data-$(shell date +%Y%m%d-%H%M%S)
 
 # Colors for output
 GREEN := \033[0;32m
@@ -107,6 +108,16 @@ install: pyinstaller
 		echo "$(GREEN)Backed up to $(BACKUP_NAME)$(NC)"; \
 	else \
 		echo "$(GREEN)No existing binary to backup.$(NC)"; \
+	fi
+	
+	# Backup existing data directory if present
+	@if [ -d "$(INSTALL_DIR)/data" ] && [ "$$(ls -A $(INSTALL_DIR)/data 2>/dev/null)" ]; then \
+		echo "$(YELLOW)Backing up existing data directory...$(NC)"; \
+		mkdir -p $(INSTALL_DIR)/$(DATA_BACKUP_DIR); \
+		cp -r $(INSTALL_DIR)/data/* $(INSTALL_DIR)/$(DATA_BACKUP_DIR)/; \
+		echo "$(GREEN)Backed up to $(DATA_BACKUP_DIR)$(NC)"; \
+	else \
+		echo "$(GREEN)No existing data to backup.$(NC)"; \
 	fi
 	
 	# Create installation directory
