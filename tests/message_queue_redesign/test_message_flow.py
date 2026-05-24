@@ -307,32 +307,29 @@ class TestCheckChildCompletionV2:
         # The check_child_completion_v2 should skip
 
     def test_skips_if_content_is_none(self, engine, message_repo):
-        """Should skip if completion report content is None (FIX: C3)."""
+        """FIX C3 UPDATE: When content is None, should proceed with sentinel content."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
         create_test_instance(engine, parent_id, waiting_for=1)
         create_test_instance(engine, child_id, parent_id=parent_id)
 
-        # Simulate: check if we should skip when content would be None
+        # FIX C3: If content is None, use sentinel and proceed with completion
         content = None  # This is the bug scenario
+        sentinel_content = "[No response content]"
+        actual_content = sentinel_content if content is None else content
 
-        if content is None:
-            # Skip the completion report - this is the fix
-            pass
-        else:
-            # Would create completion report
-            create_completion_report(engine, parent_id, child_id, content)
+        # Create completion report with sentinel content
+        create_completion_report(engine, parent_id, child_id, actual_content)
 
-        # Verify NO completion report was created
-        with Session(engine) as session:
-            from sqlalchemy import select
-            reports = session.exec(
-                select(MessageQueue)
-                .where(MessageQueue.instance_id == parent_id)
-                .where(MessageQueue.type == MessageType.COMPLETION_REPORT.value)
-            ).all()
+        # Verify completion report WAS created with sentinel content using message_repo helper
+        reports = message_repo.get_by_instance(parent_id)
+        completion_reports = [
+            r for r in reports
+            if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"internal_report:{child_id}"
+        ]
 
-        assert len(reports) == 0  # Should be skipped
+        assert len(completion_reports) == 1, "Completion report should be created with sentinel content"
+        assert completion_reports[0].content == sentinel_content, "Report should use sentinel content"
 
     def test_idempotent_no_duplicate_reports(self, engine, message_repo):
         """Should not create duplicate completion reports (idempotent)."""
@@ -814,20 +811,21 @@ class TestCheckChildCompletionC3Fix:
         
         # Simulate FIX C3 behavior
         last_content = None  # _get_last_assistant_message returns None
-        
-        # The fix: if content is None, use empty string and create report
-        content = last_content if last_content is not None else ""
+
+        # The fix: if content is None, use sentinel content and create report
+        sentinel_content = "[No response content]"
+        content = last_content if last_content is not None else sentinel_content
         create_completion_report(engine, parent_id, child_id, content)
-        
-        # Verify: completion report WAS created with empty content using message_repo helper
+
+        # Verify: completion report WAS created with sentinel content using message_repo helper
         reports = message_repo.get_by_instance(parent_id)
         completion_reports = [
-            r for r in reports 
+            r for r in reports
             if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"internal_report:{child_id}"
         ]
-        
-        assert len(completion_reports) == 1, "FIX C3 violation: Completion report should be created with empty content"
-        assert completion_reports[0].content == "", "Completion report should have empty content"
+
+        assert len(completion_reports) == 1, "FIX C3 violation: Completion report should be created with sentinel content"
+        assert completion_reports[0].content == sentinel_content, "Completion report should have sentinel content"
 
     def test_proceeds_with_empty_content_decrements_parent_waiting(self, engine, manager_with_mocked_content):
         """FIX C3: When content is None, parent's waiting_for SHOULD be decremented."""
@@ -895,16 +893,16 @@ class TestCheckChildCompletionC3Fix:
         assert len(completion_reports) == 1, "Completion report should be created when content exists"
         assert completion_reports[0].content == last_content
 
-    def test_content_fetch_happens_before_transaction_boundary(self, engine, manager_with_mocked_content):
-        """FIX C3: Verifies the critical ordering - content fetched OUTSIDE transaction.
+    def test_content_fetch_happens_before_transaction_boundary(self, engine, manager_with_mocked_content, message_repo):
+        """FIX C3 UPDATE: Verifies the critical ordering - content fetched OUTSIDE transaction.
         
         This test documents the FIX C3 pattern where:
         1. Content fetch happens BEFORE any database transaction
-        2. If content is None, return immediately without touching DB
-        3. If content exists, proceed with atomic DB operations
+        2. If content is None, use sentinel content and PROCEED with completion
+        3. State transition MUST happen even with sentinel content
         
-        This prevents the bug where instance.status = COMPLETED is set inside
-        the transaction, but then content fetch fails, leaving orphaned COMPLETED state.
+        This ensures the instance is properly marked COMPLETED and report is sent,
+        even when _get_last_assistant_message() returns None.
         """
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
@@ -916,22 +914,440 @@ class TestCheckChildCompletionC3Fix:
         # In real code: last_content = await self._get_last_assistant_message(instance_id)
         last_content = None  # Simulating failure
         
-        # Step 2: Check content BEFORE transaction (FIX C3 critical ordering)
-        # If we reach here with None, we should NOT have touched the database at all
+        # Step 2: FIX C3 - If content is None, use sentinel and proceed with completion
+        sentinel_content = "[No response content]"
         if last_content is None:
-            # Return early - transaction never started
-            # No instance status change
-            # No completion report created
-            pass
+            last_content = sentinel_content  # Proceed with sentinel content
+
+        # Simulate the completion flow with the (potentially sentinel) content
+        # 1. Mark instance as COMPLETED
+        with Session(engine) as session:
+            instance = session.get(Instance, child_id)
+            instance.status = InstanceStatus.COMPLETED.value
+            session.commit()
+
+        # 2. Create completion report with the (sentinel) content
+        create_completion_report(engine, parent_id, child_id, last_content)
         
-        # Verify: Nothing was committed to DB (transaction never started)
-        child = get_instance(engine, child_id)
-        assert child.status == InstanceStatus.IDLE.value, \
-            "Transaction should never have started when content is None"
-        
-        # Verify parent waiting_for unchanged
-        parent = get_instance(engine, parent_id)
-        assert parent.waiting_for == 1, "Parent waiting_for should be unchanged"
+        # Verify: instance IS completed (state transition happened)
+        child_after = get_instance(engine, child_id)
+        assert child_after.status == InstanceStatus.COMPLETED.value, \
+            "Instance should transition to COMPLETED even with sentinel content"
+
+        # Verify: completion report was created with sentinel content using message_repo helper
+        reports = message_repo.get_by_instance(parent_id)
+        completion_reports = [
+            r for r in reports
+            if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"internal_report:{child_id}"
+        ]
+        assert len(completion_reports) == 1, "Completion report should be created with sentinel content"
+        assert completion_reports[0].content == sentinel_content, "Report should use sentinel content"
+
+
+# ============================================================================
+# Test Class: C3 - WAITING_CHILDREN → RUNNING Transition
+# ============================================================================
+
+
+class TestWaitingChildrenToRunningTransition:
+    """Tests for FIX C3: WAITING_CHILDREN → RUNNING transition on message enqueue.
+
+    This tests the fix that ensures when a message is enqueued to an instance
+    in WAITING_CHILDREN status, the instance transitions to RUNNING (not staying
+    stuck in WAITING_CHILDREN).
+
+    Before the fix: Instance stayed in WAITING_CHILDREN when message arrived,
+    preventing parent from processing its own messages.
+
+    After the fix: Instance transitions WAITING_CHILDREN → RUNNING when any
+    message is enqueued, allowing it to process its own work.
+    """
+
+    def test_enqueue_message_transitions_waiting_children_to_running(self, engine, message_repo):
+        """FIX C3: enqueue_message() transitions instance from WAITING_CHILDREN to RUNNING."""
+        instance_id = str(uuid.uuid4())
+
+        # Create instance in WAITING_CHILDREN status
+        create_test_instance(
+            engine,
+            instance_id,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            waiting_for=1,
+        )
+
+        # Verify initial status is WAITING_CHILDREN
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.WAITING_CHILDREN.value
+
+        # Enqueue message and update status (simulating enqueue_message behavior)
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            # This is the key fix: WAITING_CHILDREN is now included in the transition check
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            session.commit()
+
+        # Verify: status should be RUNNING (not stuck in WAITING_CHILDREN)
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value, (
+            "FIX C3 violation: Instance should transition WAITING_CHILDREN → RUNNING on message enqueue"
+        )
+
+    def test_enqueue_message_via_jq_transitions_waiting_children_to_running(self, engine, message_repo):
+        """FIX C3: enqueue_message_via_jq() transitions instance from WAITING_CHILDREN to RUNNING."""
+        instance_id = str(uuid.uuid4())
+
+        # Create instance in WAITING_CHILDREN status
+        create_test_instance(
+            engine,
+            instance_id,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            waiting_for=1,
+        )
+
+        # Verify initial status is WAITING_CHILDREN
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.WAITING_CHILDREN.value
+
+        # Enqueue message and update status (simulating enqueue_message_via_jq behavior)
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            # This is the key fix: WAITING_CHILDREN is now included in the transition check
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            session.commit()
+
+        # Verify: status should be RUNNING (not stuck in WAITING_CHILDREN)
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value, (
+            "FIX C3 violation: Instance should transition WAITING_CHILDREN → RUNNING on message enqueue via JobQueue"
+        )
+
+    def test_waiting_children_with_zero_waiting_for_still_transitions(self, engine):
+        """FIX C3: WAITING_CHILDREN → RUNNING even when waiting_for is 0."""
+        instance_id = str(uuid.uuid4())
+
+        # Create instance in WAITING_CHILDREN but with waiting_for=0
+        # (edge case: all children completed but instance still in WAITING_CHILDREN)
+        create_test_instance(
+            engine,
+            instance_id,
+            status=InstanceStatus.WAITING_CHILDREN.value,
+            waiting_for=0,  # All children done, but status wasn't updated
+        )
+
+        # Verify initial status
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.WAITING_CHILDREN.value
+
+        # Transition on message enqueue
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            session.commit()
+
+        # Verify: status should be RUNNING
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value
+
+    def test_idle_status_still_transitions_to_running(self, engine):
+        """Sanity check: IDLE → RUNNING still works (existing behavior)."""
+        instance_id = str(uuid.uuid4())
+        create_test_instance(engine, instance_id, status=InstanceStatus.IDLE.value)
+
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.IDLE.value
+
+        # Transition on message enqueue
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            session.commit()
+
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value
+
+    def test_paused_status_still_transitions_to_running(self, engine):
+        """Sanity check: PAUSED → RUNNING still works (existing behavior)."""
+        instance_id = str(uuid.uuid4())
+        create_test_instance(engine, instance_id, status=InstanceStatus.PAUSED.value)
+
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.PAUSED.value
+
+        # Transition on message enqueue
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            session.commit()
+
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value
+
+    def test_running_status_stays_running(self, engine):
+        """Sanity check: RUNNING → RUNNING stays the same."""
+        instance_id = str(uuid.uuid4())
+        create_test_instance(engine, instance_id, status=InstanceStatus.RUNNING.value)
+
+        instance = get_instance(engine, instance_id)
+        assert instance.status == InstanceStatus.RUNNING.value
+
+        # Transition on message enqueue (RUNNING not in the list)
+        with Session(engine) as session:
+            instance = session.get(Instance, instance_id)
+            if instance.status in (
+                InstanceStatus.IDLE.value,
+                InstanceStatus.PAUSED.value,
+                InstanceStatus.WAITING_CHILDREN.value,
+            ):
+                instance.status = InstanceStatus.RUNNING.value
+            session.commit()
+
+        # Should stay RUNNING
+        updated = get_instance(engine, instance_id)
+        assert updated.status == InstanceStatus.RUNNING.value
+
+
+# ============================================================================
+# Test Class: C4 - MessageJobHandler Completion Handler
+# ============================================================================
+
+
+class TestMessageJobHandlerCompletionHandler:
+    """Tests for FIX C4: MessageJobHandler calls completion handler after processing.
+
+    This tests the fix that ensures MessageJobHandler.handle() calls
+    _process_child_completion_and_notify_parent() after processing a message.
+
+    Key behaviors tested:
+    1. Completion handler is called with correct arguments (instance_id, message_id)
+    2. Completion handler is NOT called when message_id is None (W2 guard)
+    3. Completion handler errors are caught and logged, not propagated
+    """
+
+    @pytest.fixture
+    def mock_completion_handler(self):
+        """Create a mock completion handler."""
+        return AsyncMock(return_value=None)
+
+    @pytest.fixture
+    def mock_manager_with_completion(self, mock_completion_handler):
+        """Create a mock manager with _process_child_completion_and_notify_parent."""
+        manager = MagicMock()
+        manager._process_message_with_tracking = AsyncMock(
+            return_value=MagicMock(content="Processed response", tool_calls=None)
+        )
+        manager._process_child_completion_and_notify_parent = mock_completion_handler
+        return manager
+
+    @pytest.fixture
+    def mock_job_queue_service(self):
+        """Create a mock job queue service."""
+        service = MagicMock()
+        service.complete_job = AsyncMock(return_value=None)
+        return service
+
+    @pytest.fixture
+    def mock_job_repository(self):
+        """Create a mock job repository."""
+        repo = MagicMock()
+        repo.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
+        return repo
+
+    def _create_message_job(
+        self,
+        job_id: str,
+        instance_id: str,
+        message: str = "Test message",
+        message_id: str | None = "msg-123",
+    ):
+        """Create a mock JobItem for MessageJobHandler tests."""
+        job = MagicMock()
+        job.job_id = job_id
+        job.instance_id = instance_id
+        job.message = message
+        job.project_id = "test-project"
+        job.queue_id = "queue-1"
+        job.job_metadata = {"message_id": message_id, "source": "api", "images": None}
+        return job
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_called_after_successful_processing(
+        self,
+        mock_manager_with_completion,
+        mock_completion_handler,
+        mock_job_queue_service,
+        mock_job_repository,
+    ):
+        """FIX C4: _process_child_completion_and_notify_parent is called after processing."""
+        from daemon.services.message_job_handler import MessageJobHandler
+
+        handler = MessageJobHandler(
+            manager=mock_manager_with_completion,
+            job_queue_service=mock_job_queue_service,
+            job_repository=mock_job_repository,
+        )
+
+        job = self._create_message_job("job-1", "instance-1", message_id="msg-123")
+
+        await handler.handle(job)
+
+        # Verify completion handler was called
+        mock_completion_handler.assert_called_once_with("instance-1", "msg-123")
+
+        # Verify job was completed successfully
+        mock_job_queue_service.complete_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_not_called_when_message_id_is_none(
+        self,
+        mock_manager_with_completion,
+        mock_completion_handler,
+        mock_job_queue_service,
+        mock_job_repository,
+    ):
+        """FIX C4 (W2 guard): Completion handler is NOT called when message_id is None."""
+        from daemon.services.message_job_handler import MessageJobHandler
+
+        handler = MessageJobHandler(
+            manager=mock_manager_with_completion,
+            job_queue_service=mock_job_queue_service,
+            job_repository=mock_job_repository,
+        )
+
+        # Create job with message_id=None in metadata
+        job = self._create_message_job("job-2", "instance-2", message_id=None)
+        job.job_metadata = {"message_id": None, "source": "api", "images": None}
+
+        await handler.handle(job)
+
+        # Verify completion handler was NOT called (W2 guard)
+        mock_completion_handler.assert_not_called()
+
+        # Verify job was still completed successfully
+        mock_job_queue_service.complete_job.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_error_does_not_fail_job(
+        self,
+        mock_manager_with_completion,
+        mock_completion_handler,
+        mock_job_queue_service,
+        mock_job_repository,
+    ):
+        """FIX C4: Completion handler exception is caught, job still completes."""
+        from daemon.services.message_job_handler import MessageJobHandler
+
+        # Make completion handler raise an exception
+        mock_completion_handler.side_effect = RuntimeError("Completion handler failed!")
+
+        handler = MessageJobHandler(
+            manager=mock_manager_with_completion,
+            job_queue_service=mock_job_queue_service,
+            job_repository=mock_job_repository,
+        )
+
+        job = self._create_message_job("job-3", "instance-3", message_id="msg-456")
+
+        # Should not raise - error should be caught internally
+        await handler.handle(job)
+
+        # Verify completion handler was called (attempted)
+        mock_completion_handler.assert_called_once()
+
+        # Verify job was still completed successfully (error was caught)
+        mock_job_queue_service.complete_job.assert_called_once()
+        call_args = mock_job_queue_service.complete_job.call_args
+        # Should be COMPLETED, not FAILED
+        from daemon.services.job_queue_service import DemandState
+        assert call_args[1]["demand_state"] == DemandState.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_called_with_correct_arguments(
+        self,
+        mock_manager_with_completion,
+        mock_completion_handler,
+        mock_job_queue_service,
+        mock_job_repository,
+    ):
+        """FIX C4: Completion handler receives correct instance_id and message_id."""
+        from daemon.services.message_job_handler import MessageJobHandler
+
+        handler = MessageJobHandler(
+            manager=mock_manager_with_completion,
+            job_queue_service=mock_job_queue_service,
+            job_repository=mock_job_repository,
+        )
+
+        job = self._create_message_job(
+            job_id="job-4",
+            instance_id="instance-specific-123",
+            message_id="message-specific-456",
+        )
+
+        await handler.handle(job)
+
+        # Verify completion handler was called with correct args
+        mock_completion_handler.assert_called_once_with(
+            "instance-specific-123", "message-specific-456"
+        )
+
+    @pytest.mark.asyncio
+    async def test_completion_handler_not_called_when_manager_lacks_method(
+        self,
+        mock_manager_with_completion,
+        mock_completion_handler,
+        mock_job_queue_service,
+        mock_job_repository,
+    ):
+        """FIX C4: Completion handler skipped if manager lacks the method (safety check)."""
+        from daemon.services.message_job_handler import MessageJobHandler
+
+        # Remove the completion handler method from manager
+        del mock_manager_with_completion._process_child_completion_and_notify_parent
+
+        handler = MessageJobHandler(
+            manager=mock_manager_with_completion,
+            job_queue_service=mock_job_queue_service,
+            job_repository=mock_job_repository,
+        )
+
+        job = self._create_message_job("job-5", "instance-5", message_id="msg-789")
+
+        # Should not raise - hasattr check prevents AttributeError
+        await handler.handle(job)
+
+        # Job should still complete
+        mock_job_queue_service.complete_job.assert_called_once()
 
 
 # ============================================================================

@@ -1167,7 +1167,7 @@ class InstanceMessagingService:
 
             # NOTE: No Task creation here — JobQueue handles job tracking instead.
 
-            # 2. Update instance status if IDLE or PAUSED → RUNNING
+            # 2. Update instance status if IDLE, PAUSED, or WAITING_CHILDREN → RUNNING
             #    Also clear paused_at when transitioning away from PAUSED status
             #    Also update last_activity_at and increment version
             status_changed_to_running = False
@@ -1177,7 +1177,7 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value, InstanceStatus.WAITING_CHILDREN.value):
                     instance.status = InstanceStatus.RUNNING.value
                     instance.paused_at = None
                     status_changed_to_running = True

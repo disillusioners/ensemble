@@ -541,7 +541,7 @@ Provide a concise summary:"""
         last_content = await self._get_last_assistant_message(instance_id, agent_id)
         if last_content is None:
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
-            last_content = ""  # Proceed with empty content — state transition must still happen
+            last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
         
         with Session(self._manager._engine) as session:
             # Get instance metadata
