@@ -1261,6 +1261,38 @@ class InstanceManager:
             images=images,
         )
 
+    async def enqueue_message_via_jq(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+    ) -> AsyncMessageResult:
+        """Enqueue a message via JobQueue instead of WorkerPool.
+
+        Creates MessageQueue entry + all side effects (same as enqueue_message),
+        then enqueues a MESSAGE-type job via JobQueueService.
+        Does NOT create Task or notify WorkerPool.
+
+        Args:
+            instance_id: The ID of the target instance.
+            message: The message content.
+            source: Source identifier (e.g., "api", "web", "telegram:user:123").
+            priority: Message priority (0=system, 1=user).
+            images: Optional list of base64-encoded images for vision messages.
+
+        Returns:
+            AsyncMessageResult with message_id and status.
+        """
+        return await self._messaging_service.enqueue_message_via_jq(
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+        )
+
     async def _process_message_with_tracking(
         self, 
         instance_id: str, 

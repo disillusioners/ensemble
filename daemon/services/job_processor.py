@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.message_job_handler import MessageJobHandler
 from daemon.repositories import SQLModelProjectRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 
@@ -75,6 +76,20 @@ class JobProcessor:
         self._event_dispatch_enabled = event_dispatch_enabled
         self._jobs_dispatched_immediately = 0
         self._jobs_dispatched_polling = 0
+        self._message_job_handler: MessageJobHandler | None = None
+
+    def setup_message_job_handler(self) -> None:
+        """Set up the MessageJobHandler after all services are initialized.
+
+        Called from manager initialization after _queue_service is available.
+        """
+        if self._message_job_handler is None:
+            self._message_job_handler = MessageJobHandler(
+                manager=self._instance_manager,
+                job_queue_service=self._queue_service,
+                job_repository=self._queue_service._repository,
+            )
+            self._queue_service._message_job_handler = self._message_job_handler
     
     async def start(self) -> None:
         """Start the background processing loop."""
@@ -198,6 +213,22 @@ class JobProcessor:
                         statuses=["processing"]
                     )
                     for proc_job in (processing or []):
+                        # >>> FIRST: Guard MESSAGE jobs — fail, don't re-spawn <<<
+                        # MUST be before the `if proc_job.instance_id:` check below
+                        if getattr(proc_job, 'job_type', 'task') == 'message':
+                            logger.info(
+                                f"JobProcessor: orphan MESSAGE job {proc_job.job_id[:8]}... "
+                                f"(instance {proc_job.instance_id[:8] if proc_job.instance_id else 'N/A'}...) "
+                                f"— failing (no re-spawn)"
+                            )
+                            await self._queue_service.complete_job(
+                                proc_job.job_id,
+                                demand_state=DemandState.FAILED,
+                                error="Instance gone or unreachable, message job orphaned",
+                            )
+                            continue
+                        # <<< END FIRST GUARD >>>
+
                         # Skip if instance already spawned (normal case).
                         # If instance_id is set but get_instance raises KeyError,
                         # the instance might be in the process of being spawned
@@ -270,12 +301,38 @@ class JobProcessor:
 
                 job = pending[0]
 
+                # >>> NEW: Pre-check for MESSAGE jobs — DB-level concurrency gate <<<
+                # Check BEFORE start_job() to avoid unnecessary lock acquisition
+                # Use getattr with default for test mock objects
+                if getattr(job, 'job_type', 'task') == "message":
+                    if job.instance_id:
+                        active = await asyncio.to_thread(
+                            self._queue_service._repository.find_processing_message_jobs_by_instance,
+                            job.instance_id,
+                        )
+                        if active:
+                            # Another MESSAGE is processing for this instance — skip this poll cycle
+                            logger.debug(
+                                f"JobProcessor: MESSAGE job {job.job_id[:8]}... skipped — "
+                                f"instance {job.instance_id[:8]}... busy with another message"
+                            )
+                            continue  # Skip to next queue, job stays PENDING
+                # <<< END NEW >>>
+
                 # Try to start the job (acquires per-queue lock internally)
                 try:
                     started_job = await self._queue_service.start_job(job.job_id)
                     if started_job is None:
                         # Lock acquisition failed or job was cancelled
                         continue
+
+                    # >>> NEW: Route MESSAGE jobs to MessageJobHandler <<<
+                    # Use getattr with default for safety
+                    if getattr(started_job, 'job_type', 'task') == "message":
+                        if self._message_job_handler is not None:
+                            await self._message_job_handler.handle(started_job)
+                            continue
+                    # <<< END NEW >>>
 
                     # Spawn instance for this job
                     try:

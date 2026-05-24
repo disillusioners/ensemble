@@ -430,6 +430,18 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to mark job as failed on terminate: {e}")
 
+        # 7.5. Cancel ALL MESSAGE jobs for this instance
+        if self._job_queue_service is not None:
+            try:
+                message_jobs = self._job_queue_service._repository.find_jobs_by_instance(
+                    instance_id, job_type="message"
+                )
+                for msg_job in message_jobs:
+                    if msg_job.status in ("pending", "processing"):
+                        await self._job_queue_service.cancel_message_job(msg_job.job_id)
+            except Exception as e:
+                logger.warning(f"Failed to cancel MESSAGE jobs on terminate: {e}")
+
         # 8. Publish lifecycle event for terminated instance
         parent_id = meta.parent_id if meta else None
         if self._events_service:

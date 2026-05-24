@@ -1101,7 +1101,7 @@ class InstanceMessagingService:
 
     def get_queue_stats(self, instance_id: str) -> dict:
         """Get queue statistics for an instance.
-        
+
         Returns a dict with pending_count, processing_count,
         and oldest_message_age_seconds attributes.
         """
@@ -1111,3 +1111,146 @@ class InstanceMessagingService:
             "processing_count": stats["processing_count"],
             "oldest_message_age_seconds": stats["oldest_message_age_seconds"]
         }
+
+    async def enqueue_message_via_jq(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+    ) -> "AsyncMessageResult":
+        """Enqueue a message via JobQueue instead of WorkerPool.
+
+        Creates MessageQueue entry + all side effects (same as enqueue_message),
+        then enqueues a MESSAGE-type job via JobQueueService.
+        Does NOT create Task or notify WorkerPool.
+        """
+        from ..manager import AsyncMessageResult
+
+        # Reject new messages during shutdown
+        if self._cancellation_service.is_shutting_down:
+            raise RuntimeError("Manager is shutting down, cannot accept new messages")
+
+        # Determine message type based on source (exact same logic as enqueue_message)
+        if source.startswith("internal_report:"):
+            msg_type = MessageType.COMPLETION_REPORT.value
+            message_id = str(uuid.uuid4())
+        elif source.startswith("internal_error_report:"):
+            msg_type = MessageType.ERROR_REPORT.value
+            message_id = str(uuid.uuid4())
+        elif source.startswith("internal_agent:"):
+            msg_type = MessageType.AGENT.value
+            message_id = str(uuid.uuid4())
+        else:
+            msg_type = MessageType.HUMAN.value
+            message_id = str(uuid.uuid4())
+
+        # Log image count if images are provided
+        if images:
+            logger.info(f"Processing message with {len(images)} image(s)")
+
+        with Session(self._manager._engine) as session:
+            # 1. Insert the message
+            db_message = MessageQueue(
+                message_id=message_id,
+                instance_id=instance_id,
+                content=message,
+                source=source,
+                type=msg_type,
+                status=MessageStatus.READY.value,
+                priority=priority,
+                images=images,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+            session.add(db_message)
+
+            # NOTE: No Task creation here — JobQueue handles job tracking instead.
+
+            # 2. Update instance status if IDLE or PAUSED → RUNNING
+            #    Also clear paused_at when transitioning away from PAUSED status
+            #    Also update last_activity_at and increment version
+            status_changed_to_running = False
+            is_idle_to_running = False
+            instance_agent_id = None
+            instance = session.get(Instance, instance_id)
+            if instance:
+                instance_agent_id = instance.agent_id
+                previous_status = instance.status
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
+                    instance.status = InstanceStatus.RUNNING.value
+                    instance.paused_at = None
+                    status_changed_to_running = True
+                    is_idle_to_running = previous_status == InstanceStatus.IDLE.value
+                instance.last_activity_at = datetime.now(timezone.utc)
+                instance.version = (instance.version or 1) + 1
+            else:
+                logger.warning(
+                    f"Instance {instance_id} not found in database during enqueue_message_via_jq. "
+                    f"This may indicate the instance was not properly persisted."
+                )
+
+            # 3. Create MESSAGE_RECEIVED event (event-sourced features)
+            role = "system" if msg_type == MessageType.SYSTEM.value else "user"
+            message_data = {
+                "message_id": message_id,
+                "role": role,
+                "content": message,
+                "source": source,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            event = Event(
+                instance_id=instance_id,
+                message_id=message_id,
+                kind=EventKind.MESSAGE_RECEIVED.value,
+                data=json.dumps(message_data),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(event)
+
+            session.commit()
+
+        # 4. Emit SSE status_change if instance transitioned to RUNNING
+        if status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id
+            )
+
+        # 5. Trigger title generation for first user message (fire-and-forget)
+        self._maybe_trigger_title_generation(
+            instance_id, message, is_idle_to_running and msg_type == MessageType.HUMAN.value
+        )
+
+        # 6. Look up instance metadata for JobQueue enqueue
+        #    Use instance repository for agent_id and project_id lookup.
+        instance_meta = self._manager._instance_repository.get(instance_id)
+        if instance_meta is None:
+            raise ValueError(f"Instance {instance_id} not found")
+
+        agent_id = instance_meta.agent_id
+        project_id = instance_meta.project_id
+
+        # 7. Enqueue as MESSAGE job via JobQueueService
+        #    instance_id goes to JobItem.instance_id column (not metadata)
+        job = await self._manager._job_queue_service.enqueue(
+            agent_id=agent_id,
+            message=message,
+            source=source,
+            project_id=project_id,
+            priority=priority,
+            job_type="message",
+            instance_id=instance_id,  # stored in JobItem.instance_id column
+            metadata={
+                "message_id": message_id,
+                "source": source,
+                "images": images,
+            },
+        )
+
+        logger.debug(f"Enqueued MESSAGE job for message {message_id} via JobQueue for instance {instance_id}")
+
+        return AsyncMessageResult(
+            message_id=message_id,
+            instance_id=instance_id,
+            status="queued",
+        )

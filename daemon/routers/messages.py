@@ -51,9 +51,9 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
             ).model_dump()
         )
 
-    # Enqueue the message (non-blocking)
+    # Enqueue the message via JobQueue (non-blocking)
     try:
-        result = await manager.enqueue_message(
+        result = await manager.enqueue_message_via_jq(
             instance_id=instance_id,
             message=message.content,
             source="api",
@@ -88,7 +88,7 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
 async def get_message_status(instance_id: str, message_id: str, request: Request):
     """Get the status of a queued message."""
     manager = _get_manager(request)
-    
+
     # Check instance exists
     try:
         await manager.get_instance(instance_id)
@@ -100,10 +100,31 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
                 message=f"Instance not found: {instance_id}"
             ).model_dump()
         )
-    
-    # Get queue stats
+
+    # Try JobQueue path first (HTTP-originated messages)
+    job_item = None
+    if manager._job_queue_service:
+        # Find MESSAGE job with this instance_id + message_id in metadata
+        jobs = manager._job_queue_service._repository.find_jobs_by_instance(
+            instance_id, job_type="message"
+        )
+        job_item = next(
+            (j for j in jobs if j.job_metadata and j.job_metadata.get("message_id") == message_id),
+            None,
+        )
+
+    if job_item:
+        # Return job-based status
+        return {
+            "message_id": message_id,
+            "instance_id": instance_id,
+            "status": job_item.status,
+            "result_summary": job_item.result_summary,
+            "error": job_item.error_message,
+        }
+
+    # Fallback: existing queue stats (internal/WorkerPool messages)
     stats = manager.get_queue_stats(instance_id)
-    
     return {
         "message_id": message_id,
         "instance_id": instance_id,

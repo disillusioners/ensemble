@@ -76,6 +76,7 @@ class JobQueueService:
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
         self._project_repo: Any | None = None  # Project repository for pause state checks
         self._watcher_repo: Any | None = None  # Repository for job watchers
+        self._message_job_handler: Any | None = None  # MessageJobHandler for MESSAGE jobs
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -1317,3 +1318,17 @@ class JobQueueService:
             "Lock release cannot be done synchronously. Use async release_lock_by_instance() instead."
         )
         return []
+
+    async def cancel_message_job(self, job_id: str) -> None:
+        """Cancel a MESSAGE-type job. Delegates to MessageJobHandler.
+
+        This is the public API called by instance_lifecycle.terminate_instance()
+        and any other external callers.
+
+        Args:
+            job_id: The job to cancel.
+        """
+        if self._message_job_handler is None:
+            logger.warning(f"Cannot cancel MESSAGE job {job_id[:8]}... — no handler registered")
+            return
+        await self._message_job_handler.cancel_message_job(job_id)

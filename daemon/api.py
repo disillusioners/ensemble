@@ -268,6 +268,10 @@ async def lifespan(app: FastAPI):
     await job_processor.start()
     logger.info("JobProcessor started")
     
+    # Set up message job handler for JobQueue-based message processing
+    job_processor.setup_message_job_handler()
+    logger.info("MessageJobHandler configured")
+    
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
     
