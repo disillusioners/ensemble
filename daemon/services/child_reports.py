@@ -583,13 +583,13 @@ Provide a concise summary:"""
                     ]))
                 ).scalar_one()
                 
-                if pending_count > 0:
-                    # Still has pending messages (e.g., child completion reports) - wait
+                if instance.waiting_for > 0 and pending_count > 0:
+                    # Has explicit children to wait for
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
-                        f"Instance {instance_id[:8]}... waiting_for=0 but has {pending_count} "
-                        f"pending messages, status=WAITING_CHILDREN"
+                        f"Instance {instance_id[:8]}... waiting_for={instance.waiting_for}, pending={pending_count}, "
+                        f"status=WAITING_CHILDREN"
                     )
                     # Emit status_change SSE event
                     if self._manager._live_hub:
@@ -598,6 +598,11 @@ Provide a concise summary:"""
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
+                elif pending_count > 0 and instance.waiting_for == 0:
+                    logger.warning(
+                        "Instance %s has pending_count=%d but waiting_for=0 — not setting waiting_children",
+                        instance_id[:8], pending_count
+                    )
                 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
