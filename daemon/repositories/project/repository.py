@@ -56,7 +56,7 @@ class SQLModelProjectRepository:
         return project
 
     def _enrich_projects(self, session: Session, projects: list[Project]) -> list[Project]:
-        """Load tags/shortnames for multiple projects."""
+        """Load tags/shortnames/metadata for multiple projects."""
         for p in projects:
             p.tags = self._load_tags(session, p.project_id)
             p.shortnames = self._load_shortnames(session, p.project_id)
@@ -394,9 +394,15 @@ class SQLModelProjectRepository:
                 self._sync_tags_bulk(session, project_id, tags_update)
             if shortnames_update is not None:
                 self._sync_shortnames_bulk(session, project_id, shortnames_update)
-            if metadata_update:
-                for k, v in metadata_update.items():
-                    self.set_metadata_record(session, project_id, k, v)
+            if metadata_update is not None:
+                if metadata_update:
+                    for k, v in metadata_update.items():
+                        self.set_metadata_record(session, project_id, k, v)
+                else:
+                    # Empty dict = clear all metadata
+                    session.exec(
+                        sql_delete(ProjectMetadataRecord).where(ProjectMetadataRecord.project_id == project_id)
+                    )
                 session.commit()
                 session.refresh(project)
 
