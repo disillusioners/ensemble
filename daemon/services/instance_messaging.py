@@ -621,7 +621,7 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value):
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value, InstanceStatus.WAITING_CHILDREN.value):
                     instance.status = InstanceStatus.RUNNING.value
                     instance.paused_at = None  # Clear paused_at on resume
                     status_changed_to_running = True

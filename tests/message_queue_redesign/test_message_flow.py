@@ -745,17 +745,18 @@ class TestIntegrationScenarios:
 
 
 class TestCheckChildCompletionC3Fix:
-    """Tests for FIX C3: Content fetch BEFORE transaction with None guard.
+    """Tests for FIX C3: Content fetch BEFORE transaction with empty string fallback.
     
     This fix ensures that if _get_last_assistant_message returns None (e.g., child
-    failed immediately without any assistant message), we skip the completion check
-    entirely WITHOUT marking the instance as COMPLETED.
+    failed immediately without any assistant message), we proceed with completion
+    using empty string content.
     
     The bug before C3: Set instance to COMPLETED in transaction, then content fetch
     failed, leaving instance completed but no report sent to parent.
     
-    The fix: Fetch content BEFORE transaction. If None, return early (don't touch
-    instance status or create any report).
+    The fix: Fetch content BEFORE transaction. If None, use empty string and proceed
+    with completion - state transition MUST still happen even if assistant message
+    content is unavailable.
     """
 
     @pytest.fixture
@@ -771,8 +772,8 @@ class TestCheckChildCompletionC3Fix:
         
         return manager
 
-    def test_skips_when_content_is_none_does_not_mark_instance_completed(self, engine, manager_with_mocked_content):
-        """FIX C3: When content is None, instance should NOT be marked COMPLETED."""
+    def test_proceeds_with_empty_content_marks_instance_completed(self, engine, manager_with_mocked_content):
+        """FIX C3: When content is None, instance SHOULD be marked COMPLETED with empty content."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
         
@@ -788,19 +789,22 @@ class TestCheckChildCompletionC3Fix:
         # Step 1: Fetch content BEFORE transaction (this is what _check_child_completion_v2 does)
         last_content = None  # Simulating _get_last_assistant_message returning None
         
-        # Step 2: If content is None, skip entirely - DO NOT mark as COMPLETED
-        if last_content is None:
-            # Skip completion check - this is the FIX C3 behavior
-            # DO NOT touch instance status
-            pass
+        # Step 2: If content is None, use empty string and proceed with completion
+        content = last_content if last_content is not None else ""
         
-        # Verify: instance should still NOT be COMPLETED
+        # Mark instance as COMPLETED with empty content
+        with Session(engine) as session:
+            instance = session.get(Instance, child_id)
+            instance.status = InstanceStatus.COMPLETED.value
+            session.commit()
+        
+        # Verify: instance SHOULD be COMPLETED with empty content
         child_after = get_instance(engine, child_id)
-        assert child_after.status != InstanceStatus.COMPLETED.value, \
-            "FIX C3 violation: Instance marked COMPLETED even though content was None"
+        assert child_after.status == InstanceStatus.COMPLETED.value, \
+            "FIX C3 violation: Instance should be marked COMPLETED even with empty content"
 
-    def test_skips_when_content_is_none_does_not_create_report(self, engine, manager_with_mocked_content):
-        """FIX C3: When content is None, NO completion report should be created."""
+    def test_proceeds_with_empty_content_creates_report(self, engine, manager_with_mocked_content, message_repo):
+        """FIX C3: When content is None, completion report SHOULD be created with empty content."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
         
@@ -811,28 +815,22 @@ class TestCheckChildCompletionC3Fix:
         # Simulate FIX C3 behavior
         last_content = None  # _get_last_assistant_message returns None
         
-        # The fix: if content is None, skip report creation
-        if last_content is None:
-            # Skip - no report created
-            pass
-        else:
-            # Would create completion report here (but we skip because content is None)
-            create_completion_report(engine, parent_id, child_id, last_content)
+        # The fix: if content is None, use empty string and create report
+        content = last_content if last_content is not None else ""
+        create_completion_report(engine, parent_id, child_id, content)
         
-        # Verify: NO completion report was created
-        with Session(engine) as session:
-            from sqlalchemy import select
-            reports = session.exec(
-                select(MessageQueue)
-                .where(MessageQueue.instance_id == parent_id)
-                .where(MessageQueue.type == MessageType.COMPLETION_REPORT.value)
-                .where(MessageQueue.source == f"internal_report:{child_id}")
-            ).all()
+        # Verify: completion report WAS created with empty content using message_repo helper
+        reports = message_repo.get_by_instance(parent_id)
+        completion_reports = [
+            r for r in reports 
+            if r.type == MessageType.COMPLETION_REPORT.value and r.source == f"internal_report:{child_id}"
+        ]
         
-        assert len(reports) == 0, "FIX C3 violation: Completion report created even though content was None"
+        assert len(completion_reports) == 1, "FIX C3 violation: Completion report should be created with empty content"
+        assert completion_reports[0].content == "", "Completion report should have empty content"
 
-    def test_skips_when_content_is_none_does_not_decrement_parent_waiting(self, engine, manager_with_mocked_content):
-        """FIX C3: When content is None, parent's waiting_for should NOT be decremented."""
+    def test_proceeds_with_empty_content_decrements_parent_waiting(self, engine, manager_with_mocked_content):
+        """FIX C3: When content is None, parent's waiting_for SHOULD be decremented."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
         
@@ -843,23 +841,20 @@ class TestCheckChildCompletionC3Fix:
         parent_before = get_instance(engine, parent_id)
         initial_waiting = parent_before.waiting_for
         
-        # Simulate FIX C3: content is None, so skip everything
+        # Simulate FIX C3: content is None, so use empty string and proceed
         last_content = None
+        content = last_content if last_content is not None else ""
         
-        if last_content is None:
-            # Skip entire completion flow - don't decrement waiting_for
-            pass
-        else:
-            # Would decrement waiting_for here (but we skip because content is None)
-            with Session(engine) as session:
-                parent = session.get(Instance, parent_id)
-                parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
-                session.commit()
+        # Proceed with completion flow - decrement waiting_for
+        with Session(engine) as session:
+            parent = session.get(Instance, parent_id)
+            parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+            session.commit()
         
-        # Verify: waiting_for NOT decremented
+        # Verify: waiting_for WAS decremented
         parent_after = get_instance(engine, parent_id)
-        assert parent_after.waiting_for == initial_waiting, \
-            "FIX C3 violation: Parent waiting_for decremented even though content was None"
+        assert parent_after.waiting_for == initial_waiting - 1, \
+            "FIX C3 violation: Parent waiting_for should be decremented even with empty content"
 
     def test_proceeds_and_marks_completed_when_content_exists(self, engine, manager_with_mocked_content, message_repo):
         """When content exists, instance SHOULD be marked COMPLETED (positive test)."""
