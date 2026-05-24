@@ -556,9 +556,9 @@ Original scheduled task:
         # Check if instance is active (running or waiting)
         # Note: instance.status is a string, compare with enum values
         is_active = instance.status in (
-            InstanceStatus.running.value,
-            InstanceStatus.waiting.value,
-            InstanceStatus.waiting_children.value,
+            InstanceStatus.RUNNING.value,
+            InstanceStatus.WAITING.value,
+            InstanceStatus.WAITING_CHILDREN.value,
         )
         
         return is_active, mapping.agent_instance_id, instance.status

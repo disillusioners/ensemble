@@ -7,14 +7,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class InstanceStatus(str, Enum):
     """Status of a daemon instance."""
 
-    idle = "idle"
-    running = "running"
-    waiting = "waiting"
-    waiting_children = "waiting_children"
-    error = "error"
-    terminated = "terminated"
-    completed = "completed"
-    paused = "paused"
+    IDLE = "idle"
+    RUNNING = "running"
+    WAITING = "waiting"
+    WAITING_CHILDREN = "waiting_children"
+    ERROR = "error"
+    TERMINATED = "terminated"
+    COMPLETED = "completed"
+    PAUSED = "paused"
 
 
 class InstanceCreate(BaseModel):

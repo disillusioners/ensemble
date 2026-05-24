@@ -218,7 +218,7 @@ class Project(SQLModel, table=True):
             "project_type": self.project_type,
             "status": self.status,
             "main_directory": self.main_directory,
-            "related_directories": list(self.related_directories),
+            "related_directories": list(self.related_directories) if self.related_directories else [],
             "description": self.description,
             "job_queue_paused": self.job_queue_paused,
             "tags": list(self._tags),
