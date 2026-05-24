@@ -116,7 +116,7 @@ class TestBashTool:
         result = await bash.ainvoke({"command": "sleep 5", "timeout": 0.5})
 
         assert "timed out" in result.lower()
-        assert "0.5" in result or "0.5" in result  # Error message should contain the timeout value
+        assert "0.5" in result  # Error message should contain the timeout value
 
 
 class TestListDirectoryTool:
