@@ -655,7 +655,8 @@ Provide a concise summary:"""
                 return
             
             # Idempotency checks
-            if not await self._should_send_completion_report(session, instance_id, completed_message_id)[0]:
+            should_send = await self._should_send_completion_report(session, instance_id, completed_message_id)
+            if not should_send[0]:
                 return
 
             # Check if this is a tool invocation (explore/experience)
