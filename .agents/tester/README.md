@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 system_defer_queue Auto-Provision)
+## Test Results (Latest: 2026-05-25 message-api-job-queue)
+
+### Message API → JobQueue (2026-05-25)
+- **Commits**: 914adaa + ee3bdca + 20b61f0 + 215629c + daf846e
+- **New Tests**: 29/29 PASS — All 10 test scenarios (job creation, concurrency gate, orphan recovery, cancellation, termination, backward compat, side effects, status endpoint, error handling, no-project-context)
+- **Job Queue Suite**: 1073/1073 PASS (+29 new, 19 skipped, 0 regressions)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 2 — api.py init order fix + job_type migration
+- See `.agents/tester/RESULTS/2026-05-25-message-api-job-queue.md` for full report
+
+### Message API → JobQueue Status: ✅ READY (29 new tests pass, 1073 suite tests pass, dev.sh stable, 0 regressions)
 
 ### system_defer_queue Auto-Provision (2026-05-25)
 - **Branch**: feature/defer-queue-ui (commits f38bf92 + 104e15f + 8c0d781)
