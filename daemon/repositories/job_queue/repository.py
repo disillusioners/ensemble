@@ -324,6 +324,7 @@ class JobRepository:
                 .where(JobItem.deleted_at.is_(None))
                 .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
             )
+            stmt = stmt.order_by(JobItem.created_at.asc())
             if job_type:
                 stmt = stmt.where(JobItem.job_type == job_type)
             return list(db_session.exec(stmt))

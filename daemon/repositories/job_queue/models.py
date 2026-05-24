@@ -109,6 +109,7 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_project", "project_id"),
         Index("idx_job_queue_items_queue", "queue_id"),
         Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
+        Index("idx_job_queue_items_status_type_instance", "status", "job_type", "instance_id"),
     )
 
     # Primary identification

@@ -437,8 +437,7 @@ class InstanceLifecycleService:
                     instance_id, job_type="message"
                 )
                 for msg_job in message_jobs:
-                    if msg_job.status in ("pending", "processing"):
-                        await self._job_queue_service.cancel_message_job(msg_job.job_id)
+                    await self._job_queue_service.cancel_message_job(msg_job.job_id)
             except Exception as e:
                 logger.warning(f"Failed to cancel MESSAGE jobs on terminate: {e}")
 

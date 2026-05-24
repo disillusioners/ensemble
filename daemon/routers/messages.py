@@ -105,7 +105,7 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
     job_item = None
     if manager._job_queue_service:
         # Find MESSAGE job with this instance_id + message_id in metadata
-        jobs = manager._job_queue_service._repository.find_jobs_by_instance(
+        jobs = manager._job_queue_service.find_active_jobs_by_instance(
             instance_id, job_type="message"
         )
         job_item = next(

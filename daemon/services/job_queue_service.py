@@ -213,6 +213,9 @@ class JobQueueService:
     
     # ========== Public API ==========
     
+    def find_active_jobs_by_instance(self, instance_id: str, job_type: str | None = None) -> list[JobItem]:
+        return self._repository.find_jobs_by_instance(instance_id, job_type)
+    
     async def enqueue(
         self,
         agent_id: str,
