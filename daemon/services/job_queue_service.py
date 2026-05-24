@@ -982,16 +982,9 @@ class JobQueueService:
         job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return None
-        
-        # Release the per-queue lock first
-        await self._release_job_lock(
-            project_id=job.project_id,
-            queue_id=job.queue_id,
-            job_id=job_id,
-            release_by_instance=False,
-        )
-        
-        # Mark job based on demand_state
+
+        # Mark job based on demand_state FIRST (before lock release)
+        result = None
         try:
             if demand_state == DemandState.COMPLETED:
                 summary = result_summary or "Job completed successfully"
@@ -1000,25 +993,24 @@ class JobQueueService:
                 )
                 # Notify watchers after successful transition
                 await self.notify_watchers(job_id, "completed")
-                return result
             elif demand_state == DemandState.FAILED:
                 failed_job = await asyncio.to_thread(
                     self._repository.fail_job, job_id, error_message=error or "Unknown error"
                 )
-                
+
                 # Try auto-retry if retry engine is configured
                 if failed_job is not None and self._retry_engine is not None:
                     try:
                         retried = await asyncio.to_thread(self._retry_engine.maybe_retry, job_id)
                         if retried is not None:
-                            return retried
+                            result = retried
                     except Exception as e:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
-                
+
                 # Notify watchers if job is still FAILED (retry didn't succeed)
-                if failed_job is not None:
+                if failed_job is not None and result is None:
                     await self.notify_watchers(job_id, "failed", error)
-                return failed_job
+                result = result if result is not None else failed_job
             elif demand_state == DemandState.CANCELLED:
                 # CANCELLED state does not trigger retry
                 result = await asyncio.to_thread(
@@ -1026,10 +1018,19 @@ class JobQueueService:
                 )
                 # Notify watchers after successful transition
                 await self.notify_watchers(job_id, "cancelled", error)
-                return result
         except (ValueError, InvalidTransitionError):
-            # Job state changed (already completed/cancelled)
-            return None
+            # Job state already changed — still need to release lock below
+            pass
+        finally:
+            # Release the per-queue lock AFTER state is committed
+            await self._release_job_lock(
+                project_id=job.project_id,
+                queue_id=job.queue_id,
+                job_id=job_id,
+                release_by_instance=False,
+            )
+
+        return result
     
     def complete_job_sync(
         self,

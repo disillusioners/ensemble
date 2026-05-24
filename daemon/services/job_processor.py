@@ -216,6 +216,23 @@ class JobProcessor:
                         # >>> FIRST: Guard MESSAGE jobs — fail, don't re-spawn <<<
                         # MUST be before the `if proc_job.instance_id:` check below
                         if getattr(proc_job, 'job_type', 'task') == 'message':
+                            # Fix 2: Check instance liveness before declaring orphan
+                            if proc_job.instance_id:
+                                try:
+                                    await self._instance_manager.get_instance(proc_job.instance_id)
+                                    # Instance is still alive — job is being processed, not orphaned
+                                    continue
+                                except KeyError:
+                                    pass  # Instance truly gone — proceed to fail
+
+                            # Fix 3: Re-read current state from DB before failing
+                            current_job = await asyncio.to_thread(
+                                self._queue_service._repository.get, proc_job.job_id
+                            )
+                            if current_job is None or current_job.status != "processing":
+                                # Job already transitioned (completed/failed/cancelled) — skip
+                                continue
+
                             logger.info(
                                 f"JobProcessor: orphan MESSAGE job {proc_job.job_id[:8]}... "
                                 f"(instance {proc_job.instance_id[:8] if proc_job.instance_id else 'N/A'}...) "
