@@ -8,6 +8,7 @@ from daemon.cancellation import (
     CancellationReason,
     OperationCancelledError,
 )
+from daemon.models.instance import InstanceStatus
 from daemon.services.job_queue_service import DemandState
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,29 @@ class MessageJobHandler:
                     )
             except Exception as e:
                 logger.error("Completion check failed for job %s: %s", job.job_id[:8], e, exc_info=True)
+
+            # Check instance status to determine if job should be completed now or deferred.
+            # If instance is WAITING_CHILDREN, JobFeedbackObserver will complete the job
+            # when all children finish and instance transitions to completed.
+            skip_complete = False
+            try:
+                instance = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+                if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                    logger.info(
+                        f"MessageJobHandler: instance {instance_id[:8]}... is WAITING_CHILDREN, "
+                        f"deferring job completion for {job.job_id[:8]}..."
+                    )
+                    skip_complete = True
+            except Exception as e:
+                logger.warning(
+                    f"MessageJobHandler: failed to check instance status for {instance_id[:8]}..., "
+                    f"proceeding with job completion: {e}"
+                )
+
+            if skip_complete:
+                return
 
             # Mark job complete
             await self._job_service.complete_job(
