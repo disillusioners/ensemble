@@ -255,10 +255,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to bootstrap system default project: {e}")
     
-    # Set up message job handler for JobQueue-based message processing
-    job_processor.setup_message_job_handler()
-    logger.info("MessageJobHandler configured")
-    
     # Initialize and start JobProcessor
     job_processor = JobProcessor(
         queue_service=job_queue_service,
@@ -271,6 +267,11 @@ async def lifespan(app: FastAPI):
     )
     await job_processor.start()
     logger.info("JobProcessor started")
+    
+    # Set up message job handler for JobQueue-based message processing
+    # Must run AFTER JobProcessor is initialized
+    job_processor.setup_message_job_handler()
+    logger.info("MessageJobHandler configured")
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
