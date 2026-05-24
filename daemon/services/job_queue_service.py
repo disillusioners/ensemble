@@ -1018,17 +1018,20 @@ class JobQueueService:
                 )
                 # Notify watchers after successful transition
                 await self.notify_watchers(job_id, "cancelled", error)
-        except (ValueError, InvalidTransitionError):
+        except (ValueError, InvalidTransitionError) as e:
             # Job state already changed — still need to release lock below
-            pass
+            logger.debug("Job %s already transitioned, skip: %s", job_id[:8], e)
         finally:
             # Release the per-queue lock AFTER state is committed
-            await self._release_job_lock(
-                project_id=job.project_id,
-                queue_id=job.queue_id,
-                job_id=job_id,
-                release_by_instance=False,
-            )
+            try:
+                await self._release_job_lock(
+                    project_id=job.project_id,
+                    queue_id=job.queue_id,
+                    job_id=job_id,
+                    release_by_instance=False,
+                )
+            except Exception as e:
+                logger.warning("Failed to release lock for job %s: %s", job_id[:8], e)
 
         return result
     
@@ -1058,43 +1061,9 @@ class JobQueueService:
         job = self._repository.get(job_id)
         if job is None:
             return None
-        
-        # W6: Properly release locks from sync context using event loop
-        if job.project_id and job.queue_id:
-            # Use asyncio.run_coroutine_threadsafe to release queue lock
-            if self._loop and self._loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._lock_manager.release_queue_lock(
-                        job.project_id, job.queue_id, job_id
-                    ),
-                    self._loop,
-                )
-                try:
-                    future.result(timeout=5)  # Wait up to 5s for lock release
-                except Exception as e:
-                    logger.error(f"Failed to release queue lock for job {job_id}: {e}")
-            else:
-                logger.warning(
-                    f"Cannot release queue lock for job {job_id} - no event loop available"
-                )
-        elif job.project_id:
-            # Legacy project-level lock (backward compatibility)
-            # Use asyncio.run_coroutine_threadsafe to release async lock
-            if self._loop and self._loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._lock_manager.release(job.project_id, job_id),
-                    self._loop,
-                )
-                try:
-                    future.result(timeout=5)
-                except Exception as e:
-                    logger.error(f"Failed to release project lock for job {job_id}: {e}")
-            else:
-                logger.warning(
-                    f"Cannot release project lock for job {job_id} - no event loop available"
-                )
-        
-        # Mark job based on demand_state
+
+        # Mark job based on demand_state FIRST (before lock release)
+        result = None
         try:
             if demand_state == DemandState.COMPLETED:
                 result = self._repository.complete_job(job_id, result_summary=result_summary)
@@ -1104,27 +1073,26 @@ class JobQueueService:
                         self.notify_watchers(job_id, "completed"),
                         self._loop,
                     )
-                return result
             elif demand_state == DemandState.FAILED:
                 failed_job = self._repository.fail_job(job_id, error_message=error or "Unknown error")
-                
+
                 # Try auto-retry if retry engine is configured
                 if failed_job is not None and self._retry_engine is not None:
                     try:
                         retried = self._retry_engine.maybe_retry(job_id)
                         if retried is not None:
-                            return retried
+                            result = retried
                     except Exception as e:
                         logger.error(f"Auto-retry failed for job {job_id}: {e}")
-                
+
                 # Notify watchers if job is still FAILED (retry didn't succeed)
-                if failed_job is not None:
+                if failed_job is not None and result is None:
                     if self._loop and self._loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self.notify_watchers(job_id, "failed", error),
                             self._loop,
                         )
-                return failed_job
+                result = result if result is not None else failed_job
             elif demand_state == DemandState.CANCELLED:
                 # CANCELLED state does not trigger retry
                 result = self._repository.terminate_job(job_id, error_message=error or "Cancelled")
@@ -1134,10 +1102,34 @@ class JobQueueService:
                         self.notify_watchers(job_id, "cancelled", error),
                         self._loop,
                     )
-                return result
-        except (ValueError, InvalidTransitionError):
-            # Job state changed (already completed/cancelled)
-            return None
+        except (ValueError, InvalidTransitionError) as e:
+            # Job state already changed — still need to release lock below
+            logger.debug("Job %s already transitioned, skip: %s", job_id[:8], e)
+        finally:
+            # Release the per-queue lock AFTER state is committed (W6 fix)
+            try:
+                if job.project_id and job.queue_id:
+                    # Use asyncio.run_coroutine_threadsafe to release queue lock
+                    if self._loop and self._loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._lock_manager.release_queue_lock(
+                                job.project_id, job.queue_id, job_id
+                            ),
+                            self._loop,
+                        )
+                        future.result(timeout=5)  # Wait up to 5s for lock release
+                elif job.project_id:
+                    # Legacy project-level lock (backward compatibility)
+                    if self._loop and self._loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._lock_manager.release(job.project_id, job_id),
+                            self._loop,
+                        )
+                        future.result(timeout=5)
+            except Exception as e:
+                logger.warning("Failed to release lock for job %s: %s", job_id[:8], e)
+
+        return result
     
     async def trigger_next_job(
         self,

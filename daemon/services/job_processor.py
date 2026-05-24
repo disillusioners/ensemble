@@ -224,6 +224,14 @@ class JobProcessor:
                                     continue
                                 except KeyError:
                                     pass  # Instance truly gone — proceed to fail
+                                except Exception as e:
+                                    logger.warning(
+                                        "Instance check failed for job %s (instance %s): %s",
+                                        proc_job.job_id[:8],
+                                        proc_job.instance_id[:8] if proc_job.instance_id else "N/A",
+                                        e,
+                                    )
+                                    continue  # Don't crash on transient errors
 
                             # Fix 3: Re-read current state from DB before failing
                             current_job = await asyncio.to_thread(
@@ -287,6 +295,14 @@ class JobProcessor:
                                         proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                                     )
                                     continue
+                            except Exception as e:
+                                logger.warning(
+                                    "Instance check failed for job %s (instance %s): %s",
+                                    proc_job.job_id[:8],
+                                    proc_job.instance_id[:8] if proc_job.instance_id else "N/A",
+                                    e,
+                                )
+                                continue  # Don't crash on transient errors
                         # No instance_id: this is a genuine orphan (shouldn't happen
                         # in normal operation, but kept as safety net)
                         # This job was started by trigger_next_job() but instance not spawned
