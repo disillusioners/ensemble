@@ -1150,7 +1150,7 @@ class TestMessageJobHandlerCompletionHandler:
 
     Key behaviors tested:
     1. Completion handler is called with correct arguments (instance_id, message_id)
-    2. Completion handler is NOT called when message_id is None (W2 guard)
+    2. Completion handler IS called even when message_id is None (W2 guard removed)
     3. Completion handler errors are caught and logged, not propagated
     """
 
@@ -1228,14 +1228,14 @@ class TestMessageJobHandlerCompletionHandler:
         mock_job_queue_service.complete_job.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_completion_handler_not_called_when_message_id_is_none(
+    async def test_completion_handler_called_when_message_id_is_none(
         self,
         mock_manager_with_completion,
         mock_completion_handler,
         mock_job_queue_service,
         mock_job_repository,
     ):
-        """FIX C4 (W2 guard): Completion handler is NOT called when message_id is None."""
+        """FIX C4: Completion handler IS called even when message_id is None."""
         from daemon.services.message_job_handler import MessageJobHandler
 
         handler = MessageJobHandler(
@@ -1250,8 +1250,8 @@ class TestMessageJobHandlerCompletionHandler:
 
         await handler.handle(job)
 
-        # Verify completion handler was NOT called (W2 guard)
-        mock_completion_handler.assert_not_called()
+        # Verify completion handler was called (W2 guard removed)
+        mock_completion_handler.assert_called_once_with("instance-2", None)
 
         # Verify job was still completed successfully
         mock_job_queue_service.complete_job.assert_called_once()

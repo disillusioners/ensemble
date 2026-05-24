@@ -217,7 +217,7 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{prefix}, below is the response: Completed {len(messages)} message(s)."
 
-    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str) -> bool:
+    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None) -> tuple[bool, None]:
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we do not send duplicate completion reports:
@@ -230,11 +230,26 @@ Provide a concise summary:"""
         Args:
             session: Database session.
             instance_id: The child instance ID to check.
-            completed_message_id: The message ID that just completed.
+            completed_message_id: The message ID that just completed (can be None).
             
         Returns:
-            True if should proceed with sending report, False to skip.
+            Tuple of (should_send, None): True if should proceed with sending report, False to skip.
         """
+        # Guard: Can't do idempotency check without message_id
+        if completed_message_id is None:
+            # Just count all pending messages for the instance
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalar_one()
+            return pending_count > 0, None
+        
         # Check for pending/processing messages for this instance
         # Exclude only the completed message by ID (not by status) so that
         # newly sent messages with PROCESSING status are properly counted
@@ -255,12 +270,12 @@ Provide a concise summary:"""
                 f"Instance {instance_id[:8]}... has {pending_count} pending messages, "
                 f"skipping completion check"
             )
-            return False
+            return False, None
         
         # Idempotency: Check if completion report already sent for THIS message
         instance = session.get(Instance, instance_id)
         if instance is None or instance.parent_id is None:
-            return False
+            return False, None
             
         # Use message_id in source so each completion generates a unique report
         existing_report = session.exec(
@@ -279,9 +294,9 @@ Provide a concise summary:"""
                 f"Completion report already queued for child {instance_id[:8]}... "
                 f"message {completed_message_id[:8]}..., skipping duplicate"
             )
-            return False
+            return False, None
         
-        return True
+        return True, None
 
     async def _create_completion_report(
         self,
@@ -600,7 +615,8 @@ Provide a concise summary:"""
                     return
                 elif pending_count > 0 and instance.waiting_for == 0:
                     logger.warning(
-                        "Instance %s has pending_count=%d but waiting_for=0 — not setting waiting_children",
+                        "Instance %s has pending_count=%d but waiting_for=0 — "
+                        "proceeding to COMPLETED (not waiting_children)",
                         instance_id[:8], pending_count
                     )
                 
@@ -639,7 +655,7 @@ Provide a concise summary:"""
                 return
             
             # Idempotency checks
-            if not await self._should_send_completion_report(session, instance_id, completed_message_id):
+            if not await self._should_send_completion_report(session, instance_id, completed_message_id)[0]:
                 return
 
             # Check if this is a tool invocation (explore/experience)

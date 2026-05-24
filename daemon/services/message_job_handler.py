@@ -109,15 +109,13 @@ class MessageJobHandler:
             )
 
             # Check if this instance should transition (completed, waiting_children, etc.)
-            if hasattr(self._manager, '_process_child_completion_and_notify_parent'):
-                try:
+            try:
+                if hasattr(self._manager, '_process_child_completion_and_notify_parent'):
                     await self._manager._process_child_completion_and_notify_parent(
                         instance_id, message_id
                     )
-                except Exception as e:
-                    logger.error("Completion check failed for job %s: %s", job.job_id[:8], e, exc_info=True)
-            else:
-                logger.debug("No completion check method for job %s", job.job_id[:8])
+            except Exception as e:
+                logger.error("Completion check failed for job %s: %s", job.job_id[:8], e, exc_info=True)
 
             # Mark job complete
             await self._job_service.complete_job(
