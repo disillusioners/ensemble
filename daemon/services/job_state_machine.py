@@ -24,6 +24,7 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (_STATUS_PROCESSING, _STATUS_COMPLETED): "complete",
     (_STATUS_PROCESSING, _STATUS_FAILED): "fail",
     (_STATUS_PROCESSING, _STATUS_CANCELLED): "abort",
+    (_STATUS_PROCESSING, _STATUS_PENDING): "requeue",
     (_STATUS_FAILED, _STATUS_PENDING): "retry",
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
     (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",

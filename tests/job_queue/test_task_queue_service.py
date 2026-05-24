@@ -1034,7 +1034,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
     async def test_enqueue_no_system_queue_defaults_to_no_queue(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Test enqueue with project but no system_fifo_queue raises ValueError."""
+        """Test enqueue with project but no system_fifo_queue raises ValueError with fifo queue_kind."""
         # Don't create any queue for project
         
         job_data = {
@@ -1046,8 +1046,8 @@ class TestJobQueueServiceQueueAwareEnqueue:
             "metadata": None,
         }
 
-        # C3 fix: ValueError is raised when system FIFO queue doesn't exist
-        with pytest.raises(ValueError, match="No system FIFO queue found"):
+        # ValueError is raised when system FIFO queue doesn't exist
+        with pytest.raises(ValueError, match="No system fifo queue found"):
             await job_queue_service.enqueue(**job_data)
 
     @pytest.mark.asyncio

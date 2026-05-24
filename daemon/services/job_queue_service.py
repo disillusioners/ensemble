@@ -222,6 +222,8 @@ class JobQueueService:
         metadata: dict[str, Any] | None = None,
         queue_id: str | None = None,
         idempotency_key: str | None = None,
+        job_type: str = "task",
+        instance_id: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
         
@@ -230,11 +232,12 @@ class JobQueueService:
         messages for processing.
         
         If project_id is set but queue_id is None, the job is assigned to the
-        project's "system_fifo_queue" automatically.
-        
+        project's "system_fifo_queue" (for TASK jobs) or "system_parallel_queue"
+        (for MESSAGE jobs) automatically.
+
         With idempotency_key: if a job with the same key exists and is non-terminal,
         returns the existing job instead of creating a duplicate.
-        
+
         Args:
             agent_id: Agent ID (e.g., 'coder').
             message: Job message/content.
@@ -243,15 +246,17 @@ class JobQueueService:
             priority: Job priority (1-10, default 5).
             metadata: Optional metadata dictionary.
             queue_id: Optional queue ID for job routing. If None and project_id
-                     is set, defaults to the project's system_fifo_queue.
+                     is set, defaults to the project's system queue.
             idempotency_key: Optional idempotency key for deduplication.
                            If a non-terminal job with this key exists, returns it.
-            
+            job_type: Job type ("task" or "message", default "task").
+            instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+
         Returns:
             JobItem with PENDING status (or existing non-terminal job if idempotent).
-            
+
         Raises:
-            ValueError: If project_id is set but system_fifo_queue doesn't exist.
+            ValueError: If project_id is set but system queue doesn't exist.
         """
         # Canonical normalization: ensures ALL callers get system_default_project for None/empty
         project_id = normalize_project_id(project_id)
@@ -303,17 +308,25 @@ class JobQueueService:
         
         # Resolve queue_id for projects
         resolved_queue_id = queue_id
-        if project_id and queue_id is None:
-            # Default to system_fifo_queue for projects (if it exists)
-            queue = await asyncio.to_thread(
-                self._queue_repo.get_by_name, project_id, "system_fifo_queue"
-            )
+        if queue_id is None:
+            # project_id is always valid after normalize_project_id()
+            if job_type == "message":
+                # MESSAGE jobs → system_parallel_queue (parallel execution)
+                queue = await asyncio.to_thread(
+                    self._queue_repo.get_by_name, project_id, "system_parallel_queue"
+                )
+                queue_kind = "parallel"
+            else:
+                # TASK jobs → system_fifo_queue (serial execution, existing behavior)
+                queue = await asyncio.to_thread(
+                    self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+                )
+                queue_kind = "fifo"
             if queue is not None:
                 resolved_queue_id = queue.queue_id
             else:
-                # C3: System queue doesn't exist - raise error, don't silently continue
                 raise ValueError(
-                    f"No system FIFO queue found for project {project_id}. "
+                    f"No system {queue_kind} queue found for project {project_id}. "
                     f"Ensure system queues are provisioned."
                 )
         elif queue_id and project_id:
@@ -342,6 +355,8 @@ class JobQueueService:
             job_metadata=metadata,
             queue_id=resolved_queue_id,
             idempotency_key=idempotency_key,
+            job_type=job_type,
+            instance_id=instance_id,
         )
         
         # Notify dispatch bus of new job (for event-driven processing)
@@ -885,10 +900,13 @@ class JobQueueService:
         # Warn if project_repo is not set (can't check pause state)
         if self._project_repo is None:
             logger.warning("start_job: project_repo not set, cannot check pause state")
-        
-        # Generate new instance ID for this job
-        instance_id = str(uuid.uuid4())
-        
+
+        # Generate instance_id: MESSAGE jobs use pre-set instance_id, TASK jobs get new UUID
+        if job.job_type == "message" and job.instance_id:
+            instance_id = job.instance_id
+        else:
+            instance_id = str(uuid.uuid4())
+
         # Acquire lock FIRST - if we can't get it, don't transition the job
         lock_acquired = False
         if job.queue_id and job.project_id:

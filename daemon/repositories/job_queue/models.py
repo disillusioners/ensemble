@@ -153,6 +153,9 @@ class JobItem(SQLModel, table=True):
     # Soft delete
     deleted_at: str | None = None
 
+    # Job type: "task" (serial) or "message" (parallel)
+    job_type: str = Field(default="task")
+
     # Retry handling
     retry_count: int = Field(default=0, ge=0)
     max_retries: int | None = Field(default=None)
@@ -184,6 +187,7 @@ class JobItem(SQLModel, table=True):
             "retry_count": self.retry_count,
             "max_retries": self.max_retries,
             "idempotency_key": self.idempotency_key,
+            "job_type": self.job_type,
             "failed_at": self.failed_at,
             "next_retry_at": self.next_retry_at,
         }

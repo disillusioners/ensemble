@@ -86,9 +86,9 @@ class TestStateMachineInvalidTransitions:
         assert sm.can_transition("pending", "failed") is False
 
     def test_cannot_transition_processing_to_pending(self):
-        """Test PROCESSING -> PENDING is invalid."""
+        """Test PROCESSING -> PENDING is invalid (but 'requeue' is allowed for MESSAGE jobs)."""
         sm = JobStateMachine()
-        assert sm.can_transition("processing", "pending") is False
+        assert sm.can_transition("processing", "pending") is True
 
     def test_cannot_transition_cancelled_to_pending(self):
         """Test CANCELLED -> PENDING is invalid."""
@@ -192,7 +192,8 @@ class TestStateMachineGetValidTransitions:
         assert "completed" in targets   # complete
         assert "failed" in targets      # fail
         assert "cancelled" in targets  # abort
-        assert len(result) == 3
+        assert "pending" in targets  # requeue
+        assert len(result) == 4
 
     def test_get_valid_transitions_from_failed(self):
         """Test valid transitions from FAILED state."""
@@ -243,12 +244,6 @@ class TestStateMachineValidateTransition:
         with pytest.raises(InvalidTransitionError):
             sm.validate_transition("completed", "pending")
 
-    def test_validate_transition_invalid_processing_to_pending(self):
-        """Test validate_transition raises for PROCESSING -> PENDING."""
-        sm = JobStateMachine()
-        with pytest.raises(InvalidTransitionError):
-            sm.validate_transition("processing", "pending")
-
 
 class TestInvalidTransitionError:
     """Tests for InvalidTransitionError exception."""
@@ -291,9 +286,9 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_ten_entries(self):
-        """Test TRANSITIONS dict has 10 entries (simplified - no TERMINATED state)."""
-        assert len(TRANSITIONS) == 10
+    def test_transitions_has_eleven_entries(self):
+        """Test TRANSITIONS dict has 11 entries (added requeue for MESSAGE jobs)."""
+        assert len(TRANSITIONS) == 11
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""

@@ -41,9 +41,11 @@ class JobRepository:
         job_metadata: dict[str, Any | None] = None,
         queue_id: str | None = None,
         idempotency_key: str | None = None,
+        job_type: str = "task",
+        instance_id: str | None = None,
     ) -> JobItem:
         """Create a new job queue item.
-        
+
         Args:
             agent_id: Agent ID (e.g., 'coder').
             agent_dir: Path to the agent directory.
@@ -54,7 +56,9 @@ class JobRepository:
             job_metadata: Optional metadata dictionary.
             queue_id: Optional queue ID for job routing.
             idempotency_key: Optional idempotency key for deduplication.
-            
+            job_type: Job type ("task" or "message", default "task").
+            instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+
         Returns:
             Created JobItem object.
         """
@@ -70,6 +74,8 @@ class JobRepository:
                 job_metadata=job_metadata or {},
                 queue_id=queue_id,
                 idempotency_key=idempotency_key,
+                job_type=job_type,
+                instance_id=instance_id,
             )
 
             db_session.add(job)
@@ -274,9 +280,9 @@ class JobRepository:
 
     def find_processing_jobs(self) -> list[JobItem]:
         """Find all jobs currently in PROCESSING status.
-        
+
         Used for startup recovery to identify orphaned jobs.
-        
+
         Returns:
             List of all processing JobItem objects.
         """
@@ -286,6 +292,41 @@ class JobRepository:
             )
             jobs = list(db_session.exec(stmt))
             return jobs
+
+    def find_processing_message_jobs_by_instance(self, instance_id: str) -> list[JobItem]:
+        """Find PROCESSING MESSAGE jobs targeting a specific instance.
+
+        Used for DB-level concurrency gate: if any exist, skip starting a new MESSAGE job.
+        Uses JobItem.instance_id column (indexed) — no JSON filtering needed.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.status == JobStatus.PROCESSING.value)
+                .where(JobItem.job_type == "message")
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+            )
+            return list(db_session.exec(stmt))
+
+    def find_jobs_by_instance(
+        self, instance_id: str, job_type: str | None = None
+    ) -> list[JobItem]:
+        """Find all active jobs for a given instance.
+
+        Used for termination cleanup: cancel ALL MESSAGE jobs for an instance.
+        Uses JobItem.instance_id column (indexed) — no JSON filtering needed.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+            )
+            if job_type:
+                stmt = stmt.where(JobItem.job_type == job_type)
+            return list(db_session.exec(stmt))
 
     def list_pending_by_queue(self, queue_id: str) -> list[JobItem]:
         """List pending jobs for a specific queue, ordered by priority.
