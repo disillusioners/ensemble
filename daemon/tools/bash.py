@@ -43,7 +43,13 @@ async def bash(
     workdir: str | None = None,
     input: str | None = None,
 ) -> str:
-    """Execute a bash command and return the output. Use tool_help("bash") for details."""
+    """Execute a bash command and return the output. Timeout parameter is in seconds. Use tool_help("bash") for details."""
+    # Validate timeout parameter
+    if timeout is not None:
+        if timeout < 0:
+            return f"ERROR: Timeout must be ≥ 0 seconds. Got: {timeout}s"
+        if timeout > 1800:
+            return f"ERROR: Timeout must be ≤ 1800 seconds. Got: {timeout}s"
     try:
         if isinstance(command, list):
             proc = await asyncio.create_subprocess_exec(
@@ -113,7 +119,7 @@ Args:
     command: The bash command to execute. Can be:
         - A string (interpreted as shell command with shell=True)
         - A list of strings like ["ls", "-la", "path"] (no shell interpretation)
-    timeout: Timeout in seconds (default: 1800, 30 minutes)
+    timeout: Maximum time to wait (in seconds). Must be 0-1800. Default: 1800 (30 minutes)
     workdir: Working directory for command execution (default: current directory)
     input: Optional string to pass to stdin
 
