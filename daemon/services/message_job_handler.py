@@ -109,16 +109,34 @@ class MessageJobHandler:
                 images=images,
             )
 
-            # Check if this instance should transition (completed, waiting_children, etc.)
+            # Mark message as completed so pending_count queries don't keep counting it
+            if (message_id
+                    and hasattr(self._manager, '_queue_repository')
+                    and self._manager._queue_repository):
+                try:
+                    await asyncio.to_thread(
+                        self._manager._queue_repository.complete, message_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to mark message {message_id} as completed: {e}"
+                    )
+
+            # Check if this instance is a child that has completed all work.
+            # This may create a completion report task for the parent.
             try:
                 if hasattr(self._manager, '_process_child_completion_and_notify_parent'):
                     await self._manager._process_child_completion_and_notify_parent(
                         instance_id, message_id
                     )
             except Exception as e:
-                logger.error("Completion check failed for job %s: %s", job.job_id[:8], e, exc_info=True)
+                logger.error(
+                    f"Completion check failed for job {job.job_id[:8]}...: {e}",
+                    exc_info=True,
+                )
+                # Don't fail the task — the message was processed successfully
 
-            # Check instance status to determine if job should be completed now or deferred.
+            # Check if this instance should transition (completed, waiting_children, etc.)
             # If instance is WAITING_CHILDREN, JobFeedbackObserver will complete the job
             # when all children finish and instance transitions to completed.
             skip_complete = False

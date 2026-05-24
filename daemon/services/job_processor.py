@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.manager import InstanceManager
 
+from daemon.models.instance import InstanceStatus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.message_job_handler import MessageJobHandler
@@ -219,8 +220,35 @@ class JobProcessor:
                             # Fix 2: Check instance liveness before declaring orphan
                             if proc_job.instance_id:
                                 try:
-                                    await self._instance_manager.get_instance(proc_job.instance_id)
-                                    # Instance is still alive — job is being processed, not orphaned
+                                    instance = await self._instance_manager.get_instance(proc_job.instance_id)
+                                    # Instance exists — check if it's still alive or finished
+                                    if instance.status in (InstanceStatus.COMPLETED, InstanceStatus.TERMINATED):
+                                        # Instance finished its work — complete the job (not orphan).
+                                        # The JobFeedbackObserver event may have missed firing due to
+                                        # race condition, event bus issue, etc.
+                                        logger.info(
+                                            f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
+                                            f"completed by finished instance (status={instance.status.value})"
+                                        )
+                                        await self._queue_service.complete_job(
+                                            proc_job.job_id,
+                                            demand_state=DemandState.COMPLETED,
+                                        )
+                                        continue
+                                    elif instance.status == InstanceStatus.ERROR:
+                                        # Instance errored — the message may not have been fully processed.
+                                        # Fail the job rather than orphan it.
+                                        logger.warning(
+                                            f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
+                                            f"failed due to instance error (status=error)"
+                                        )
+                                        await self._queue_service.complete_job(
+                                            proc_job.job_id,
+                                            demand_state=DemandState.FAILED,
+                                            error="Instance errored during message processing",
+                                        )
+                                        continue
+                                    # Instance is alive and processing — not orphaned
                                     continue
                                 except KeyError:
                                     pass  # Instance truly gone — proceed to fail
