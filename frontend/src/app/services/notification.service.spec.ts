@@ -864,3 +864,195 @@ describe('NotificationService Signal Behavior', () => {
     });
   });
 });
+
+// =============================================================================
+// NOTIFICATION SERVICE SOUND EXCLUSION TESTS
+// =============================================================================
+
+describe('NotificationService Sound Exclusion', () => {
+  // Sound exclusion set matching the real service logic
+  const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-import', 'experiencer']);
+
+  class MockAudio {
+    playCallCount = 0;
+
+    play(): Promise<void> {
+      this.playCallCount++;
+      return Promise.resolve();
+    }
+  }
+
+  class TestableNotificationService {
+    readonly notifications = signal<any[]>([]);
+    readonly unreadCount = signal<number>(0);
+
+    audio: MockAudio | null = null;
+    audioUnlocked = false;
+
+    constructor(mockAudio: MockAudio | null) {
+      this.audio = mockAudio;
+      if (this.audio) {
+        this.audio.volume = 0.5;
+      }
+    }
+
+    private playSound(): void {
+      if (this.audio && this.audioUnlocked) {
+        this.audio.currentTime = 0;
+        this.audio.play().catch(() => {});
+      }
+    }
+
+    addNotification(notification: InstanceNotification): void {
+      const newNotification = {
+        ...notification,
+        id: notification.instance_id,
+        read: false,
+      };
+      this.notifications.update(list => [newNotification, ...list].slice(0, 50));
+      this.unreadCount.update(count => count + 1);
+      if (!SOUND_EXCLUDED_AGENT_IDS.has(notification.agent_id)) {
+        this.playSound();
+      }
+    }
+  }
+
+  it('should NOT play sound for kb-import agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-1',
+      agent_id: 'kb-import',
+      name: 'KB Import Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(0);
+  });
+
+  it('should NOT play sound for experiencer agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-2',
+      agent_id: 'experiencer',
+      name: 'Experiencer Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(0);
+  });
+
+  it('should play sound for coder agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-3',
+      agent_id: 'coder',
+      name: 'Coder Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(1);
+  });
+
+  it('should play sound for leader agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-4',
+      agent_id: 'leader',
+      name: 'Leader Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(1);
+  });
+
+  it('should play sound when agent_id is empty string', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-5',
+      agent_id: '',
+      name: 'Empty Agent Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(1);
+  });
+
+  it('should play sound when agent_id is a random agent', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    service.addNotification({
+      instance_id: 'instance-6',
+      agent_id: 'some-other-agent',
+      name: 'Random Agent Notification',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    expect(mockAudio.playCallCount).toBe(1);
+  });
+
+  it('should not play sound for mixed batch (some excluded, some not)', () => {
+    const mockAudio = new MockAudio();
+    const service = new TestableNotificationService(mockAudio);
+    service['audioUnlocked'] = true;
+
+    // Add notifications for kb-import (excluded), coder (not excluded),
+    // experiencer (excluded), leader (not excluded)
+    service.addNotification({
+      instance_id: 'instance-1',
+      agent_id: 'kb-import',
+      name: 'KB Import',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    service.addNotification({
+      instance_id: 'instance-2',
+      agent_id: 'coder',
+      name: 'Coder',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    service.addNotification({
+      instance_id: 'instance-3',
+      agent_id: 'experiencer',
+      name: 'Experiencer',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    service.addNotification({
+      instance_id: 'instance-4',
+      agent_id: 'leader',
+      name: 'Leader',
+      status: 'COMPLETED' as const,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Only coder and leader should trigger sound (2 total)
+    expect(mockAudio.playCallCount).toBe(2);
+  });
+});
