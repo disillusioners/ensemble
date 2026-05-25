@@ -256,7 +256,7 @@ class TestCompletionPath2ToolInvocation:
                 with patch.object(
                     service, "_should_send_completion_report",
                     new_callable=AsyncMock,
-                    return_value=True
+                    return_value=(True, None)
                 ):
                     with patch.object(
                         service, "_trigger_title_generation"
@@ -316,7 +316,7 @@ class TestCompletionPath3RegularChild:
                 with patch.object(
                     service, "_should_send_completion_report",
                     new_callable=AsyncMock,
-                    return_value=True
+                    return_value=(True, None)
                 ):
                     with patch.object(
                         service, "_update_parent_on_child_complete",
@@ -693,13 +693,13 @@ class TestInstanceMessagingTriggerTitleGeneration:
                     # Verify title generation was NOT triggered
                     mock_run_async.assert_not_called()
 
-    # ─── Scenario 3: enqueue_message does NOT trigger for non-HUMAN messages ─────
+    # ─── Scenario 3: enqueue_message DOES trigger for all message types on IDLE→RUNNING ─────
 
     @pytest.mark.asyncio
-    async def test_enqueue_does_not_trigger_for_agent_message(
+    async def test_enqueue_triggers_for_agent_message_on_idle_to_running(
         self, messaging_service, mock_messaging_manager
     ):
-        """Verify _maybe_trigger_title_generation is NOT called for AGENT messages."""
+        """Verify _maybe_trigger_title_generation IS called for AGENT messages on IDLE→RUNNING."""
         instance_id = "instance-789"
 
         # Mock instance in IDLE state
@@ -726,14 +726,14 @@ class TestInstanceMessagingTriggerTitleGeneration:
                         source="internal_agent:other-instance",  # This makes it AGENT type
                     )
 
-                    # Verify title generation was NOT triggered (not HUMAN message)
-                    mock_run_async.assert_not_called()
+                    # Verify title generation WAS triggered (any message type on IDLE→RUNNING)
+                    mock_run_async.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_enqueue_does_not_trigger_for_completion_report(
+    async def test_enqueue_triggers_for_completion_report_on_idle_to_running(
         self, messaging_service, mock_messaging_manager
     ):
-        """Verify _maybe_trigger_title_generation is NOT called for COMPLETION_REPORT."""
+        """Verify _maybe_trigger_title_generation IS called for COMPLETION_REPORT on IDLE→RUNNING."""
         instance_id = "instance-completion"
 
         # Mock instance in IDLE state
@@ -760,8 +760,8 @@ class TestInstanceMessagingTriggerTitleGeneration:
                         source="internal_report:child-instance",  # This makes it COMPLETION_REPORT type
                     )
 
-                    # Verify title generation was NOT triggered (not HUMAN message)
-                    mock_run_async.assert_not_called()
+                    # Verify title generation WAS triggered (any message type on IDLE→RUNNING)
+                    mock_run_async.assert_called_once()
 
     # ─── Scenario 4: send_message triggers title even on CancelledError ───────────
 
