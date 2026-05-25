@@ -432,11 +432,17 @@ def create_agent_node(
             logger.error(f"[LLM] Unexpected error after retries: {type(e).__name__}: {_truncate_error(e)}")
             raise
         
-        tool_info = ''
         if hasattr(response, 'tool_calls') and response.tool_calls:
             tool_names = [tc.get('name', getattr(tc, 'name', '?')) for tc in response.tool_calls]
-            tool_info = f', tools: {tool_names}'
-        logger.info(f'[LLM] Response: {response.content[:80] if response.content else "empty"}...{tool_info}')
+            # Get first tool's arguments for display
+            first_tc = response.tool_calls[0]
+            tc_args = first_tc.get('args', getattr(first_tc, 'args', {}))
+            tc_args_str = str(tc_args)[:80] if tc_args else ''
+            logger.info(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
+        elif response.content:
+            logger.info(f'[LLM] Response: {response.content[:80]}...')
+        else:
+            logger.info('[LLM] Response: empty')
         return {'messages': [response]}
     
     return agent_node
