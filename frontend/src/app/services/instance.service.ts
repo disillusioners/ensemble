@@ -19,7 +19,7 @@ const TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
   'failed',
 ]);
 
-function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
+export function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
   return [...instances].sort((a, b) => {
     const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
     const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
