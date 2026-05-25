@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 65 packs
-- Unit: 53 | Integration: 1 | Mock: 4 | E2E: 6
+- Total: 69 packs
+- Unit: 56 | Integration: 1 | Mock: 5 | E2E: 6
 
 ## Unit Test Packs
 
@@ -17,7 +17,7 @@
 | defer_race_condition_test | tests/job_queue/test_select_next_eligible_job.py | Defer job race condition fix: _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration | 2 min | 2026-05-25 | ✅ PASS (16/16, c4f6e17 fix, 0 failures, 1089 suite pass) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-05-25 | ✅ PASS (1089 passed, 19 skipped, defer-race-condition + 16 new tests, 0 regressions) |
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format, tool registration, agent definition, crash recovery | 2 min | 2026-04-24 | ✅ PASS (38 passed, 0 failed, 2 benign bugs found) |
-| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**) | 2 min | 2026-05-25 | ✅ PASS (723/723, jobs-remember-project tests, 0 failures) |
+| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**) | 2 min | 2026-05-26 | ✅ PASS (723/723, feature/fix-pause-button + sidebar visibility fix, 0 failures) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | models_split_unit_test | tests/unit/test_models_split.py | Phase 2 models split: backward compat, __all__ completeness, cross-module refs, instantiation, HealthResponse, Pydantic behavior | 2 min | 2026-04-23 | ✅ PASS (30 passed, Phase 6 no regression) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-23 | ⚠️ FILE NOT FOUND (stale entry) |
@@ -60,6 +60,9 @@
 | project_metadata_table_unit_test | tests/unit/test_project_metadata_table.py | Project metadata table separation: CRUD, upsert, enrichment, create/update/delete integration, value types, migration | 2 min | 2026-05-25 | ✅ PASS (42/42, feature/metadata-table, 0 regressions) |
 | job_status_guard_unit_test | tests/unit/test_job_processor_status_guard.py | Job processor status str/enum guard: enum .value extraction, string passthrough, job transitions, edge cases (empty/unknown/capitalized strings) | 2 min | 2026-05-25 | ✅ PASS (15/15, fix/job-status-str-enum + 45b4814, 0 regressions) |
 | ensure_system_queues_unit_test | tests/job_queue/test_ensure_system_queues.py | Ensure system queues: service layer (partial, all, none, idempotency) + API endpoint (200 OK, 404, queue correctness, idempotency, partial existing) | 2 min | 2026-05-25 | ✅ PASS (9/9, eb4bcc1 + a7c2851 bug fix, 0 regressions) |
+| instance_pause_unit_test | tests/job_queue/test_instance_pause.py | Instance pause checks: paused instance job skip, enqueue no auto-resume, pause during processing | 2 min | 2026-05-26 | ✅ PASS (8/8, feature/fix-pause-button, 0 regressions) |
+| pause_cascade_unit_test | tests/unit/test_pause_instance_cascade.py | Resume cascade: parent→children, idempotency, mixed states, no children, already running | 2 min | 2026-05-26 | ✅ PASS (19/19, feature/fix-pause-button, 0 regressions) |
+| job_processor_pause_test | tests/job_queue/test_job_processor.py | Job processor pause filter + all existing processor tests | 2 min | 2026-05-26 | ✅ PASS (30/30, feature/fix-pause-button, 0 regressions) |
 
 ## Integration Test Packs
 
@@ -75,6 +78,7 @@
 | mock_job_queue_test | test/packs/mock_job_queue_test.sh | Mock job queue API test | 5 min | 2026-04-23 | ❌ FAIL (48 fixture errors — PRE-EXISTING, not Phase 6) |
 | mock_ensure_system_queues_test | tests/mock_ensure_system_queues.py | Ensure system queues against live dev server: discover project, create, ensure (4 created), idempotency (4 existing), correctness, 404, cleanup | 2 min | 2026-05-25 | ✅ PASS (20/20 assertions, eb4bcc1 + a7c2851 bug fix) |
 | mock_project_delete_test | tests/mock_project_delete.py | Project delete cascade cleanup: 404, happy path (no instances), 409 protection, force delete, cascade verification, in-memory cleanup | 2 min | 2026-05-25 | ✅ PASS (25/25 assertions, 813e097 + 1ce9a04) |
+| mock_pause_resume_test | tests/mock_pause_resume.py | Pause/resume API: create instance, pause, verify PAUSED, message queued (PENDING), resume, verify NOT paused, job processes, idempotency | 2 min | 2026-05-26 | ✅ PASS (12/12 assertions, feature/fix-pause-button) |
 
 ## E2E Test Packs
 
