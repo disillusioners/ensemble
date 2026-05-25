@@ -791,7 +791,7 @@ class JobQueueService:
             project_id: Optional project ID to get next job for.
                        If None, gets next pending job regardless of project.
             queue_id: Optional queue ID to get next job for.
-                     Takes precedence over project_id if specified.
+                      Takes precedence over project_id if specified.
             
         Returns:
             Next JobItem to process, or None if no pending jobs.
@@ -805,10 +805,61 @@ class JobQueueService:
             pending = await asyncio.to_thread(
                 self._repository.list_pending_by_project, project_id
             )
-            return pending[0] if pending else None
+            return await self._select_next_eligible_job(pending, project_id)
         else:
             pending = await asyncio.to_thread(self._repository.list_all_pending)
             return pending[0] if pending else None
+
+    async def _select_next_eligible_job(
+        self,
+        pending: list[JobItem],
+        project_id: str,
+    ) -> JobItem | None:
+        """Select the next eligible job from pending list, respecting defer semantics.
+        
+        Defer jobs are only returned when no non-defer work (active or pending) exists.
+        This ensures defer queues don't start processing while non-defer work is pending.
+        
+        Args:
+            pending: List of pending jobs (ordered by priority desc, created_at asc).
+            project_id: Project ID for idle check.
+            
+        Returns:
+            Next eligible JobItem, or None if no eligible jobs.
+        """
+        if not pending:
+            return None
+        
+        # Batch-fetch queue types to avoid N+1 queries
+        unique_queue_ids = {job.queue_id for job in pending if job.queue_id}
+        queue_type_map: dict[str, bool] = {}  # queue_id -> is_defer
+        for qid in unique_queue_ids:
+            queue = await asyncio.to_thread(self._queue_repo.get, qid)
+            queue_type_map[qid] = queue.queue_type == "defer" if queue else False
+        
+        # Check once if non-defer work is active (used for defer jobs only)
+        non_defer_active = 0
+        for job in pending:
+            is_defer = queue_type_map.get(job.queue_id, False)
+            if is_defer:
+                # Defer job found - check if non-defer work is active
+                non_defer_active = await asyncio.to_thread(
+                    self._repository.count_active_jobs_in_non_defer_queues, project_id
+                )
+                break
+        
+        # Iterate through pending jobs and select first eligible
+        for job in pending:
+            is_defer = queue_type_map.get(job.queue_id, False)
+            if not is_defer:
+                # Non-defer job - always safe to return
+                return job
+            else:
+                # Defer job - only return if non-defer work is idle
+                if non_defer_active == 0:
+                    return job
+                # Otherwise skip this defer job and continue checking
+        return None
     
     async def _get_queue_position(
         self,
