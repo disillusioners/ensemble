@@ -572,7 +572,14 @@ Returns:
     access_memory = create_access_memory_tool(agent_id)
     
     # Create project management tools (with instance context for creator tracking)
-    project_tools = create_project_tools(manager.project_store, current_instance_id, agent_id)
+    # and job queue management service for system queue provisioning
+    queue_mgmt_service = getattr(manager, '_job_queue_mgmt_service', None)
+    project_tools = create_project_tools(
+        manager.project_store,
+        current_instance_id,
+        agent_id,
+        job_queue_mgmt_service=queue_mgmt_service,
+    )
     
     # Create workdir-aware wrappers for filesystem tools
     # These auto-populate workdir from project's main_directory when not provided

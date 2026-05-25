@@ -7,12 +7,23 @@ Provides CRUD operations for projects with:
 - Relationships to instances, agents, and other projects
 """
 
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING
+
 from langchain_core.tools import tool
+
+logger = logging.getLogger(__name__)
 
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.models import ProjectStatus, ProjectType
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
+
+if TYPE_CHECKING:
+    from ..services.job_queue_mgmt_service import JobQueueMgmtService
 
 CATEGORY_NAME = "Project Management"
 CATEGORY_DOC = """\
@@ -321,13 +332,19 @@ Returns:
 }
 
 
-def create_project_tools(store: SQLModelProjectRepository, current_instance_id: str = "", agent_id: str = ""):
+def create_project_tools(
+    store: SQLModelProjectRepository,
+    current_instance_id: str = "",
+    agent_id: str = "",
+    job_queue_mgmt_service: "JobQueueMgmtService | None" = None,
+):
     """Create project management tools with injected repository.
     
     Args:
         store: SQLModelProjectRepository instance for database operations.
         current_instance_id: The current instance ID (used for creator tracking).
         agent_id: The current agent ID (primary parameter).
+        job_queue_mgmt_service: Optional JobQueueMgmtService for system queue provisioning.
     
     Returns:
         List of tool functions for project management.
@@ -375,6 +392,30 @@ def create_project_tools(store: SQLModelProjectRepository, current_instance_id: 
                 creator_instance_id=current_instance_id or None,
                 creator_agent_id=agent_id or None,
             )
+            
+            # Auto-provision system queues for the new project (fire-and-forget)
+            if job_queue_mgmt_service is not None:
+                project_id = project.project_id
+
+                async def _provision_queues():
+                    try:
+                        await job_queue_mgmt_service.auto_provision_system_queues(project_id)
+                        logger.info(f"System queues provisioned for project {project_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to provision system queues for project {project_id}: {e}")
+
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(_provision_queues())
+                    else:
+                        loop.run_until_complete(_provision_queues())
+                except RuntimeError:
+                    # No event loop running, use threading
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        executor.submit(asyncio.run, _provision_queues())
+            
             return project.to_dict()
         except ValueError as e:
             return {"error": str(e)}
