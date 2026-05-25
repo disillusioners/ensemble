@@ -62,6 +62,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
   private sseSubscription: Subscription | null = null;
+  private projectRestored = false;
 
   // Signals for state
   readonly jobs = signal<Job[]>([]);
@@ -181,34 +182,74 @@ export class JobsComponent implements OnInit, OnDestroy {
       const latestError = this.jobSseService.latestError();
       const state = this.jobSseService.connectionState();
       const attempt = this.retryAttempt();
-      
+
       if (latestError) {
         console.error('[Jobs] SSE error:', latestError);
         // Show user-friendly error message based on state
         let displayMessage = latestError;
-        
+
         if (state === 'retrying') {
           displayMessage = `Connection lost. Reconnecting... (attempt ${attempt})`;
         } else if (state === 'failed') {
           displayMessage = latestError;
         }
-        
+
         this.snackBar.open(displayMessage, 'Dismiss', {
           duration: 5000,
           panelClass: 'error-snackbar'
         });
-        
+
         // Clear the error after showing it to prevent duplicate notifications
         this.jobSseService.clearError();
       }
     });
+
+    // Effect to restore last selected project from localStorage
+    effect(() => {
+      const projectList = this.projects();
+      if (projectList.length > 0) {
+        this.tryRestoreProject();
+      }
+    });
   }
+
+  private readonly STORAGE_KEY = 'job-page-selected-project';
 
   ngOnInit(): void {
     this.loadJobs();
     this.loadAgents();
     this.loadProjects();
     this.startAutoRefresh();
+  }
+
+  private tryRestoreProject(): void {
+    if (this.projectRestored) {
+      return;
+    }
+    this.projectRestored = true;
+
+    let savedProjectId: string | null = null;
+    try {
+      savedProjectId = localStorage.getItem(this.STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
+    if (!savedProjectId) {
+      return;
+    }
+
+    // Check if saved project still exists in the project list
+    const projectExists = this.projects().some(p => p.project_id === savedProjectId);
+    if (projectExists) {
+      this.onProjectFilterChange(savedProjectId);
+    } else {
+      // Clear stale entry
+      try {
+        localStorage.removeItem(this.STORAGE_KEY);
+      } catch {
+        // silently ignore
+      }
+    }
   }
 
   ngOnDestroy(): void {
@@ -330,6 +371,16 @@ export class JobsComponent implements OnInit, OnDestroy {
     }));
     // Clear queue selection when project changes
     this.selectedQueueId.set(null);
+    // Persist selection to localStorage
+    try {
+      if (projectId) {
+        localStorage.setItem(this.STORAGE_KEY, projectId);
+      } else {
+        localStorage.removeItem(this.STORAGE_KEY);
+      }
+    } catch {
+      // silently ignore
+    }
     this.loadJobs();
   }
 
