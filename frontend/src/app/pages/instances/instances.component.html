@@ -1,0 +1,32 @@
+<div class="instances-container">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <button
+        mat-icon-button
+        (click)="onBack()"
+        title="Back to home"
+        class="back-button"
+      >
+        <mat-icon>arrow_back</mat-icon>
+      </button>
+      <h1 class="page-title">Instances</h1>
+    </div>
+  </div>
+
+  <!-- Instance list -->
+  <div class="list-container">
+    <app-instance-list
+      [agents]="agents()"
+      [instances]="instanceService.instances()"
+      [currentInstanceId]="null"
+      [selectedAgent]="selectedAgent()"
+      [hasMore]="instanceService.hasMoreInstances()"
+      [isLoadingMore]="instanceService.isLoadingMore()"
+      (deleteInstance)="onDeleteInstance($event)"
+      (newInstance)="onNewInstance()"
+      (agentChange)="onAgentChange($event)"
+      (loadMore)="instanceService.loadMore()"
+    ></app-instance-list>
+  </div>
+</div>
