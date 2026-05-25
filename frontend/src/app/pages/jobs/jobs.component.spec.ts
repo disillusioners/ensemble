@@ -3,6 +3,55 @@ import { Job, JobStatus, JobSource } from '../../models/job.model';
 import { Project } from '../../models/project.model';
 import { createMockJob, createMockJobList } from '../../testing/job-test-helpers';
 
+// Storage key matching the component
+const STORAGE_KEY = 'job-page-selected-project';
+
+// localStorage mock helpers
+let localStorageData: Record<string, string> = {};
+type StorageErrorMode = 'none' | 'get' | 'set' | 'remove' | 'all';
+let localStorageErrorMode: StorageErrorMode = 'none';
+
+const mockLocalStorage = {
+  getItem: (key: string): string | null => {
+    if (localStorageErrorMode === 'get' || localStorageErrorMode === 'all') throw new Error('localStorage unavailable');
+    return localStorageData[key] ?? null;
+  },
+  setItem: (key: string, value: string): void => {
+    if (localStorageErrorMode === 'set' || localStorageErrorMode === 'all') throw new Error('localStorage unavailable');
+    localStorageData[key] = value;
+  },
+  removeItem: (key: string): void => {
+    if (localStorageErrorMode === 'remove' || localStorageErrorMode === 'all') throw new Error('localStorage unavailable');
+    delete localStorageData[key];
+  },
+  clear: () => {
+    localStorageData = {};
+  },
+};
+
+// Replace global localStorage
+const originalLocalStorage = global.localStorage;
+beforeAll(() => {
+  Object.defineProperty(global, 'localStorage', {
+    value: mockLocalStorage,
+    writable: true,
+    configurable: true,
+  });
+});
+
+afterAll(() => {
+  Object.defineProperty(global, 'localStorage', {
+    value: originalLocalStorage,
+    writable: true,
+    configurable: true,
+  });
+});
+
+beforeEach(() => {
+  localStorageData = {};
+  localStorageErrorMode = 'none';
+});
+
 // Simplified mock services
 const mockJobService = {
   jobs: signal<Job[]>([]),
@@ -51,6 +100,7 @@ class MockJobsComponent {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = mockProjectService.projects;
+  readonly selectedQueueId = signal<string | null>(null);
   readonly filters = signal<{ status?: JobStatus; source?: JobSource; agent_id?: string; project_id?: string; include_deleted?: boolean }>({});
   
   // Deleted jobs filter
@@ -139,6 +189,69 @@ class MockJobsComponent {
   onClearFilters() {
     this.filters.set({});
     this.showDeleted.set(false);
+    // Clear localStorage so the project isn't silently restored on next visit
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
+  }
+
+  onProjectFilterChange(projectId: string) {
+    this.filters.update(filters => ({
+      ...filters,
+      project_id: projectId || undefined
+    }));
+    // Clear queue selection when project changes
+    this.selectedQueueId.set(null);
+    // Persist selection to localStorage
+    try {
+      if (projectId) {
+        localStorage.setItem(STORAGE_KEY, projectId);
+      } else {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      // silently ignore
+    }
+  }
+
+  // Simulates the component's tryRestoreProject logic
+  private _projectRestored = false;
+
+  tryRestoreProject() {
+    if (this._projectRestored) {
+      return;
+    }
+    this._projectRestored = true;
+
+    let savedProjectId: string | null = null;
+    try {
+      savedProjectId = localStorage.getItem(STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
+    if (!savedProjectId) {
+      return;
+    }
+
+    // Check if saved project still exists in the project list
+    const projectExists = this.projects().some(p => p.project_id === savedProjectId);
+    if (projectExists) {
+      // Directly set the filter without calling loadJobs()
+      this.filters.update(f => ({ ...f, project_id: savedProjectId }));
+    } else {
+      // Clear stale entry
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // silently ignore
+      }
+    }
+  }
+
+  resetProjectRestored() {
+    this._projectRestored = false;
   }
 
   onToggleShowDeleted(checked: boolean) {
@@ -680,6 +793,300 @@ describe('JobsComponent Logic', () => {
       expect(component.filters().include_deleted).toBe(true);
       component.onClearFilters();
       expect(component.filters().include_deleted).toBeUndefined();
+    });
+  });
+
+  describe('localStorage project persistence', () => {
+    const mockProjects: Project[] = [
+      {
+        project_id: 'project-123',
+        name: 'Test Project',
+        project_type: 'software',
+        status: 'active',
+        main_directory: '/test',
+        related_directories: [],
+        description: 'Test description',
+        tags: [],
+        shortnames: [],
+        metadata: {},
+        relationships: {},
+        creator_instance_id: null,
+        creator_agent_id: null,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+        job_queue_paused: false,
+      },
+      {
+        project_id: 'project-456',
+        name: 'Another Project',
+        project_type: 'software',
+        status: 'active',
+        main_directory: '/another',
+        related_directories: [],
+        description: 'Another description',
+        tags: [],
+        shortnames: [],
+        metadata: {},
+        relationships: {},
+        creator_instance_id: null,
+        creator_agent_id: null,
+        created_at: new Date().toISOString(),
+        updated_at: null,
+        job_queue_paused: false,
+      },
+    ];
+
+    beforeEach(() => {
+      localStorage.clear();
+      component = new MockJobsComponent();
+      component.projects.set(mockProjects);
+      component.resetProjectRestored();
+    });
+
+    describe('Scenario 1: Happy path - project persisted and restored', () => {
+      it('should restore selected project from localStorage on page load', () => {
+        // Simulate: user selected a project previously
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+
+        // Simulate: page loads and calls tryRestoreProject
+        component.tryRestoreProject();
+
+        // Verify: project is auto-selected
+        expect(component.filters().project_id).toBe('project-123');
+      });
+
+      it('should persist project selection when user selects a project', () => {
+        component.onProjectFilterChange('project-456');
+
+        expect(localStorage.getItem(STORAGE_KEY)).toBe('project-456');
+      });
+
+      it('should only restore once even if called multiple times (double load guard)', () => {
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+
+        // Simulate multiple calls (e.g., from multiple effects)
+        component.tryRestoreProject();
+        component.tryRestoreProject();
+        component.tryRestoreProject();
+
+        // Verify: project is set only once
+        expect(component.filters().project_id).toBe('project-123');
+        // Verify: projectRestored flag prevents multiple restores
+        expect(component._projectRestored).toBe(true);
+      });
+    });
+
+    describe('Scenario 2: Stale project - deleted project ID in localStorage', () => {
+      it('should clear localStorage when saved project no longer exists', () => {
+        // Simulate: stale entry from deleted project
+        localStorage.setItem(STORAGE_KEY, 'deleted-project-id');
+
+        component.tryRestoreProject();
+
+        // Verify: localStorage is cleaned
+        expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+        // Verify: no crash, default selection (no project_id)
+        expect(component.filters().project_id).toBeUndefined();
+      });
+
+      it('should not set project_id filter for non-existent project', () => {
+        localStorage.setItem(STORAGE_KEY, 'deleted-project-999');
+
+        component.tryRestoreProject();
+
+        expect(component.filters().project_id).toBeUndefined();
+      });
+
+      it('should handle gracefully even if localStorage.removeItem fails', () => {
+        localStorageErrorMode = 'remove';
+        // Use a stale/deleted project ID
+        localStorage.setItem(STORAGE_KEY, 'deleted-project-id');
+
+        // Should not throw
+        expect(() => component.tryRestoreProject()).not.toThrow();
+        expect(component.filters().project_id).toBeUndefined();
+      });
+    });
+
+    describe('Scenario 3: Clear filters clears localStorage', () => {
+      it('should clear localStorage when user clicks Clear Filters', () => {
+        // Simulate: user had selected a project
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+        component.onProjectFilterChange('project-123');
+
+        expect(localStorage.getItem(STORAGE_KEY)).toBe('project-123');
+
+        // Simulate: user clicks "Clear Filters"
+        component.onClearFilters();
+
+        // Verify: localStorage is cleared
+        expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+      });
+
+      it('should reset filters when clearing', () => {
+        component.onProjectFilterChange('project-123');
+        component.onClearFilters();
+
+        expect(component.filters()).toEqual({});
+      });
+    });
+
+    describe('Scenario 4: No saved project - fresh localStorage', () => {
+      it('should not crash with empty localStorage', () => {
+        // localStorage is already empty from beforeEach
+
+        expect(() => component.tryRestoreProject()).not.toThrow();
+        expect(component.filters().project_id).toBeUndefined();
+      });
+
+      it('should not throw when localStorage returns null', () => {
+        // Explicitly ensure no value
+        localStorage.removeItem(STORAGE_KEY);
+
+        expect(() => component.tryRestoreProject()).not.toThrow();
+        expect(component.filters().project_id).toBeUndefined();
+      });
+
+      it('should work normally without any saved state', () => {
+        // Fresh start - no project selected
+        expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+        // User selects a project for first time
+        component.onProjectFilterChange('project-123');
+
+        expect(component.filters().project_id).toBe('project-123');
+        expect(localStorage.getItem(STORAGE_KEY)).toBe('project-123');
+      });
+    });
+
+    describe('Scenario 5: localStorage unavailable', () => {
+      it('should not crash when localStorage throws on getItem', () => {
+        localStorageErrorMode = 'get';
+
+        expect(() => component.tryRestoreProject()).not.toThrow();
+        expect(component.filters().project_id).toBeUndefined();
+      });
+
+      it('should not crash when localStorage throws on setItem', () => {
+        localStorageErrorMode = 'set';
+
+        expect(() => component.onProjectFilterChange('project-123')).not.toThrow();
+        expect(component.filters().project_id).toBe('project-123'); // Filter still works
+      });
+
+      it('should not crash when localStorage throws on removeItem', () => {
+        // First set a project
+        component.onProjectFilterChange('project-123');
+        expect(component.filters().project_id).toBe('project-123');
+
+        // Now make localStorage fail
+        localStorageErrorMode = 'remove';
+
+        expect(() => component.onClearFilters()).not.toThrow();
+        expect(component.filters()).toEqual({}); // Filters still cleared
+      });
+
+      it('should handle getItem throwing during stale project cleanup', () => {
+        localStorageErrorMode = 'get';
+        localStorage.setItem(STORAGE_KEY, 'deleted-project');
+
+        // Should silently handle error
+        expect(() => component.tryRestoreProject()).not.toThrow();
+        expect(component.filters().project_id).toBeUndefined();
+      });
+    });
+
+    describe('Scenario 6: Double load guard', () => {
+      it('should only allow tryRestoreProject to run once', () => {
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+
+        // First call - should restore
+        component.tryRestoreProject();
+        expect(component.filters().project_id).toBe('project-123');
+
+        // Second call - should be no-op
+        component.filters.set({}); // Reset
+        component.tryRestoreProject();
+        expect(component.filters().project_id).toBeUndefined(); // Not restored again
+      });
+
+      it('should not restore if already restored even with different saved value', () => {
+        // First load with project-123
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+        component.tryRestoreProject();
+        expect(component.filters().project_id).toBe('project-123');
+
+        // Simulate: different project saved while page is open
+        localStorage.setItem(STORAGE_KEY, 'project-456');
+
+        // Second attempt - should NOT restore project-456
+        component.tryRestoreProject();
+        expect(component.filters().project_id).toBe('project-123'); // Still 123
+      });
+
+      it('should be protected by _projectRestored flag', () => {
+        expect(component._projectRestored).toBe(false);
+
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+        component.tryRestoreProject();
+
+        expect(component._projectRestored).toBe(true);
+      });
+
+      it('resetProjectRestored allows restoration on new component instance', () => {
+        // Simulate first "load"
+        component.tryRestoreProject();
+        expect(component._projectRestored).toBe(true);
+
+        // Simulate "new page load" - reset flag
+        component.resetProjectRestored();
+        expect(component._projectRestored).toBe(false);
+
+        // Should be able to restore again
+        localStorage.setItem(STORAGE_KEY, 'project-456');
+        component.tryRestoreProject();
+        expect(component.filters().project_id).toBe('project-456');
+      });
+    });
+
+    describe('Edge cases and integration', () => {
+      it('should handle undefined/null projectId in onProjectFilterChange', () => {
+        component.onProjectFilterChange('');
+        expect(component.filters().project_id).toBeUndefined();
+        expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+      });
+
+      it('should not persist undefined/null to localStorage', () => {
+        component.onProjectFilterChange('project-123');
+        expect(localStorage.getItem(STORAGE_KEY)).toBe('project-123');
+
+        component.onProjectFilterChange('');
+        expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+      });
+
+      it('should clear queue selection when project changes', () => {
+        component.selectedQueueId.set('queue-1');
+
+        component.onProjectFilterChange('project-123');
+
+        expect(component.selectedQueueId()).toBeNull();
+      });
+
+      it('should handle project restored with empty projects list', () => {
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+        component.projects.set([]); // No projects loaded yet
+
+        // Should not crash - effect won't call tryRestoreProject until projects exist
+        expect(() => component.tryRestoreProject()).not.toThrow();
+      });
+
+      it('should only restore existing projects', () => {
+        localStorage.setItem(STORAGE_KEY, 'project-123');
+
+        component.tryRestoreProject();
+
+        expect(component.filters().project_id).toBe('project-123');
+      });
     });
   });
 });

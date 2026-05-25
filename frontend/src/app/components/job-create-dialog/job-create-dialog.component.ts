@@ -123,10 +123,15 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
 
   private loadQueues(projectId: string): void {
     this.queuesLoading.set(true);
-    
+
     this.queueService.listQueues(projectId).subscribe({
       next: (queues) => {
         this.queues.set(queues);
+        // Default to system_defer_queue if available
+        const defaultQueue = queues.find(q => q.queue_id === 'system_defer_queue');
+        if (defaultQueue) {
+          this.form.get('queue_id')?.setValue(defaultQueue.queue_id);
+        }
         this.queuesLoading.set(false);
       },
       error: (err) => {
