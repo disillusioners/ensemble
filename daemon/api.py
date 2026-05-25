@@ -325,6 +325,10 @@ async def lifespan(app: FastAPI):
     from daemon.routers.projects import set_project_repository
     set_project_repository(manager._project_repository)
     
+    # Also set project repository for queues router (has its own dependency injection)
+    from daemon.routers.queues import set_project_repository as set_queues_project_repository
+    set_queues_project_repository(manager._project_repository)
+
     # Set JobQueueMgmtService for projects and queues routers injection
     from daemon.routers.projects import set_job_queue_mgmt_service as set_proj_mgmt_service
     set_proj_mgmt_service(job_queue_mgmt_service)
