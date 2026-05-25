@@ -4,6 +4,14 @@
     <div class="header-top">
       <h2 class="title">Instances</h2>
       <div class="header-actions">
+        <button
+          class="refresh-btn"
+          (click)="onRefresh()"
+          [disabled]="isRefreshing()"
+          title="Refresh instances"
+        >
+          <mat-icon [class.spinning]="isRefreshing()">refresh</mat-icon>
+        </button>
         <app-agent-switcher
           [agents]="agents()"
           [selectedAgent]="selectedAgent()"
@@ -32,7 +40,7 @@
   </div>
 
   <!-- Instance Tree -->
-  <div class="instance-list">
+  <div class="instance-list" #instanceListContainer>
     @if (instanceService.loading()) {
       <div class="loading-state">
         <span class="loading-spinner"></span>

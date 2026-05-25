@@ -25,7 +25,7 @@ const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
 
 // Testable InstanceService implementation (mirrors actual service)
 class TestableInstanceService {
-  private readonly POLLING_INTERVAL = 10_000;
+  private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
   private currentProjectId: string | null = null;
   private currentOffset: number = 0;
@@ -431,7 +431,7 @@ describe('InstanceService', () => {
       service.startPolling();
 
       // Fast-forward time
-      jest.advanceTimersByTime(11000);
+      jest.advanceTimersByTime(61000);
 
       // Should have called API twice (initial + interval)
       expect(mockApi.listInstances).toHaveBeenCalledTimes(2);
@@ -440,7 +440,7 @@ describe('InstanceService', () => {
     it('should pass projectId to polling', () => {
       service.startPolling('test-project');
 
-      jest.advanceTimersByTime(11000);
+      jest.advanceTimersByTime(61000);
 
       expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'test-project', true);
     });

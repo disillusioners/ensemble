@@ -67,6 +67,40 @@
   }
 }
 
+.refresh-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background-color: #334155;
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: all 0.2s ease;
+
+  &:hover:not(:disabled) {
+    background-color: #475569;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+
+  mat-icon {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    transition: transform 0.2s ease;
+
+    &.spinning {
+      animation: spin 0.8s linear infinite;
+    }
+  }
+}
+
 ::ng-deep .agent-switcher-container {
   .dropdown-trigger {
     padding: 6px 10px;

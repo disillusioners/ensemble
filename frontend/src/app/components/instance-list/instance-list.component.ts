@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, input, inject } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, input, inject, ViewChild, ElementRef, effect, AfterViewInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -20,23 +20,24 @@ export interface InstanceTreeNode {
   templateUrl: './instance-list.html',
   styleUrl: './instance-list.scss'
 })
-export class InstanceListComponent {
+export class InstanceListComponent implements AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
 
-  readonly agents = input<Agent[]>([]);
-  readonly instances = input<InstanceInfo[]>([]);
-  readonly currentInstanceId = input<string | null>(null);
-  readonly selectedAgent = input<Agent | null>(null);
-  readonly hasMore = input<boolean>(false);
-  readonly isLoadingMore = input<boolean>(false);
-  @Output() deleteInstance = new EventEmitter<string>();
-  @Output() newInstance = new EventEmitter<void>();
-  @Output() agentChange = new EventEmitter<Agent>();
-  @Output() loadMore = new EventEmitter<void>();
-  @Output() pauseInstance = new EventEmitter<string>();
+  @ViewChild('instanceListContainer') private instanceListContainer!: ElementRef<HTMLElement>;
 
   // Track expanded/collapsed state per instance
   readonly expandedInstances = signal<Set<string>>(new Set());
+
+  // Manual refresh state
+  readonly isRefreshing = signal(false);
+
+  // Scroll position tracking
+  private scrollTop = 0;
+  private isScrolledByUser = false;
+  private scrollHandler = () => {
+    this.scrollTop = this.instanceListContainer.nativeElement.scrollTop;
+    this.isScrolledByUser = this.scrollTop > 0;
+  };
 
   // Build tree structure from flat instance list
   readonly instanceTree = computed(() => {
@@ -64,6 +65,34 @@ export class InstanceListComponent {
 
     return rootNodes;
   });
+
+  constructor() {
+    // Effect to restore scroll position after data refresh
+    effect(() => {
+      const loading = this.instanceService.loading();
+      const isRefreshing = this.isRefreshing();
+
+      // After loading completes and user had scrolled, restore position
+      if (!loading && !isRefreshing && this.scrollTop > 0) {
+        requestAnimationFrame(() => {
+          const container = this.instanceListContainer?.nativeElement;
+          if (container) {
+            container.scrollTop = this.scrollTop;
+          }
+        });
+      }
+    });
+  }
+
+  ngAfterViewInit(): void {
+    // Set up scroll position tracking
+    const container = this.instanceListContainer.nativeElement;
+    container.addEventListener('scroll', this.scrollHandler);
+  }
+
+  ngOnDestroy(): void {
+    this.instanceListContainer?.nativeElement?.removeEventListener('scroll', this.scrollHandler);
+  }
 
   readonly statusColors: Record<string, { bg: string; text: string }> = {
     idle: { bg: '#4d4d5c', text: '#c5c5d2' },
@@ -152,7 +181,25 @@ export class InstanceListComponent {
   }
 
   onToggleKb(): void {
+    // Save scroll position before refresh
+    this.saveScrollPosition();
     this.instanceService.toggleKb();
     this.instanceService.loadInstances();
+  }
+
+  onRefresh(): void {
+    // Save scroll position before refresh
+    this.saveScrollPosition();
+    this.isRefreshing.set(true);
+    this.instanceService.loadInstances().finally(() => {
+      this.isRefreshing.set(false);
+    });
+  }
+
+  private saveScrollPosition(): void {
+    const container = this.instanceListContainer?.nativeElement;
+    if (container) {
+      this.scrollTop = container.scrollTop;
+    }
   }
 }

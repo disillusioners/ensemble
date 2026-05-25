@@ -26,8 +26,8 @@ export class InstanceService {
   private readonly api = inject(ApiService);
   private readonly sseService = inject(SseService);
 
-  // Polling interval: 10 seconds
-  private readonly POLLING_INTERVAL = 10_000;
+  // Polling interval: 60 seconds
+  private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
   private currentProjectId: string | null = null;
   private currentOffset: number = 0;
