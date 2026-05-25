@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 job-status-enum-fix)
+## Test Results (Latest: 2026-05-25 instance-sort-full-browser-verification)
+
+### Instance Sort — Full Browser Automation Verification (2026-05-25)
+- **Build Check**: ✅ PASS — tsc --noEmit zero errors
+- **Unit Tests**: 690/690 PASS (18/20 suites; 2 e2e Playwright suites excluded for Jest/Playwright config mismatch)
+- **Browser Automation**: ✅ PASS — all 4 criteria met (new instance at TOP, each spawn pushes previous down, "Just now" text, compile clean)
+- **ensure.md**: PASS — dev.sh stable ~113 seconds
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-instance-sort-full-browser-verification.md` for full report
+
+### Instance Sort Full Browser Verification Status: ✅ READY (build clean, 690 unit tests pass, browser automation verified all criteria, dev.sh stable, 0 regressions)
 
 ### Job Status Enum/String Fix (2026-05-25)
 - **Branch**: fix/job-status-str-enum (commit 45b4814)
