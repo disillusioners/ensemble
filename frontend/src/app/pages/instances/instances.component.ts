@@ -74,12 +74,12 @@ export class InstancesComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onDeleteInstance(instanceId: string): void {
+  protected onTerminateInstance(instanceId: string): void {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
         // Instance is removed from instanceService via its polling
       },
-      error: (err) => console.error('Failed to delete instance:', err)
+      error: (err) => console.error('Failed to terminate instance:', err)
     });
   }
 

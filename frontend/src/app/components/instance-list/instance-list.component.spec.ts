@@ -48,7 +48,7 @@ class TestableInstanceListComponent {
   readonly isRefreshing = signal(false);
 
   // Output EventEmitters (mocked as objects with emit methods)
-  readonly deleteInstance = { emit: jest.fn() };
+  readonly terminateInstance = { emit: jest.fn() };
   readonly newInstance = { emit: jest.fn() };
   readonly agentChange = { emit: jest.fn() };
   readonly loadMore = { emit: jest.fn() };

@@ -32,7 +32,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
   readonly isLoadingMore = input<boolean>(false);
 
   // Output EventEmitters
-  @Output() deleteInstance = new EventEmitter<string>();
+  @Output() terminateInstance = new EventEmitter<string>();
   @Output() newInstance = new EventEmitter<void>();
   @Output() agentChange = new EventEmitter<Agent>();
   @Output() loadMore = new EventEmitter<void>();
@@ -146,11 +146,11 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     };
   }
 
-  onDeleteInstance(instanceId: string, event: Event): void {
+  onTerminateInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Delete this instance?')) {
-      this.deleteInstance.emit(instanceId);
+    if (confirm('Terminate this instance?')) {
+      this.terminateInstance.emit(instanceId);
     }
   }
 

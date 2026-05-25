@@ -285,7 +285,7 @@ export class ChatComponent implements OnInit, OnDestroy {
     });
   }
 
-  protected onDeleteInstance(instanceId: string): void {
+  protected onTerminateInstance(instanceId: string): void {
     this.api.deleteInstance(instanceId).subscribe({
       next: () => {
         // Instance is removed from instanceService via its polling

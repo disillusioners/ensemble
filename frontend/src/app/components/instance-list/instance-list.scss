@@ -219,7 +219,7 @@
     background-color: rgba(30, 41, 59, 0.5);
 
     .pause-btn,
-    .delete-btn {
+    .terminate-btn {
       opacity: 1;
     }
   }
@@ -345,7 +345,7 @@
   color: #475569;
 }
 
-.delete-btn {
+.terminate-btn {
   position: absolute;
   bottom: 8px;
   right: 8px;

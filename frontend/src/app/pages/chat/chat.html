@@ -12,7 +12,7 @@
         [selectedAgent]="selectedAgent()"
         [hasMore]="instanceService.hasMoreInstances()"
         [isLoadingMore]="instanceService.isLoadingMore()"
-        (deleteInstance)="onDeleteInstance($event)"
+        (terminateInstance)="onTerminateInstance($event)"
         (newInstance)="onNewInstance()"
         (agentChange)="onAgentChange($event)"
         (loadMore)="onLoadMoreInstances()"
