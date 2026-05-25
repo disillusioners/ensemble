@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 instance-sort-fix)
+## Test Results (Latest: 2026-05-25 job-status-enum-fix)
+
+### Job Status Enum/String Fix (2026-05-25)
+- **Branch**: fix/job-status-str-enum (commit 45b4814)
+- **New Tests**: 15/15 PASS — Status guard: enum .value extraction, string passthrough, job transitions, edge cases
+- **Regression**: 1088/1088 PASS (1 pre-existing port conflict, unrelated to fix)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-job-status-enum-string-fix.md` for full report
+
+### Job Status Enum/String Fix Status: ✅ READY (15 new tests pass, 1088 regression pass, dev.sh stable, 0 regressions)
 
 ### Instance List Sorting Fix (2026-05-25)
 - **Branch**: feature/new-instance-top (commit 9f28afd)

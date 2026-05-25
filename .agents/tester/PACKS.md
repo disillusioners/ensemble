@@ -1,7 +1,7 @@
 # Test Packs
 
 ## Summary
-- Total: 61 packs
+- Total: 62 packs
 - Unit: 52 | Integration: 1 | Mock: 2 | E2E: 6
 
 ## Unit Test Packs
@@ -58,6 +58,7 @@
 | project_history_tools_unit_test | tests/unit/test_project_history_tools.py | Project history agent tools: add (validation, truncation, special chars), list (clamping, filter, pagination), search (format, special chars), delete (ownership), constants | 2 min | 2026-05-22 | ✅ PASS (38/38, project_history feature, no regressions) |
 | project_history_injection_unit_test | tests/unit/test_project_history_injection.py | Project history context injection: emoji icons, section rendering, limit 10, ordering, error handling, CE+history coexistence, ProjectResponse serialization | 2 min | 2026-05-22 | ✅ PASS (28/28, project_history feature, no regressions) |
 | project_metadata_table_unit_test | tests/unit/test_project_metadata_table.py | Project metadata table separation: CRUD, upsert, enrichment, create/update/delete integration, value types, migration | 2 min | 2026-05-25 | ✅ PASS (42/42, feature/metadata-table, 0 regressions) |
+| job_status_guard_unit_test | tests/unit/test_job_processor_status_guard.py | Job processor status str/enum guard: enum .value extraction, string passthrough, job transitions, edge cases (empty/unknown/capitalized strings) | 2 min | 2026-05-25 | ✅ PASS (15/15, fix/job-status-str-enum + 45b4814, 0 regressions) |
 
 ## Integration Test Packs
 
