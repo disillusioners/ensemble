@@ -129,7 +129,7 @@
     </div>
     
     <!-- Pause/Resume button -->
-    @if (instance.status === 'running') {
+    @if (instance.status === 'running' || instance.status === 'waiting_children' || instance.status === 'queued') {
       <button
         class="pause-btn"
         (click)="onPauseInstance(instance.instance_id, $event)"
