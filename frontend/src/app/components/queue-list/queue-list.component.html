@@ -6,6 +6,21 @@
       <span>Queues</span>
     </div>
     <div class="header-actions">
+      <!-- Ensure system queues button -->
+      @if (projectId()) {
+        <button
+          mat-icon-button
+          class="ensure-btn"
+          [disabled]="ensuring()"
+          matTooltip="Ensure system queues"
+          (click)="onEnsureSystemQueues()">
+          @if (ensuring()) {
+            <mat-progress-spinner mode="indeterminate" diameter="16"></mat-progress-spinner>
+          } @else {
+            <mat-icon>build</mat-icon>
+          }
+        </button>
+      }
       <!-- Project pause toggle -->
       @if (projectId()) {
         <mat-slide-toggle

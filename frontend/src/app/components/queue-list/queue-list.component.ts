@@ -47,6 +47,7 @@ export class QueueListComponent {
   // State
   readonly loading = signal(false);
   readonly error = signal<string | null>(null);
+  readonly ensuring = signal(false);
 
   // Computed values
   readonly queues = computed(() => this.queueService.queues());
@@ -100,6 +101,40 @@ export class QueueListComponent {
     if (projectId) {
       this.queueService.refreshQueues(projectId);
     }
+  }
+
+  protected onEnsureSystemQueues(): void {
+    const projectId = this.projectId();
+    if (!projectId || this.ensuring()) return;
+
+    this.ensuring.set(true);
+
+    this.queueService.ensureSystemQueues(projectId).subscribe({
+      next: (response) => {
+        this.ensuring.set(false);
+        if (response.created_queues.length === 0) {
+          this.snackBar.open('All system queues are present', 'Close', {
+            duration: 3000,
+            panelClass: 'success-snackbar'
+          });
+        } else {
+          this.snackBar.open(
+            `Created ${response.created_queues.length} missing system queues`,
+            'Close',
+            { duration: 3000, panelClass: 'success-snackbar' }
+          );
+        }
+        this.onRefresh();
+      },
+      error: (err) => {
+        this.ensuring.set(false);
+        this.snackBar.open(
+          `Failed to ensure system queues: ${err.message || 'Unknown error'}`,
+          'Close',
+          { duration: 5000, panelClass: 'error-snackbar' }
+        );
+      }
+    });
   }
 
   protected onToggleProjectPause(): void {

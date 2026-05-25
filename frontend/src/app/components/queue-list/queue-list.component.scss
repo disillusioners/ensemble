@@ -99,6 +99,25 @@ $accent-rose: #f43f5e;
       color: $text-primary;
     }
   }
+
+  .ensure-btn {
+    width: 32px;
+    height: 32px;
+    line-height: 32px;
+
+    mat-icon,
+    mat-progress-spinner {
+      font-size: 18px;
+      width: 18px;
+      height: 18px;
+      color: $text-secondary;
+      transition: color 0.15s ease;
+    }
+
+    &:hover mat-icon {
+      color: $text-primary;
+    }
+  }
 }
 
 // Content area

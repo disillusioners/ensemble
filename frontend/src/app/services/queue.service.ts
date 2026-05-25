@@ -6,6 +6,7 @@ import {
   JobQueueCreateRequest,
   JobQueueUpdateRequest,
   JobQueueListResponse,
+  EnsureSystemQueuesResponse,
 } from '../models/job-queue.model';
 
 @Injectable({
@@ -174,5 +175,22 @@ export class QueueService {
    */
   clearError(): void {
     this.error.set(null);
+  }
+
+  /**
+   * POST /api/projects/{projectId}/queues/ensure-system
+   */
+  ensureSystemQueues(projectId: string): Observable<EnsureSystemQueuesResponse> {
+    return this.http
+      .post<EnsureSystemQueuesResponse>(
+        `${this.API_BASE}/${encodeURIComponent(projectId)}/queues/ensure-system`,
+        {}
+      )
+      .pipe(
+        catchError((err) => {
+          this.error.set(err.message || 'Failed to ensure system queues');
+          throw err;
+        })
+      );
   }
 }

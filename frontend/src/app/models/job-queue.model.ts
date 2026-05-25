@@ -36,6 +36,13 @@ export interface JobQueueListResponse {
   total: number;
 }
 
+export interface EnsureSystemQueuesResponse {
+  project_id: string;
+  existing_queues: string[];
+  created_queues: string[];
+  total_system_queues: number;
+}
+
 // Helper Functions
 
 export function getQueueStatusColor(paused: boolean): string {
