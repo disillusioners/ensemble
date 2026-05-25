@@ -158,7 +158,7 @@ class TestableInstanceService {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
-        return [...instances, minimalInstance];
+        return [minimalInstance, ...instances];
       }
     });
   }
