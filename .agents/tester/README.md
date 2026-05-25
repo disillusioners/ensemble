@@ -93,6 +93,15 @@ tests/
 
 ### Instance List Sorting Fix Status: ✅ READY (680 unit tests pass, browser automation pass, dev.sh stable, 0 regressions)
 
+### Instance Sort Order — Browser Automation Verification (2026-05-25)
+- **Unit Tests**: 690/690 PASS (type check pass)
+- **Browser Automation**: ✅ PASS — all 3 criteria met (new instance at TOP, each spawn pushes previous down, "Just now" text)
+- **ensure.md**: PASS — dev.sh stable 21+ minutes
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-instance-sort-browser-verification.md` for full report
+
+### Instance Sort Order Browser Verification Status: ✅ READY (690 unit tests pass, browser automation verified all criteria, dev.sh stable, 0 regressions)
+
 ### Defer Job Race Condition Fix (2026-05-25)
 - **Commit**: c4f6e17 (fix) + fead301 (tests)
 - **New Tests**: 16/16 PASS — _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration
