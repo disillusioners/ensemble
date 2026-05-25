@@ -23,6 +23,15 @@ class MockApiService {
 // KB agent IDs to filter when showKb is false
 const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
 
+// Module-level sort function (mirrors actual service)
+function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
+  return [...instances].sort((a, b) => {
+    const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return bTime - aTime;
+  });
+}
+
 // Testable InstanceService implementation (mirrors actual service)
 class TestableInstanceService {
   private readonly POLLING_INTERVAL = 60_000;
@@ -73,8 +82,8 @@ class TestableInstanceService {
       }
     }
 
-    // Prepend local-only instances to maintain newest-first sort order
-    return [...localById.values(), ...result];
+    // Prepend local-only instances and sort to maintain newest-first order
+    return sortByCreatedAtDesc([...localById.values(), ...result]);
   }
 
   async loadInstances(projectId?: string, append = false): Promise<void> {
@@ -744,6 +753,139 @@ describe('InstanceService', () => {
       service.showKb.set(false);
       await service.loadInstances();
       expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
+    });
+  });
+
+  describe('sortByCreatedAtDesc', () => {
+    it('should sort instances by created_at in descending order (newest first)', () => {
+      const older = createMockInstance({ instance_id: 'older', created_at: '2024-01-01T10:00:00.000Z' });
+      const newest = createMockInstance({ instance_id: 'newest', created_at: '2024-01-03T10:00:00.000Z' });
+      const middle = createMockInstance({ instance_id: 'middle', created_at: '2024-01-02T10:00:00.000Z' });
+
+      const result = sortByCreatedAtDesc([older, newest, middle]);
+
+      expect(result[0].instance_id).toBe('newest');
+      expect(result[1].instance_id).toBe('middle');
+      expect(result[2].instance_id).toBe('older');
+    });
+
+    it('should treat null created_at as oldest (sorted to end)', () => {
+      const withNull = createMockInstance({ instance_id: 'null-created', created_at: null as any });
+      const withTime = createMockInstance({ instance_id: 'with-time', created_at: '2024-01-01T00:00:00.000Z' });
+
+      const result = sortByCreatedAtDesc([withNull, withTime]);
+
+      expect(result[0].instance_id).toBe('with-time');
+      expect(result[1].instance_id).toBe('null-created');
+    });
+
+    it('should treat undefined created_at as oldest (sorted to end)', () => {
+      // Create instances directly to ensure created_at is truly undefined
+      const withUndefined: InstanceInfo = {
+        instance_id: 'undefined-created',
+        agent_id: 'test',
+        status: 'running',
+        parent_id: null,
+        children: [],
+        created_at: undefined as any,
+        updated_at: null,
+      };
+      const withTime: InstanceInfo = {
+        instance_id: 'with-time',
+        agent_id: 'test',
+        status: 'running',
+        parent_id: null,
+        children: [],
+        created_at: '2024-01-01T00:00:00.000Z',
+        updated_at: null,
+      };
+
+      const result = sortByCreatedAtDesc([withUndefined, withTime]);
+
+      expect(result[0].instance_id).toBe('with-time');
+      expect(result[1].instance_id).toBe('undefined-created');
+    });
+
+    it('should handle merge scenario: local SSE instances merged with API instances sorted by created_at desc', () => {
+      // Local instance (SSE arrival, newer)
+      const local = createMockInstance({
+        instance_id: 'local-new',
+        created_at: '2024-01-03T00:00:00.000Z',
+        status: 'running',
+      });
+      // API instance (older)
+      const api = createMockInstance({
+        instance_id: 'api-old',
+        created_at: '2024-01-01T00:00:00.000Z',
+        status: 'running',
+      });
+
+      const result = service.mergeInstances([local], [api]);
+
+      expect(result[0].instance_id).toBe('local-new');
+      expect(result[1].instance_id).toBe('api-old');
+    });
+
+    it('should handle pagination scenario: page 1 and page 2 instances combined sorted by created_at desc', () => {
+      // Page 1 (newer instances)
+      const page1Instance = createMockInstance({
+        instance_id: 'page1-new',
+        created_at: '2024-01-02T00:00:00.000Z',
+      });
+      // Page 2 (older instances from earlier page)
+      const page2Instance = createMockInstance({
+        instance_id: 'page2-old',
+        created_at: '2024-01-01T00:00:00.000Z',
+      });
+
+      // Simulate appending page 2 to page 1 with sort
+      const combined = sortByCreatedAtDesc([page1Instance, page2Instance]);
+
+      expect(combined[0].instance_id).toBe('page1-new');
+      expect(combined[1].instance_id).toBe('page2-old');
+    });
+
+    it('should handle SSE out-of-order arrival: later instance arrives first but sorts correctly', () => {
+      // B was created after A, but SSE for B arrives first
+      const instanceA = createMockInstance({
+        instance_id: 'a-created-first',
+        created_at: '2024-01-01T00:00:00.000Z',
+      });
+      const instanceB = createMockInstance({
+        instance_id: 'b-created-second',
+        created_at: '2024-01-02T00:00:00.000Z',
+      });
+
+      // B arrives before A (out of order arrival)
+      const result = sortByCreatedAtDesc([instanceB, instanceA]);
+
+      // B should still be first (newer)
+      expect(result[0].instance_id).toBe('b-created-second');
+      expect(result[1].instance_id).toBe('a-created-first');
+    });
+
+    it('should not mutate the original array', () => {
+      const original = createMockInstance({ instance_id: 'test' });
+      const instances = [original];
+      const originalFirstId = instances[0].instance_id;
+
+      sortByCreatedAtDesc(instances);
+
+      expect(instances[0].instance_id).toBe(originalFirstId);
+      expect(instances).toHaveLength(1);
+    });
+
+    it('should handle empty array', () => {
+      const result = sortByCreatedAtDesc([]);
+      expect(result).toEqual([]);
+    });
+
+    it('should handle single element array', () => {
+      const single = createMockInstance({ instance_id: 'single' });
+      const result = sortByCreatedAtDesc([single]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].instance_id).toBe('single');
     });
   });
 
