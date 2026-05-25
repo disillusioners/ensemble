@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 instance-list-scroll-fix)
+## Test Results (Latest: 2026-05-25 defer-race-condition-fix)
+
+### Defer Job Race Condition Fix (2026-05-25)
+- **Commit**: c4f6e17 (fix) + fead301 (tests)
+- **New Tests**: 16/16 PASS — _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration
+- **Regression**: 1089/1089 PASS (16 new + 1073 existing, 19 skipped, 0 failures)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-defer-race-condition-fix.md` for full report
+
+### Defer Job Race Condition Fix Status: ✅ READY (16 new tests pass, 1089 suite pass, dev.sh stable, 0 regressions)
 
 ### Instance List Scroll Fix (2026-05-25)
 - **Branch**: feature/instance-list-scroll-fix (commits 06464dc + 5ec6cd2 + b1e3cd4)
