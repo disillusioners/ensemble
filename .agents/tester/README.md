@@ -72,6 +72,16 @@ tests/
 
 ### Job Status Enum/String Fix Status: ✅ READY (15 new tests pass, 1088 regression pass, dev.sh stable, 0 regressions)
 
+### Sort By Created At Desc Utility Tests (2026-05-25)
+- **Commit**: bbe2da1
+- **New Tests**: 9/9 PASS — sortByCreatedAtDesc: basic sort, null/undefined handling, merge scenario, pagination scenario, SSE out-of-order arrival, immutability, empty/single element
+- **Regression**: 689/689 PASS (9 new + 680 existing, 0 failures)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 3 (test helper alignment)
+- See `.agents/tester/RESULTS/2026-05-25-sort-by-created-at-desc-tests.md` for full report
+
+### Sort By Created At Desc Utility Tests Status: ✅ READY (9 new tests pass, 689 suite pass, dev.sh stable, 0 regressions)
+
 ### Instance List Sorting Fix (2026-05-25)
 - **Branch**: feature/new-instance-top (commit 9f28afd)
 - **Change**: One-line fix — local-only instances prepended at top instead of appended at bottom in `mergeInstances()`
