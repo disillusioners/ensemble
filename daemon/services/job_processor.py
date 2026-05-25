@@ -229,9 +229,10 @@ class JobProcessor:
                                         # Instance finished its work — complete the job (not orphan).
                                         # The JobFeedbackObserver event may have missed firing due to
                                         # race condition, event bus issue, etc.
+                                        status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
                                         logger.info(
                                             f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
-                                            f"completed by finished instance (status={instance_meta.status.value})"
+                                            f"completed by finished instance (status={status_display})"
                                         )
                                         await self._queue_service.complete_job(
                                             proc_job.job_id,
