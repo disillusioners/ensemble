@@ -60,6 +60,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
   
+  private readonly STORAGE_KEY = 'job-page-selected-project';
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
   private sseSubscription: Subscription | null = null;
   private projectRestored = false;
@@ -212,8 +213,6 @@ export class JobsComponent implements OnInit, OnDestroy {
       }
     });
   }
-
-  private readonly STORAGE_KEY = 'job-page-selected-project';
 
   ngOnInit(): void {
     this.loadJobs();
