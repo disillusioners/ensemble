@@ -472,13 +472,13 @@ class TestEnumValues:
         """Verify InstanceStatus enum values."""
         from daemon.models.instance import InstanceStatus
         
-        assert InstanceStatus.idle.value == "idle"
-        assert InstanceStatus.running.value == "running"
-        assert InstanceStatus.waiting.value == "waiting"
-        assert InstanceStatus.waiting_children.value == "waiting_children"
-        assert InstanceStatus.error.value == "error"
-        assert InstanceStatus.terminated.value == "terminated"
-        assert InstanceStatus.completed.value == "completed"
+        assert InstanceStatus.IDLE.value == "idle"
+        assert InstanceStatus.RUNNING.value == "running"
+        assert InstanceStatus.WAITING.value == "waiting"
+        assert InstanceStatus.WAITING_CHILDREN.value == "waiting_children"
+        assert InstanceStatus.ERROR.value == "error"
+        assert InstanceStatus.TERMINATED.value == "terminated"
+        assert InstanceStatus.COMPLETED.value == "completed"
 
     def test_source_status_values(self):
         """Verify SourceStatus enum values."""

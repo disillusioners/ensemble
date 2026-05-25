@@ -331,7 +331,10 @@ class TestJobProcessorInstancePause:
         """Test that JobProcessor skips jobs for paused instances.
 
         When a MESSAGE job targets a paused instance, the processor should
-        skip it and move to the next queue.
+        skip it and move to the next queue. Note: The pause check happens
+        INSIDE JobQueueService.start_job() which returns None for paused
+        instances. The JobProcessor then checks for None and skips further
+        processing.
         """
         from daemon.services.job_processor import JobProcessor
 
@@ -375,10 +378,16 @@ class TestJobProcessorInstancePause:
             instance_id, status=InstanceStatus.PAUSED.value
         )
 
+        # Mock start_job to return None for paused instances (the actual behavior)
+        # The pause check is INSIDE start_job(), so we mock it to return None
+        mock_queue_service.start_job = AsyncMock(return_value=None)
+
         await processor._process_next_job()
 
-        # Job should NOT be started because instance is paused
-        mock_queue_service.start_job.assert_not_called()
+        # Job was NOT processed because start_job returned None (paused check)
+        mock_queue_service.start_job.assert_called_once_with("job-1")
+        # Instance manager spawn should NOT be called since job was skipped
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_processor_processes_running_instance(
@@ -472,13 +481,20 @@ class TestInstanceMessagingNoAutoResume:
         mock_manager._live_hub.stream_status_change = AsyncMock()
         mock_manager._instance_repository = MagicMock()
 
+        # Create mock cancellation_service (required by InstanceMessagingService.__init__)
+        mock_cancellation_service = MagicMock()
+        mock_cancellation_service.is_shutting_down = False
+
         # Create a PAUSED instance
         paused_instance = MagicMock()
         paused_instance.status = InstanceStatus.PAUSED.value
         paused_instance.agent_id = "test-agent"
         paused_instance.version = 1
 
-        service = InstanceMessagingService(manager=mock_manager)
+        service = InstanceMessagingService(
+            manager=mock_manager,
+            cancellation_service=mock_cancellation_service,
+        )
         service._message_queue = MagicMock()
         service._message_queue.enqueue = MagicMock(return_value=("msg-123", "queue-1"))
 
@@ -491,7 +507,6 @@ class TestInstanceMessagingNoAutoResume:
             await service.enqueue_message(
                 instance_id="test-instance-123",
                 message="test message",
-                msg_type="user",
                 source="test",
             )
 
