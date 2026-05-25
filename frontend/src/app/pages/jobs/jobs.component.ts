@@ -241,7 +241,8 @@ export class JobsComponent implements OnInit, OnDestroy {
     // Check if saved project still exists in the project list
     const projectExists = this.projects().some(p => p.project_id === savedProjectId);
     if (projectExists) {
-      this.onProjectFilterChange(savedProjectId);
+      // Directly set the filter without calling loadJobs() — ngOnInit already called it
+      this.filters.update(f => ({ ...f, project_id: savedProjectId }));
     } else {
       // Clear stale entry
       try {
@@ -388,6 +389,12 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.filters.set({});
     this.selectedQueueId.set(null);
     this.showDeleted.set(false);
+    // Clear localStorage so the project isn't silently restored on next visit
+    try {
+      localStorage.removeItem(this.STORAGE_KEY);
+    } catch {
+      // silently ignore
+    }
     this.loadJobs();
   }
 
