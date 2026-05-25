@@ -80,7 +80,7 @@ def format_project_context(project, store=None) -> str:
                 type_icons = {
                     "milestone": "🏁", "commit": "📦", "phase": "🔄",
                     "bugfix": "🐛", "deployment": "🚀", "note": "📝",
-                    "config_change": "⚙️", "other": "📋",
+                    "config_change": "⚙️", "feature": "✨", "other": "📋",
                 }
                 for entry in recent:
                     icon = type_icons.get(entry.entry_type, "📋")

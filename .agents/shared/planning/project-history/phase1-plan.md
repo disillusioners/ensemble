@@ -25,7 +25,7 @@ Create the `ProjectHistoryEntry` SQLModel, add repository methods for CRUD + sea
 | # | Task | Details | Key Files |
 |---|------|---------|-----------|
 | 1 | Define `ProjectHistoryEntry` SQLModel | New class in models.py with fields: id (UUID), project_id (FK with ON DELETE CASCADE), entry_type (str), summary (str max 300), details (optional str, max 5000), recorded_by_agent (optional str), recorded_by_instance (optional str), entry_metadata (optional JSON dict), created_at (datetime). Use `table=True`. | `daemon/repositories/project/models.py` |
-| 2 | Define `HistoryEntryType` enum | Enum with values: milestone, commit, phase, bugfix, deployment, note, config_change, other. Place in models.py near other enums. | `daemon/repositories/project/models.py` |
+| 2 | Define `HistoryEntryType` enum | Enum with values: milestone, commit, phase, bugfix, deployment, note, config_change, feature, other. Place in models.py near other enums. | `daemon/repositories/project/models.py` |
 | 3 | Add `to_dict()` method to `ProjectHistoryEntry` | Simple serialization for JSON output, following same pattern as `CriticalExperience.to_dict()`. | `daemon/repositories/project/models.py` |
 | 4 | Add repository CRUD methods | `add_history_entry()`, `get_history_entry()`, `delete_history_entry()` — basic create/read/delete. Use SQLAlchemy sessions. `delete_history_entry()` takes `entry_id` + `project_id` and validates entry belongs to project before deleting. | `daemon/repositories/project/repository.py` |
 | 5 | Add repository list/paging method | `list_history_entries(project_id, limit=20, offset=0, entry_type=None)` — returns list + total count. Order by `created_at DESC`. | `daemon/repositories/project/repository.py` |

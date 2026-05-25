@@ -22,7 +22,7 @@ class ProjectHistoryEntry(SQLModel, table=True):
     __tablename__ = "project_history"
     id: str                          # UUID
     project_id: str                  # FK → projects.project_id
-    entry_type: str                  # "milestone" | "commit" | "phase" | "bugfix" | "deployment" | "note" | "config_change" | "other"
+    entry_type: str                  # "milestone" | "commit" | "phase" | "bugfix" | "deployment" | "note" | "config_change" | "feature" | "other"
     summary: str                     # Brief description (max 300 chars)
     details: str | None              # Optional longer description
     recorded_by_agent: str | None    # agent_id of recorder

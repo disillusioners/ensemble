@@ -74,7 +74,7 @@ def create_project_history_tools(store, current_instance_id, agent_id) -> list:
         
         Args:
             project_id: The project to add history to
-            entry_type: One of: milestone, commit, phase, bugfix, deployment, note, config_change, other
+            entry_type: One of: milestone, commit, phase, bugfix, deployment, note, config_change, feature, other
             summary: Brief description of what happened (max 300 chars)
             details: Optional longer description (max 5000 chars)
             entry_metadata: Optional structured data to attach
