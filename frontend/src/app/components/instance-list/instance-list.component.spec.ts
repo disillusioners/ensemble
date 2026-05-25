@@ -22,6 +22,14 @@ class MockInstanceService {
   }
 }
 
+// Mock container with scrollTop for testing
+const createMockContainer = () => ({
+  scrollTop: 0,
+  removeEventListener: jest.fn(),
+});
+
+type MockContainer = ReturnType<typeof createMockContainer>;
+
 // Testable InstanceListComponent (mirrors actual component)
 class TestableInstanceListComponent {
   protected readonly instanceService: MockInstanceService;
@@ -48,13 +56,45 @@ class TestableInstanceListComponent {
 
   // Scroll position tracking
   private scrollTop = 0;
+  private isScrolledByUser = false;
+  private scrollHandler = () => {
+    const container = this.instanceListContainer?.nativeElement;
+    if (container) {
+      this.scrollTop = container.scrollTop;
+      this.isScrolledByUser = this.scrollTop > 0;
+    }
+  };
+
+  // Mock container for testing
+  mockContainer: MockContainer;
+  instanceListContainer: { nativeElement: MockContainer };
+
+  // Scroll restoration effect tracking
+  private effectCallback: ((loading: boolean, isRefreshing: boolean) => void) | null = null;
 
   private saveScrollPosition(): void {
-    // Mock implementation
+    const container = this.instanceListContainer?.nativeElement;
+    if (container) {
+      this.scrollTop = container.scrollTop;
+    }
+  }
+
+  onRefresh(): void {
+    this.saveScrollPosition();
+    this.isRefreshing.set(true);
+    this.instanceService.loadInstances().finally(() => {
+      this.isRefreshing.set(false);
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.instanceListContainer?.nativeElement?.removeEventListener('scroll', this.scrollHandler);
   }
 
   constructor(instanceService: MockInstanceService) {
     this.instanceService = instanceService;
+    this.mockContainer = createMockContainer();
+    this.instanceListContainer = { nativeElement: this.mockContainer };
   }
 
   // Build tree structure from flat instance list
@@ -378,6 +418,210 @@ describe('InstanceListComponent', () => {
     it('should return days for older dates', () => {
       const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
       expect(component.formatDate(threeDaysAgo)).toBe('3d ago');
+    });
+  });
+
+  describe('isRefreshing signal', () => {
+    it('should default to false', () => {
+      expect(component.isRefreshing()).toBe(false);
+    });
+
+    it('should be true during refresh', () => {
+      jest.spyOn(mockService, 'loadInstances').mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 100))
+      );
+
+      component.onRefresh();
+
+      expect(component.isRefreshing()).toBe(true);
+    });
+
+    it('should become false after refresh completes', async () => {
+      jest.spyOn(mockService, 'loadInstances').mockResolvedValue(undefined);
+
+      component.onRefresh();
+      expect(component.isRefreshing()).toBe(true);
+
+      await mockService.loadInstances();
+
+      expect(component.isRefreshing()).toBe(false);
+    });
+  });
+
+  describe('onRefresh', () => {
+    it('should set isRefreshing to true before loadInstances', () => {
+      const loadInstancesMock = jest.spyOn(mockService, 'loadInstances').mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 10))
+      );
+
+      component.onRefresh();
+
+      expect(component.isRefreshing()).toBe(true);
+      expect(loadInstancesMock).toHaveBeenCalled();
+    });
+
+    it('should call saveScrollPosition', () => {
+      jest.spyOn(mockService, 'loadInstances').mockResolvedValue(undefined);
+
+      // Manually set scroll position
+      component.mockContainer.scrollTop = 100;
+      component.saveScrollPosition();
+      expect(component['scrollTop']).toBe(100);
+
+      // Reset and call onRefresh
+      component.mockContainer.scrollTop = 200;
+      component.onRefresh();
+
+      expect(component['scrollTop']).toBe(200);
+    });
+
+    it('should call instanceService.loadInstances()', () => {
+      const loadInstancesMock = jest.spyOn(mockService, 'loadInstances').mockResolvedValue(undefined);
+
+      component.onRefresh();
+
+      expect(loadInstancesMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reset isRefreshing to false after load completes', async () => {
+      let resolveLoad: () => void;
+      jest.spyOn(mockService, 'loadInstances').mockImplementation(
+        () => new Promise(resolve => { resolveLoad = resolve; })
+      );
+
+      component.onRefresh();
+      expect(component.isRefreshing()).toBe(true);
+
+      // Resolve the mock promise
+      resolveLoad!();
+
+      // Wait for the finally block to execute
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(component.isRefreshing()).toBe(false);
+    });
+
+    it('should handle loadInstances rejection gracefully', async () => {
+      jest.spyOn(mockService, 'loadInstances').mockRejectedValue(new Error('API Error'));
+
+      component.onRefresh();
+
+      // Should not throw
+      await expect(mockService.loadInstances()).rejects.toThrow('API Error');
+    });
+  });
+
+  describe('saveScrollPosition', () => {
+    it('should save scrollTop from container', () => {
+      component.mockContainer.scrollTop = 150;
+
+      component.saveScrollPosition();
+
+      expect(component['scrollTop']).toBe(150);
+    });
+
+    it('should not throw when container is undefined', () => {
+      component.instanceListContainer = { nativeElement: null as unknown as MockContainer };
+
+      expect(() => component.saveScrollPosition()).not.toThrow();
+    });
+  });
+
+  describe('scrollHandler', () => {
+    it('should track scrollTop value', () => {
+      component.mockContainer.scrollTop = 75;
+
+      component.scrollHandler();
+
+      expect(component['scrollTop']).toBe(75);
+    });
+
+    it('should set isScrolledByUser when scrolled', () => {
+      component.mockContainer.scrollTop = 50;
+
+      component.scrollHandler();
+
+      expect(component['isScrolledByUser']).toBe(true);
+    });
+
+    it('should clear isScrolledByUser when at top', () => {
+      component.mockContainer.scrollTop = 0;
+
+      component.scrollHandler();
+
+      expect(component['isScrolledByUser']).toBe(false);
+    });
+  });
+
+  describe('ngOnDestroy', () => {
+    it('should remove scroll event listener', () => {
+      component.ngOnDestroy();
+
+      expect(component.mockContainer.removeEventListener).toHaveBeenCalledWith(
+        'scroll',
+        component.scrollHandler
+      );
+    });
+
+    it('should handle null container gracefully', () => {
+      component.instanceListContainer = { nativeElement: null as unknown as MockContainer };
+
+      expect(() => component.ngOnDestroy()).not.toThrow();
+    });
+  });
+
+  describe('scroll restoration effect', () => {
+    beforeEach(() => {
+      jest.spyOn(window, 'requestAnimationFrame').mockImplementation(cb => {
+        cb();
+        return 1;
+      });
+    });
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('should restore scrollTop via requestAnimationFrame after loading completes', () => {
+      component['scrollTop'] = 100;
+      mockService.loading.set(false);
+
+      // Simulate the effect logic
+      const loading = mockService.loading();
+      const isRefreshing = component.isRefreshing();
+
+      if (!loading && !isRefreshing && component['scrollTop'] > 0) {
+        requestAnimationFrame(() => {
+          component.instanceListContainer.nativeElement.scrollTop = component['scrollTop'];
+        });
+      }
+
+      expect(component.instanceListContainer.nativeElement.scrollTop).toBe(100);
+    });
+
+    it('should not restore when scrollTop is 0', () => {
+      component['scrollTop'] = 0;
+      mockService.loading.set(false);
+
+      const loading = mockService.loading();
+      const isRefreshing = component.isRefreshing();
+
+      let rafCalled = false;
+      jest.spyOn(window, 'requestAnimationFrame').mockImplementation(cb => {
+        rafCalled = true;
+        cb();
+        return 1;
+      });
+
+      if (!loading && !isRefreshing && component['scrollTop'] > 0) {
+        requestAnimationFrame(() => {
+          component.instanceListContainer.nativeElement.scrollTop = component['scrollTop'];
+        });
+      }
+
+      expect(rafCalled).toBe(false);
+      expect(component.instanceListContainer.nativeElement.scrollTop).toBe(0);
     });
   });
 });

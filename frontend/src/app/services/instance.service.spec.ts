@@ -728,4 +728,10 @@ describe('InstanceService', () => {
       expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
     });
   });
+
+  describe('POLLING_INTERVAL', () => {
+    it('should be 60000 (60 seconds)', () => {
+      expect(service['POLLING_INTERVAL']).toBe(60000);
+    });
+  });
 });
