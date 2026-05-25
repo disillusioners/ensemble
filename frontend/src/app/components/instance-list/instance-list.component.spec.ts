@@ -36,6 +36,23 @@ class TestableInstanceListComponent {
   // Track expanded/collapsed state per instance
   readonly expandedInstances = signal<Set<string>>(new Set());
 
+  // Track refresh state
+  readonly isRefreshing = signal(false);
+
+  // Output EventEmitters (mocked as objects with emit methods)
+  readonly deleteInstance = { emit: jest.fn() };
+  readonly newInstance = { emit: jest.fn() };
+  readonly agentChange = { emit: jest.fn() };
+  readonly loadMore = { emit: jest.fn() };
+  readonly pauseInstance = { emit: jest.fn() };
+
+  // Scroll position tracking
+  private scrollTop = 0;
+
+  private saveScrollPosition(): void {
+    // Mock implementation
+  }
+
   constructor(instanceService: MockInstanceService) {
     this.instanceService = instanceService;
   }

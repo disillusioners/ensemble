@@ -23,6 +23,21 @@ export interface InstanceTreeNode {
 export class InstanceListComponent implements AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
 
+  // Signal inputs
+  readonly agents = input<Agent[]>([]);
+  readonly instances = input<InstanceInfo[]>([]);
+  readonly currentInstanceId = input<string | null>(null);
+  readonly selectedAgent = input<Agent | null>(null);
+  readonly hasMore = input<boolean>(false);
+  readonly isLoadingMore = input<boolean>(false);
+
+  // Output EventEmitters
+  @Output() deleteInstance = new EventEmitter<string>();
+  @Output() newInstance = new EventEmitter<void>();
+  @Output() agentChange = new EventEmitter<Agent>();
+  @Output() loadMore = new EventEmitter<void>();
+  @Output() pauseInstance = new EventEmitter<string>();
+
   @ViewChild('instanceListContainer') private instanceListContainer!: ElementRef<HTMLElement>;
 
   // Track expanded/collapsed state per instance

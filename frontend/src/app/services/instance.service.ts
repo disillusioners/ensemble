@@ -98,14 +98,14 @@ export class InstanceService {
    * Merge API instances with local instances to handle timing between SSE and polling.
    *
    * Background: SSE delivers status updates asynchronously (event-driven), while polling
-   * reads from the DB on a 10-second interval. Due to network timing, SSE may arrive
+   * reads from the DB on a 60-second interval. Due to network timing, SSE may arrive
    * before the API's next poll sees the updated DB status.
    *
    * Example race condition this solves:
    *   T=0: SSE arrives with status="completed"
    *   T=1: User navigates or starts polling
    *   T=2: Poll API returns status="running" (DB not yet updated)
-   *   Without merging: User sees "running" for ~8 more seconds
+   * Without merging: User sees "running" for ~58 more seconds
    *   With merging: User sees "completed" immediately (SSE wins)
    *
    * This function also preserves local-only instances (e.g., created via direct
