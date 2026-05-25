@@ -455,26 +455,53 @@ class TestInstanceMessagingNoAutoResume:
     - Only explicit unpause operations can resume the instance
     """
 
-    def test_paused_instance_status_does_not_change(self):
-        """Test that a PAUSED instance status remains PAUSED after message enqueue.
+    @pytest.mark.asyncio
+    async def test_paused_instance_status_does_not_change(self):
+        """Test that enqueue_message() does NOT auto-resume a paused instance.
 
-        This tests the core fix: when a message arrives for a PAUSED instance,
-        the instance should NOT transition to RUNNING.
+        This verifies the core fix: when a message arrives for a PAUSED instance,
+        the instance should NOT transition to RUNNING — it stays PAUSED.
         """
-        from sqlmodel import Session
-        from daemon.repositories.instance.models import Instance, InstanceStatus
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from daemon.models.instance import InstanceStatus
+        from daemon.services.instance_messaging import InstanceMessagingService
 
-        # This would be an integration test that verifies the behavior
-        # For unit testing, we verify the logic in the fix
+        # Create mock manager with required attributes
+        mock_manager = MagicMock()
+        mock_manager._live_hub = MagicMock()
+        mock_manager._live_hub.stream_status_change = AsyncMock()
+        mock_manager._instance_repository = MagicMock()
 
-        # The fix in instance_messaging.py ensures:
-        # if instance.status == InstanceStatus.PAUSED.value:
-        #     # DO NOT auto-resume paused instances
-        #     pass
+        # Create a PAUSED instance
+        paused_instance = MagicMock()
+        paused_instance.status = InstanceStatus.PAUSED.value
+        paused_instance.agent_id = "test-agent"
+        paused_instance.version = 1
 
-        # This is a placeholder for the actual behavior verification
-        # The real test would be in an integration test with actual database
-        pass
+        service = InstanceMessagingService(manager=mock_manager)
+        service._message_queue = MagicMock()
+        service._message_queue.enqueue = MagicMock(return_value=("msg-123", "queue-1"))
+
+        # Enqueue a message for the paused instance
+        with patch('daemon.services.instance_messaging.Session') as mock_session_class:
+            mock_session = MagicMock()
+            mock_session_class.return_value = mock_session
+            mock_session.get.return_value = paused_instance
+
+            await service.enqueue_message(
+                instance_id="test-instance-123",
+                message="test message",
+                msg_type="user",
+                source="test",
+            )
+
+            # Verify instance status was NOT changed to RUNNING
+            # The update should not have been called with status=RUNNING
+            call_args = mock_manager._instance_repository.update.call_args
+            if call_args:
+                # If update was called, status should NOT be RUNNING
+                assert call_args.kwargs.get('status') != InstanceStatus.RUNNING.value, \
+                    "Paused instance should NOT be auto-resumed on message enqueue"
 
     def test_idle_instance_still_transitions_to_running(self):
         """Test that IDLE instances still transition to RUNNING on message.

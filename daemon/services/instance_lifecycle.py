@@ -639,6 +639,8 @@ class InstanceLifecycleService:
             skipped_ids.append(instance_id)
         else:
             # Update DB status to running and clear paused_at
+            # NOTE: waiting_for is NOT restored on resume — it was reset during pause
+            # to prevent deadlock. Children are also resumed, so the count would be stale.
             self._manager._instance_repository.update(
                 instance_id,
                 status=InstanceStatus.RUNNING.value,
@@ -647,7 +649,7 @@ class InstanceLifecycleService:
             logger.info(f"Resumed instance {instance_id[:8]}...")
             resumed_ids.append(instance_id)
             # Emit status_change event for running status
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id if meta else None)
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id)
 
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids}
 

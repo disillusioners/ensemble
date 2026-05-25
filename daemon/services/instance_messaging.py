@@ -619,11 +619,8 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                if instance.status == InstanceStatus.PAUSED.value:
-                    # DO NOT auto-resume paused instances
-                    # Job will stay PENDING until explicitly unpaused
-                    pass
-                elif instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
+                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN transition
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
@@ -1179,11 +1176,8 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                if instance.status == InstanceStatus.PAUSED.value:
-                    # DO NOT auto-resume paused instances
-                    # Job will stay PENDING until explicitly unpaused
-                    pass
-                elif instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
+                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN transition
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value

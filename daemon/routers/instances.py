@@ -233,7 +233,7 @@ async def pause_instance(
     }
 
 
-# 5c. POST /instances/{instance_id}/resume - Resume instance
+# 6. POST /instances/{instance_id}/resume - Resume instance
 @router.post("/{instance_id}/resume")
 async def resume_instance(
     instance_id: str,
@@ -262,7 +262,7 @@ async def resume_instance(
     }
 
 
-# 5b. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
+# 7. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
 @router.post("/{instance_id}/stop", deprecated=True)
 async def stop_instance_deprecated(
     instance_id: str,

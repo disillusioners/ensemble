@@ -384,26 +384,8 @@ class JobProcessor:
                             continue  # Skip to next queue, job stays PENDING
                 # <<< END NEW >>>
 
-                # >>> INSTANCE PAUSE CHECK — skip jobs for paused instances <<<
-                # This is an optimization to avoid unnecessary lock acquisition
-                # The actual enforcement is in JobQueueService.start_job()
-                if getattr(job, 'job_type', 'task') == "message" and getattr(job, 'instance_id', None):
-                    try:
-                        instance_meta = await asyncio.to_thread(
-                            self._instance_manager._instance_repository.get,
-                            job.instance_id,
-                        )
-                        if instance_meta and instance_meta.status == InstanceStatus.PAUSED.value:
-                            logger.debug(
-                                f"JobProcessor: MESSAGE job {job.job_id[:8]}... skipped — "
-                                f"instance {job.instance_id[:8]}... is paused"
-                            )
-                            continue  # Skip to next queue, job stays PENDING
-                    except Exception as e:
-                        logger.warning(f"Instance status check failed for job {job.job_id}: {e}")
-                # <<< END INSTANCE PAUSE CHECK >>>
-
                 # Try to start the job (acquires per-queue lock internally)
+                # Note: Instance pause check is in JobQueueService.start_job(), not here
                 try:
                     started_job = await self._queue_service.start_job(job.job_id)
                     if started_job is None:

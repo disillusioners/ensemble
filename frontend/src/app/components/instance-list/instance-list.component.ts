@@ -166,9 +166,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
   onResumeInstance(instanceId: string, event: Event): void {
     event.preventDefault();
     event.stopPropagation();
-    if (confirm('Resume this paused instance?')) {
-      this.resumeInstance.emit(instanceId);
-    }
+    this.resumeInstance.emit(instanceId);
   }
 
   onNewInstance(): void {
