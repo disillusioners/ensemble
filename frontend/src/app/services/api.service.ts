@@ -21,7 +21,8 @@ import type {
   InstanceMappingCreate,
   InstanceMappingListResponse,
   DeleteResponse,
-  PauseResponse
+  PauseResponse,
+  ResumeResponse
 } from '../models';
 
 @Injectable({
@@ -85,6 +86,10 @@ export class ApiService {
 
   pauseInstance(instanceId: string): Observable<PauseResponse> {
     return this.http.post<PauseResponse>(`${this.API_BASE}/instances/${instanceId}/pause`, {});
+  }
+
+  resumeInstance(instanceId: string): Observable<ResumeResponse> {
+    return this.http.post<ResumeResponse>(`${this.API_BASE}/instances/${instanceId}/resume`, {});
   }
 
   // Messages

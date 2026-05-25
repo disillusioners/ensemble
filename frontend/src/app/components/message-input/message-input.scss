@@ -106,6 +106,14 @@ $border-color: #374151;
   &:active {
     transform: scale(0.95);
   }
+
+  &.resume-button {
+    background-color: #10b981;
+
+    &:hover {
+      background-color: #059669;
+    }
+  }
 }
 
 .pause-icon {

@@ -218,6 +218,13 @@ export interface PauseResponse {
   skipped_ids: string[];
 }
 
+// Resume instance response
+export interface ResumeResponse {
+  resumed: boolean;
+  resumed_ids: string[];
+  skipped_ids: string[];
+}
+
 // Job Queue types
 export * from './job-queue.model';
 

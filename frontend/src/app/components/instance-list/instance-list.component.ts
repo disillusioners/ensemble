@@ -37,6 +37,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
   @Output() agentChange = new EventEmitter<Agent>();
   @Output() loadMore = new EventEmitter<void>();
   @Output() pauseInstance = new EventEmitter<string>();
+  @Output() resumeInstance = new EventEmitter<string>();
 
   @ViewChild('instanceListContainer') private instanceListContainer!: ElementRef<HTMLElement>;
 
@@ -159,6 +160,14 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     event.stopPropagation();
     if (confirm('Pause this running instance?')) {
       this.pauseInstance.emit(instanceId);
+    }
+  }
+
+  onResumeInstance(instanceId: string, event: Event): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (confirm('Resume this paused instance?')) {
+      this.resumeInstance.emit(instanceId);
     }
   }
 

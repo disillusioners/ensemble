@@ -73,6 +73,12 @@
                 <rect x="14" y="5" width="4" height="14" rx="1" />
             </svg>
         </button>
+    } @else if (isInstancePaused()) {
+        <button type="button" class="pause-button resume-button" (click)="resumeInstance.emit()" title="Resume" aria-label="Resume">
+            <svg class="pause-icon" fill="currentColor" viewBox="0 0 24 24">
+                <polygon points="5,3 19,12 5,21" />
+            </svg>
+        </button>
     } @else {
         <button
             type="button"

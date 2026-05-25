@@ -233,6 +233,35 @@ async def pause_instance(
     }
 
 
+# 5c. POST /instances/{instance_id}/resume - Resume instance
+@router.post("/{instance_id}/resume")
+async def resume_instance(
+    instance_id: str,
+    request: Request,
+) -> dict:
+    """Resume a paused instance and cascade to children."""
+    manager = _get_manager(request)
+
+    # Check instance exists
+    try:
+        await manager.get_instance(instance_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INSTANCE_NOT_FOUND,
+                message=f"Instance not found: {instance_id}"
+            ).model_dump()
+        )
+
+    result = await manager.resume_instance_cascade(instance_id)
+    return {
+        "resumed": True,
+        "resumed_ids": result["resumed_ids"],
+        "skipped_ids": result["skipped_ids"],
+    }
+
+
 # 5b. POST /instances/{instance_id}/stop - Deprecated: use POST /pause instead
 @router.post("/{instance_id}/stop", deprecated=True)
 async def stop_instance_deprecated(

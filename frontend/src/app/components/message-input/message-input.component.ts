@@ -31,6 +31,7 @@ export class MessageInputComponent {
   readonly instanceStatus = input<InstanceStatus | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() pauseInstance = new EventEmitter<void>();
+  @Output() resumeInstance = new EventEmitter<void>();
 
   message = signal('');
   images = signal<FilePreview[]>([]);
@@ -44,6 +45,14 @@ export class MessageInputComponent {
   readonly isInstanceRunning = computed(() => {
     const status = this.instanceStatus();
     return status === 'running' || status === 'waiting_children' || status === 'queued';
+  });
+
+  /**
+   * Returns true when the instance is paused and should show a Resume button.
+   */
+  readonly isInstancePaused = computed(() => {
+    const status = this.instanceStatus();
+    return status === 'paused';
   });
 
   protected readonly MAX_IMAGES = 3;

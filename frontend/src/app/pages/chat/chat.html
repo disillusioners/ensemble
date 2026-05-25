@@ -17,6 +17,7 @@
         (agentChange)="onAgentChange($event)"
         (loadMore)="onLoadMoreInstances()"
         (pauseInstance)="onPauseInstanceFromList($event)"
+        (resumeInstance)="onResumeInstanceFromList($event)"
       ></app-instance-list>
     </div>
 
@@ -119,6 +120,7 @@
           [agentColor]="instanceAgent()?.id || 'coder'"
           [instanceStatus]="currentInstance()?.status ?? null"
           (pauseInstance)="onPauseInstance()"
+          (resumeInstance)="onResumeInstance()"
         ></app-message-input>
       }
     </div>

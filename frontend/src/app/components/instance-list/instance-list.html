@@ -128,7 +128,7 @@
       </div>
     </div>
     
-    <!-- Pause button (only for running instances) -->
+    <!-- Pause/Resume button -->
     @if (instance.status === 'running') {
       <button
         class="pause-btn"
@@ -136,6 +136,14 @@
         title="Pause instance"
       >
         <mat-icon>pause</mat-icon>
+      </button>
+    } @else if (instance.status === 'paused') {
+      <button
+        class="pause-btn resume-btn"
+        (click)="onResumeInstance(instance.instance_id, $event)"
+        title="Resume instance"
+      >
+        <mat-icon>play_arrow</mat-icon>
       </button>
     }
     

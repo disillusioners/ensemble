@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.services.project_normalizer import normalize_project_id
@@ -964,10 +965,23 @@ class JobQueueService:
                 and hasattr(self._instance_manager, '_instance_repository')
                 and self._instance_manager._instance_repository is not None
             ):
-                instance = await asyncio.to_thread(
-                    self._instance_manager._instance_repository.get, job.instance_id
-                )
-                if instance and instance.status == "paused":
+                try:
+                    instance = await asyncio.to_thread(
+                        self._instance_manager._instance_repository.get, job.instance_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"start_job: failed to fetch instance {job.instance_id[:8]}...: {e}"
+                    )
+                    instance = None
+
+                if instance is None:
+                    logger.warning(
+                        f"start_job: instance {job.instance_id[:8]}... not found, skipping"
+                    )
+                    return None
+
+                if instance.status == InstanceStatus.PAUSED.value:
                     logger.debug(
                         f"start_job: instance {job.instance_id[:8]}... is paused, skipping"
                     )

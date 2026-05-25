@@ -401,6 +401,13 @@
     width: 16px;
     height: 16px;
   }
+
+  &.resume-btn {
+    &:hover {
+      background-color: rgba(16, 185, 129, 0.2);
+      color: #10b981;
+    }
+  }
 }
 
 .load-more-container {

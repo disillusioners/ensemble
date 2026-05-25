@@ -577,6 +577,80 @@ class InstanceLifecycleService:
 
         return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
+    async def resume_instance_cascade(
+        self, instance_id: str, *, _visited: set[str] | None = None, _depth: int = 0
+    ) -> dict:
+        """Resume an instance and cascade to all children.
+
+        Recursively resumes the target instance and all its descendants.
+        Sets status to RUNNING and clears paused_at.
+        Does NOT re-spawn or restart instances - just unpauses them.
+
+        Args:
+            instance_id: The ID of the instance to resume.
+            _visited: Internal set for circular reference detection.
+            _depth: Internal counter for depth limit protection.
+
+        Returns dict with:
+          - resumed_ids: list of all instance IDs that were resumed
+          - skipped_ids: list of instance IDs that were skipped (not paused)
+        """
+        # Depth guard
+        if _depth > 256:
+            logger.error(f"Max cascade depth exceeded at {instance_id[:8]}...")
+            return {"resumed_ids": [], "skipped_ids": [instance_id]}
+
+        # Circular reference guard
+        if _visited is None:
+            _visited = set()
+        if instance_id in _visited:
+            logger.warning(f"Circular reference detected: {instance_id[:8]}..., skipping")
+            return {"resumed_ids": [], "skipped_ids": [instance_id]}
+        _visited.add(instance_id)
+
+        resumed_ids: list[str] = []
+        skipped_ids: list[str] = []
+
+        # Get instance metadata for cascade
+        meta = self._manager._instance_repository.get(instance_id)
+
+        if meta is None:
+            logger.warning(f"Root instance {instance_id[:8]}... not found in DB")
+            return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids}
+
+        # Cascade to children first (DFS)
+        if meta.children:
+            for child_id in list(meta.children):
+                try:
+                    logger.info(f"Cascading resume to child instance: {child_id[:8]}...")
+                    child_result = await self.resume_instance_cascade(
+                        child_id, _visited=_visited, _depth=_depth + 1
+                    )
+                    resumed_ids.extend(child_result["resumed_ids"])
+                    skipped_ids.extend(child_result["skipped_ids"])
+                except Exception as e:
+                    logger.error(f"Failed to resume child {child_id[:8]}...: {e}")
+                    skipped_ids.append(child_id)
+
+        # Resume self
+        # Skip if not paused (already running or other status)
+        if meta.status != InstanceStatus.PAUSED.value:
+            logger.info(f"Instance {instance_id[:8]}... is not paused (status={meta.status}), skipping")
+            skipped_ids.append(instance_id)
+        else:
+            # Update DB status to running and clear paused_at
+            self._manager._instance_repository.update(
+                instance_id,
+                status=InstanceStatus.RUNNING.value,
+                paused_at=None,  # Clear paused_at on resume
+            )
+            logger.info(f"Resumed instance {instance_id[:8]}...")
+            resumed_ids.append(instance_id)
+            # Emit status_change event for running status
+            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id if meta else None)
+
+        return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids}
+
     async def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.
 

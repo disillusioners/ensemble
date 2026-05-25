@@ -486,3 +486,155 @@ class TestPauseInstanceCascade:
         call_kwargs = mock_repo.update.call_args[1]
         assert call_kwargs["status"] == "paused"
         assert "paused_at" in call_kwargs
+
+
+class TestResumeInstanceCascade:
+    """Test suite for resume_instance_cascade functionality."""
+
+    @pytest.fixture
+    def mock_repo(self):
+        """Create a mock instance repository."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_registry(self):
+        """Create a mock request registry."""
+        registry = MagicMock()
+        registry.cancel_by_instance = MagicMock(return_value=0)
+        return registry
+
+    @pytest.fixture
+    def mock_manager(self, mock_repo, mock_registry):
+        """Create a mock manager with mocked repository and registry."""
+        manager = MagicMock()
+        manager._instance_repository = mock_repo
+        manager._request_registry = mock_registry
+        # Mock live_hub with async stream_status_change
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+        return manager
+
+    @pytest.fixture
+    def lifecycle_service(self, mock_manager):
+        """Create an InstanceLifecycleService with mocked manager."""
+        from daemon.services.instance_lifecycle import InstanceLifecycleService
+        service = InstanceLifecycleService.__new__(InstanceLifecycleService)
+        service._manager = mock_manager
+        return service
+
+    def _make_instance(
+        self,
+        instance_id: str,
+        status: str = InstanceStatus.PAUSED.value,
+        children: list[str] | None = None,
+        agent_id: str = "test-agent",
+    ) -> Instance:
+        """Create a mock Instance object."""
+        instance = MagicMock(spec=Instance)
+        instance.instance_id = instance_id
+        instance.status = status
+        instance.children = children if children is not None else []
+        instance.agent_id = agent_id
+        return instance
+
+    @pytest.mark.asyncio
+    async def test_resume_single_instance_no_children(self, lifecycle_service, mock_repo):
+        """Test resuming a single paused instance with no children.
+        
+        Verifies:
+        - resumed_ids contains the instance
+        - skipped_ids is empty
+        - update called with status='running' and paused_at=None
+        """
+        instance_id = "test-instance-123"
+        mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
+
+        result = await lifecycle_service.resume_instance_cascade(instance_id)
+
+        assert result["resumed_ids"] == [instance_id]
+        assert result["skipped_ids"] == []
+        mock_repo.update.assert_called_once()
+        call_kwargs = mock_repo.update.call_args[1]
+        assert call_kwargs["status"] == "running"
+        assert call_kwargs["paused_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_resume_instance_with_children(self, lifecycle_service, mock_repo):
+        """Test resuming a parent instance with direct children."""
+        parent_id = "parent-instance"
+        child1_id = "child-1"
+        child2_id = "child-2"
+
+        def get_side_effect(instance_id):
+            if instance_id == parent_id:
+                return self._make_instance(parent_id, status="paused", children=[child1_id, child2_id])
+            elif instance_id == child1_id:
+                return self._make_instance(child1_id, status="paused")
+            elif instance_id == child2_id:
+                return self._make_instance(child2_id, status="paused")
+            return None
+
+        mock_repo.get.side_effect = get_side_effect
+
+        result = await lifecycle_service.resume_instance_cascade(parent_id)
+
+        assert set(result["resumed_ids"]) == {parent_id, child1_id, child2_id}
+        assert result["skipped_ids"] == []
+        assert mock_repo.update.call_count == 3
+        for call in mock_repo.update.call_args_list:
+            assert call[1]["status"] == "running"
+            assert call[1]["paused_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_resume_already_running_instance(self, lifecycle_service, mock_repo):
+        """Test resuming an instance that is already running (not paused).
+        
+        Verifies:
+        - resumed_ids is empty
+        - skipped_ids contains the instance
+        - update NOT called
+        """
+        instance_id = "running-instance"
+        mock_repo.get.return_value = self._make_instance(instance_id, status="running")
+
+        result = await lifecycle_service.resume_instance_cascade(instance_id)
+
+        assert result["resumed_ids"] == []
+        assert result["skipped_ids"] == [instance_id]
+        mock_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_mixed_status_children(self, lifecycle_service, mock_repo):
+        """Test resuming when children have mixed status."""
+        parent_id = "parent"
+        child1_id = "child1-paused"
+        child2_id = "child2-running"
+
+        def get_side_effect(instance_id):
+            if instance_id == parent_id:
+                return self._make_instance(parent_id, status="paused", children=[child1_id, child2_id])
+            elif instance_id == child1_id:
+                return self._make_instance(child1_id, status="paused")
+            elif instance_id == child2_id:
+                return self._make_instance(child2_id, status="running")
+            return None
+
+        mock_repo.get.side_effect = get_side_effect
+
+        result = await lifecycle_service.resume_instance_cascade(parent_id)
+
+        assert set(result["resumed_ids"]) == {parent_id, child1_id}
+        assert result["skipped_ids"] == [child2_id]
+        assert mock_repo.update.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_resume_nonexistent_instance(self, lifecycle_service, mock_repo):
+        """Test resuming a non-existent instance."""
+        instance_id = "nonexistent-instance"
+        mock_repo.get.return_value = None
+
+        result = await lifecycle_service.resume_instance_cascade(instance_id)
+
+        assert result["resumed_ids"] == []
+        assert result["skipped_ids"] == []
+        mock_repo.update.assert_not_called()

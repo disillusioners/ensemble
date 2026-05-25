@@ -1783,6 +1783,23 @@ class InstanceManager:
         """
         return await self._lifecycle_service.pause_instance_cascade(instance_id)
 
+    async def resume_instance_cascade(self, instance_id: str) -> dict:
+        """Resume an instance and cascade to all children.
+
+        Recursively resumes the target instance and all its descendants.
+        Sets status to RUNNING and clears paused_at.
+        Does NOT re-spawn or restart instances - just unpauses them.
+
+        Args:
+            instance_id: The ID of the instance to resume.
+
+        Returns:
+            Dict with:
+              - resumed_ids: list of all instance IDs that were resumed
+              - skipped_ids: list of instance IDs that were skipped (not paused)
+        """
+        return await self._lifecycle_service.resume_instance_cascade(instance_id)
+
     async def _publish_instance_lifecycle_event(
         self,
         instance_id: str,
