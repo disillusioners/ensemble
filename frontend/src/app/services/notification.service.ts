@@ -15,6 +15,9 @@ export interface Notification extends InstanceNotification {
   read: boolean;
 }
 
+// Agents that should NOT trigger notification sounds (visual notifications still shown)
+const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-import', 'experiencer']);
+
 @Injectable({ providedIn: 'root' })
 export class NotificationService implements OnDestroy {
   private readonly ngZone = inject(NgZone);
@@ -155,7 +158,9 @@ export class NotificationService implements OnDestroy {
       return [newNotification, ...list].slice(0, 50); // Keep last 50
     });
     this.unreadCount.update(count => count + 1);
-    this.playSound();
+    if (!SOUND_EXCLUDED_AGENT_IDS.has(notification.agent_id)) {
+      this.playSound();
+    }
   }
   
   markAsRead(id: string): void {
