@@ -67,24 +67,46 @@ $accent-cyan: #10a7f7;
   text-align: center;
 }
 
-.menu-icon {
-  font-size: 16px;
-  width: 16px;
-  height: 16px;
-  line-height: 16px;
+.close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-left: 4px;
   color: $text-muted;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
   opacity: 0;
-  transition: opacity 0.15s ease;
-  margin-left: 2px;
+  transition: all 0.15s ease;
   flex-shrink: 0;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+    line-height: 14px;
+  }
+
+  &:hover {
+    color: $text-primary;
+    background-color: rgba($bg-card-hover, 0.8);
+  }
 }
 
-.tab:hover .menu-icon {
+.tab:hover .close-btn {
   opacity: 1;
 }
 
-.tab.active .menu-icon {
-  opacity: 1;
+.tab.active .close-btn {
+  opacity: 0.7;
+
+  &:hover {
+    opacity: 1;
+  }
 }
 
 .tab-add {
@@ -146,17 +168,5 @@ $accent-cyan: #10a7f7;
   .empty-message {
     color: $text-muted;
     font-style: italic;
-  }
-
-  .delete-item {
-    color: #ef4444;
-
-    mat-icon {
-      color: #ef4444;
-    }
-
-    &:hover {
-      background-color: rgba(#ef4444, 0.1);
-    }
   }
 }

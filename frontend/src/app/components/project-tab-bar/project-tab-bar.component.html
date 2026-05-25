@@ -7,22 +7,20 @@
         (click)="tabStateService.setActiveTab(tab.id)"
         [matTooltip]="tab.name"
         [matTooltipDisabled]="tab.name.length <= 20"
-        [matMenuTriggerFor]="projectMenu"
       >
         <span class="tab-name">{{ tab.name }}</span>
-        <mat-icon class="menu-icon">more_vert</mat-icon>
-      </button>
-
-      <mat-menu #projectMenu="matMenu" class="project-menu">
-        <button mat-menu-item (click)="onCloseTab($event, tab.id)">
+        <span
+          class="close-btn"
+          role="button"
+          tabindex="0"
+          (click)="onCloseTab($event, tab.id)"
+          (keydown.enter)="onCloseTab($event, tab.id)"
+          (keydown.space)="onCloseTab($event, tab.id)"
+          [attr.aria-label]="'Close ' + tab.name"
+        >
           <mat-icon>close</mat-icon>
-          <span>Close Tab</span>
-        </button>
-        <button mat-menu-item class="delete-item" (click)="onDeleteProject($event, getProjectById(tab.id)!)">
-          <mat-icon>delete</mat-icon>
-          <span>Delete Project</span>
-        </button>
-      </mat-menu>
+        </span>
+      </button>
     } @else {
       <button
         class="tab"
