@@ -60,7 +60,36 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 instance-sort-full-browser-verification)
+## Test Results (Latest: 2026-05-25 project-delete-cleanup)
+
+### Project Delete Cleanup — Phase 1 (2026-05-25)
+- **Commits**: 813e097 (initial) + 1ce9a04 (fixes)
+- **Mock Tests**: 25/25 assertions PASS — Live dev server: 404, happy path, 409 protection, force delete, cascade verification, in-memory cleanup
+- **Quick Fixes**: 2 (queue creation field name, 409 test instance state)
+- **ensure.md**: PASS — dev.sh stable on port 8079
+- See `.agents/tester/RESULTS/2026-05-25-project-delete-cleanup.md` for full report
+
+### Project Delete Cleanup Status: ✅ READY (25 mock assertions pass, dev.sh stable, 0 regressions)
+
+### Ensure System Queues — Phase 2 (2026-05-25)
+- **Commit**: eb4bcc1 (feature), 8ccf4cc (tests), a7c2851 (bug fix), 1ce9a04 (cascade fix)
+- **Unit Tests**: 9/9 PASS — Service layer (partial, all, none, idempotency) + API endpoint (200, 404, correctness, idempotency, partial)
+- **Mock Tests**: 20/20 assertions PASS — Live dev server: discover project, create, ensure, idempotency, correctness, 404, cleanup
+- **ensure.md**: PASS — dev.sh stable, healthy
+- **Bugs Found & Fixed**: 2 (project repo not initialized for queues router, project delete cascade cleanup order)
+- See `.agents/tester/RESULTS/2026-05-25-ensure-system-queues.md` for full report
+
+### Ensure System Queues Status: ✅ READY (9 unit tests pass, 20 mock assertions pass, 2 bugs fixed, dev.sh stable, 0 regressions)
+
+### Ensure System Queues — Phase 3 Frontend (2026-05-25)
+- **Commits**: 67e4fdf (feature), 9716410 (jest fix), 3025e73 (tests)
+- **Unit Tests**: 692/692 PASS (690 existing + 2 new for ensureSystemQueues service)
+- **ensure.md**: PASS — dev.sh stable on port 8079
+- **Quick Fixes**: 1 (jest.config.js e2e test exclusion)
+- **New Tests**: 2 (ensureSystemQueues response correctness, array typing)
+- See `.agents/tester/RESULTS/2026-05-25-ensure-system-queues-frontend.md` for full report
+
+### Ensure System Queues Frontend Status: ✅ READY (692 unit tests pass, service layer covered, dev.sh stable, 0 regressions)
 
 ### Instance Sort — Full Browser Automation Verification (2026-05-25)
 - **Build Check**: ✅ PASS — tsc --noEmit zero errors
