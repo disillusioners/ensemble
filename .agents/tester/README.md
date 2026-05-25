@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 project-metadata-table)
+## Test Results (Latest: 2026-05-25 instance-list-scroll-fix)
+
+### Instance List Scroll Fix (2026-05-25)
+- **Branch**: feature/instance-list-scroll-fix (commits 06464dc + 5ec6cd2 + b1e3cd4)
+- **New Tests**: 18/18 PASS — scroll save/restore, refresh button, polling interval, ngOnDestroy cleanup
+- **Regression**: 679/679 PASS (661 existing + 18 new, 0 failures)
+- **ensure.md**: PASS — dev.sh stable 30s+
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-instance-list-scroll-fix.md` for full report
+
+### Instance List Scroll Fix Status: ✅ READY (18 new tests pass, 679 total pass, dev.sh stable, 0 regressions)
 
 ### Project Metadata Table Separation (2026-05-25)
 - **Branch**: feature/metadata-table (commits de4ad4f + d897fc8 + 0e59e21 + 9861040)
