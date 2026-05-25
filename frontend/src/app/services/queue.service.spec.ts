@@ -1,6 +1,17 @@
 import { signal } from '@angular/core';
-import { JobQueue } from '../models/job-queue.model';
+import { JobQueue, EnsureSystemQueuesResponse } from '../models/job-queue.model';
 import { createMockQueue, createMockQueueList } from '../testing/queue-test-helpers';
+
+// Mock response factory for ensureSystemQueues
+function createMockEnsureSystemResponse(overrides?: Partial<EnsureSystemQueuesResponse>): EnsureSystemQueuesResponse {
+  return {
+    project_id: 'project-123',
+    existing_queues: [],
+    created_queues: ['system-queue-1'],
+    total_system_queues: 1,
+    ...overrides,
+  };
+}
 
 class TestableQueueService {
   readonly queues = signal<JobQueue[]>([]);
@@ -137,6 +148,22 @@ class TestableQueueService {
   clearError() {
     this.error.set(null);
   }
+
+  // ensureSystemQueues - returns ensure system queues response
+  ensureSystemQueues(projectId: string) {
+    return {
+      pipe: () => ({
+        subscribe: (observer: any) => {
+          const response = createMockEnsureSystemResponse({ project_id: projectId });
+          if (typeof observer === 'function') {
+            observer(response);
+          } else if (observer.next) {
+            observer.next(response);
+          }
+        }
+      })
+    };
+  }
 }
 
 describe('QueueService', () => {
@@ -237,6 +264,27 @@ describe('QueueService', () => {
       service.error.set('Test error');
       service.clearError();
       expect(service.error()).toBeNull();
+    });
+  });
+
+  describe('ensureSystemQueues', () => {
+    it('should return ensure system queues response', () => {
+      let result: EnsureSystemQueuesResponse | null = null;
+      service.ensureSystemQueues('project-1').pipe().subscribe(response => { result = response; });
+      expect(result).not.toBeNull();
+      expect(result?.project_id).toBe('project-1');
+      expect(result?.existing_queues).toEqual([]);
+      expect(result?.created_queues).toEqual(['system-queue-1']);
+      expect(result?.total_system_queues).toBe(1);
+    });
+
+    it('should return response with existing and created queues', () => {
+      let result: EnsureSystemQueuesResponse | null = null;
+      service.ensureSystemQueues('project-1').pipe().subscribe(response => { result = response; });
+      expect(result?.existing_queues).toBeDefined();
+      expect(result?.created_queues).toBeDefined();
+      expect(Array.isArray(result?.existing_queues)).toBe(true);
+      expect(Array.isArray(result?.created_queues)).toBe(true);
     });
   });
 });
