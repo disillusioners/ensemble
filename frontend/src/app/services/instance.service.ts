@@ -19,6 +19,14 @@ const TERMINAL_STATUSES: Set<InstanceStatus> = new Set([
   'failed',
 ]);
 
+function sortByCreatedAtDesc(instances: InstanceInfo[]): InstanceInfo[] {
+  return [...instances].sort((a, b) => {
+    const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+    return bTime - aTime;
+  });
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -73,8 +81,10 @@ export class InstanceService {
       const existingIdx = instances.findIndex(i => i.instance_id === instanceId);
       if (existingIdx >= 0) {
         // Update existing instance
-        return instances.map((instance, idx) =>
-          idx === existingIdx ? { ...instance, status: newStatus } : instance
+        return sortByCreatedAtDesc(
+          instances.map((instance, idx) =>
+            idx === existingIdx ? { ...instance, status: newStatus } : instance
+          )
         );
       } else {
         // Instance not in list - create minimal entry for direct navigation support
@@ -89,7 +99,7 @@ export class InstanceService {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
-        return [minimalInstance, ...instances];
+        return sortByCreatedAtDesc([minimalInstance, ...instances]);
       }
     });
   }
@@ -130,7 +140,7 @@ export class InstanceService {
     // Prepend any local-only instances that weren't in the API response.
     // These are newer than everything in the API response (since API returns newest first),
     // so they should appear at the top to maintain correct sort order.
-    return [...localById.values(), ...result];
+    return sortByCreatedAtDesc([...localById.values(), ...result]);
   }
 
   /**
@@ -155,7 +165,7 @@ export class InstanceService {
         // Deduplicate when appending
         const existingIds = new Set(this.instances().map((i: InstanceInfo) => i.instance_id));
         const newInstances = response.instances.filter(i => !existingIds.has(i.instance_id));
-        this.instances.update((prev: InstanceInfo[]) => [...prev, ...newInstances]);
+        this.instances.update((prev: InstanceInfo[]) => sortByCreatedAtDesc([...prev, ...newInstances]));
         this.currentOffset += response.instances.length;
       } else {
         // Merge with existing instances to avoid overwriting SSE updates.
