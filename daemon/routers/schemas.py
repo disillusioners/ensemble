@@ -350,6 +350,26 @@ class JobQueueNotFoundResponse(BaseModel):
     }
 
 
+class EnsureSystemQueuesResponse(BaseModel):
+    """Response for ensuring system queues exist."""
+    
+    project_id: str = Field(..., description="Project identifier")
+    existing_queues: list[str] = Field(default_factory=list, description="Names of queues that already existed")
+    created_queues: list[str] = Field(default_factory=list, description="Names of queues that were newly created")
+    total_system_queues: int = Field(..., description="Total number of system queues (existing + created)")
+    
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "project_id": "project-uuid",
+                "existing_queues": ["system_fifo_queue", "system_parallel_queue"],
+                "created_queues": ["system_kb_fifo_queue", "system_defer_queue"],
+                "total_system_queues": 4
+            }
+        }
+    }
+
+
 # ==================== Project Schemas ====================
 
 

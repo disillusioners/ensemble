@@ -1,10 +1,12 @@
 """Job Queue Management API endpoints."""
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from daemon.repositories import SQLModelProjectRepository
 from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
 from .schemas import (
     JobQueueResponse,
@@ -12,6 +14,8 @@ from .schemas import (
     JobQueueCreateRequest,
     JobQueueUpdateRequest,
     JobQueueNotFoundResponse,
+    ProjectNotFoundResponse,
+    EnsureSystemQueuesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,33 @@ def set_job_queue_mgmt_service(service: JobQueueMgmtService) -> None:
     """Set the JobQueueMgmtService instance (called during app startup)."""
     global _job_queue_mgmt_service
     _job_queue_mgmt_service = service
+
+
+# Dependency to get SQLModelProjectRepository
+_project_repo: SQLModelProjectRepository | None = None
+
+
+def get_project_repository() -> SQLModelProjectRepository:
+    """Get the SQLModelProjectRepository instance.
+
+    Returns:
+        SQLModelProjectRepository instance.
+
+    Raises:
+        HTTPException: If the repository is not initialized.
+    """
+    if _project_repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "Project repository not initialized"}
+        )
+    return _project_repo
+
+
+def set_project_repository(repo: SQLModelProjectRepository) -> None:
+    """Set the SQLModelProjectRepository instance (called during app startup)."""
+    global _project_repo
+    _project_repo = repo
 
 
 def _queue_to_response(queue_data) -> JobQueueResponse:
@@ -121,6 +152,54 @@ async def list_queues(
     return JobQueueListResponse(
         queues=[_queue_to_response(q) for q in queues],
         total=len(queues),
+    )
+
+
+@router.post(
+    "/ensure-system",
+    response_model=EnsureSystemQueuesResponse,
+    responses={
+        200: {"description": "System queues ensured"},
+        404: {"model": ProjectNotFoundResponse, "description": "Project not found"},
+        503: {"description": "Service not initialized"},
+    },
+)
+async def ensure_system_queues(
+    project_id: str,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+    service: JobQueueMgmtService = Depends(get_mgmt_service),
+) -> EnsureSystemQueuesResponse:
+    """Ensure all system queues exist for a project.
+
+    Creates any missing system queues (system_fifo_queue, system_parallel_queue,
+    system_kb_fifo_queue, system_defer_queue). Idempotent - safe to call multiple times.
+
+    Args:
+        project_id: Project identifier from path.
+
+    Returns:
+        200 with lists of existing and created queue names
+        404 if project doesn't exist
+    """
+    # Validate project exists
+    project = await asyncio.to_thread(repo.get, project_id)
+    if project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ProjectNotFoundResponse(
+                error="Project not found",
+                project_id=project_id
+            ).model_dump()
+        )
+
+    result = await service.ensure_system_queues(project_id)
+    total = len(result["existing_queues"]) + len(result["created_queues"])
+
+    return EnsureSystemQueuesResponse(
+        project_id=project_id,
+        existing_queues=result["existing_queues"],
+        created_queues=result["created_queues"],
+        total_system_queues=total,
     )
 
 

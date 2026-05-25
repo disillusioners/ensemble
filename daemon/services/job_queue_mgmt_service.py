@@ -138,6 +138,52 @@ class JobQueueMgmtService:
         
         return system_queues
     
+    async def ensure_system_queues(self, project_id: str) -> dict[str, Any]:
+        """Ensure system queues exist for a project, tracking existing vs created.
+        
+        Reuses auto_provision_system_queues() and tracks which queues already
+        existed vs which were newly created.
+        
+        Idempotent: safe to call multiple times.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Dictionary with lists of existing and created queue names,
+            plus total count.
+        """
+        # 1. Get existing system queue names BEFORE provisioning
+        all_queues_before = await asyncio.to_thread(
+            self._queue_repo.list_by_project, project_id
+        )
+        existing_system_queues = [
+            q.queue_name for q in all_queues_before
+            if q.queue_name in RESERVED_QUEUE_NAMES
+        ]
+        
+        # 2. Call the existing function to create any missing queues
+        await self.auto_provision_system_queues(project_id)
+        
+        # 3. Determine which were created (by comparing before vs after)
+        all_queues_after = await asyncio.to_thread(
+            self._queue_repo.list_by_project, project_id
+        )
+        all_system_queues = [
+            q.queue_name for q in all_queues_after
+            if q.queue_name in RESERVED_QUEUE_NAMES
+        ]
+        created_queues = [
+            name for name in all_system_queues
+            if name not in existing_system_queues
+        ]
+        
+        return {
+            "existing_queues": existing_system_queues,
+            "created_queues": created_queues,
+            "total_system_queues": len(all_system_queues),
+        }
+    
     # ========== Queue CRUD ==========
     
     async def create_queue(
