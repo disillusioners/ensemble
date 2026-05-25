@@ -57,6 +57,14 @@ class MockJob:
         self.message = "test message"
         self.source = "api"
         self.instance_id = None
+        self.job_type = "task"  # Default to task, override for message jobs
+
+
+class MockInstance:
+    """Mock instance object for testing instance pause."""
+    def __init__(self, instance_id: str, status: str = "running"):
+        self.instance_id = instance_id
+        self.status = status
 
 
 @pytest.fixture
@@ -67,11 +75,13 @@ def mock_queue_service():
 
 @pytest.fixture
 def mock_instance_manager():
-    """Create mock InstanceManager."""
+    """Create mock InstanceManager with instance_repository for pause checks."""
     manager = MagicMock()
     manager.spawn_instance_with_mcp = AsyncMock(return_value="instance-123")
     manager.enqueue_message = AsyncMock()
     manager.get_instance = AsyncMock(return_value=MagicMock())
+    # Add instance_repository for pause status checks
+    manager._instance_repository = MagicMock()
     return manager
 
 
@@ -893,3 +903,175 @@ class TestJobProcessorEventDispatch:
         assert processor._jobs_dispatched_polling == 1
         # Immediate counter should remain zero
         assert processor._jobs_dispatched_immediately == 0
+
+
+class TestJobProcessorInstancePause:
+    """Tests for instance-level pause in JobProcessor.
+
+    These tests verify that when an instance is PAUSED:
+    1. New jobs targeting that instance are skipped (stay PENDING)
+    2. Currently processing jobs are NOT affected
+    3. The processor correctly checks instance status before starting jobs
+    """
+
+    @pytest.fixture
+    def processor_with_instance_repo(
+        self, mock_queue_service, mock_instance_manager, mock_project_repo, mock_queue_repo
+    ):
+        """Create JobProcessor with instance_repository properly mocked."""
+        return JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_job_for_paused_instance(
+        self, processor_with_instance_repo, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that jobs targeting paused instances are skipped.
+
+        When a MESSAGE job targets a paused instance, the processor should
+        skip starting that job. The job stays PENDING until the instance
+        is unpaused.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        instance_id = "paused-instance-123"
+        job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
+        job.instance_id = instance_id
+        job.job_type = "message"  # MESSAGE jobs have instance_id
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = [job]
+
+        # Mock the paused instance
+        mock_instance_manager._instance_repository.get.return_value = MockInstance(
+            instance_id, status="paused"
+        )
+
+        await processor_with_instance_repo._process_next_job()
+
+        # Job should NOT be started because instance is paused
+        mock_queue_service.start_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_processes_job_for_running_instance(
+        self, processor_with_instance_repo, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that jobs targeting running instances are processed normally.
+
+        When a MESSAGE job targets a running instance, the processor should
+        start the job normally.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        instance_id = "running-instance-123"
+        job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
+        job.instance_id = instance_id
+        job.job_type = "message"
+
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1",
+                             status=JobStatus.PROCESSING.value)
+        started_job.instance_id = instance_id
+        started_job.job_type = "message"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = [job]
+        # Mock the concurrency check - no active message jobs for this instance
+        mock_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=None)
+
+        # Mock the running instance
+        mock_instance_manager._instance_repository.get.return_value = MockInstance(
+            instance_id, status="running"
+        )
+        mock_queue_service.start_job = AsyncMock(return_value=started_job)
+
+        await processor_with_instance_repo._process_next_job()
+
+        # Job should be started
+        mock_queue_service.start_job.assert_called_once_with("job-1")
+
+    @pytest.mark.asyncio
+    async def test_task_jobs_bypass_instance_pause_check(
+        self, processor_with_instance_repo, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that TASK jobs (without instance_id) bypass instance pause check.
+
+        TASK jobs don't have a pre-set instance_id - it's generated when
+        the job starts. Therefore, they should not be subject to instance
+        pause checks.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        # TASK job without instance_id
+        job = MockJob("task-1", project_id="project-1", queue_id="queue-1")
+        job.instance_id = None
+        job.job_type = "task"
+
+        started_job = MockJob("task-1", project_id="project-1", queue_id="queue-1",
+                             status=JobStatus.PROCESSING.value)
+        started_job.instance_id = "new-instance-123"
+        started_job.job_type = "task"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = [job]
+        mock_queue_service.start_job = AsyncMock(return_value=started_job)
+
+        await processor_with_instance_repo._process_next_job()
+
+        # Job should be started (instance pause check skipped for task jobs)
+        mock_queue_service.start_job.assert_called_once_with("task-1")
+        # instance_repository should NOT be called (no instance_id to check)
+        mock_instance_manager._instance_repository.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handles_instance_repo_error_gracefully(
+        self, processor_with_instance_repo, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that processor handles instance repository errors gracefully.
+
+        If the instance repository check fails, the processor should not crash.
+        It should allow start_job() to handle the check instead.
+        """
+        project = MockProject("project-1", job_queue_paused=False)
+        queue = MockQueue("queue-1", "project-1", is_paused=False)
+
+        instance_id = "instance-123"
+        job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
+        job.instance_id = instance_id
+        job.job_type = "message"
+
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1",
+                             status=JobStatus.PROCESSING.value)
+        started_job.instance_id = instance_id
+        started_job.job_type = "message"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = [job]
+        # Mock the concurrency check - no active message jobs for this instance
+        mock_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=None)
+
+        # Mock the repository to raise an error
+        mock_instance_manager._instance_repository.get.side_effect = Exception("Repo error")
+        mock_queue_service.start_job = AsyncMock(return_value=started_job)
+
+        # Should not raise - error is caught
+        await processor_with_instance_repo._process_next_job()
+
+        # Job should still be processed (start_job handles the check)
+        mock_queue_service.start_job.assert_called_once_with("job-1")
+

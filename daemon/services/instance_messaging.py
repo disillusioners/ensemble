@@ -1167,8 +1167,9 @@ class InstanceMessagingService:
 
             # NOTE: No Task creation here — JobQueue handles job tracking instead.
 
-            # 2. Update instance status if IDLE, PAUSED, or WAITING_CHILDREN → RUNNING
-            #    Also clear paused_at when transitioning away from PAUSED status
+            # 2. Update instance status if IDLE or WAITING_CHILDREN → RUNNING
+            #    DO NOT auto-resume PAUSED instances - jobs will sit in PENDING
+            #    until explicitly unpaused by the user.
             #    Also update last_activity_at and increment version
             status_changed_to_running = False
             is_idle_to_running = False
@@ -1177,9 +1178,12 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.PAUSED.value, InstanceStatus.WAITING_CHILDREN.value):
+                if instance.status == InstanceStatus.PAUSED.value:
+                    # DO NOT auto-resume paused instances
+                    # Job will stay PENDING until explicitly unpaused
+                    pass
+                elif instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
                     instance.status = InstanceStatus.RUNNING.value
-                    instance.paused_at = None
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
                 instance.last_activity_at = datetime.now(timezone.utc)

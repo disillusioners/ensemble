@@ -956,6 +956,23 @@ class JobQueueService:
         if self._project_repo is None:
             logger.warning("start_job: project_repo not set, cannot check pause state")
 
+        # INSTANCE PAUSE CHECK - prevent starting jobs for paused instances
+        # Only check for MESSAGE jobs that have a target instance_id
+        if job.job_type == "message" and job.instance_id:
+            if (
+                self._instance_manager is not None
+                and hasattr(self._instance_manager, '_instance_repository')
+                and self._instance_manager._instance_repository is not None
+            ):
+                instance = await asyncio.to_thread(
+                    self._instance_manager._instance_repository.get, job.instance_id
+                )
+                if instance and instance.status == "paused":
+                    logger.debug(
+                        f"start_job: instance {job.instance_id[:8]}... is paused, skipping"
+                    )
+                    return None
+
         # Generate instance_id: MESSAGE jobs use pre-set instance_id, TASK jobs get new UUID
         if job.job_type == "message" and job.instance_id:
             instance_id = job.instance_id
