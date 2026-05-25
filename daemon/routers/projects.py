@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories import SQLModelProjectRepository
@@ -45,6 +46,18 @@ def set_project_repository(repo: SQLModelProjectRepository) -> None:
     """Set the SQLModelProjectRepository instance (called during app startup)."""
     global _project_repo
     _project_repo = repo
+
+
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state.
+    
+    Args:
+        request: FastAPI request object.
+        
+    Returns:
+        InstanceManager instance.
+    """
+    return request.app.state.manager
 
 
 # Dependency to get JobQueueMgmtService
@@ -708,3 +721,107 @@ async def delete_project_history(
     await asyncio.to_thread(repo.delete_history_entry, entry_id, project_id=project_id)
     
     return {"message": "History entry deleted", "entry_id": entry_id}
+
+
+@router.delete(
+    "/{project_id}",
+    status_code=200,
+    responses={
+        200: {"description": "Project deleted successfully"},
+        404: {"description": "Project not found"},
+        409: {"description": "Cannot delete project with active instances or running jobs"},
+    },
+)
+async def delete_project(
+    project_id: str,
+    request: Request,
+    force: bool = False,
+    repo: SQLModelProjectRepository = Depends(get_project_repository),
+) -> dict:
+    """Delete a project with full cascade cleanup.
+    
+    Deletes the project and ALL related data including:
+    - Job watches
+    - Job locks
+    - Dead letter queue items
+    - Job queue items
+    - Job queues
+    - Instances and instance hierarchy
+    - Tags, shortnames, metadata, history, critical notes
+    
+    Also cleans up in-memory state in InstanceManager:
+    - instances dict
+    - graph tasks
+    - request registry
+    
+    Safety checks (unless force=True):
+    - Fails if project has active (non-idle) instances
+    - Fails if project has running or processing jobs
+    
+    Query params:
+        force: Bypass safety checks (default: False)
+    
+    Returns:
+        200 with deletion summary
+        404 if project not found
+        409 if active instances or running jobs exist (and force=False)
+    """
+    try:
+        # Perform DB deletion
+        result = await asyncio.to_thread(
+            repo.delete,
+            project_id,
+            force=force,
+        )
+        
+        # BUG 4 FIX: Clean up in-memory state in InstanceManager
+        manager = _get_manager(request)
+        if manager and hasattr(manager, '_instance_repository') and manager._instance_repository:
+            try:
+                # Get all instances for this project from DB
+                instances, _ = manager._instance_repository.list(
+                    project_id=project_id,
+                    limit=10000,  # Get all
+                    offset=0,
+                    exclude_kb=False,
+                )
+                
+                for instance in instances:
+                    instance_id = instance.instance_id
+                    
+                    # Cancel active requests
+                    if hasattr(manager, '_request_registry') and manager._request_registry:
+                        manager._request_registry.cancel_by_instance(instance_id)
+                    
+                    # Cancel and remove graph task
+                    task = manager._graph_tasks.pop(instance_id, None)
+                    if task and not task.done():
+                        task.cancel()
+                    
+                    # Remove from instances dict
+                    if instance_id in manager.instances:
+                        del manager.instances[instance_id]
+                    
+                    logger.info(f"Cleaned up in-memory state for instance {instance_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"Failed to clean up in-memory state for project {project_id}: {e}")
+        
+        return result
+    except ValueError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(
+                status_code=404,
+                detail=ProjectNotFoundResponse(
+                    error=str(e),
+                    project_id=project_id
+                ).model_dump()
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={"error": str(e)}
+        )
+    except RuntimeError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": str(e)}
+        )

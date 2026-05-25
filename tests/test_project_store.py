@@ -596,16 +596,16 @@ class TestDelete:
         
         assert result["deleted"] is True
         assert result["name"] == "To Delete"
+        assert "counts" in result
+        assert "project" in result["counts"]
         
         # Verify it's gone
         assert store.get(project.project_id) is None
 
     def test_delete_not_found(self, store):
         """Test deleting non-existent project."""
-        result = store.delete("non-existent-id")
-        
-        assert result["deleted"] is False
-        assert "error" in result
+        with pytest.raises(ValueError, match="not found"):
+            store.delete("non-existent-id")
 
 
 class TestProjectEnums:

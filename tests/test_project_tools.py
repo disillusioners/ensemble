@@ -626,14 +626,14 @@ class TestProjectDelete:
         
         assert result["deleted"] is True
         assert result["name"] == "To Delete"
+        assert "counts" in result
 
     def test_delete_not_found(self, tool_map):
         """Test deleting non-existent project."""
-        result = tool_map["project_delete"].invoke({
-            "project_id": "nonexistent-id"
-        })
-        
-        assert result["deleted"] is False
+        with pytest.raises(Exception):
+            tool_map["project_delete"].invoke({
+                "project_id": "nonexistent-id"
+            })
 
 
 class TestToolCount:

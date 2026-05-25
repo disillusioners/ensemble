@@ -1,24 +1,37 @@
 <div class="tab-bar">
   @for (tab of tabStateService.openTabs(); track tab.id) {
-    <button
-      class="tab"
-      [class.active]="tab.id === tabStateService.activeTab().id"
-      (click)="tabStateService.setActiveTab(tab.id)"
-      [matTooltip]="tab.name"
-      [matTooltipDisabled]="tab.name.length <= 20"
-    >
-      <span class="tab-name">{{ tab.name }}</span>
-      @if (tab.type === 'project') {
-        <button
-          class="tab-close"
-          (click)="onCloseTab($event, tab.id)"
-          mat-icon-button
-          [attr.aria-label]="'Close ' + tab.name + ' tab'"
-        >
-          <mat-icon class="close-icon">close</mat-icon>
+    @if (tab.type === 'project') {
+      <button
+        class="tab"
+        [class.active]="tab.id === tabStateService.activeTab().id"
+        (click)="tabStateService.setActiveTab(tab.id)"
+        [matTooltip]="tab.name"
+        [matTooltipDisabled]="tab.name.length <= 20"
+        [matMenuTriggerFor]="projectMenu"
+      >
+        <span class="tab-name">{{ tab.name }}</span>
+        <mat-icon class="menu-icon">more_vert</mat-icon>
+      </button>
+
+      <mat-menu #projectMenu="matMenu" class="project-menu">
+        <button mat-menu-item (click)="onCloseTab($event, tab.id)">
+          <mat-icon>close</mat-icon>
+          <span>Close Tab</span>
         </button>
-      }
-    </button>
+        <button mat-menu-item class="delete-item" (click)="onDeleteProject($event, getProjectById(tab.id)!)">
+          <mat-icon>delete</mat-icon>
+          <span>Delete Project</span>
+        </button>
+      </mat-menu>
+    } @else {
+      <button
+        class="tab"
+        [class.active]="tab.id === tabStateService.activeTab().id"
+        (click)="tabStateService.setActiveTab(tab.id)"
+      >
+        <span class="tab-name">{{ tab.name }}</span>
+      </button>
+    }
   }
 
   <button

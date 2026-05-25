@@ -376,3 +376,33 @@ class SQLModelInstanceRepository:
             db_session.commit()
 
             return total
+
+    def delete_by_project(self, project_id: str) -> int:
+        """Delete all instances for a project.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Number of instances deleted.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # First get all instance IDs for this project to clean up hierarchy
+            stmt = select(Instance.instance_id).where(Instance.project_id == project_id)
+            instance_ids = list(db_session.exec(stmt).all())
+            
+            # BUG 5 FIX: Use IN clause instead of N+1 individual deletes
+            if instance_ids:
+                # Delete hierarchy links where parent or child is in this project
+                db_session.exec(
+                    sql_delete(InstanceHierarchy).where(
+                        (col(InstanceHierarchy.parent_id).in_(instance_ids)) |
+                        (col(InstanceHierarchy.child_id).in_(instance_ids))
+                    )
+                )
+            
+            # Delete all instances for this project
+            stmt = sql_delete(Instance).where(Instance.project_id == project_id)
+            result = db_session.exec(stmt)
+            db_session.commit()
+            return result.rowcount

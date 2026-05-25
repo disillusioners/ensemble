@@ -79,6 +79,25 @@ export class ProjectService {
   }
 
   /**
+   * DELETE /api/projects/{id}
+   */
+  deleteProject(projectId: string): Observable<{ deleted: boolean }> {
+    return this.http
+      .delete<{ deleted: boolean }>(`${this.API_BASE}/${encodeURIComponent(projectId)}`)
+      .pipe(
+        tap(() => {
+          this.projects.update((projects) =>
+            projects.filter((project) => project.project_id !== projectId)
+          );
+        }),
+        catchError((err) => {
+          this.error.set(err.message || 'Failed to delete project');
+          throw err;
+        })
+      );
+  }
+
+  /**
    * Helper to refresh projects list
    */
   refreshProjects(): void {

@@ -93,3 +93,19 @@ class LockRepository:
         with SQLModelSession(self.engine) as session:
             stmt = select(JobLock).where(JobLock.instance_id == instance_id)
             return list(session.exec(stmt))
+
+    def delete_by_project(self, project_id: str) -> int:
+        """Delete all locks for a project.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Number of locks deleted.
+        """
+        from sqlalchemy import delete as sql_delete
+        with SQLModelSession(self.engine) as session:
+            stmt = sql_delete(JobLock).where(JobLock.project_id == project_id)
+            result = session.exec(stmt)
+            session.commit()
+            return result.rowcount

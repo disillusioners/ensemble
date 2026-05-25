@@ -205,6 +205,22 @@ class DeadLetterRepository:
             return session.exec(stmt).one()
 
 
+    def delete_by_project(self, project_id: str) -> int:
+        """Delete all dead letter items for a project.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Number of items deleted.
+        """
+        with SQLModelSession(self.engine) as session:
+            stmt = sql_delete(DeadLetterItem).where(DeadLetterItem.project_id == project_id)
+            result = session.exec(stmt)
+            session.commit()
+            return result.rowcount
+
+
 # Module-level singleton for dependency injection
 _repo: DeadLetterRepository | None = None
 

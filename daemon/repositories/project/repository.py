@@ -14,6 +14,8 @@ from sqlmodel import Session, select, col
 
 from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel, ProjectMetadataRecord
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
+from daemon.repositories.job_queue.models import JobItem, JobStatus, JobLock, DeadLetterItem, JobQueue
 
 
 class SQLModelProjectRepository:
@@ -656,14 +658,131 @@ class SQLModelProjectRepository:
     # DELETE
     # --------------------------------------------------------
 
-    def delete(self, project_id: str) -> dict[str, Any]:
-        """Delete a project."""
+    def delete(
+        self,
+        project_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Delete a project with full cascade cleanup.
+        
+        Args:
+            project_id: The project ID to delete.
+            force: If True, bypass active instance check. Default False.
+            
+        Returns:
+            Dict with deletion summary including counts per entity type.
+            
+        Raises:
+            ValueError: If project not found.
+            RuntimeError: If active instances exist and force=False.
+        """
+        # Non-terminal statuses (instances that block deletion)
+        # These are statuses that indicate the instance is still doing work
+        non_terminal_statuses = {
+            InstanceStatus.RUNNING.value,
+            InstanceStatus.PAUSED.value,
+            InstanceStatus.QUEUED.value,
+            InstanceStatus.WAITING_CHILDREN.value,
+        }
+        
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
-                return {"deleted": False, "project_id": project_id, "error": "Not found"}
-
-            # Delete from junction tables
+                raise ValueError(f"Project not found: {project_id}")
+            
+            project_name = project.name
+            
+            # BUG 3 FIX: Use direct COUNT query instead of limit=1
+            # Check for active instances (non-terminal statuses)
+            if not force:
+                stmt = select(func.count()).select_from(Instance).where(
+                    Instance.project_id == project_id,
+                    Instance.status.in_(non_terminal_statuses)
+                )
+                active_count = session.exec(stmt).one()
+                if active_count > 0:
+                    raise RuntimeError(
+                        f"Cannot delete project with active instances. "
+                        f"Found {active_count} non-idle instances. "
+                        f"Use force=True to bypass this check."
+                    )
+            
+            # Check for running/processing jobs
+            if not force:
+                running_statuses = {JobStatus.PROCESSING.value}
+                # Count jobs with processing status for this project
+                stmt = select(func.count()).select_from(JobItem).where(
+                    JobItem.project_id == project_id,
+                    JobItem.status.in_(running_statuses)
+                )
+                running_count = session.exec(stmt).one()
+                if running_count > 0:
+                    raise RuntimeError(
+                        f"Cannot delete project with running jobs. "
+                        f"Found {running_count} running/processing jobs. "
+                        f"Use force=True to bypass this check."
+                    )
+            
+            # BUG 1 & 2 FIX: Perform ALL cascade deletions inline within this session
+            # This ensures atomicity - either ALL changes commit or NONE commit
+            
+            # Import JobWatcher here to avoid circular imports
+            from daemon.repositories.job_queue.watcher_models import JobWatcher
+            
+            # 1. Get all instance IDs for this project (needed for hierarchy and watchers)
+            stmt = select(Instance.instance_id).where(Instance.project_id == project_id)
+            instance_ids = list(session.exec(stmt).all())
+            
+            # 2. Delete job_watchers for jobs in this project (Bug 2: was missing)
+            watchers_stmt = sql_delete(JobWatcher).where(
+                JobWatcher.job_id.in_(
+                    select(JobItem.job_id).where(JobItem.project_id == project_id)
+                )
+            )
+            watchers_deleted = session.exec(watchers_stmt).rowcount
+            
+            # 3. Delete job_watchers for instances in this project
+            if instance_ids:
+                instance_watchers_stmt = sql_delete(JobWatcher).where(
+                    JobWatcher.instance_id.in_(instance_ids)
+                )
+                instance_watchers_deleted = session.exec(instance_watchers_stmt).rowcount
+                watchers_deleted += instance_watchers_deleted
+            
+            # 4. Delete job_locks
+            locks_deleted = session.exec(
+                sql_delete(JobLock).where(JobLock.project_id == project_id)
+            ).rowcount
+            
+            # 5. Delete dead_letter_items
+            dlq_deleted = session.exec(
+                sql_delete(DeadLetterItem).where(DeadLetterItem.project_id == project_id)
+            ).rowcount
+            
+            # 6. Delete job_queue_items
+            jobs_deleted = session.exec(
+                sql_delete(JobItem).where(JobItem.project_id == project_id)
+            ).rowcount
+            
+            # 7. Delete job_queues
+            queues_deleted = session.exec(
+                sql_delete(JobQueue).where(JobQueue.project_id == project_id)
+            ).rowcount
+            
+            # 8. Delete instance hierarchy links (BUG 5 FIX: use IN clause instead of N+1)
+            if instance_ids:
+                hierarchy_stmt = sql_delete(InstanceHierarchy).where(
+                    (col(InstanceHierarchy.parent_id).in_(instance_ids)) |
+                    (col(InstanceHierarchy.child_id).in_(instance_ids))
+                )
+                session.exec(hierarchy_stmt)
+            
+            # 9. Delete instances
+            instances_deleted = session.exec(
+                sql_delete(Instance).where(Instance.project_id == project_id)
+            ).rowcount
+            
+            # 10. Delete junction tables
             session.exec(
                 sql_delete(ProjectTagLink).where(ProjectTagLink.project_id == project_id)
             )
@@ -673,15 +792,33 @@ class SQLModelProjectRepository:
             session.exec(
                 sql_delete(ProjectMetadataRecord).where(ProjectMetadataRecord.project_id == project_id)
             )
-
-            # Delete project
+            session.exec(
+                sql_delete(ProjectHistoryEntry).where(ProjectHistoryEntry.project_id == project_id)
+            )
+            session.exec(
+                sql_delete(CriticalNoteModel).where(CriticalNoteModel.project_id == project_id)
+            )
+            
+            # 11. Delete project record
             session.delete(project)
+            
+            # ONE commit for ALL changes (atomic transaction)
             session.commit()
-
+            
             return {
                 "deleted": True,
                 "project_id": project_id,
-                "name": project.name
+                "name": project_name,
+                "message": "Project deleted successfully",
+                "counts": {
+                    "job_watchers": watchers_deleted,
+                    "job_locks": locks_deleted,
+                    "dead_letter_items": dlq_deleted,
+                    "job_queue_items": jobs_deleted,
+                    "job_queues": queues_deleted,
+                    "instances": instances_deleted,
+                    "project": True,
+                },
             }
 
     # --------------------------------------------------------

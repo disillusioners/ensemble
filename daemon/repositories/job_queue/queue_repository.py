@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, update
+from sqlalchemy import delete as sql_delete, func, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
@@ -212,6 +212,21 @@ class JobQueueRepository:
                 "queue_id": queue_id,
                 "project_id": queue.project_id,
             }
+
+    def delete_by_project(self, project_id: str) -> int:
+        """Delete all queues for a project.
+        
+        Args:
+            project_id: Project identifier.
+            
+        Returns:
+            Number of queues deleted.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = sql_delete(JobQueue).where(JobQueue.project_id == project_id)
+            result = db_session.exec(stmt)
+            db_session.commit()
+            return result.rowcount
 
     # --------------------------------------------------------
     # JOB STATISTICS
