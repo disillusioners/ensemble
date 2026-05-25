@@ -1265,3 +1265,293 @@ class TestStreamingDeduplicationByMessageId:
             contents = [call.kwargs['content'] for call in call_args_list]
             assert "First unique message" in contents
             assert "Second unique message" in contents
+
+
+class TestTitleGenerationTrigger:
+    """Tests for title generation trigger behavior in enqueue_message methods.
+
+    Verifies that _maybe_trigger_title_generation is called correctly based on:
+    - Message type (AGENT or HUMAN)
+    - Instance state transition (IDLE -> RUNNING)
+    """
+
+    @pytest.fixture
+    def mock_manager(self, mock_config, mock_instance_repository):
+        """Create a mock manager with required attributes."""
+        manager = MagicMock()
+        manager.config = mock_config
+        manager._instance_repository = mock_instance_repository
+        manager._queue_repository = MagicMock()
+        manager._project_repository = MagicMock()
+        manager._engine = MagicMock()
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+        manager._worker_pool = None
+        manager._graph_tasks = {}
+        manager.prompt_cache = Mock()
+        manager._llm_semaphore = asyncio.Semaphore(1)
+        manager._compactor = None
+        manager._checkpointer = None
+        manager._generate_and_broadcast_title = AsyncMock()
+        # Mock job queue service
+        manager._job_queue_service = MagicMock()
+        manager._job_queue_service.enqueue = AsyncMock(return_value=MagicMock(job_id="test-job"))
+        return manager
+
+    @pytest.fixture
+    def mock_cancellation_service(self):
+        """Create a mock cancellation service."""
+        service = MagicMock()
+        service.is_shutting_down = False
+        return service
+
+    @pytest.mark.asyncio
+    async def test_agent_message_triggers_title_on_idle_to_running(
+        self, mock_manager, mock_cancellation_service, mock_instance_repository
+    ):
+        """Test that AGENT message triggers title generation when instance transitions IDLE->RUNNING.
+
+        This is the bug fix case: previously only HUMAN messages triggered title generation,
+        but AGENT messages (e.g., parent-to-child messages) should also trigger it.
+        """
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        # Patch Session to return our mock with IDLE instance
+        with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+             patch('daemon.services.instance_messaging.MainLoopBridge') as mock_bridge, \
+             patch('daemon.services.instance_messaging.Instance') as mock_instance_model, \
+             patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+             patch('daemon.services.instance_messaging.Task') as mock_task, \
+             patch('daemon.services.instance_messaging.Event') as mock_event:
+
+            mock_session = MagicMock()
+
+            # Create a fresh mock instance for each call
+            def get_instance_side_effect(instance_id, instance_cls):
+                mock_instance = MagicMock()
+                mock_instance.status = InstanceStatus.IDLE.value  # Start as IDLE
+                mock_instance.agent_id = "test-agent"
+                mock_instance.instance_metadata = {}
+                mock_instance.version = 1
+                mock_instance.paused_at = None
+                # The code will transition this to RUNNING
+                return mock_instance
+
+            mock_session.get.side_effect = get_instance_side_effect
+            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
+            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
+            mock_session_cls.return_value.add = Mock()
+
+            # Configure MainLoopBridge to capture the call
+            mock_bridge.run_async_no_wait = Mock()
+
+            # Create the messaging service
+            service = InstanceMessagingService(mock_manager, mock_cancellation_service)
+
+            # Call enqueue_message with AGENT source (triggers MessageType.AGENT)
+            await service.enqueue_message(
+                instance_id="test-instance-id",
+                message="Agent message content",
+                source="internal_agent:parent-123",
+            )
+
+            # Verify _maybe_trigger_title_generation was triggered (via MainLoopBridge)
+            # This proves AGENT messages now trigger title generation (the bug fix)
+            mock_bridge.run_async_no_wait.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_human_message_still_triggers_title_on_idle_to_running(
+        self, mock_manager, mock_cancellation_service, mock_instance_repository
+    ):
+        """Test that HUMAN message still triggers title generation (regression test)."""
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+             patch('daemon.services.instance_messaging.MainLoopBridge') as mock_bridge, \
+             patch('daemon.services.instance_messaging.Instance') as mock_instance_model, \
+             patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+             patch('daemon.services.instance_messaging.Task') as mock_task, \
+             patch('daemon.services.instance_messaging.Event') as mock_event:
+
+            mock_session = MagicMock()
+
+            def get_instance_side_effect(instance_id, instance_cls):
+                mock_instance = MagicMock()
+                mock_instance.status = InstanceStatus.IDLE.value
+                mock_instance.agent_id = "test-agent"
+                mock_instance.instance_metadata = {}
+                mock_instance.version = 1
+                mock_instance.paused_at = None
+                return mock_instance
+
+            mock_session.get.side_effect = get_instance_side_effect
+            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
+            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
+            mock_session_cls.return_value.add = Mock()
+
+            mock_bridge.run_async_no_wait = Mock()
+
+            service = InstanceMessagingService(mock_manager, mock_cancellation_service)
+
+            # Call enqueue_message with default source (triggers MessageType.HUMAN)
+            await service.enqueue_message(
+                instance_id="test-instance-id",
+                message="Human message content",
+                source="user",
+            )
+
+            # Verify title generation was triggered
+            mock_bridge.run_async_no_wait.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_title_generation_skipped_when_already_running(
+        self, mock_manager, mock_cancellation_service, mock_instance_repository
+    ):
+        """Test that title generation is NOT triggered when instance is already RUNNING."""
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+             patch('daemon.services.instance_messaging.MainLoopBridge') as mock_bridge, \
+             patch('daemon.services.instance_messaging.Instance') as mock_instance_model, \
+             patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+             patch('daemon.services.instance_messaging.Task') as mock_task, \
+             patch('daemon.services.instance_messaging.Event') as mock_event:
+
+            mock_session = MagicMock()
+
+            def get_instance_side_effect(instance_id, instance_cls):
+                mock_instance = MagicMock()
+                mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
+                mock_instance.agent_id = "test-agent"
+                mock_instance.instance_metadata = {}
+                mock_instance.version = 1
+                mock_instance.paused_at = None
+                return mock_instance
+
+            mock_session.get.side_effect = get_instance_side_effect
+            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
+            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
+            mock_session_cls.return_value.add = Mock()
+
+            mock_bridge.run_async_no_wait = Mock()
+
+            service = InstanceMessagingService(mock_manager, mock_cancellation_service)
+
+            # Call enqueue_message with AGENT source
+            await service.enqueue_message(
+                instance_id="test-instance-id",
+                message="Any message content",
+                source="internal_agent:parent-123",
+            )
+
+            # Verify title generation was NOT triggered
+            mock_bridge.run_async_no_wait.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_message_triggers_title_via_jq_on_idle_to_running(
+        self, mock_manager, mock_cancellation_service, mock_instance_repository
+    ):
+        """Test that AGENT message triggers title generation via enqueue_message_via_jq.
+
+        This tests the JobQueue path which has the same title generation logic.
+        """
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        # Configure mock instance repository to return proper metadata for via_jq path
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.agent_id = "test-agent"
+        mock_instance_meta.project_id = "test-project"
+        mock_instance_repository.get.return_value = mock_instance_meta
+
+        with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+             patch('daemon.services.instance_messaging.MainLoopBridge') as mock_bridge, \
+             patch('daemon.services.instance_messaging.Instance') as mock_instance_model, \
+             patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+             patch('daemon.services.instance_messaging.Event') as mock_event:
+
+            mock_session = MagicMock()
+
+            def get_instance_side_effect(instance_id, instance_cls):
+                mock_instance = MagicMock()
+                mock_instance.status = InstanceStatus.IDLE.value
+                mock_instance.agent_id = "test-agent"
+                mock_instance.instance_metadata = {}
+                mock_instance.version = 1
+                mock_instance.paused_at = None
+                return mock_instance
+
+            mock_session.get.side_effect = get_instance_side_effect
+            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
+            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
+            mock_session_cls.return_value.add = Mock()
+
+            mock_bridge.run_async_no_wait = Mock()
+
+            service = InstanceMessagingService(mock_manager, mock_cancellation_service)
+
+            # Call enqueue_message_via_jq with AGENT source
+            await service.enqueue_message_via_jq(
+                instance_id="test-instance-id",
+                message="Agent message via jq",
+                source="internal_agent:parent-123",
+                priority=0,
+            )
+
+            # Verify title generation was triggered
+            # This proves AGENT messages now trigger title generation (the bug fix)
+            mock_bridge.run_async_no_wait.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_title_generation_skipped_via_jq_when_already_running(
+        self, mock_manager, mock_cancellation_service, mock_instance_repository
+    ):
+        """Test that title generation is NOT triggered via enqueue_message_via_jq when already RUNNING."""
+        from daemon.services.instance_messaging import InstanceMessagingService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        # Configure mock instance repository to return proper metadata for via_jq path
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.agent_id = "test-agent"
+        mock_instance_meta.project_id = "test-project"
+        mock_instance_repository.get.return_value = mock_instance_meta
+
+        with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
+             patch('daemon.services.instance_messaging.MainLoopBridge') as mock_bridge, \
+             patch('daemon.services.instance_messaging.Instance') as mock_instance_model, \
+             patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+             patch('daemon.services.instance_messaging.Event') as mock_event:
+
+            mock_session = MagicMock()
+
+            def get_instance_side_effect(instance_id, instance_cls):
+                mock_instance = MagicMock()
+                mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
+                mock_instance.agent_id = "test-agent"
+                mock_instance.instance_metadata = {}
+                mock_instance.version = 1
+                mock_instance.paused_at = None
+                return mock_instance
+
+            mock_session.get.side_effect = get_instance_side_effect
+            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
+            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
+            mock_session_cls.return_value.add = Mock()
+
+            mock_bridge.run_async_no_wait = Mock()
+
+            service = InstanceMessagingService(mock_manager, mock_cancellation_service)
+
+            # Call enqueue_message_via_jq with default source (triggers HUMAN)
+            await service.enqueue_message_via_jq(
+                instance_id="test-instance-id",
+                message="Human message via jq",
+                source="user",
+                priority=0,
+            )
+
+            # Verify title generation was NOT triggered
+            mock_bridge.run_async_no_wait.assert_not_called()

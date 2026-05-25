@@ -658,10 +658,10 @@ class InstanceMessagingService:
         if status_changed_to_running:
             await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id)
         
-        # Trigger title generation for first user message (fire-and-forget)
-        # This fires when instance transitions from IDLE -> RUNNING with a user message
+        # Trigger title generation for first message (fire-and-forget)
+        # This fires when instance transitions from IDLE -> RUNNING with any message type
         self._maybe_trigger_title_generation(
-            instance_id, message, is_idle_to_running and msg_type == MessageType.HUMAN.value
+            instance_id, message, is_idle_to_running
         )
         
         # After commit — task is now visible in DB
@@ -1216,9 +1216,10 @@ class InstanceMessagingService:
                 instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id
             )
 
-        # 5. Trigger title generation for first user message (fire-and-forget)
+        # 5. Trigger title generation for first message (fire-and-forget)
+        # This fires when instance transitions from IDLE -> RUNNING with any message type
         self._maybe_trigger_title_generation(
-            instance_id, message, is_idle_to_running and msg_type == MessageType.HUMAN.value
+            instance_id, message, is_idle_to_running
         )
 
         # 6. Look up instance metadata for JobQueue enqueue
