@@ -767,28 +767,23 @@ async def delete_project(
         409 if active instances or running jobs exist (and force=False)
     """
     try:
-        # Perform DB deletion
-        result = await asyncio.to_thread(
-            repo.delete,
-            project_id,
-            force=force,
-        )
-        
-        # BUG 4 FIX: Clean up in-memory state in InstanceManager
+        # BUG 4 FIX: Collect instance IDs BEFORE DB deletion
+        # Clean up in-memory state first, then do DB deletion
         manager = _get_manager(request)
+        instance_ids = []
         if manager and hasattr(manager, '_instance_repository') and manager._instance_repository:
             try:
-                # Get all instances for this project from DB
+                # Get all instances for this project from DB (before deletion!)
                 instances, _ = manager._instance_repository.list(
                     project_id=project_id,
                     limit=10000,  # Get all
                     offset=0,
                     exclude_kb=False,
                 )
+                instance_ids = [inst.instance_id for inst in instances]
                 
-                for instance in instances:
-                    instance_id = instance.instance_id
-                    
+                # Clean up in-memory state using those IDs
+                for instance_id in instance_ids:
                     # Cancel active requests
                     if hasattr(manager, '_request_registry') and manager._request_registry:
                         manager._request_registry.cancel_by_instance(instance_id)
@@ -805,6 +800,13 @@ async def delete_project(
                     logger.info(f"Cleaned up in-memory state for instance {instance_id[:8]}...")
             except Exception as e:
                 logger.warning(f"Failed to clean up in-memory state for project {project_id}: {e}")
+        
+        # Now perform DB deletion (instances already cleaned from memory)
+        result = await asyncio.to_thread(
+            repo.delete,
+            project_id,
+            force=force,
+        )
         
         return result
     except ValueError as e:

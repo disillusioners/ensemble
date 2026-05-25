@@ -16,6 +16,9 @@ from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
 from daemon.repositories.job_queue.models import JobItem, JobStatus, JobLock, DeadLetterItem, JobQueue
+from daemon.repositories.task.models import Task
+from daemon.repositories.event.models import Event
+from daemon.repositories.message_queue.models import MessageQueue
 
 
 class SQLModelProjectRepository:
@@ -776,6 +779,16 @@ class SQLModelProjectRepository:
                     (col(InstanceHierarchy.child_id).in_(instance_ids))
                 )
                 session.exec(hierarchy_stmt)
+            
+            # BUG 6 FIX: Delete orphaned tables that reference instance_id
+            # These tables were not being cleaned during cascade deletion
+            if instance_ids:
+                # Delete tasks for this project's instances
+                session.exec(sql_delete(Task).where(col(Task.instance_id).in_(instance_ids)))
+                # Delete events for this project's instances
+                session.exec(sql_delete(Event).where(col(Event.instance_id).in_(instance_ids)))
+                # Delete message_queue entries for this project's instances
+                session.exec(sql_delete(MessageQueue).where(col(MessageQueue.instance_id).in_(instance_ids)))
             
             # 9. Delete instances
             instances_deleted = session.exec(
