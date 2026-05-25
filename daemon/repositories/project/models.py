@@ -103,6 +103,7 @@ class HistoryEntryType(str, enum.Enum):
     DEPLOYMENT = "deployment"
     NOTE = "note"
     CONFIG_CHANGE = "config_change"
+    FEATURE = "feature"
     OTHER = "other"
 
 

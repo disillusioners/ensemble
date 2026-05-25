@@ -341,7 +341,7 @@ async def test_add_history_entry_all_valid_types(client):
 
     valid_types = [
         "milestone", "commit", "phase", "bugfix",
-        "deployment", "note", "config_change", "other",
+        "deployment", "note", "config_change", "feature", "other",
     ]
 
     for entry_type in valid_types:

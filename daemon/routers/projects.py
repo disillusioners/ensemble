@@ -574,7 +574,7 @@ async def add_project_history(
     """Add a new history entry to a project.
     
     Request body:
-        entry_type: Type of history entry (milestone, commit, phase, bugfix, deployment, note, config_change, other)
+        entry_type: Type of history entry (milestone, commit, phase, bugfix, deployment, note, config_change, feature, other)
         summary: Brief summary (max 300 chars)
         details: Optional detailed description (max 5000 chars)
         entry_metadata: Optional metadata dictionary

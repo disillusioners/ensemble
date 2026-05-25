@@ -13,7 +13,7 @@ from ._tool_registry import register_tool_category
 
 CATEGORY_NAME = "project_history"
 CATEGORY_DOC = """Manage project history entries — record milestones, commits, phase completions,
-bugfixes, deployments, and other project events. History provides a chronological record of
+bugfixes, deployments, features, and other project events. History provides a chronological record of
 what happened in a project, complementing critical notes (which tracks learned lessons)."""
 
 _MAX_SUMMARY_LEN = 300
@@ -30,7 +30,7 @@ notable occurrence. Entries are timestamped and can be filtered by type.
 Args:
     project_id: The project ID to add the entry to.
     entry_type: Type of event — milestone, commit, phase, bugfix, deployment,
-               note, config_change, or other.
+               note, config_change, feature, or other.
     summary: Brief description of the event (max 300 chars, auto-truncated).
     details: Optional detailed description (max 5000 chars, auto-truncated).
     entry_metadata: Optional custom metadata dict for additional context.

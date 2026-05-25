@@ -254,6 +254,7 @@ def format_project_context(project, store=None, critical_notes=None) -> str:
                     "deployment": "🚀",
                     "note": "📝",
                     "config_change": "⚙️",
+                    "feature": "✨",
                     "other": "❓",
                 }
                 for entry in history_entries:
