@@ -127,9 +127,10 @@ export class InstanceService {
       }
     }
 
-    // Append any local-only instances that weren't in the API response
-    // (e.g., instances created via direct navigation)
-    return [...result, ...localById.values()];
+    // Prepend any local-only instances that weren't in the API response.
+    // These are newer than everything in the API response (since API returns newest first),
+    // so they should appear at the top to maintain correct sort order.
+    return [...localById.values(), ...result];
   }
 
   /**

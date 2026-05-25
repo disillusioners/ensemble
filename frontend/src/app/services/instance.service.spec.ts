@@ -73,7 +73,8 @@ class TestableInstanceService {
       }
     }
 
-    return [...result, ...localById.values()];
+    // Prepend local-only instances to maintain newest-first sort order
+    return [...localById.values(), ...result];
   }
 
   async loadInstances(projectId?: string, append = false): Promise<void> {
@@ -641,6 +642,23 @@ describe('InstanceService', () => {
       expect(result).toHaveLength(2);
       expect(result.find(i => i.instance_id === 'local-only')).toBeDefined();
       expect(result.find(i => i.instance_id === 'inst-1')).toBeDefined();
+    });
+
+    it('should prepend local-only instances at the top (newest-first order)', () => {
+      const local: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'new-instance', status: 'running' }),
+      ];
+      const api: InstanceInfo[] = [
+        createMockInstance({ instance_id: 'older-instance', status: 'completed' }),
+      ];
+
+      const result = service.mergeInstances(local, api);
+
+      expect(result).toHaveLength(2);
+      // Local-only instance should be at index 0 (top)
+      expect(result[0].instance_id).toBe('new-instance');
+      // API instance should be at index 1
+      expect(result[1].instance_id).toBe('older-instance');
     });
   });
 
