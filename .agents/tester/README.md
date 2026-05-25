@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-25 defer-race-condition-fix)
+## Test Results (Latest: 2026-05-25 instance-sort-fix)
+
+### Instance List Sorting Fix (2026-05-25)
+- **Branch**: feature/new-instance-top (commit 9f28afd)
+- **Change**: One-line fix — local-only instances prepended at top instead of appended at bottom in `mergeInstances()`
+- **Unit Tests**: 680/680 PASS (existing test already covers sort order behavior)
+- **Browser Automation**: ✅ PASS — new instance confirmed at TOP of list
+- **ensure.md**: PASS — dev.sh stable 45+ minutes
+- **Quick Fixes**: 0
+- See `.agents/tester/RESULTS/2026-05-25-instance-sort-fix.md` for full report
+
+### Instance List Sorting Fix Status: ✅ READY (680 unit tests pass, browser automation pass, dev.sh stable, 0 regressions)
 
 ### Defer Job Race Condition Fix (2026-05-25)
 - **Commit**: c4f6e17 (fix) + fead301 (tests)

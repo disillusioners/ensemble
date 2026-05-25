@@ -38,6 +38,7 @@
     "marked": "^17.0.4",
     "ng-zorro-antd": "^21.2.1",
     "ngx-markdown": "^21.1.0",
+    "playwright": "^1.60.0",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0",
     "zone.js": "^0.16.1"
