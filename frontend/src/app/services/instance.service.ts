@@ -63,45 +63,83 @@ export class InstanceService {
 
       // Filter out KB instances when showKb is false
       if (!this.showKb() && statusChange.agent_id && KB_AGENT_IDS.has(statusChange.agent_id)) {
+        this.sseService.statusChange.set(null);
         return;
       }
 
-      this.updateInstanceStatus(statusChange.instance_id, statusChange.status as InstanceStatus);
-      this.sseService.statusChange.set(null);  // Reset for re-trigger
+      // Capture the statusChange data before resetting
+      const { instance_id, status, agent_id } = statusChange;
+
+      // Reset the SSE signal immediately to allow re-triggering
+      this.sseService.statusChange.set(null);
+
+      // Update status (async to fetch created_at for new instances)
+      this.updateInstanceStatus(instance_id, status as InstanceStatus);
     });
   }
 
   /**
    * Optimistically update instance status locally.
-   * If the instance is not in the list (e.g., direct navigation), creates a minimal entry
-   * so computed signals like currentInstance can pick it up. Polling will correct any inconsistencies.
+   * If the instance is not in the list (e.g., direct navigation), fetches the actual
+   * created_at from the backend to ensure correct sort order. Polling will correct any inconsistencies.
    */
-  updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): void {
-    this.instances.update(instances => {
-      const existingIdx = instances.findIndex(i => i.instance_id === instanceId);
-      if (existingIdx >= 0) {
-        // Update existing instance
-        return sortByCreatedAtDesc(
+  async updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): Promise<void> {
+    const existingInstances = this.instances();
+    const existingIdx = existingInstances.findIndex(i => i.instance_id === instanceId);
+
+    if (existingIdx >= 0) {
+      // Update existing instance - just update status, keep existing created_at
+      this.instances.update(instances =>
+        sortByCreatedAtDesc(
           instances.map((instance, idx) =>
             idx === existingIdx ? { ...instance, status: newStatus } : instance
           )
+        )
+      );
+    } else {
+      // Instance not in list - fetch from API to get actual created_at
+      // This ensures the new instance sorts correctly by server creation time
+      try {
+        const instanceData = await firstValueFrom(this.api.getInstance(instanceId));
+        // Re-check if instance was already added by a concurrent call (race condition fix)
+        const currentInstances = this.instances();
+        if (currentInstances.some(i => i.instance_id === instanceId)) {
+          // Already added, just update status
+          this.instances.update(instances =>
+            instances.map(i => i.instance_id === instanceId ? { ...i, status: newStatus } : i)
+          );
+          return;
+        }
+        this.instances.update(instances =>
+          sortByCreatedAtDesc([instanceData, ...instances])
         );
-      } else {
-        // Instance not in list - create minimal entry for direct navigation support
-        // Required fields for InstanceInfo: instance_id, agent_id, project_id, status, parent_id, children, created_at
+      } catch (err) {
+        // Instance not found - create minimal entry for direct navigation support
+        console.warn('Instance not found in API, creating minimal entry:', instanceId);
+        // Re-check if instance was already added by a concurrent call
+        const currentInstances = this.instances();
+        if (currentInstances.some(i => i.instance_id === instanceId)) {
+          // Already added, just update status
+          this.instances.update(instances =>
+            instances.map(i => i.instance_id === instanceId ? { ...i, status: newStatus } : i)
+          );
+          return;
+        }
         const minimalInstance: InstanceInfo = {
           instance_id: instanceId,
-          agent_id: '',           // Will be filled by polling
-          project_id: null,       // Will be filled by polling
+          agent_id: '',
+          project_id: null,
           status: newStatus,
           parent_id: null,
           children: [],
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
-        return sortByCreatedAtDesc([minimalInstance, ...instances]);
+        this.instances.update(instances =>
+          sortByCreatedAtDesc([minimalInstance, ...instances])
+        );
       }
-    });
+    }
   }
 
   /**

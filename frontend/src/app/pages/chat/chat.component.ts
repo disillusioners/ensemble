@@ -8,7 +8,7 @@ import { Subscription } from 'rxjs';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
 import { TabStateService } from '../../services/tab-state.service';
-import { InstanceService } from '../../services/instance.service';
+import { InstanceService, sortByCreatedAtDesc } from '../../services/instance.service';
 import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
@@ -240,7 +240,7 @@ export class ChatComponent implements OnInit, OnDestroy {
           // Add to instanceService list so currentInstance computed can find it
           this.instanceService.instances.update(list => {
             if (!list.find(i => i.instance_id === instanceId)) {
-              return [...list, instanceData];
+              return sortByCreatedAtDesc([...list, instanceData]);
             }
             return list;
           });

@@ -1,5 +1,5 @@
 import { signal, computed } from '@angular/core';
-import { Observable, of, firstValueFrom } from 'rxjs';
+import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { InstanceInfo, InstanceStatus } from '../models';
 
 const PAGE_SIZE = 100;
@@ -17,6 +17,10 @@ class MockApiService {
       instances: [],
       total: 0,
     });
+  }
+
+  getInstance(instanceId: string): Observable<InstanceInfo> {
+    return throwError(() => ({ status: 404 }));
   }
 }
 
@@ -151,13 +155,52 @@ class TestableInstanceService {
   }
 
   updateInstanceStatus(instanceId: string, newStatus: InstanceStatus): void {
-    this.instances.update(instances => {
-      const existingIdx = instances.findIndex(i => i.instance_id === instanceId);
-      if (existingIdx >= 0) {
-        return instances.map((instance, idx) =>
+    // Synchronous version for existing instances only (for backwards compatibility)
+    const existingIdx = this.instances().findIndex(i => i.instance_id === instanceId);
+    if (existingIdx >= 0) {
+      this.instances.update(instances =>
+        instances.map((instance, idx) =>
           idx === existingIdx ? { ...instance, status: newStatus } : instance
+        )
+      );
+    }
+    // Note: For new instances, the test must use the async version
+    // This sync version is kept for tests that only test existing instance updates
+  }
+
+  async updateInstanceStatusAsync(instanceId: string, newStatus: InstanceStatus): Promise<void> {
+    const existingInstances = this.instances();
+    const existingIdx = existingInstances.findIndex(i => i.instance_id === instanceId);
+
+    if (existingIdx >= 0) {
+      this.instances.update(instances =>
+        instances.map((instance, idx) =>
+          idx === existingIdx ? { ...instance, status: newStatus } : instance
+        )
+      );
+    } else {
+      try {
+        const instanceData = await firstValueFrom(this.api.getInstance(instanceId));
+        // Re-check if instance was already added by a concurrent call
+        const currentInstances = this.instances();
+        if (currentInstances.some(i => i.instance_id === instanceId)) {
+          this.instances.update(instances =>
+            instances.map(i => i.instance_id === instanceId ? { ...i, status: newStatus } : i)
+          );
+          return;
+        }
+        this.instances.update(instances =>
+          sortByCreatedAtDesc([instanceData, ...instances])
         );
-      } else {
+      } catch (err) {
+        // Re-check if instance was already added by a concurrent call
+        const currentInstances = this.instances();
+        if (currentInstances.some(i => i.instance_id === instanceId)) {
+          this.instances.update(instances =>
+            instances.map(i => i.instance_id === instanceId ? { ...i, status: newStatus } : i)
+          );
+          return;
+        }
         const minimalInstance: InstanceInfo = {
           instance_id: instanceId,
           agent_id: '',
@@ -168,9 +211,11 @@ class TestableInstanceService {
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
-        return [minimalInstance, ...instances];
+        this.instances.update(instances =>
+          sortByCreatedAtDesc([minimalInstance, ...instances])
+        );
       }
-    });
+    }
   }
 }
 
@@ -544,37 +589,60 @@ describe('InstanceService', () => {
   });
 
   describe('updateInstanceStatus', () => {
-    it('should update existing instance status', () => {
+    it('should update existing instance status', async () => {
       const instance = createMockInstance({ instance_id: 'test-123', status: 'running' });
       service.instances.set([instance]);
 
-      service.updateInstanceStatus('test-123', 'completed');
+      await service.updateInstanceStatus('test-123', 'completed');
 
       expect(service.instances()).toHaveLength(1);
       expect(service.instances()[0].status).toBe('completed');
       expect(service.instances()[0].instance_id).toBe('test-123');
     });
 
-    it('should add minimal instance when not found', () => {
+    it('should fetch from API and add instance when not found', async () => {
       service.instances.set([]);
+      const mockInstance = createMockInstance({
+        instance_id: 'new-instance-456',
+        status: 'running',
+        created_at: '2025-01-01T00:00:00.000Z',
+      });
+      mockApi.getInstance = jest.fn().mockReturnValue(of(mockInstance));
 
-      service.updateInstanceStatus('new-instance-456', 'running');
+      await service.updateInstanceStatusAsync('new-instance-456', 'running');
+
+      expect(service.instances()).toHaveLength(1);
+      expect(service.instances()[0].instance_id).toBe('new-instance-456');
+      expect(service.instances()[0].status).toBe('running');
+      expect(service.instances()[0].created_at).toBe('2025-01-01T00:00:00.000Z');
+      expect(mockApi.getInstance).toHaveBeenCalledWith('new-instance-456');
+    });
+
+    it('should create minimal instance as fallback when API returns 404', async () => {
+      service.instances.set([]);
+      mockApi.getInstance = jest.fn().mockReturnValue(
+        new Promise((_, reject) => reject({ status: 404 }))
+      );
+
+      await service.updateInstanceStatusAsync('new-instance-456', 'running');
 
       expect(service.instances()).toHaveLength(1);
       expect(service.instances()[0].instance_id).toBe('new-instance-456');
       expect(service.instances()[0].status).toBe('running');
       expect(service.instances()[0].agent_id).toBe('');
       expect(service.instances()[0].project_id).toBe(null);
+      // created_at should be client-generated for fallback
+      expect(service.instances()[0].created_at).toBeTruthy();
     });
 
-    it('should update status without duplicating instance', () => {
+    it('should update status without duplicating instance', async () => {
       const instance = createMockInstance({ instance_id: 'test-789', status: 'queued' });
       service.instances.set([instance]);
 
       // Update multiple times
-      service.updateInstanceStatus('test-789', 'running');
-      service.updateInstanceStatus('test-789', 'paused');
-      service.updateInstanceStatus('test-789', 'completed');
+      await service.updateInstanceStatus('test-789', 'running');
+      await service.updateInstanceStatus('test-789', 'paused');
+      await service.updateInstanceStatus('test-789', 'completed');
 
       expect(service.instances()).toHaveLength(1);
       expect(service.instances()[0].status).toBe('completed');
