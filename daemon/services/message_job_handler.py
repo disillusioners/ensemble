@@ -174,15 +174,33 @@ class MessageJobHandler:
                 error="Message processing cancelled",
             )
         except asyncio.CancelledError:
-            # Graph was cancelled by pause_instance_cascade.
-            # Per spec: "pausing instance still keeps the job on processing state"
-            # Do NOT complete the job — leave it PROCESSING so it can be resumed.
-            logger.info(
-                f"MessageJobHandler: job {job.job_id[:8]}... left PROCESSING "
-                f"(instance {instance_id[:8]}... was paused)"
-            )
-            # Return without completing — job stays PROCESSING
-            return
+            # Graph was cancelled — could be pause or shutdown.
+            # Distinguish by checking instance status.
+            try:
+                instance = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+            except Exception:
+                # Repo failed - safest to re-raise and let failure handler deal with it
+                logger.warning(
+                    f"MessageJobHandler: job {job.job_id[:8]}... failed to check "
+                    f"instance status during CancelledError"
+                )
+                raise
+            if instance and instance.status == InstanceStatus.PAUSED.value:
+                # Pause — leave PROCESSING for resume
+                logger.info(
+                    f"MessageJobHandler: job {job.job_id[:8]}... left PROCESSING "
+                    f"(instance {instance_id[:8]}... was paused)"
+                )
+                return
+            else:
+                # Shutdown or other cancel — re-raise for failure handler
+                logger.info(
+                    f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
+                    f"(not pause, status={instance.status if instance else 'unknown'})"
+                )
+                raise
         except Exception as e:
             logger.error(
                 f"MessageJobHandler: error processing MESSAGE job {job.job_id[:8]}...: {e}"

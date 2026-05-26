@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
+from daemon.models.instance import InstanceStatus
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
@@ -283,14 +284,33 @@ class ProcessMessageProcessor(BaseProcessor):
         except OperationCancelledError:
             raise
         except asyncio.CancelledError:
-            # Graph was cancelled by pause_instance_cascade.
-            # Per spec: "pausing instance still keeps the job on processing state"
-            # For tasks in WorkerPool, this means task stays RUNNING (not completed).
-            # Re-raise to propagate to worker thread cleanly.
-            logger.info(
-                f"Task {task.id} left RUNNING (instance {task.instance_id[:8]}... was paused)"
-            )
-            raise
+            # Graph was cancelled — could be pause or shutdown.
+            # Distinguish by checking instance status.
+            try:
+                instance = await asyncio.to_thread(
+                    self._manager._instance_repository.get, task.instance_id
+                )
+            except Exception:
+                # Repo failed - safest to re-raise and let failure handler deal with it
+                logger.warning(
+                    f"Task {task.id} failed to check instance status during CancelledError"
+                )
+                raise
+            if instance and instance.status == InstanceStatus.PAUSED.value:
+                # Pause — leave RUNNING for resume
+                # Re-raise to propagate to worker thread cleanly
+                logger.info(
+                    f"Task {task.id} left RUNNING "
+                    f"(instance {task.instance_id[:8]}... was paused)"
+                )
+                raise
+            else:
+                # Shutdown or other cancel — re-raise for failure handler
+                logger.info(
+                    f"Task {task.id} cancelled "
+                    f"(not pause, status={instance.status if instance else 'unknown'})"
+                )
+                raise
         except Exception as e:
             error_msg = _truncate_error(str(e))
             logger.error(f"Failed to process message task {task.id}: {error_msg}", exc_info=True)

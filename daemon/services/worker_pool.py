@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import threading
@@ -181,7 +182,17 @@ class Worker(threading.Thread):
             self._handle_cancellation(
                 task, CancellationReason.TIMEOUT
             )
-            
+
+        except concurrent.futures.CancelledError:
+            # Pause cancelled the coroutine through run_coroutine_threadsafe.
+            # Don't fail the task — leave it RUNNING for resume.
+            logger.info(
+                f"Worker {self.worker_id}: task {task.id} paused "
+                "(concurrent.futures.CancelledError)"
+            )
+            # Task stays in RUNNING state — no failure, no retry
+            return
+
         except Exception as e:
             # Other error — decide retry vs permanent fail
             error_msg = _truncate_error(str(e))

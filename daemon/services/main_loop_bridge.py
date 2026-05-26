@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import Any, Coroutine, TypeVar
 
@@ -86,8 +87,10 @@ class MainLoopBridge:
         except TimeoutError:
             logger.error(f"MainLoopBridge: coroutine timed out after {timeout}s")
             raise
-        except asyncio.CancelledError:
-            # CancelledError is BaseException, not Exception - propagate cleanly
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            # CancelledError can arrive as either asyncio or concurrent.futures variant.
+            # asyncio variant: direct asyncio calls (MessageJobHandler path)
+            # concurrent.futures variant: via run_coroutine_threadsafe (WorkerPool path)
             raise
         except Exception as e:
             logger.error(f"MainLoopBridge: error running coroutine: {e}")

@@ -309,3 +309,212 @@ class TestMainLoopBridgeCancelledError:
         t = threading.Thread(target=run_with_loop)
         t.start()
         t.join()
+
+    def test_main_loop_bridge_propagates_concurrent_futures_cancelled_error(self):
+        """Test that MainLoopBridge.run_async propagates concurrent.futures.CancelledError."""
+        import asyncio
+        import concurrent.futures
+        from daemon.services.main_loop_bridge import MainLoopBridge
+
+        async def raise_concurrent_cancelled():
+            raise concurrent.futures.CancelledError()
+
+        # Reset and create a fresh loop
+        MainLoopBridge.reset()
+        loop = asyncio.new_event_loop()
+
+        def run_with_loop():
+            MainLoopBridge.set_loop(loop)
+            try:
+                # Should raise concurrent.futures.CancelledError
+                with pytest.raises(concurrent.futures.CancelledError):
+                    MainLoopBridge.run_async(raise_concurrent_cancelled(), timeout=5)
+            finally:
+                MainLoopBridge.reset()
+                loop.close()
+
+        import threading
+        t = threading.Thread(target=run_with_loop)
+        t.start()
+        t.join()
+
+
+class TestWorkerPoolPathCancellation:
+    """Tests for WorkerPool handling of concurrent.futures.CancelledError."""
+
+    def test_process_with_timeout_handles_concurrent_futures_cancelled_error(self):
+        """Test that _process_with_timeout doesn't fail task on concurrent.futures.CancelledError."""
+        import concurrent.futures
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from daemon.services.worker_pool import Worker
+
+        # Create a mock task
+        mock_task = MagicMock()
+        mock_task.id = "task-123"
+        mock_task.instance_id = "test-instance"
+        mock_task.task_type = "process_message"
+        mock_task.message_id = "msg-123"
+
+        # Create a mock task processor that raises concurrent.futures.CancelledError
+        mock_processor = MagicMock()
+        mock_processor._task_repo = MagicMock()
+        mock_processor._task_repo.schedule_retry = MagicMock(return_value=None)
+
+        # Create worker with mocks
+        worker = Worker(
+            worker_id="test-worker",
+            task_processor=mock_processor,
+            worker_pool=MagicMock(),
+        )
+
+        # Mock run_task to raise concurrent.futures.CancelledError
+        mock_processor.run_task = MagicMock(
+            side_effect=concurrent.futures.CancelledError()
+        )
+
+        # Process task - should NOT raise and should NOT fail the task
+        worker._process_with_timeout(mock_task)
+
+        # Verify: task should NOT be marked as failed
+        mock_processor._task_repo.fail_task.assert_not_called()
+        mock_processor._task_repo.schedule_retry.assert_not_called()
+        mock_processor._task_repo.cancel_task.assert_not_called()
+
+        # _tasks_completed and _tasks_failed should NOT be incremented
+        assert worker._tasks_completed == 0
+        assert worker._tasks_failed == 0
+
+
+class TestPauseVsShutdownDistinction:
+    """Tests that distinguish pause cancellation from shutdown cancellation."""
+
+    @pytest.mark.asyncio
+    async def test_message_job_handler_pause_leaves_processing(self):
+        """Test that CancelledError with PAUSED instance leaves job PROCESSING."""
+        handler = MessageJobHandler(
+            manager=MagicMock(),
+            job_queue_service=MagicMock(),
+            job_repository=MagicMock(),
+        )
+
+        job = MockJob("job-123", instance_id="test-instance")
+
+        # Mock manager to raise CancelledError
+        handler._manager._process_message_with_tracking = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        handler._manager._queue_repository = MagicMock()
+        handler._manager._instance_repository = MagicMock()
+        handler._manager._process_child_completion_and_notify_parent = AsyncMock()
+
+        # Instance is PAUSED
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.PAUSED.value
+        handler._manager._instance_repository.get.return_value = mock_instance
+
+        # Call handle
+        await handler.handle(job)
+
+        # Job should NOT be completed - stays PROCESSING
+        handler._job_service.complete_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_message_job_handler_shutdown_propagates_cancelled_error(self):
+        """Test that CancelledError with non-PAUSED instance propagates error."""
+        handler = MessageJobHandler(
+            manager=MagicMock(),
+            job_queue_service=MagicMock(),
+            job_repository=MagicMock(),
+        )
+
+        job = MockJob("job-123", instance_id="test-instance")
+
+        # Mock manager to raise CancelledError
+        handler._manager._process_message_with_tracking = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        handler._manager._queue_repository = MagicMock()
+        handler._manager._instance_repository = MagicMock()
+        handler._manager._process_child_completion_and_notify_parent = AsyncMock()
+
+        # Instance is RUNNING (not paused - simulating shutdown scenario)
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.RUNNING.value
+        handler._manager._instance_repository.get.return_value = mock_instance
+
+        # Call handle - should raise CancelledError
+        with pytest.raises(asyncio.CancelledError):
+            await handler.handle(job)
+
+        # complete_job should NOT be called (error propagates)
+        handler._job_service.complete_job.assert_not_called()
+
+    def test_process_message_processor_pause_raises_cancelled_error(self):
+        """Test that ProcessMessageProcessor raises CancelledError when paused."""
+        import asyncio
+        from daemon.services.task_processor import ProcessMessageProcessor
+
+        task = MagicMock()
+        task.id = "task-123"
+        task.message_id = "msg-123"
+        task.instance_id = "test-instance"
+        task.retry_count = 0
+
+        mock_manager = MagicMock()
+        mock_manager._process_message_with_tracking = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        mock_manager._instance_repository = MagicMock()
+        mock_manager._event_bus = None
+
+        # Instance is PAUSED
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.PAUSED.value
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=MagicMock(),
+            event_repo=None,
+            message_repository=MagicMock(),
+            source_dispatcher=None,
+        )
+
+        # Should raise CancelledError (to propagate to worker thread)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(processor.process(task))
+
+    def test_process_message_processor_shutdown_raises_cancelled_error(self):
+        """Test that ProcessMessageProcessor raises CancelledError when shutting down (not paused)."""
+        import asyncio
+        from daemon.services.task_processor import ProcessMessageProcessor
+
+        task = MagicMock()
+        task.id = "task-123"
+        task.message_id = "msg-123"
+        task.instance_id = "test-instance"
+        task.retry_count = 0
+
+        mock_manager = MagicMock()
+        mock_manager._process_message_with_tracking = AsyncMock(
+            side_effect=asyncio.CancelledError()
+        )
+        mock_manager._instance_repository = MagicMock()
+        mock_manager._event_bus = None
+
+        # Instance is RUNNING (not paused - simulating shutdown)
+        mock_instance = MagicMock()
+        mock_instance.status = InstanceStatus.RUNNING.value
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=MagicMock(),
+            event_repo=None,
+            message_repository=MagicMock(),
+            source_dispatcher=None,
+        )
+
+        # Should also raise CancelledError (not treating as pause)
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(processor.process(task))
