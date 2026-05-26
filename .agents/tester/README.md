@@ -62,6 +62,15 @@ tests/
 
 ## Test Results (Latest: 2026-05-26 fix-pause-button)
 
+### Fix Instance Termination with Job Queue — Full Testing (2026-05-26)
+- **New Tests**: 23/23 PASS (test_instance_termination_job_cleanup.py)
+- **Mock Integration**: 6/6 scenarios PASS (terminate happy path, re-entrancy guard, jobs, parent-child, sequential)
+- **Regression**: 57/57 pause tests + 1132/1133 job queue (1 environmental) + 47/47 API tests
+- **ensure.md**: PASS — dev.sh stable on port 8079 (87s uptime)
+- See `.agents/tester/RESULTS/2026-05-26-fix-terminate-instance.md` for full report
+
+### Fix Instance Termination Status: ✅ READY (23 new tests pass, 6 mock scenarios pass, 0 regressions)
+
 ### Fix Pause Button — Full Testing (2026-05-26)
 - **Commits**: 7b4116d → 2f4596b → fa61ace → 5e50031 → 7101ab7
 - **Backend Unit Tests**: 3,102 run, 3,101 passed (1 environmental — port 8079 in use)

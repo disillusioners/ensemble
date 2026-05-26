@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 69 packs
-- Unit: 56 | Integration: 1 | Mock: 5 | E2E: 6
+- Total: 71 packs
+- Unit: 57 | Integration: 1 | Mock: 6 | E2E: 6
 
 ## Unit Test Packs
 
@@ -63,6 +63,7 @@
 | instance_pause_unit_test | tests/job_queue/test_instance_pause.py | Instance pause checks: paused instance job skip, enqueue no auto-resume, pause during processing | 2 min | 2026-05-26 | ✅ PASS (8/8, feature/fix-pause-button, 0 regressions) |
 | pause_cascade_unit_test | tests/unit/test_pause_instance_cascade.py | Resume cascade: parent→children, idempotency, mixed states, no children, already running | 2 min | 2026-05-26 | ✅ PASS (19/19, feature/fix-pause-button, 0 regressions) |
 | job_processor_pause_test | tests/job_queue/test_job_processor.py | Job processor pause filter + all existing processor tests | 2 min | 2026-05-26 | ✅ PASS (30/30, feature/fix-pause-button, 0 regressions) |
+| instance_termination_cleanup_unit_test | tests/job_queue/test_instance_termination_job_cleanup.py | Instance termination job cleanup: start_job terminal state checks, terminate_instance job sweep, orphan detection, find_jobs_by_instance FAILED status, shared constants | 2 min | 2026-05-26 | ✅ PASS (23/23, feature/fix-terminate-instance, 0 regressions) |
 
 ## Integration Test Packs
 
@@ -79,6 +80,7 @@
 | mock_ensure_system_queues_test | tests/mock_ensure_system_queues.py | Ensure system queues against live dev server: discover project, create, ensure (4 created), idempotency (4 existing), correctness, 404, cleanup | 2 min | 2026-05-25 | ✅ PASS (20/20 assertions, eb4bcc1 + a7c2851 bug fix) |
 | mock_project_delete_test | tests/mock_project_delete.py | Project delete cascade cleanup: 404, happy path (no instances), 409 protection, force delete, cascade verification, in-memory cleanup | 2 min | 2026-05-25 | ✅ PASS (25/25 assertions, 813e097 + 1ce9a04) |
 | mock_pause_resume_test | tests/mock_pause_resume.py | Pause/resume API: create instance, pause, verify PAUSED, message queued (PENDING), resume, verify NOT paused, job processes, idempotency | 2 min | 2026-05-26 | ✅ PASS (12/12 assertions, feature/fix-pause-button) |
+| mock_terminate_job_cleanup_test | tests/mock_terminate_job_cleanup.py | Instance termination job cleanup: terminate happy path, re-entrancy guard, job CRUD, terminate with jobs, parent-child cascade, sequential terminations | 2 min | 2026-05-26 | ✅ PASS (6/6 scenarios, feature/fix-terminate-instance) |
 
 ## E2E Test Packs
 
