@@ -578,11 +578,10 @@ async def test_resume_instance_with_default_message(client, mock_manager):
         "resumed_ids": ["test-instance-id"],
         "skipped_ids": []
     })
-    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
-        message_id="msg-resume-123",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-123",
+        "message_id": "msg-resume-123"
+    })
 
     # No body - should use default "resume" message
     response = await client.post("/instances/test-instance-id/resume")
@@ -592,13 +591,12 @@ async def test_resume_instance_with_default_message(client, mock_manager):
     assert data["resumed"] is True
     assert data["resumed_ids"] == ["test-instance-id"]
     assert data["skipped_ids"] == []
-    assert data["message_id"] == "msg-resume-123"
+    assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-resume-123"
     
-    # Verify enqueue_message_via_jq was called with default message
-    mock_manager.enqueue_message_via_jq.assert_called_once_with(
-        instance_id="test-instance-id",
+    # Verify resume_processing_job was called with default message
+    mock_manager.resume_processing_job.assert_called_once_with(
+        "test-instance-id",
         message="resume",
-        source="api",
     )
 
 
@@ -610,11 +608,10 @@ async def test_resume_instance_with_custom_message(client, mock_manager):
         "resumed_ids": ["test-instance-id"],
         "skipped_ids": []
     })
-    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
-        message_id="msg-custom-456",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-456",
+        "message_id": "msg-custom-456"
+    })
 
     response = await client.post(
         "/instances/test-instance-id/resume",
@@ -624,13 +621,12 @@ async def test_resume_instance_with_custom_message(client, mock_manager):
     assert response.status_code == 200
     data = response.json()
     assert data["resumed"] is True
-    assert data["message_id"] == "msg-custom-456"
+    assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-custom-456"
     
     # Verify custom message was passed through
-    mock_manager.enqueue_message_via_jq.assert_called_once_with(
-        instance_id="test-instance-id",
+    mock_manager.resume_processing_job.assert_called_once_with(
+        "test-instance-id",
         message="hello world",
-        source="api",
     )
 
 
@@ -642,11 +638,10 @@ async def test_resume_instance_with_whitespace_message_uses_default(client, mock
         "resumed_ids": ["test-instance-id"],
         "skipped_ids": []
     })
-    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
-        message_id="msg-default-789",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-789",
+        "message_id": "msg-default-789"
+    })
 
     # Whitespace-only message should be stripped to empty, then default to "resume"
     response = await client.post(
@@ -657,13 +652,12 @@ async def test_resume_instance_with_whitespace_message_uses_default(client, mock
     assert response.status_code == 200
     data = response.json()
     assert data["resumed"] is True
-    assert data["message_id"] == "msg-default-789"
+    assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-default-789"
     
     # Verify default message was used after stripping
-    mock_manager.enqueue_message_via_jq.assert_called_once_with(
-        instance_id="test-instance-id",
+    mock_manager.resume_processing_job.assert_called_once_with(
+        "test-instance-id",
         message="resume",
-        source="api",
     )
 
 
@@ -684,10 +678,10 @@ async def test_resume_instance_already_running_no_message_enqueued(client, mock_
     assert data["resumed"] is True
     assert data["resumed_ids"] == []
     assert data["skipped_ids"] == ["test-instance-id"]
-    assert data["message_id"] is None  # No message enqueued
+    assert data["resume_results"] == {}  # No jobs resumed since none were paused
     
-    # Verify enqueue_message_via_jq was NOT called
-    mock_manager.enqueue_message_via_jq.assert_not_called()
+    # Verify resume_processing_job was NOT called
+    mock_manager.resume_processing_job.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -700,11 +694,10 @@ async def test_resume_instance_response_includes_message_id(client, mock_manager
     })
     
     expected_msg_id = "msg-from-resume-001"
-    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
-        message_id=expected_msg_id,
-        instance_id="test-instance-id",
-        status="queued"
-    ))
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-001",
+        "message_id": expected_msg_id
+    })
 
     response = await client.post(
         "/instances/test-instance-id/resume",
@@ -713,7 +706,7 @@ async def test_resume_instance_response_includes_message_id(client, mock_manager
     
     assert response.status_code == 200
     data = response.json()
-    assert data["message_id"] == expected_msg_id
+    assert data["resume_results"]["test-instance-id"]["message_id"] == expected_msg_id
 
 
 @pytest.mark.asyncio
@@ -724,11 +717,10 @@ async def test_resume_instance_backward_compatibility_no_body(client, mock_manag
         "resumed_ids": ["test-instance-id"],
         "skipped_ids": []
     })
-    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
-        message_id="msg-backward-compat",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-backward",
+        "message_id": "msg-backward-compat"
+    })
 
     # Send request without any body (using content='' to ensure no JSON)
     response = await client.post(
@@ -740,13 +732,12 @@ async def test_resume_instance_backward_compatibility_no_body(client, mock_manag
     assert response.status_code == 200
     data = response.json()
     assert data["resumed"] is True
-    assert data["message_id"] == "msg-backward-compat"
+    assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-backward-compat"
     
     # Verify default "resume" message was sent
-    mock_manager.enqueue_message_via_jq.assert_called_once_with(
-        instance_id="test-instance-id",
+    mock_manager.resume_processing_job.assert_called_once_with(
+        "test-instance-id",
         message="resume",
-        source="api",
     )
 
 

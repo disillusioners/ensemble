@@ -120,6 +120,7 @@ class TestAllCompleteness:
             "InstanceCreate",
             "InstanceInfo",
             "InstanceListResponse",
+            "ResumeRequest",
             # message
             "MessageCreate",
             "MessageResponse",
