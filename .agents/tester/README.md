@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-26 resume-redesign-latest)
+## Test Results (Latest: 2026-05-26 resume-target-message)
+
+### Resume — Message Target Only (2026-05-26)
+- **Branch**: `latest`
+- **Commit**: `c3ce6cf` — fix: send resume message to target instance only, children resume silently
+- **Backend Unit Tests**: 7458/7461 PASS (3 pre-existing/environmental)
+- **Frontend Unit Tests**: 723/723 PASS
+- **Browser E2E**: 5/5 steps PASS (create → pause → resume → verify target vs children → no zombies)
+- **ensure.md**: PASS — dev.sh stable (231s+ uptime)
+- **Quick Fixes**: None needed
+- See `.agents/tester/RESULTS/2026-05-26-resume-target-message.md` for full report
+
+### Resume Target Message Status: ✅ READY (0 regressions, E2E confirms target gets message, children silent)
 
 ### Resume — Re-execute Existing Job from Checkpoint — Latest Commit (2026-05-26)
 - **Branch**: `feature/redesign-resume`

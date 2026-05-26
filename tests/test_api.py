@@ -593,10 +593,11 @@ async def test_resume_instance_with_default_message(client, mock_manager):
     assert data["skipped_ids"] == []
     assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-resume-123"
     
-    # Verify resume_processing_job was called with default message
+    # Verify resume_processing_job was called with default message and silent=False for target
     mock_manager.resume_processing_job.assert_called_once_with(
         "test-instance-id",
         message="resume",
+        silent=False,
     )
 
 
@@ -623,10 +624,11 @@ async def test_resume_instance_with_custom_message(client, mock_manager):
     assert data["resumed"] is True
     assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-custom-456"
     
-    # Verify custom message was passed through
+    # Verify custom message was passed through with silent=False for target
     mock_manager.resume_processing_job.assert_called_once_with(
         "test-instance-id",
         message="hello world",
+        silent=False,
     )
 
 
@@ -654,10 +656,11 @@ async def test_resume_instance_with_whitespace_message_uses_default(client, mock
     assert data["resumed"] is True
     assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-default-789"
     
-    # Verify default message was used after stripping
+    # Verify default message was used after stripping with silent=False for target
     mock_manager.resume_processing_job.assert_called_once_with(
         "test-instance-id",
         message="resume",
+        silent=False,
     )
 
 
@@ -710,6 +713,48 @@ async def test_resume_instance_response_includes_message_id(client, mock_manager
 
 
 @pytest.mark.asyncio
+async def test_resume_instance_cascade_target_vs_children(client, mock_manager):
+    """Test that target instance gets silent=False but children get silent=True."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id", "child-1", "child-2"],
+        "skipped_ids": []
+    })
+    mock_manager.resume_processing_job = AsyncMock(return_value={
+        "job_id": "job-resume",
+        "message_id": "msg-resume"
+    })
+
+    response = await client.post(
+        "/instances/test-instance-id/resume",
+        json={"message": "continue"}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert len(data["resumed_ids"]) == 3
+
+    # Verify resume_processing_job was called 3 times (once per instance)
+    assert mock_manager.resume_processing_job.call_count == 3
+
+    # Check that the calls were made with correct parameters
+    calls = mock_manager.resume_processing_job.call_args_list
+    call_instances = {call[0][0]: call for call in calls}
+
+    # Target instance: gets custom message, silent=False
+    target_call = call_instances["test-instance-id"]
+    assert target_call[1]["message"] == "continue"
+    assert target_call[1]["silent"] is False
+
+    # Children: get default message, silent=True
+    for child_id in ["child-1", "child-2"]:
+        child_call = call_instances[child_id]
+        assert child_call[1]["message"] == "resume"
+        assert child_call[1]["silent"] is True
+
+
+@pytest.mark.asyncio
 async def test_resume_instance_backward_compatibility_no_body(client, mock_manager):
     """Test resume endpoint works without any request body (backward compatibility)."""
     mock_manager.get_instance.return_value = AsyncMock()
@@ -734,10 +779,11 @@ async def test_resume_instance_backward_compatibility_no_body(client, mock_manag
     assert data["resumed"] is True
     assert data["resume_results"]["test-instance-id"]["message_id"] == "msg-backward-compat"
     
-    # Verify default "resume" message was sent
+    # Verify default "resume" message was sent with silent=False for target
     mock_manager.resume_processing_job.assert_called_once_with(
         "test-instance-id",
         message="resume",
+        silent=False,
     )
 
 
