@@ -60,7 +60,22 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-26 fix-pause-button)
+## Test Results (Latest: 2026-05-26 resume-redesign)
+
+### Resume Redesign — Send Message on Resume — Full Testing (2026-05-26)
+- **Branch**: `feature/redesign-resume`
+- **Commits**: b8406f4 → 39dbba9 → 1250fd5 → fdb6c7b (quick fix) → 73a0c65 (mock test)
+- **New Resume Tests**: 7/7 PASS (test_api.py)
+- **API Regression**: 42/42 PASS
+- **Pause Regression**: 60/60 PASS
+- **Job Queue Regression**: 1144/1145 PASS (1 environmental)
+- **Frontend Unit Tests**: 723/723 PASS
+- **Mock Integration**: 22/22 PASS (default message, custom message, already-running)
+- **ensure.md**: PASS — dev.sh stable on port 8079
+- **Quick Fixes**: 1 (parameter ordering in instances router)
+- See `.agents/tester/RESULTS/2026-05-26-resume-redesign.md` for full report
+
+### Resume Redesign Status: ✅ READY (7 new tests pass, 22 mock assertions pass, 0 regressions, dev.sh stable)
 
 ### Fix Pause Causing Job to Complete — Full Testing (2026-05-26)
 - **Commits**: 3a690da → 184abb6 → cleanup → 58c76e2
