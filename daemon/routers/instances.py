@@ -239,7 +239,7 @@ async def pause_instance(
 async def resume_instance(
     instance_id: str,
     body: ResumeRequest | None = None,
-    request: Request = None,
+    request: Request,
 ) -> dict:
     """Resume a paused instance and cascade to children.
     
@@ -276,6 +276,7 @@ async def resume_instance(
         # Rollback: re-pause all resumed instances
         for rid in result.get("resumed_ids", []):
             try:
+                # Direct repo update for rollback — avoids re-calling cascade which would log/notify
                 manager._instance_repository.update(rid, status=InstanceStatus.PAUSED.value)
             except Exception:
                 pass
@@ -299,7 +300,7 @@ async def stop_instance_deprecated(
     return await pause_instance(instance_id, request)
 
 
-# 6. GET /instances/{instance_id}/messages - Get message history
+# 7. GET /instances/{instance_id}/messages - Get message history
 @router.get("/{instance_id}/messages")
 async def get_messages(
     instance_id: str,
