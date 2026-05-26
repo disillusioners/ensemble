@@ -37,8 +37,15 @@ export class InstanceService {
   // Polling interval: 60 seconds
   private readonly POLLING_INTERVAL = 60_000;
   private pollingIntervalId: ReturnType<typeof setInterval> | null = null;
-  private currentProjectId: string | null = null;
+  private _currentProjectId: string | null = null;
   private currentOffset: number = 0;
+
+  /**
+   * The currently active project filter. Returns null if showing all instances.
+   */
+  get currentProjectId(): string | null {
+    return this._currentProjectId;
+  }
 
   // Public signals
   readonly instances: WritableSignal<InstanceInfo[]> = signal([]);
@@ -232,7 +239,7 @@ export class InstanceService {
     if (!this.hasMoreInstances() || this.isLoadingMore()) {
       return;
     }
-    this.loadInstances(this.currentProjectId ?? undefined, true);
+    this.loadInstances(this._currentProjectId ?? undefined, true);
   }
 
   /**
@@ -241,7 +248,7 @@ export class InstanceService {
    */
   startPolling(projectId?: string): void {
     this.stopPolling();
-    this.currentProjectId = projectId ?? null;
+    this._currentProjectId = projectId ?? null;
 
     // Clear old instances immediately to avoid showing stale data
     this.instances.set([]);

@@ -213,7 +213,7 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     // Save scroll position before refresh
     this.saveScrollPosition();
     this.isRefreshing.set(true);
-    this.instanceService.loadInstances().finally(() => {
+    this.instanceService.loadInstances(this.instanceService.currentProjectId ?? undefined).finally(() => {
       this.isRefreshing.set(false);
     });
   }
