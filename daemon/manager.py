@@ -62,7 +62,8 @@ from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
 from .services.event_publisher import EventPublisherService
 from .cancellation import (
-    CancellationToken, 
+    CancellationToken,
+    CancellationTokenSource,
     CancellationReason,
     OperationCancelledError
 )
@@ -1799,6 +1800,81 @@ class InstanceManager:
               - skipped_ids: list of instance IDs that were skipped (not paused)
         """
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
+
+    async def resume_processing_job(self, instance_id: str, message: str = "resume") -> dict | None:
+        """Resume a paused instance's PROCESSING job from checkpoint.
+
+        Directly re-executes the existing job by calling _process_message_with_tracking()
+        with is_retry=False and the resume message. LangGraph loads the checkpoint
+        and appends the new message, continuing the conversation naturally.
+
+        Returns dict with result info, or None if no PROCESSING job found.
+        """
+        # 1. Find existing PROCESSING MESSAGE job(s) for this instance
+        old_jobs = await asyncio.to_thread(
+            self._job_queue_service._repository.find_processing_message_jobs_by_instance,
+            instance_id
+        )
+        if not old_jobs:
+            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}..., nothing to resume")
+            return None
+
+        old_job = old_jobs[0]
+        message_id = old_job.job_metadata.get("message_id") if old_job.job_metadata else None
+
+        logger.info(f"Resuming PROCESSING job {old_job.job_id[:8]}... for instance {instance_id[:8]}...")
+
+        # 2. Create fresh cancellation token
+        cts = CancellationTokenSource()
+
+        try:
+            # 3. Re-execute directly — bypasses queue entirely
+            # is_retry=False → graph_input has the new "resume" message
+            # LangGraph loads checkpoint AND appends new message
+            result = await self._process_message_with_tracking(
+                instance_id=instance_id,
+                message=message,
+                message_id=message_id or str(uuid.uuid4()),
+                cancellation_token=cts.token,
+                is_retry=False,
+                message_source="api",
+            )
+
+            # 4. Complete the old job on success
+            await self._job_queue_service.complete_job(
+                old_job.job_id,
+                DemandState.COMPLETED,
+                result_summary=result.content if result else None
+            )
+
+            # 5. Complete the old message queue entry
+            if message_id:
+                await asyncio.to_thread(self._queue_repository.complete, message_id)
+
+            logger.info(f"Resumed job {old_job.job_id[:8]}... completed successfully")
+            return {"job_id": old_job.job_id, "message_id": message_id}
+
+        except asyncio.CancelledError:
+            logger.info(f"Resumed job cancelled again for instance {instance_id[:8]}...")
+            try:
+                await self._job_queue_service.complete_job(
+                    old_job.job_id, DemandState.CANCELLED, error="Cancelled by user during resume"
+                )
+                if message_id:
+                    await asyncio.to_thread(self._queue_repository.fail, message_id, "Cancelled by user during resume")
+            except Exception:
+                pass
+            return None
+
+        except Exception as e:
+            logger.error(f"Resumed job failed for instance {instance_id[:8]}...: {e}")
+            try:
+                await self._job_queue_service.complete_job(
+                    old_job.job_id, DemandState.FAILED, error=str(e)
+                )
+            except Exception:
+                pass
+            raise
 
     async def _publish_instance_lifecycle_event(
         self,

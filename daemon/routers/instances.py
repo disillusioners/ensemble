@@ -14,6 +14,7 @@ from daemon.models import (
     InstanceInfo,
     InstanceListResponse,
     InstanceStatus,
+    ResumeRequest,
 )
 from daemon.utils import parse_utc_datetime
 
@@ -238,8 +239,10 @@ async def pause_instance(
 async def resume_instance(
     instance_id: str,
     request: Request,
+    body: ResumeRequest | None = None,
 ) -> dict:
-    """Resume a paused instance and cascade to children."""
+    """Resume a paused instance and cascade to children.
+    Re-executes existing PROCESSING jobs from checkpoint with optional message."""
     manager = _get_manager(request)
 
     # Check instance exists
@@ -254,11 +257,26 @@ async def resume_instance(
             ).model_dump()
         )
 
+    message_text = (body.message.strip() if body and body.message else None) or "resume"
+
+    # Cascade resume (sets PAUSED→RUNNING for target + children)
     result = await manager.resume_instance_cascade(instance_id)
+
+    # Resume processing jobs for all resumed instances (including children)
+    resume_results = {}
+    for rid in result["resumed_ids"]:
+        try:
+            job_result = await manager.resume_processing_job(rid, message=message_text)
+            resume_results[rid] = job_result
+        except Exception as e:
+            logger.warning(f"Failed to resume job for instance {rid[:8]}...: {e}")
+            resume_results[rid] = {"error": str(e)}
+
     return {
         "resumed": True,
         "resumed_ids": result["resumed_ids"],
         "skipped_ids": result["skipped_ids"],
+        "resume_results": resume_results,
     }
 
 
