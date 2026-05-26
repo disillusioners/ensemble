@@ -432,8 +432,7 @@ class InstanceMessagingService:
             result = await graph.ainvoke({"messages": [message]}, config)
         except asyncio.CancelledError:
             logger.info(f"Graph execution cancelled for instance {instance_id}")
-            # Don't re-raise - we want clean stop
-            return MessageResult(content="")
+            raise
         finally:
             # Trigger title generation even on cancellation (fire-and-forget)
             self._maybe_trigger_title_generation(instance_id, message, is_first_message)
