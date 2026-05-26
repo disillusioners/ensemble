@@ -1,5 +1,6 @@
 """Instance management API endpoints."""
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -261,6 +262,57 @@ async def resume_instance(
 
     # Cascade resume (sets PAUSED→RUNNING for target + children)
     result = await manager.resume_instance_cascade(instance_id)
+
+    # Cancel any old PROCESSING MESSAGE jobs that are zombie (asyncio task cancelled
+    # but DB status still PROCESSING). This prevents the new job from being blocked
+    # by the concurrency gate in message_job_handler.py.
+    zombie_jobs = await asyncio.to_thread(
+        manager._job_queue_service._repository.find_processing_message_jobs_by_instance,
+        instance_id
+    )
+    for old_job in zombie_jobs:
+        # Cancel the job in JobQueue
+        try:
+            await manager._job_queue_service.cancel_job(old_job.job_id)
+            logger.info(
+                f"resume_instance: cancelled zombie MESSAGE job {old_job.job_id[:8]}... "
+                f"for instance {instance_id[:8]}..."
+            )
+        except Exception as e:
+            logger.warning(
+                f"resume_instance: failed to cancel zombie job {old_job.job_id[:8]}...: {e}"
+            )
+
+        # Cancel corresponding MessageQueue entry (only if still in non-terminal state)
+        old_message_id = old_job.job_metadata.get("message_id") if old_job.job_metadata else None
+        if old_message_id:
+            try:
+                # Check if message already completed to avoid race condition
+                existing = manager._queue_repository.get(old_message_id)
+                if existing and existing.status not in ("completed", "failed"):
+                    await asyncio.to_thread(
+                        manager._queue_repository.fail,
+                        old_message_id,
+                        "Cancelled due to resume"
+                    )
+                    logger.info(
+                        f"resume_instance: cancelled zombie MessageQueue entry {old_message_id[:8]}... "
+                        f"for instance {instance_id[:8]}..."
+                    )
+                elif existing:
+                    logger.debug(
+                        f"resume_instance: skipping MessageQueue entry {old_message_id[:8]}... "
+                        f"(status={existing.status}) for instance {instance_id[:8]}..."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"resume_instance: failed to cancel MessageQueue entry {old_message_id[:8]}...: {e}"
+                )
+
+    if zombie_jobs:
+        logger.info(
+            f"resume_instance: cancelled {len(zombie_jobs)} zombie job(s) for instance {instance_id[:8]}..."
+        )
 
     msg_result = None
     try:
