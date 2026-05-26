@@ -256,8 +256,8 @@ class TestFindJobsByInstance:
 
         assert len(results) == 0
 
-    def test_excludes_failed_jobs(self, repository, sample_job_data):
-        """Test it excludes failed jobs."""
+    def test_includes_failed_jobs(self, repository, sample_job_data):
+        """Test it INCLUDES failed jobs (Fix 3: FAILED jobs can be cancelled during termination cleanup)."""
         instance_id = "failed-instance"
 
         job = repository.create(**sample_job_data)
@@ -266,7 +266,10 @@ class TestFindJobsByInstance:
 
         results = repository.find_jobs_by_instance(instance_id)
 
-        assert len(results) == 0
+        # FAILED jobs are now included so they can be cancelled during termination cleanup
+        assert len(results) == 1
+        assert results[0].job_id == started_job.job_id
+        assert results[0].status == "failed"
 
     def test_excludes_cancelled_jobs(self, repository, sample_job_data):
         """Test it excludes cancelled jobs."""

@@ -352,7 +352,12 @@ class InstanceLifecycleService:
         meta = None
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
             meta = self._manager._instance_repository.get(instance_id)
-        
+
+        # Re-entrancy guard: if already terminated, return early
+        if meta and meta.status == InstanceStatus.TERMINATED.value:
+            logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
+            return True
+
         # Cascade to children FIRST - terminate all child instances recursively
         if meta and meta.children:
             for child_id in list(meta.children):
@@ -458,7 +463,18 @@ class InstanceLifecycleService:
                         f"for instance {instance_id[:8]}..."
                     )
                     try:
-                        await self._job_queue_service.cancel_job(remaining_job.job_id)
+                        if remaining_job.status == "processing":
+                            # Use complete_job() to avoid re-entrancy — cancel_job() on PROCESSING
+                            # jobs may trigger terminate_instance() again via _is_instance_alive check
+                            from .job_queue_service import DemandState
+                            await self._job_queue_service.complete_job(
+                                remaining_job.job_id,
+                                demand_state=DemandState.CANCELLED,
+                                error="Instance terminated during cleanup",
+                            )
+                        else:
+                            # PENDING, FAILED — safe to use cancel_job()
+                            await self._job_queue_service.cancel_job(remaining_job.job_id)
                     except Exception as e:
                         logger.warning(
                             f"terminate_instance: failed to cancel job {remaining_job.job_id[:8]}...: {e}"

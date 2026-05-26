@@ -322,7 +322,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value, JobStatus.FAILED.value]))
             )
             stmt = stmt.order_by(JobItem.created_at.asc())
             if job_type:

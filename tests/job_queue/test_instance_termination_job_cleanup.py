@@ -102,6 +102,7 @@ def mock_repository():
     repo.atomic_transition = MagicMock()
     repo.get_by_instance = MagicMock(return_value=None)
     repo.find_jobs_by_instance = MagicMock(return_value=[])
+    repo.update = MagicMock(return_value=None)
     return repo
 
 
@@ -155,10 +156,14 @@ class TestStartJobInstanceStatusChecks:
     """
 
     @pytest.mark.asyncio
-    async def test_start_job_cancels_job_for_terminated_instance(
+    async def test_start_job_clears_stale_instance_for_terminated_task_job(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels a PENDING job whose instance is TERMINATED."""
+        """Test that start_job() clears stale instance_id for TASK jobs with TERMINATED instance.
+
+        TASK jobs with terminal instances: the stale instance_id is cleared and the job
+        falls through to normal start logic (doesn't cancel, continues processing).
+        """
         instance_id = "terminated-instance-123"
         job_id = "job-terminated"
 
@@ -171,7 +176,7 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True  # Cancel succeeds
+        mock_repository.start_job_atomic.return_value = job  # Simulate successful start
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -179,16 +184,20 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        # Job should not be started
-        assert result is None
-        # Cancel should have been called
-        mock_repository.atomic_transition.assert_called()
+        # For TASK jobs: instance_id is cleared, job continues to normal start
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
+        # Job should be started (not cancelled)
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_start_job_cancels_job_for_completed_instance(
+    async def test_start_job_clears_stale_instance_for_completed_task_job(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels a PENDING job whose instance is COMPLETED."""
+        """Test that start_job() clears stale instance_id for TASK jobs with COMPLETED instance.
+
+        TASK jobs with terminal instances: the stale instance_id is cleared and the job
+        falls through to normal start logic (doesn't cancel, continues processing).
+        """
         instance_id = "completed-instance-123"
         job_id = "job-completed"
 
@@ -201,7 +210,7 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True
+        mock_repository.start_job_atomic.return_value = job
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.COMPLETED.value
@@ -209,14 +218,20 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        assert result is None
-        mock_repository.atomic_transition.assert_called()
+        # For TASK jobs: instance_id is cleared, job continues to normal start
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
+        # Job should be started (not cancelled)
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_start_job_cancels_job_for_error_instance(
+    async def test_start_job_clears_stale_instance_for_error_task_job(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels a PENDING job whose instance is ERROR."""
+        """Test that start_job() clears stale instance_id for TASK jobs with ERROR instance.
+
+        TASK jobs with terminal instances: the stale instance_id is cleared and the job
+        falls through to normal start logic (doesn't cancel, continues processing).
+        """
         instance_id = "error-instance-123"
         job_id = "job-error"
 
@@ -229,7 +244,7 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True
+        mock_repository.start_job_atomic.return_value = job
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.ERROR.value
@@ -237,14 +252,20 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        assert result is None
-        mock_repository.atomic_transition.assert_called()
+        # For TASK jobs: instance_id is cleared, job continues to normal start
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
+        # Job should be started (not cancelled)
+        assert result is not None
 
     @pytest.mark.asyncio
-    async def test_start_job_cancels_job_for_failed_instance(
+    async def test_start_job_clears_stale_instance_for_failed_task_job(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels a PENDING job whose instance is FAILED."""
+        """Test that start_job() clears stale instance_id for TASK jobs with FAILED instance.
+
+        TASK jobs with terminal instances: the stale instance_id is cleared and the job
+        falls through to normal start logic (doesn't cancel, continues processing).
+        """
         instance_id = "failed-instance-123"
         job_id = "job-failed"
 
@@ -257,7 +278,7 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True
+        mock_repository.start_job_atomic.return_value = job
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.FAILED.value
@@ -265,8 +286,10 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        assert result is None
-        mock_repository.atomic_transition.assert_called()
+        # For TASK jobs: instance_id is cleared, job continues to normal start
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
+        # Job should be started (not cancelled)
+        assert result is not None
 
     @pytest.mark.asyncio
     async def test_start_job_keeps_job_pending_for_paused_instance(
@@ -399,10 +422,10 @@ class TestStartJobInstanceStatusChecks:
     async def test_start_job_works_for_task_type_jobs(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels TASK jobs for terminated instances.
+        """Test that start_job() clears stale instance_id for TASK jobs with terminal instances.
 
-        This verifies the fix that extended instance status checking from
-        MESSAGE jobs to ALL job types including TASK.
+        TASK jobs with terminal instances: the stale instance_id is cleared and the job
+        falls through to normal start logic (doesn't cancel).
         """
         instance_id = "terminated-task-instance"
         job_id = "task-job-terminated"
@@ -416,7 +439,7 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True
+        mock_repository.start_job_atomic.return_value = job
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -424,8 +447,10 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        assert result is None
-        mock_repository.atomic_transition.assert_called()
+        # For TASK jobs: instance_id is cleared, job continues to normal start
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
+        # Job should be started (not cancelled)
+        assert result is not None
 
     @pytest.mark.asyncio
     async def test_start_job_works_for_message_type_jobs(
@@ -496,6 +521,8 @@ class TestTerminateInstanceJobCleanup:
         service._repository.get_by_instance = MagicMock(return_value=None)
         service._repository.find_jobs_by_instance = MagicMock(return_value=[])
         service.cancel_job = AsyncMock(return_value=True)
+        service.cancel_message_job = AsyncMock(return_value=True)
+        service.complete_job = AsyncMock(return_value=None)
         service.complete_job_sync = MagicMock(return_value=None)
         service.release_lock_by_instance = AsyncMock(return_value=[])
         service.trigger_next_job_sync = MagicMock()
@@ -522,7 +549,7 @@ class TestTerminateInstanceJobCleanup:
     async def test_terminate_cancels_processing_task_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() cancels PROCESSING TASK jobs."""
+        """Test that terminate_instance() completes PROCESSING TASK jobs as CANCELLED."""
         instance_id = "terminate-instance-123"
 
         # Mock instance metadata
@@ -549,8 +576,8 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # cancel_job should be called for the processing task
-        mock_job_queue_service.cancel_job.assert_called()
+        # For PROCESSING jobs: complete_job with CANCELLED state is used (to avoid re-entrancy)
+        mock_job_queue_service.complete_job.assert_called()
 
     @pytest.mark.asyncio
     async def test_terminate_cancels_pending_task_jobs(
@@ -591,7 +618,7 @@ class TestTerminateInstanceJobCleanup:
     async def test_terminate_cancels_processing_message_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() cancels PROCESSING MESSAGE jobs."""
+        """Test that terminate_instance() completes PROCESSING MESSAGE jobs as CANCELLED."""
         instance_id = "terminate-instance-message"
 
         meta = MagicMock()
@@ -617,7 +644,8 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        mock_job_queue_service.cancel_job.assert_called()
+        # For PROCESSING jobs: complete_job with CANCELLED state is used
+        mock_job_queue_service.complete_job.assert_called()
 
     @pytest.mark.asyncio
     async def test_terminate_cancels_pending_message_jobs(
@@ -651,14 +679,15 @@ class TestTerminateInstanceJobCleanup:
         mock_job_queue_service.cancel_job.assert_called()
 
     @pytest.mark.asyncio
-    async def test_terminate_does_not_cancel_completed_jobs(
+    async def test_terminate_cancels_failed_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() does NOT cancel already COMPLETED jobs.
+        """Test that terminate_instance() CANCELS FAILED jobs.
 
-        Terminal states (completed, cancelled, dead_letter) should be skipped.
+        FAILED jobs should now be included in find_jobs_by_instance() and
+        cancelled during termination cleanup.
         """
-        instance_id = "terminate-instance-complete"
+        instance_id = "terminate-instance-failed"
 
         meta = MagicMock()
         meta.instance_id = instance_id
@@ -668,22 +697,22 @@ class TestTerminateInstanceJobCleanup:
         meta.children = []
         mock_manager._instance_repository.get.return_value = meta
 
-        # Mock COMPLETED job (terminal state - should be skipped)
-        completed_job = MockJob(
-            job_id="completed-job",
+        # Mock FAILED job (now included in find_jobs_by_instance)
+        failed_job = MockJob(
+            job_id="failed-job",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.COMPLETED.value,
+            status=JobStatus.FAILED.value,
             instance_id=instance_id,
             job_type="task",
         )
 
-        mock_job_queue_service._repository.find_jobs_by_instance.return_value = [completed_job]
+        mock_job_queue_service._repository.find_jobs_by_instance.return_value = [failed_job]
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # cancel_job should NOT be called for completed jobs
-        mock_job_queue_service.cancel_job.assert_not_called()
+        # cancel_job should be called for failed jobs (they are now included)
+        mock_job_queue_service.cancel_job.assert_called()
 
     @pytest.mark.asyncio
     async def test_terminate_does_not_cancel_cancelled_jobs(
@@ -755,6 +784,10 @@ class TestTerminateInstanceJobCleanup:
 
         This verifies that the comprehensive sweep (step 7.6) handles multiple
         jobs of different types and states correctly.
+
+        - PENDING jobs → cancel_job()
+        - PROCESSING jobs → complete_job() with CANCELLED
+        - COMPLETED jobs → skipped (terminal state)
         """
         instance_id = "terminate-instance-multi"
 
@@ -769,16 +802,22 @@ class TestTerminateInstanceJobCleanup:
         # Mock multiple jobs of different types and states
         pending_task = MockJob(
             job_id="pending-task",
+            project_id="project-1",
+            queue_id="queue-1",
             status=JobStatus.PENDING.value,
             job_type="task",
         )
         processing_message = MockJob(
             job_id="processing-message",
+            project_id="project-1",
+            queue_id="queue-1",
             status=JobStatus.PROCESSING.value,
             job_type="message",
         )
         completed_job = MockJob(
             job_id="completed-job",
+            project_id="project-1",
+            queue_id="queue-1",
             status=JobStatus.COMPLETED.value,
             job_type="task",
         )
@@ -791,9 +830,9 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # Only non-terminal jobs should be cancelled
-        # cancel_job should be called twice (pending_task and processing_message)
-        assert mock_job_queue_service.cancel_job.call_count == 2
+        # PENDING → cancel_job, PROCESSING → complete_job, COMPLETED → skipped
+        mock_job_queue_service.cancel_job.assert_called_once()  # Only pending_task
+        mock_job_queue_service.complete_job.assert_called_once()  # Only processing_message
 
 
 # =============================================================================

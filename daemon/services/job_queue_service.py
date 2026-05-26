@@ -990,12 +990,22 @@ class JobQueueService:
                 ])
 
                 if instance.status in TERMINAL_STATUSES:
-                    logger.info(
-                        f"start_job: instance {job.instance_id[:8]}... is {instance.status}, "
-                        f"cancelling job {job.job_id[:8]}..."
-                    )
-                    await self.cancel_job(job.job_id)
-                    return None
+                    if job.job_type == "task":
+                        # TASK jobs get fresh instances — clear stale ref and allow normal start
+                        logger.info(
+                            f"start_job: clearing stale instance_id for TASK job {job.job_id[:8]}... "
+                            f"(instance {job.instance_id[:8]}... is {instance.status})"
+                        )
+                        await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
+                        # Fall through to normal start logic below (don't return None)
+                    else:
+                        # MESSAGE jobs target specific instances — cancel if instance is terminal
+                        logger.info(
+                            f"start_job: instance {job.instance_id[:8]}... is {instance.status}, "
+                            f"cancelling MESSAGE job {job.job_id[:8]}..."
+                        )
+                        await self.cancel_job(job.job_id)
+                        return None
 
                 if instance.status == InstanceStatus.PAUSED.value:
                     logger.debug(
