@@ -60,7 +60,20 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-26 resume-redesign)
+## Test Results (Latest: 2026-05-26 resume-redesign-latest)
+
+### Resume — Re-execute Existing Job from Checkpoint — Latest Commit (2026-05-26)
+- **Branch**: `feature/redesign-resume`
+- **Commits**: fd8f6e2 → 0a3ec53 (quick fix: test mocks updated)
+- **Backend Unit Tests**: 3256/3258 PASS (2 pre-existing/environmental)
+- **Frontend Unit Tests**: 723/723 PASS (18 suites, 5.156s)
+- **Browser Automation**: 6/6 steps PASS (pause during LLM → resume → complete → no zombies)
+- **Job Queue Final**: 0 zombie PROCESSING jobs after resume
+- **ensure.md**: PASS — dev.sh stable at 1817s uptime
+- **Quick Fixes**: 1 commit (resume API test mocks + ResumeRequest in __all__)
+- See `.agents/tester/RESULTS/2026-05-26-resume-redesign-latest.md` for full report
+
+### Resume Redesign Latest Status: ✅ READY (3256 backend pass, 723 frontend pass, browser E2E pass, 0 regressions, dev.sh stable)
 
 ### Resume Redesign — Send Message on Resume — Full Testing (2026-05-26)
 - **Branch**: `feature/redesign-resume`
