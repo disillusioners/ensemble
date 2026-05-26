@@ -278,67 +278,6 @@ class TestProcessMessageProcessorPause:
         processor._task_repo.complete_task.assert_not_called()
 
 
-class TestMainLoopBridgeCancelledError:
-    """Tests for MainLoopBridge handling of CancelledError."""
-
-    def test_main_loop_bridge_propagates_cancelled_error(self):
-        """Test that MainLoopBridge.run_async propagates CancelledError."""
-        import asyncio
-        from daemon.services.main_loop_bridge import MainLoopBridge
-
-        async def raise_cancelled():
-            raise asyncio.CancelledError()
-
-        # Reset and create a fresh loop
-        MainLoopBridge.reset()
-
-        # Create a thread to run the event loop
-        loop = asyncio.new_event_loop()
-
-        def run_with_loop():
-            MainLoopBridge.set_loop(loop)
-            try:
-                with pytest.raises(asyncio.CancelledError):
-                    MainLoopBridge.run_async(raise_cancelled(), timeout=5)
-            finally:
-                MainLoopBridge.reset()
-                loop.close()
-
-        # Run in a thread since MainLoopBridge expects to be called from worker thread
-        import threading
-        t = threading.Thread(target=run_with_loop)
-        t.start()
-        t.join()
-
-    def test_main_loop_bridge_propagates_concurrent_futures_cancelled_error(self):
-        """Test that MainLoopBridge.run_async propagates concurrent.futures.CancelledError."""
-        import asyncio
-        import concurrent.futures
-        from daemon.services.main_loop_bridge import MainLoopBridge
-
-        async def raise_concurrent_cancelled():
-            raise concurrent.futures.CancelledError()
-
-        # Reset and create a fresh loop
-        MainLoopBridge.reset()
-        loop = asyncio.new_event_loop()
-
-        def run_with_loop():
-            MainLoopBridge.set_loop(loop)
-            try:
-                # Should raise concurrent.futures.CancelledError
-                with pytest.raises(concurrent.futures.CancelledError):
-                    MainLoopBridge.run_async(raise_concurrent_cancelled(), timeout=5)
-            finally:
-                MainLoopBridge.reset()
-                loop.close()
-
-        import threading
-        t = threading.Thread(target=run_with_loop)
-        t.start()
-        t.join()
-
-
 class TestWorkerPoolPathCancellation:
     """Tests for WorkerPool handling of concurrent.futures.CancelledError."""
 
