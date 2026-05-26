@@ -1840,7 +1840,7 @@ class InstanceManager:
             result = await self._process_message_with_tracking(
                 instance_id=instance_id,
                 message=message,
-                message_id=message_id or str(uuid.uuid4()),
+                message_id=str(uuid.uuid4()),
                 cancellation_token=cts.token,
                 is_retry=silent,
                 message_source="api",
