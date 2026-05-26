@@ -88,8 +88,10 @@ export class ApiService {
     return this.http.post<PauseResponse>(`${this.API_BASE}/instances/${instanceId}/pause`, {});
   }
 
-  resumeInstance(instanceId: string): Observable<ResumeResponse> {
-    return this.http.post<ResumeResponse>(`${this.API_BASE}/instances/${instanceId}/resume`, {});
+  resumeInstance(instanceId: string, message?: string): Observable<ResumeResponse> {
+    return this.http.post<ResumeResponse>(`${this.API_BASE}/instances/${instanceId}/resume`, {
+      message: message || null
+    });
   }
 
   // Messages

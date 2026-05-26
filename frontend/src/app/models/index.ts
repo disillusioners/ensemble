@@ -223,6 +223,7 @@ export interface ResumeResponse {
   resumed: boolean;
   resumed_ids: string[];
   skipped_ids: string[];
+  message_id?: string;
 }
 
 // Job Queue types

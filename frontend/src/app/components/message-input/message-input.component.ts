@@ -31,7 +31,7 @@ export class MessageInputComponent {
   readonly instanceStatus = input<InstanceStatus | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() pauseInstance = new EventEmitter<void>();
-  @Output() resumeInstance = new EventEmitter<void>();
+  @Output() resumeInstance = new EventEmitter<string>();  // emits message text (or empty string for default)
 
   message = signal('');
   images = signal<FilePreview[]>([]);
@@ -91,6 +91,13 @@ export class MessageInputComponent {
 
     this.sendMessage.emit(payload);
     // Do NOT clear message/images here — parent calls clearInput() on API success
+  }
+
+  handleResume(): void {
+    const text = this.message().trim();
+    this.resumeInstance.emit(text);  // empty string means "resume" (backend default)
+    this.message.set('');
+    this.images.set([]);
   }
 
   clearInput(): void {

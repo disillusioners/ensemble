@@ -120,7 +120,7 @@
           [agentColor]="instanceAgent()?.id || 'coder'"
           [instanceStatus]="currentInstance()?.status ?? null"
           (pauseInstance)="onPauseInstance()"
-          (resumeInstance)="onResumeInstance()"
+          (resumeInstance)="onResumeInstance($event)"
         ></app-message-input>
       }
     </div>

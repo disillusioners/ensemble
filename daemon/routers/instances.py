@@ -14,6 +14,7 @@ from daemon.models import (
     InstanceInfo,
     InstanceListResponse,
     InstanceStatus,
+    ResumeRequest,
 )
 from daemon.utils import parse_utc_datetime
 
@@ -237,9 +238,13 @@ async def pause_instance(
 @router.post("/{instance_id}/resume")
 async def resume_instance(
     instance_id: str,
-    request: Request,
+    body: ResumeRequest | None = None,
+    request: Request = None,
 ) -> dict:
-    """Resume a paused instance and cascade to children."""
+    """Resume a paused instance and cascade to children.
+    
+    Optionally sends a message through the normal pipeline after resuming.
+    """
     manager = _get_manager(request)
 
     # Check instance exists
@@ -254,11 +259,22 @@ async def resume_instance(
             ).model_dump()
         )
 
+    # Cascade resume (sets PAUSED→RUNNING for target + children)
     result = await manager.resume_instance_cascade(instance_id)
+
+    # Send message through normal pipeline
+    message_text = (body.message if body else None) or "resume"
+    msg_result = await manager.enqueue_message_via_jq(
+        instance_id=instance_id,
+        message=message_text,
+        source="api",
+    )
+
     return {
         "resumed": True,
         "resumed_ids": result["resumed_ids"],
         "skipped_ids": result["skipped_ids"],
+        "message_id": msg_result.message_id,
     }
 
 

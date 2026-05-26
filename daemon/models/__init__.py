@@ -17,6 +17,7 @@ __all__ = [
     "InstanceCreate",
     "InstanceInfo",
     "InstanceListResponse",
+    "ResumeRequest",
     # message
     "MessageCreate",
     "MessageResponse",

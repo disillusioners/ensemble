@@ -105,4 +105,13 @@ class InstanceListResponse(BaseModel):
     )
 
 
-__all__ = ["InstanceStatus", "InstanceCreate", "InstanceInfo", "InstanceListResponse"]
+class ResumeRequest(BaseModel):
+    """Request body for resuming an instance with optional message."""
+
+    message: str | None = Field(
+        default=None,
+        description="Optional message to send when resuming (defaults to 'resume')"
+    )
+
+
+__all__ = ["InstanceStatus", "InstanceCreate", "InstanceInfo", "InstanceListResponse", "ResumeRequest"]
