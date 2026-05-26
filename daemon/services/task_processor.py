@@ -282,6 +282,15 @@ class ProcessMessageProcessor(BaseProcessor):
             
         except OperationCancelledError:
             raise
+        except asyncio.CancelledError:
+            # Graph was cancelled by pause_instance_cascade.
+            # Per spec: "pausing instance still keeps the job on processing state"
+            # For tasks in WorkerPool, this means task stays RUNNING (not completed).
+            # Re-raise to propagate to worker thread cleanly.
+            logger.info(
+                f"Task {task.id} left RUNNING (instance {task.instance_id[:8]}... was paused)"
+            )
+            raise
         except Exception as e:
             error_msg = _truncate_error(str(e))
             logger.error(f"Failed to process message task {task.id}: {error_msg}", exc_info=True)

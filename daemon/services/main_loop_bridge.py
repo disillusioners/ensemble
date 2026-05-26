@@ -86,6 +86,9 @@ class MainLoopBridge:
         except TimeoutError:
             logger.error(f"MainLoopBridge: coroutine timed out after {timeout}s")
             raise
+        except asyncio.CancelledError:
+            # CancelledError is BaseException, not Exception - propagate cleanly
+            raise
         except Exception as e:
             logger.error(f"MainLoopBridge: error running coroutine: {e}")
             raise

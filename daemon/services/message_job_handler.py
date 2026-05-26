@@ -173,6 +173,16 @@ class MessageJobHandler:
                 demand_state=DemandState.CANCELLED,
                 error="Message processing cancelled",
             )
+        except asyncio.CancelledError:
+            # Graph was cancelled by pause_instance_cascade.
+            # Per spec: "pausing instance still keeps the job on processing state"
+            # Do NOT complete the job — leave it PROCESSING so it can be resumed.
+            logger.info(
+                f"MessageJobHandler: job {job.job_id[:8]}... left PROCESSING "
+                f"(instance {instance_id[:8]}... was paused)"
+            )
+            # Return without completing — job stays PROCESSING
+            return
         except Exception as e:
             logger.error(
                 f"MessageJobHandler: error processing MESSAGE job {job.job_id[:8]}...: {e}"
