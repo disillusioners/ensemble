@@ -62,6 +62,19 @@ tests/
 
 ## Test Results (Latest: 2026-05-26 fix-pause-button)
 
+### Fix Pause Causing Job to Complete — Full Testing (2026-05-26)
+- **Commits**: 3a690da → 184abb6 → cleanup → 58c76e2
+- **New Tests**: 12/12 PASS (test_pause_while_processing.py)
+- **Pause Regression**: 57/57 PASS (8 instance_pause + 20 cascade + 29 job_processor)
+- **Termination Regression**: 23/23 PASS
+- **Job Queue Full Suite**: 1,144/1,144 PASS (1 environmental — port 8079 in use)
+- **API + Core Tests**: 65/65 PASS
+- **ensure.md**: PASS — dev.sh stable on port 8079
+- **Total**: 1,300/1,300 code-related tests PASS
+- See `.agents/tester/RESULTS/2026-05-26-fix-pause-job-complete.md` for full report
+
+### Fix Pause Causing Job to Complete Status: ✅ READY (12 new tests pass, 0 regressions, dev.sh stable)
+
 ### Fix Instance Termination with Job Queue — Full Testing (2026-05-26)
 - **New Tests**: 23/23 PASS (test_instance_termination_job_cleanup.py)
 - **Mock Integration**: 6/6 scenarios PASS (terminate happy path, re-entrancy guard, jobs, parent-child, sequential)

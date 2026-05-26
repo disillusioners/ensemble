@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 71 packs
-- Unit: 57 | Integration: 1 | Mock: 6 | E2E: 6
+- Total: 72 packs
+- Unit: 58 | Integration: 1 | Mock: 6 | E2E: 6
 
 ## Unit Test Packs
 
@@ -60,10 +60,11 @@
 | project_metadata_table_unit_test | tests/unit/test_project_metadata_table.py | Project metadata table separation: CRUD, upsert, enrichment, create/update/delete integration, value types, migration | 2 min | 2026-05-25 | ✅ PASS (42/42, feature/metadata-table, 0 regressions) |
 | job_status_guard_unit_test | tests/unit/test_job_processor_status_guard.py | Job processor status str/enum guard: enum .value extraction, string passthrough, job transitions, edge cases (empty/unknown/capitalized strings) | 2 min | 2026-05-25 | ✅ PASS (15/15, fix/job-status-str-enum + 45b4814, 0 regressions) |
 | ensure_system_queues_unit_test | tests/job_queue/test_ensure_system_queues.py | Ensure system queues: service layer (partial, all, none, idempotency) + API endpoint (200 OK, 404, queue correctness, idempotency, partial existing) | 2 min | 2026-05-25 | ✅ PASS (9/9, eb4bcc1 + a7c2851 bug fix, 0 regressions) |
-| instance_pause_unit_test | tests/job_queue/test_instance_pause.py | Instance pause checks: paused instance job skip, enqueue no auto-resume, pause during processing | 2 min | 2026-05-26 | ✅ PASS (8/8, feature/fix-pause-button, 0 regressions) |
-| pause_cascade_unit_test | tests/unit/test_pause_instance_cascade.py | Resume cascade: parent→children, idempotency, mixed states, no children, already running | 2 min | 2026-05-26 | ✅ PASS (19/19, feature/fix-pause-button, 0 regressions) |
-| job_processor_pause_test | tests/job_queue/test_job_processor.py | Job processor pause filter + all existing processor tests | 2 min | 2026-05-26 | ✅ PASS (30/30, feature/fix-pause-button, 0 regressions) |
-| instance_termination_cleanup_unit_test | tests/job_queue/test_instance_termination_job_cleanup.py | Instance termination job cleanup: start_job terminal state checks, terminate_instance job sweep, orphan detection, find_jobs_by_instance FAILED status, shared constants | 2 min | 2026-05-26 | ✅ PASS (23/23, feature/fix-terminate-instance, 0 regressions) |
+| instance_pause_unit_test | tests/job_queue/test_instance_pause.py | Instance pause checks: paused instance job skip, enqueue no auto-resume, pause during processing | 2 min | 2026-05-26 | ✅ PASS (8/8, feature/fix-pause-job-complete, 0 regressions) |
+| pause_cascade_unit_test | tests/unit/test_pause_instance_cascade.py | Resume cascade: parent→children, idempotency, mixed states, no children, already running | 2 min | 2026-05-26 | ✅ PASS (20/20, feature/fix-pause-job-complete, 0 regressions) |
+| job_processor_pause_test | tests/job_queue/test_job_processor.py | Job processor pause filter + all existing processor tests | 2 min | 2026-05-26 | ✅ PASS (29/29, feature/fix-pause-job-complete, 0 regressions) |
+| instance_termination_cleanup_unit_test | tests/job_queue/test_instance_termination_job_cleanup.py | Instance termination job cleanup: start_job terminal state checks, terminate_instance job sweep, orphan detection, find_jobs_by_instance FAILED status, shared constants | 2 min | 2026-05-26 | ✅ PASS (23/23, feature/fix-pause-job-complete, 0 regressions) |
+| pause_while_processing_unit_test | tests/job_queue/test_pause_while_processing.py | Pause while processing: CancelledError re-raise, pause vs shutdown distinction, concurrent.futures variant, normal completion unaffected | 2 min | 2026-05-26 | ✅ PASS (12/12, feature/fix-pause-job-complete, 0 regressions) |
 
 ## Integration Test Packs
 
