@@ -238,8 +238,8 @@ async def pause_instance(
 @router.post("/{instance_id}/resume")
 async def resume_instance(
     instance_id: str,
-    body: ResumeRequest | None = None,
     request: Request,
+    body: ResumeRequest | None = None,
 ) -> dict:
     """Resume a paused instance and cascade to children.
     
