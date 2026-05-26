@@ -60,7 +60,20 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-26 resume-target-message)
+## Test Results (Latest: 2026-05-26 resume-append-message)
+
+### Resume — Message Appends Not Replaces (2026-05-26)
+- **Branch**: `latest`
+- **Commit**: `ab23b16` — fix: resume message now appends instead of replacing first message
+- **New Resume Append Tests**: 8/8 PASS (`tests/unit/test_resume_message_append.py`)
+- **API Regression**: 43/43 PASS
+- **Core Regression**: 156/157 PASS (1 pre-existing title-generation CancelledError mock issue)
+- **Frontend Unit Tests**: 723/723 PASS
+- **ensure.md**: PASS — dev.sh stable (30s timeout)
+- **Quick Fixes**: None needed
+- See `.agents/tester/RESULTS/2026-05-26-resume-append-message.md` for full report
+
+### Resume Append Status: ✅ READY (8 new tests pass, 0 regressions, dev.sh stable)
 
 ### Resume — Message Target Only (2026-05-26)
 - **Branch**: `latest`
