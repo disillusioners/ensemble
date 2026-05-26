@@ -9,7 +9,11 @@ if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
 from daemon.models.instance import InstanceStatus
-from daemon.services.job_queue_service import DemandState, JobQueueService
+from daemon.services.job_queue_service import (
+    DemandState,
+    JobQueueService,
+    TERMINAL_CANCEL_STATUSES,
+)
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.message_job_handler import MessageJobHandler
 from daemon.repositories import SQLModelProjectRepository
@@ -308,9 +312,7 @@ class JobProcessor:
                                         )
                                         if instance_meta is not None:
                                             # Instance exists in DB — check its status
-                                            if instance_meta.status in (
-                                                InstanceStatus.TERMINATED, InstanceStatus.COMPLETED
-                                            ):
+                                            if instance_meta.status in TERMINAL_CANCEL_STATUSES:
                                                 status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
                                                 logger.info(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "

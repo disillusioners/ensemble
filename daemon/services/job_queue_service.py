@@ -29,6 +29,21 @@ from daemon.registry import get_registry
 logger = logging.getLogger(__name__)
 
 
+# Shared terminal instance statuses — used across job_queue_service,
+# instance_lifecycle, and job_processor for consistent cleanup behavior.
+TERMINAL_STATUSES = frozenset([
+    InstanceStatus.TERMINATED.value,
+    InstanceStatus.COMPLETED.value,
+    InstanceStatus.ERROR.value,
+    InstanceStatus.FAILED.value,
+])
+
+TERMINAL_CANCEL_STATUSES = frozenset([
+    InstanceStatus.TERMINATED.value,
+    InstanceStatus.COMPLETED.value,
+])
+
+
 class DemandState(enum.Enum):
     """Job demand state for completion.
     
@@ -980,14 +995,6 @@ class JobQueueService:
                         f"start_job: instance {job.instance_id[:8]}... not found, skipping"
                     )
                     return None
-
-                # Terminal states: instance is done, cancel the job
-                TERMINAL_STATUSES = frozenset([
-                    InstanceStatus.TERMINATED.value,
-                    InstanceStatus.COMPLETED.value,
-                    InstanceStatus.ERROR.value,
-                    InstanceStatus.FAILED.value,
-                ])
 
                 if instance.status in TERMINAL_STATUSES:
                     if job.job_type == "task":

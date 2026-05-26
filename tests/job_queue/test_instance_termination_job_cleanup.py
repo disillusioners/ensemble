@@ -907,16 +907,6 @@ class TestJobProcessorOrphanDetection:
         When a PROCESSING TASK job has instance_id pointing to a TERMINATED
         instance, it should be cancelled (not re-spawned).
         """
-        from daemon.services.job_processor import JobProcessor
-
-        processor = JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
-
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False
@@ -967,16 +957,6 @@ class TestJobProcessorOrphanDetection:
         mock_project_repo, mock_queue_repo
     ):
         """Test that JobProcessor cancels TASK jobs for COMPLETED instances."""
-        from daemon.services.job_processor import JobProcessor
-
-        processor = JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
-
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False
@@ -1028,16 +1008,6 @@ class TestJobProcessorOrphanDetection:
         ERROR instances should fail the job (not cancel it), since the
         instance encountered an error during processing.
         """
-        from daemon.services.job_processor import JobProcessor
-
-        processor = JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
-
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False
@@ -1090,16 +1060,6 @@ class TestJobProcessorOrphanDetection:
         just temporarily paused. The job should be skipped (not cancelled
         or re-spawned).
         """
-        from daemon.services.job_processor import JobProcessor
-
-        processor = JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
-
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False
@@ -1151,16 +1111,6 @@ class TestJobProcessorOrphanDetection:
         genuinely doesn't exist (not just terminated), it should be re-spawned.
         This is the existing recovery behavior.
         """
-        from daemon.services.job_processor import JobProcessor
-
-        processor = JobProcessor(
-            queue_service=mock_queue_service,
-            instance_manager=mock_instance_manager,
-            project_repo=mock_project_repo,
-            queue_repo=mock_queue_repo,
-            poll_interval=0.1,
-        )
-
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False

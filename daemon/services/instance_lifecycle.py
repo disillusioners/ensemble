@@ -17,6 +17,7 @@ from ..registry import get_registry
 from ..repositories.instance.models import Instance, InstanceStatus
 from .cancellation import CancellationService
 from .event_publisher import EventPublisherService
+from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
@@ -424,7 +425,6 @@ class InstanceLifecycleService:
             try:
                 job = self._job_queue_service.get_job_by_instance_sync(instance_id)
                 if job is not None and job.status == "processing":
-                    from .job_queue_service import DemandState
                     self._job_queue_service.complete_job_sync(
                         job.job_id, DemandState.CANCELLED, error="Instance terminated",
                         result_summary=None,
@@ -466,7 +466,6 @@ class InstanceLifecycleService:
                         if remaining_job.status == "processing":
                             # Use complete_job() to avoid re-entrancy — cancel_job() on PROCESSING
                             # jobs may trigger terminate_instance() again via _is_instance_alive check
-                            from .job_queue_service import DemandState
                             await self._job_queue_service.complete_job(
                                 remaining_job.job_id,
                                 demand_state=DemandState.CANCELLED,
