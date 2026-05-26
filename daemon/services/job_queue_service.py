@@ -957,9 +957,9 @@ class JobQueueService:
         if self._project_repo is None:
             logger.warning("start_job: project_repo not set, cannot check pause state")
 
-        # INSTANCE PAUSE CHECK - prevent starting jobs for paused instances
-        # Only check for MESSAGE jobs that have a target instance_id
-        if job.job_type == "message" and job.instance_id:
+        # INSTANCE STATUS CHECK - prevent starting jobs for terminated instances or paused instances
+        # Check for all job types that have a target instance_id (TASK jobs may not have instance_id while PENDING)
+        if job.instance_id:
             if (
                 self._instance_manager is not None
                 and hasattr(self._instance_manager, '_instance_repository')
@@ -979,6 +979,22 @@ class JobQueueService:
                     logger.warning(
                         f"start_job: instance {job.instance_id[:8]}... not found, skipping"
                     )
+                    return None
+
+                # Terminal states: instance is done, cancel the job
+                TERMINAL_STATUSES = frozenset([
+                    InstanceStatus.TERMINATED.value,
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.ERROR.value,
+                    InstanceStatus.FAILED.value,
+                ])
+
+                if instance.status in TERMINAL_STATUSES:
+                    logger.info(
+                        f"start_job: instance {job.instance_id[:8]}... is {instance.status}, "
+                        f"cancelling job {job.job_id[:8]}..."
+                    )
+                    await self.cancel_job(job.job_id)
                     return None
 
                 if instance.status == InstanceStatus.PAUSED.value:

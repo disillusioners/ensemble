@@ -441,6 +441,31 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to cancel MESSAGE jobs on terminate: {e}")
 
+        # 7.6. Cancel ALL remaining jobs for this instance (comprehensive sweep)
+        if self._job_queue_service is not None:
+            try:
+                # Find ALL jobs still associated with this instance (any type, any non-terminal state)
+                all_jobs = self._job_queue_service._repository.find_jobs_by_instance(
+                    instance_id, job_type=None  # All types
+                )
+                for remaining_job in all_jobs:
+                    # Skip already-terminal states
+                    if remaining_job.status in ("completed", "cancelled", "dead_letter"):
+                        continue
+                    logger.info(
+                        f"terminate_instance: cancelling remaining job {remaining_job.job_id[:8]}... "
+                        f"(type={remaining_job.job_type}, status={remaining_job.status}) "
+                        f"for instance {instance_id[:8]}..."
+                    )
+                    try:
+                        await self._job_queue_service.cancel_job(remaining_job.job_id)
+                    except Exception as e:
+                        logger.warning(
+                            f"terminate_instance: failed to cancel job {remaining_job.job_id[:8]}...: {e}"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
+
         # 8. Publish lifecycle event for terminated instance
         parent_id = meta.parent_id if meta else None
         if self._events_service:

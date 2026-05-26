@@ -295,9 +295,61 @@ class JobProcessor:
                                 await self._instance_manager.get_instance(proc_job.instance_id)
                                 continue  # Instance exists, skip
                             except KeyError:
-                                # Instance has instance_id but doesn't exist in DB.
-                                # This is an orphan from a crash between start_job_atomic()
-                                # and spawn_instance(). Recover it now.
+                                # Instance not in memory — check if it was terminated/completed/errored
+                                # before attempting to re-spawn
+                                if (
+                                    hasattr(self._instance_manager, '_instance_repository')
+                                    and self._instance_manager._instance_repository is not None
+                                ):
+                                    try:
+                                        instance_meta = await asyncio.to_thread(
+                                            self._instance_manager._instance_repository.get,
+                                            proc_job.instance_id
+                                        )
+                                        if instance_meta is not None:
+                                            # Instance exists in DB — check its status
+                                            if instance_meta.status in (
+                                                InstanceStatus.TERMINATED, InstanceStatus.COMPLETED
+                                            ):
+                                                status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
+                                                logger.info(
+                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                    f"instance {proc_job.instance_id[:8]}... is {status_display}, "
+                                                    f"cancelling job"
+                                                )
+                                                await self._queue_service.complete_job(
+                                                    proc_job.job_id,
+                                                    demand_state=DemandState.CANCELLED,
+                                                    error=f"Instance is {status_display}",
+                                                )
+                                                continue
+                                            elif instance_meta.status == InstanceStatus.ERROR:
+                                                logger.warning(
+                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                    f"instance {proc_job.instance_id[:8]}... errored, failing job"
+                                                )
+                                                await self._queue_service.complete_job(
+                                                    proc_job.job_id,
+                                                    demand_state=DemandState.FAILED,
+                                                    error="Instance errored",
+                                                )
+                                                continue
+                                            elif instance_meta.status == InstanceStatus.PAUSED:
+                                                logger.debug(
+                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                    f"instance {proc_job.instance_id[:8]}... is paused, skipping"
+                                                )
+                                                continue
+                                            # Instance is in a non-terminal state but not in memory —
+                                            # genuine crash, proceed to re-spawn below
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"JobProcessor: failed to check instance status for "
+                                            f"{proc_job.instance_id[:8]}...: {e}"
+                                        )
+                                        continue  # Don't crash on transient errors
+
+                                # Instance genuinely crashed or missing — re-spawn
                                 logger.info(
                                     f"JobProcessor: recovering orphan PROCESSING job {proc_job.job_id[:8]}... "
                                     f"(instance {proc_job.instance_id[:8]}... missing)"
