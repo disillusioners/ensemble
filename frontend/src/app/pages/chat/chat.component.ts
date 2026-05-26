@@ -389,11 +389,15 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected onResumeInstance(message?: string): void {
     const instanceId = this.currentInstanceId();
     if (instanceId) {
+      this.sendError.set(null);
       this.api.resumeInstance(instanceId, message).subscribe({
         next: () => {
           this.messageInputRef?.clearInput();
         },
-        error: (err: any) => console.error('Resume failed:', err)
+        error: (err: any) => {
+          console.error('Resume failed:', err);
+          this.sendError.set('Failed to resume instance. Please try again.');
+        }
       });
     }
   }

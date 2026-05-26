@@ -555,6 +555,201 @@ async def test_stop_instance_deprecated_alias(client, mock_manager):
     mock_manager.pause_instance_cascade.assert_called_once_with("test-instance")
 
 
+# ==================== Resume Instance Tests ====================
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_not_found(client, mock_manager):
+    """Test POST /instances/{instance_id}/resume with non-existent instance."""
+    mock_manager.get_instance.side_effect = KeyError("Instance not found: invalid-id")
+    
+    response = await client.post("/instances/invalid-id/resume")
+    
+    assert response.status_code == 404
+    data = response.json()
+    assert data["detail"]["code"] == "INSTANCE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_with_default_message(client, mock_manager):
+    """Test resuming with no body sends default 'resume' message."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id"],
+        "skipped_ids": []
+    })
+    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
+        message_id="msg-resume-123",
+        instance_id="test-instance-id",
+        status="queued"
+    ))
+
+    # No body - should use default "resume" message
+    response = await client.post("/instances/test-instance-id/resume")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert data["resumed_ids"] == ["test-instance-id"]
+    assert data["skipped_ids"] == []
+    assert data["message_id"] == "msg-resume-123"
+    
+    # Verify enqueue_message_via_jq was called with default message
+    mock_manager.enqueue_message_via_jq.assert_called_once_with(
+        instance_id="test-instance-id",
+        message="resume",
+        source="api",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_with_custom_message(client, mock_manager):
+    """Test resuming with custom message body."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id"],
+        "skipped_ids": []
+    })
+    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
+        message_id="msg-custom-456",
+        instance_id="test-instance-id",
+        status="queued"
+    ))
+
+    response = await client.post(
+        "/instances/test-instance-id/resume",
+        json={"message": "hello world"}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert data["message_id"] == "msg-custom-456"
+    
+    # Verify custom message was passed through
+    mock_manager.enqueue_message_via_jq.assert_called_once_with(
+        instance_id="test-instance-id",
+        message="hello world",
+        source="api",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_with_whitespace_message_uses_default(client, mock_manager):
+    """Test resuming with whitespace-only message falls back to default 'resume'."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id"],
+        "skipped_ids": []
+    })
+    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
+        message_id="msg-default-789",
+        instance_id="test-instance-id",
+        status="queued"
+    ))
+
+    # Whitespace-only message should be stripped to empty, then default to "resume"
+    response = await client.post(
+        "/instances/test-instance-id/resume",
+        json={"message": "   "}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert data["message_id"] == "msg-default-789"
+    
+    # Verify default message was used after stripping
+    mock_manager.enqueue_message_via_jq.assert_called_once_with(
+        instance_id="test-instance-id",
+        message="resume",
+        source="api",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_already_running_no_message_enqueued(client, mock_manager):
+    """Test resuming an already-running instance skips message enqueue."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    # Instance is in skipped_ids (already running, not paused)
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": [],
+        "skipped_ids": ["test-instance-id"]
+    })
+
+    response = await client.post("/instances/test-instance-id/resume")
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert data["resumed_ids"] == []
+    assert data["skipped_ids"] == ["test-instance-id"]
+    assert data["message_id"] is None  # No message enqueued
+    
+    # Verify enqueue_message_via_jq was NOT called
+    mock_manager.enqueue_message_via_jq.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_response_includes_message_id(client, mock_manager):
+    """Test that resume response includes message_id when message is enqueued."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id", "child-1"],
+        "skipped_ids": []
+    })
+    
+    expected_msg_id = "msg-from-resume-001"
+    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
+        message_id=expected_msg_id,
+        instance_id="test-instance-id",
+        status="queued"
+    ))
+
+    response = await client.post(
+        "/instances/test-instance-id/resume",
+        json={"message": "continue work"}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message_id"] == expected_msg_id
+
+
+@pytest.mark.asyncio
+async def test_resume_instance_backward_compatibility_no_body(client, mock_manager):
+    """Test resume endpoint works without any request body (backward compatibility)."""
+    mock_manager.get_instance.return_value = AsyncMock()
+    mock_manager.resume_instance_cascade = AsyncMock(return_value={
+        "resumed_ids": ["test-instance-id"],
+        "skipped_ids": []
+    })
+    mock_manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
+        message_id="msg-backward-compat",
+        instance_id="test-instance-id",
+        status="queued"
+    ))
+
+    # Send request without any body (using content='' to ensure no JSON)
+    response = await client.post(
+        "/instances/test-instance-id/resume",
+        content=b"",
+        headers={"content-type": "application/json"}
+    )
+    
+    assert response.status_code == 200
+    data = response.json()
+    assert data["resumed"] is True
+    assert data["message_id"] == "msg-backward-compat"
+    
+    # Verify default "resume" message was sent
+    mock_manager.enqueue_message_via_jq.assert_called_once_with(
+        instance_id="test-instance-id",
+        message="resume",
+        source="api",
+    )
+
+
 @pytest.mark.asyncio
 async def test_send_message_success(client, mock_manager):
     """Test POST /instances/{id}/messages."""

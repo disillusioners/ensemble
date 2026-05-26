@@ -262,19 +262,30 @@ async def resume_instance(
     # Cascade resume (sets PAUSED→RUNNING for target + children)
     result = await manager.resume_instance_cascade(instance_id)
 
-    # Send message through normal pipeline
-    message_text = (body.message if body else None) or "resume"
-    msg_result = await manager.enqueue_message_via_jq(
-        instance_id=instance_id,
-        message=message_text,
-        source="api",
-    )
+    msg_result = None
+    try:
+        # Only enqueue if this instance was actually resumed
+        if instance_id in result["resumed_ids"]:
+            message_text = (body.message.strip() if body and body.message else None) or "resume"
+            msg_result = await manager.enqueue_message_via_jq(
+                instance_id=instance_id,
+                message=message_text,
+                source="api",
+            )
+    except Exception:
+        # Rollback: re-pause all resumed instances
+        for rid in result.get("resumed_ids", []):
+            try:
+                manager._instance_repository.update(rid, status=InstanceStatus.PAUSED.value)
+            except Exception:
+                pass
+        raise
 
     return {
         "resumed": True,
         "resumed_ids": result["resumed_ids"],
         "skipped_ids": result["skipped_ids"],
-        "message_id": msg_result.message_id,
+        "message_id": msg_result.message_id if msg_result else None,
     }
 
 

@@ -96,8 +96,7 @@ export class MessageInputComponent {
   handleResume(): void {
     const text = this.message().trim();
     this.resumeInstance.emit(text);  // empty string means "resume" (backend default)
-    this.message.set('');
-    this.images.set([]);
+    // Don't clear here — parent clears on success via clearInput()
   }
 
   clearInput(): void {
