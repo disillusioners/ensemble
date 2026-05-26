@@ -1801,12 +1801,17 @@ class InstanceManager:
         """
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
 
-    async def resume_processing_job(self, instance_id: str, message: str = "resume") -> dict | None:
+    async def resume_processing_job(self, instance_id: str, message: str = "resume", silent: bool = False) -> dict | None:
         """Resume a paused instance's PROCESSING job from checkpoint.
 
-        Directly re-executes the existing job by calling _process_message_with_tracking()
-        with is_retry=False and the resume message. LangGraph loads the checkpoint
-        and appends the new message, continuing the conversation naturally.
+        Directly re-executes the existing job by calling _process_message_with_tracking().
+        When silent=False (default), appends the resume message to the conversation.
+        When silent=True, resumes from checkpoint without appending any new message.
+
+        Args:
+            instance_id: The instance ID.
+            message: The resume message text (ignored when silent=True and checkpoint exists).
+            silent: If True, resume from checkpoint without injecting a new message.
 
         Returns dict with result info, or None if no PROCESSING job found.
         """
@@ -1829,14 +1834,15 @@ class InstanceManager:
 
         try:
             # 3. Re-execute directly — bypasses queue entirely
-            # is_retry=False → graph_input has the new "resume" message
-            # LangGraph loads checkpoint AND appends new message
+            # When silent=True, is_retry=True → graph_input=None → pure checkpoint resume
+            # When silent=False, is_retry=False → graph_input has the new "resume" message
+            #   → LangGraph loads checkpoint AND appends new message
             result = await self._process_message_with_tracking(
                 instance_id=instance_id,
                 message=message,
                 message_id=message_id or str(uuid.uuid4()),
                 cancellation_token=cts.token,
-                is_retry=False,
+                is_retry=silent,
                 message_source="api",
             )
 

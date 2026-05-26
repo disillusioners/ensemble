@@ -263,10 +263,16 @@ async def resume_instance(
     result = await manager.resume_instance_cascade(instance_id)
 
     # Resume processing jobs for all resumed instances (including children)
+    # Target instance gets the user message; children resume silently from checkpoint
     resume_results = {}
     for rid in result["resumed_ids"]:
         try:
-            job_result = await manager.resume_processing_job(rid, message=message_text)
+            is_target = rid == instance_id
+            job_result = await manager.resume_processing_job(
+                rid,
+                message=message_text if is_target else "resume",
+                silent=not is_target,  # silent=True for children
+            )
             resume_results[rid] = job_result
         except Exception as e:
             logger.warning(f"Failed to resume job for instance {rid[:8]}...: {e}")
