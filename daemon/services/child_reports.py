@@ -217,7 +217,7 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{prefix}, below is the response: Completed {len(messages)} message(s)."
 
-    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None) -> tuple[bool, None]:
+    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None, force_notify: bool = False) -> tuple[bool, str | None]:
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we do not send duplicate completion reports:
@@ -231,9 +231,12 @@ Provide a concise summary:"""
             session: Database session.
             instance_id: The child instance ID to check.
             completed_message_id: The message ID that just completed (can be None).
+            force_notify: If True, handle stale reports from paused instances.
             
         Returns:
-            Tuple of (should_send, None): True if should proceed with sending report, False to skip.
+            Tuple of (should_send, stale_report_reason): 
+            - should_send: True if should proceed with sending report, False to skip.
+            - stale_report_reason: None if should_send=True, or reason string if skipped.
         """
         # Guard: Can't do idempotency check without message_id
         if completed_message_id is None:
@@ -290,12 +293,41 @@ Provide a concise summary:"""
         ).first()
         
         if existing_report is not None:
+            # Check if this is a stale report from a paused instance (force_notify case)
+            if force_notify:
+                parent = session.get(Instance, instance.parent_id)
+                if parent and parent.waiting_for > 0:
+                    # Parent still has children waiting - this report was never consumed
+                    # Delete the stale report and proceed with fresh notification
+                    logger.warning(
+                        f"STALE REPORT DETECTED for child {instance_id[:8]}... message {completed_message_id[:8]}...: "
+                        f"parent {instance.parent_id[:8]}... has waiting_for={parent.waiting_for} > 0, "
+                        f"deleting stale report {existing_report.message_id[:8]}... and proceeding"
+                    )
+                    session.delete(existing_report)
+                    logger.info(
+                        f"Idempotency check PASSED (force_notify): child {instance_id[:8]}..., "
+                        f"message {completed_message_id[:8]}..., stale report deleted"
+                    )
+                    return True, "stale_report_cleaned"
+                else:
+                    # Parent's waiting_for == 0, report was already consumed
+                    logger.info(
+                        f"Completion report already consumed for child {instance_id[:8]}... "
+                        f"message {completed_message_id[:8]}..., skipping (parent waiting_for=0)"
+                    )
+                    return False, "already_consumed"
+            
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
                 f"message {completed_message_id[:8]}..., skipping duplicate"
             )
-            return False, None
+            return False, "idempotency_skip"
         
+        logger.info(
+            f"Idempotency check PASSED: child {instance_id[:8]}..., "
+            f"message {completed_message_id[:8]}..., no existing report found"
+        )
         return True, None
 
     async def _create_completion_report(
@@ -539,7 +571,7 @@ Provide a concise summary:"""
             return f"{prefix}, below is the response:\n{last_assistant_content}"
         return None
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, force_notify: bool = False) -> None:
         """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -548,8 +580,9 @@ Provide a concise summary:"""
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
+            force_notify: If True, handle stale reports from paused instances (resume case).
         """
-        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
+        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}, force_notify={force_notify}")
         
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
         # Get instance's agent_id for the report
@@ -665,9 +698,14 @@ Provide a concise summary:"""
                 return
             
             # Idempotency checks
-            should_send = await self._should_send_completion_report(session, instance_id, completed_message_id)
-            if not should_send[0]:
-                logger.info(f"Instance {instance_id[:8]}... completion report already exists, skipping")
+            should_send, skip_reason = await self._should_send_completion_report(session, instance_id, completed_message_id, force_notify)
+            if not should_send:
+                if force_notify and skip_reason == "stale_report_cleaned":
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... force_notify=True, stale report was cleaned, proceeding with notification"
+                    )
+                else:
+                    logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
                 return
 
             # Check if this is a tool invocation (explore/experience)

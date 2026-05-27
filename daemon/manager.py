@@ -1846,8 +1846,9 @@ class InstanceManager:
                     logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
                     if hasattr(self, '_process_child_completion_and_notify_parent'):
                         logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
+                        # Use fresh message_id and force_notify=True for resume case
                         await self._process_child_completion_and_notify_parent(
-                            instance_id, message_id
+                            instance_id, message_id, force_notify=True
                         )
                         logger.info(f"Instance {instance_id[:8]}... child completion notification done")
                 except Exception as e:
@@ -1890,8 +1891,9 @@ class InstanceManager:
                 logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
                 if hasattr(self, '_process_child_completion_and_notify_parent'):
                     logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
+                    # Use fresh msg_id (not old message_id) to avoid idempotency mismatch
                     await self._process_child_completion_and_notify_parent(
-                        instance_id, message_id
+                        instance_id, msg_id, force_notify=True
                     )
                     logger.info(f"Instance {instance_id[:8]}... child completion notification done")
             except Exception as e:
