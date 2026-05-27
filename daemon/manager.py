@@ -1868,6 +1868,29 @@ class InstanceManager:
                 message_source="api",
             )
 
+            # Check if this instance should transition (completed, waiting_children, etc.)
+            # If instance is WAITING_CHILDREN, JobFeedbackObserver will complete the job
+            # when all children finish and instance transitions to completed.
+            skip_complete = False
+            try:
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, instance_id
+                )
+                if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                    logger.info(
+                        f"resume_processing_job: instance {instance_id[:8]}... is WAITING_CHILDREN, "
+                        f"deferring job completion for {old_job.job_id[:8]}..."
+                    )
+                    skip_complete = True
+            except Exception as e:
+                logger.warning(
+                    f"resume_processing_job: failed to check instance status for {instance_id[:8]}..., "
+                    f"proceeding with job completion: {e}"
+                )
+
+            if skip_complete:
+                return {"job_id": old_job.job_id, "message_id": message_id, "status": "waiting_children"}
+
             # 4. Complete the old job on success
             await self._job_queue_service.complete_job(
                 old_job.job_id,
