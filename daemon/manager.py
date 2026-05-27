@@ -1891,6 +1891,7 @@ class InstanceManager:
                 )
 
             if skip_complete:
+                logger.info(f"Instance {instance_id[:8]}... has {waiting_for} pending children, deferring job completion")
                 return {"job_id": old_job.job_id, "message_id": message_id, "status": "waiting_children"}
 
             # 4. Complete the old job on success
