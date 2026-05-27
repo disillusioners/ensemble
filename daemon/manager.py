@@ -1868,23 +1868,25 @@ class InstanceManager:
                 message_source="api",
             )
 
-            # Check if this instance is already WAITING_CHILDREN.
-            # If so, defer job completion — JobFeedbackObserver will complete the job
-            # when all children finish and instance transitions to completed.
+            # Check if this instance is waiting for children (waiting_for > 0).
+            # The waiting_for counter is the authoritative signal — not the status field.
+            # Status may be RUNNING during resume, but waiting_for accurately tracks pending work.
+            # If waiting_for > 0, defer job completion — JobFeedbackObserver will complete the job
+            # when all children finish and waiting_for decrements to 0.
             skip_complete = False
             try:
                 instance = await asyncio.to_thread(
                     self._instance_repository.get, instance_id
                 )
-                if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
-                    logger.info(
-                        f"resume_processing_job: instance {instance_id[:8]}... is WAITING_CHILDREN, "
-                        f"deferring job completion for {old_job.job_id[:8]}..."
-                    )
-                    skip_complete = True
+                waiting_for = instance.waiting_for if instance else 0
+                skip_complete = waiting_for > 0
+                logger.info(
+                    f"Instance {instance_id[:8]}... post-resume: status={instance.status if instance else 'N/A'}, "
+                    f"waiting_for={waiting_for}, skipping_completion={skip_complete}"
+                )
             except Exception as e:
                 logger.warning(
-                    f"resume_processing_job: failed to check instance status for {instance_id[:8]}..., "
+                    f"resume_processing_job: failed to check instance state for {instance_id[:8]}..., "
                     f"proceeding with job completion: {e}"
                 )
 
