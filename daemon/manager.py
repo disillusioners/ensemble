@@ -1868,8 +1868,8 @@ class InstanceManager:
                 message_source="api",
             )
 
-            # Check if this instance should transition (completed, waiting_children, etc.)
-            # If instance is WAITING_CHILDREN, JobFeedbackObserver will complete the job
+            # Check if this instance is already WAITING_CHILDREN.
+            # If so, defer job completion — JobFeedbackObserver will complete the job
             # when all children finish and instance transitions to completed.
             skip_complete = False
             try:
