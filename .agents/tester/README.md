@@ -60,7 +60,23 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-27 child-resume-message)
+## Test Results (Latest: 2026-05-28 waiting-children-skip)
+
+### WAITING_CHILDREN Skip in resume_processing_job (2026-05-28)
+- **File**: `tests/unit/test_resume_waiting_children.py`
+- **New Tests**: 6/6 PASS
+- **Regression**: 35/35 PASS (child_resume + tree_aware_pause_resume, zero failures)
+- **Bug Tested**: After pause/resume, parent's job completed prematurely despite `waiting_for > 0`
+- **Fix Location**: `daemon/manager.py` lines ~1871-1892 — WAITING_CHILDREN check before `complete_job()`
+- **Test Coverage**:
+  1. WAITING_CHILDREN → skips complete_job, returns `status: "waiting_children"`
+  2. RUNNING → completes job normally
+  3. Instance not found → falls through to complete
+  4. Repository exception → exception handler allows completion
+  5. PAUSED status → only WAITING_CHILDREN skips
+  6. Correct job_id/message_id in return value
+
+### WAITING_CHILDREN Skip Status: ✅ READY (6 new tests, 35 regression tests, 0 failures)
 
 ### Child Instance Resume — Message Appended (2026-05-27)
 - **Branch**: `fix/child-resume-message`
