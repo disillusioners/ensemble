@@ -1821,8 +1821,19 @@ class InstanceManager:
             instance_id
         )
         if not old_jobs:
-            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}..., nothing to resume")
-            return None
+            # Child instances don't have JobQueue entries (they use WorkerPool).
+            # Handle child resume by calling _process_message_with_tracking directly.
+            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
+            cts = CancellationTokenSource()
+            result = await self._process_message_with_tracking(
+                instance_id=instance_id,
+                message=message,
+                message_id=str(uuid.uuid4()),
+                cancellation_token=cts.token,
+                is_retry=silent,
+                message_source="api",
+            )
+            return {"instance_id": instance_id, "result": result}
 
         old_job = old_jobs[0]
         message_id = old_job.job_metadata.get("message_id") if old_job.job_metadata else None
