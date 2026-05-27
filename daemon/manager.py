@@ -1463,7 +1463,7 @@ class InstanceManager:
             session, instance_id, parent_id, report_message_id, waiting_for_remaining
         )
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, force_notify: bool = False) -> None:
         """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -1478,9 +1478,10 @@ class InstanceManager:
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
+            force_notify: If True, handle stale reports from paused instances (resume case).
         """
         return await self._child_reports_service._process_child_completion_and_notify_parent(
-            instance_id, completed_message_id
+            instance_id, completed_message_id, force_notify=force_notify
         )
 
     async def _send_error_report(

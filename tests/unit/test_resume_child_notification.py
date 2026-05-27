@@ -146,9 +146,9 @@ class TestChildNotificationWorkerPoolPath:
         call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
         expected_message_id = call_kwargs["message_id"]
 
-        # Verify correct args: instance_id and the fresh message_id
+        # Verify correct args: instance_id, the fresh message_id, and force_notify=True
         mock_manager._process_child_completion_and_notify_parent.assert_called_with(
-            instance_id, expected_message_id
+            instance_id, expected_message_id, force_notify=True
         )
 
         # Verify return value
@@ -221,13 +221,13 @@ class TestChildNotificationWorkerPoolPath:
         # Verify notification was called twice with different message_ids
         assert mock_manager._process_child_completion_and_notify_parent.call_count == 2
 
-        # First call with first message_id
+        # First call with first message_id and force_notify=True
         mock_manager._process_child_completion_and_notify_parent.assert_any_call(
-            instance_id, msg_id1
+            instance_id, msg_id1, force_notify=True
         )
-        # Second call with second message_id
+        # Second call with second message_id and force_notify=True
         mock_manager._process_child_completion_and_notify_parent.assert_any_call(
-            instance_id, msg_id2
+            instance_id, msg_id2, force_notify=True
         )
 
 
@@ -276,9 +276,13 @@ class TestChildNotificationJobQueuePath:
         # Verify _process_child_completion_and_notify_parent WAS called
         mock_manager._process_child_completion_and_notify_parent.assert_called_once()
 
-        # Verify correct args: instance_id and message_id from old_job
+        # Get the fresh message_id from _process_message_with_tracking call
+        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        fresh_message_id = call_kwargs["message_id"]
+
+        # Verify correct args: instance_id, fresh message_id, and force_notify=True
         mock_manager._process_child_completion_and_notify_parent.assert_called_with(
-            instance_id, message_id
+            instance_id, fresh_message_id, force_notify=True
         )
 
     @pytest.mark.asyncio
