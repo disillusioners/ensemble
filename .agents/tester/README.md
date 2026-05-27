@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-28 waiting-for-round2)
+## Test Results (Latest: 2026-05-28 resume-child-notification)
+
+### Child Completion Notification in Resume Path (2026-05-28)
+- **File**: `tests/unit/test_resume_child_notification.py`
+- **New Tests**: 9/9 PASS (notification called in both branches of resume_processing_job)
+- **Regression**: 85/85 PASS (child_resume + tree_aware + tree_traversal + pause_cascade + resume_waiting_children)
+- **Quick Fixes**: 2 (stale test expectations in test_child_resume.py — not a regression)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Bug Tested**: After resume, child completes but parent never gets notified
+- **Fix Location**: `daemon/manager.py` — `_process_child_completion_and_notify_parent()` call added
+- **Commits**: `8993d32` (new tests), `e2173c7` (stale expectation fix)
+
+### Notification Status: ✅ READY (9 new tests, 85 regression tests, 0 failures, dev.sh stable)
 
 ### waiting_for > 0 Check in resume_processing_job — Round 2 (2026-05-28)
 - **File**: `tests/unit/test_resume_waiting_children.py`
