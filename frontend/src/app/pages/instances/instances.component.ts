@@ -1,4 +1,4 @@
-import { Component, signal, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, signal, inject, OnInit, OnDestroy, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
@@ -6,7 +6,9 @@ import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
+import { ProjectService } from '../../services/project.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
+import { ProjectTabBarComponent } from '../../components/project-tab-bar/project-tab-bar.component';
 import type { Agent } from '../../models';
 
 @Component({
@@ -17,7 +19,8 @@ import type { Agent } from '../../models';
     RouterModule,
     MatButtonModule,
     MatIconModule,
-    InstanceListComponent
+    InstanceListComponent,
+    ProjectTabBarComponent
   ],
   templateUrl: './instances.component.html',
   styleUrl: './instances.component.scss'
@@ -27,9 +30,15 @@ export class InstancesComponent implements OnInit, OnDestroy {
   private readonly router = inject(Router);
   protected readonly instanceService = inject(InstanceService);
   private readonly tabStateService = inject(TabStateService);
+  private readonly projectService = inject(ProjectService);
 
   readonly agents = signal<Agent[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+
+  private tabEffect = effect(() => {
+    const projectId = this.tabStateService.activeProjectId();
+    this.instanceService.startPolling(projectId ?? undefined);
+  });
 
   /**
    * Get the current project context for navigation.
@@ -40,8 +49,18 @@ export class InstancesComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.loadAgents();
-    this.instanceService.startPolling();
+    this.projectService.listProjects().subscribe({
+      next: (response) => {
+        const projectIds = response.projects.map(p => p.project_id);
+        this.tabStateService.restoreState(projectIds);
+        this.instanceService.startPolling(this.tabStateService.activeProjectId() ?? undefined);
+        this.loadAgents();
+      },
+      error: (err) => {
+        console.error('Failed to load projects:', err);
+        this.loadAgents();
+      }
+    });
   }
 
   ngOnDestroy(): void {
