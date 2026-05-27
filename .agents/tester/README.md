@@ -60,7 +60,21 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-27 tree-aware-pause-resume-phase4)
+## Test Results (Latest: 2026-05-27 project-aware-url-routing)
+
+### Project-Aware Instance URL Routing (2026-05-27)
+- **Branch**: `latest`
+- **Commit**: c66075b (feature) + 86f46eb (test fix)
+- **Frontend Unit Tests**: 800/800 PASS (77 new routing tests, 22 suites)
+- **Browser E2E**: 4/4 PASS (URL routing, redirect, back-nav)
+- **ensure.md**: PASS — dev.sh stable (30s timeout)
+- **Quick Fixes**: 1 commit (variable scoping in home.component.spec.ts)
+- **New Route**: `/projects/:projectId/instances/:instanceId` resolves correctly
+- **Backward Compat**: Old `/instances/:id` redirects to `/projects/all/instances/:id`
+- **All 10 navigation points** verified producing correct URLs
+- See `.agents/tester/RESULTS/2026-05-27-project-aware-url-routing.md` for full report
+
+### Project-Aware URL Routing Status: ✅ READY (77 new tests, 0 regressions, all E2E pass, dev.sh stable)
 
 ### Tree-Aware Pause/Resume — Phase 4 (2026-05-27)
 - **Branch**: `latest`
