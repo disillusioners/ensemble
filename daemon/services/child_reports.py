@@ -549,6 +549,8 @@ Provide a concise summary:"""
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
         """
+        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
+        
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
         # Get instance's agent_id for the report
         instance_meta = self._instance_repository.get(instance_id)
@@ -562,7 +564,10 @@ Provide a concise summary:"""
             # Get instance metadata
             instance = session.get(Instance, instance_id)
             if instance is None:
+                logger.info(f"Instance {instance_id[:8]}... not found in DB, skipping")
                 return
+            
+            logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, waiting_for={instance.waiting_for}, status={instance.status}")
             
             # Not a child? Instance completed (no parent to send report to)
             # Check if we have active children - if so, wait for them before completing
@@ -576,6 +581,7 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... completed message but waiting for "
                         f"{instance.waiting_for} children, status=WAITING_CHILDREN"
                     )
+                    logger.info(f"Instance {instance_id[:8]}... has children (waiting_for>0), deferring completion")
                     # Emit status_change SSE event
                     if self._manager._live_hub:
                         try:
@@ -606,6 +612,7 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... waiting_for={instance.waiting_for}, pending={pending_count}, "
                         f"status=WAITING_CHILDREN"
                     )
+                    logger.info(f"Instance {instance_id[:8]}... has pending messages, deferring notification")
                     # Emit status_change SSE event
                     if self._manager._live_hub:
                         try:
@@ -619,6 +626,9 @@ Provide a concise summary:"""
                         "proceeding to COMPLETED (not waiting_children)",
                         instance_id[:8], pending_count
                     )
+                
+                # No children, no pending messages - safe to complete
+                logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
                 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
@@ -657,6 +667,7 @@ Provide a concise summary:"""
             # Idempotency checks
             should_send = await self._should_send_completion_report(session, instance_id, completed_message_id)
             if not should_send[0]:
+                logger.info(f"Instance {instance_id[:8]}... completion report already exists, skipping")
                 return
 
             # Check if this is a tool invocation (explore/experience)
@@ -665,6 +676,7 @@ Provide a concise summary:"""
                 logger.info(
                     f"Instance {instance_id[:8]}... completed (tool invocation, skipping parent report)"
                 )
+                logger.info(f"Instance {instance_id[:8]}... is tool invocation, skipping parent notification")
 
                 # Update child status to COMPLETED
                 instance.status = InstanceStatus.COMPLETED.value

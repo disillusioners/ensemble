@@ -1843,15 +1843,15 @@ class InstanceManager:
                 # Check if this instance is a child that has completed all work.
                 # This may create a completion report task for the parent.
                 try:
+                    logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
                     if hasattr(self, '_process_child_completion_and_notify_parent'):
+                        logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
                         await self._process_child_completion_and_notify_parent(
                             instance_id, message_id
                         )
+                        logger.info(f"Instance {instance_id[:8]}... child completion notification done")
                 except Exception as e:
-                    logger.error(
-                        f"Completion check failed for resumed child instance {instance_id[:8]}...: {e}",
-                        exc_info=True,
-                    )
+                    logger.error(f"Instance {instance_id[:8]}... child completion notification FAILED: {e}", exc_info=True)
 
                 return {"instance_id": instance_id, "job_id": None, "message_id": message_id}
             except asyncio.CancelledError:
@@ -1887,15 +1887,15 @@ class InstanceManager:
             # Check if this instance is a child that has completed all work.
             # This may create a completion report task for the parent.
             try:
+                logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
                 if hasattr(self, '_process_child_completion_and_notify_parent'):
+                    logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
                     await self._process_child_completion_and_notify_parent(
                         instance_id, message_id
                     )
+                    logger.info(f"Instance {instance_id[:8]}... child completion notification done")
             except Exception as e:
-                logger.error(
-                    f"Completion check failed for resumed instance {instance_id[:8]}...: {e}",
-                    exc_info=True,
-                )
+                logger.error(f"Instance {instance_id[:8]}... child completion notification FAILED: {e}", exc_info=True)
 
             # Check if this instance is waiting for children (waiting_for > 0).
             # The waiting_for counter is the authoritative signal — not the status field.

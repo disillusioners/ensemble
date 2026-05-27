@@ -361,7 +361,7 @@ class TestChildNotificationErrorHandling:
 
         # Verify error was logged
         assert any(
-            "Completion check failed" in record.message
+            "child completion notification FAILED" in record.message
             for record in caplog.records
         ), "Expected error log from notification failure"
 
@@ -397,7 +397,7 @@ class TestChildNotificationErrorHandling:
 
         # Verify error was logged
         assert any(
-            "Completion check failed" in record.message
+            "child completion notification FAILED" in record.message
             for record in caplog.records
         ), "Expected error log from notification failure"
 
@@ -434,7 +434,7 @@ class TestChildNotificationErrorHandling:
 
         # Verify the exception message is in the log (exc_info=True logs traceback)
         log_found = any(
-            "Completion check failed" in record.message and
+            "child completion notification FAILED" in record.message and
             error_message in record.message
             for record in caplog.records
         )
