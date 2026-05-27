@@ -4,6 +4,7 @@ import { Router, RouterModule } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../services/api.service';
+import { TabStateService } from '../../services/tab-state.service';
 import { InstanceService } from '../../services/instance.service';
 import { InstanceListComponent } from '../../components/instance-list/instance-list.component';
 import type { Agent } from '../../models';
@@ -25,9 +26,18 @@ export class InstancesComponent implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
   protected readonly instanceService = inject(InstanceService);
+  private readonly tabStateService = inject(TabStateService);
 
   readonly agents = signal<Agent[]>([]);
   readonly selectedAgent = signal<Agent | null>(null);
+
+  /**
+   * Get the current project context for navigation.
+   * Returns 'all' when on the All tab, or the project ID otherwise.
+   */
+  protected getProjectContext(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
 
   ngOnInit(): void {
     this.loadAgents();
@@ -68,7 +78,7 @@ export class InstancesComponent implements OnInit, OnDestroy {
     const agentPath = `./agents/${agent.id}`;
     this.api.createInstance(agentPath).subscribe({
       next: (instance) => {
-        this.router.navigate(['/instances', instance.instance_id]);
+        this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
       error: (err) => console.error('Failed to create instance:', err)
     });

@@ -7,6 +7,7 @@ import { MatListModule } from '@angular/material/list';
 import { Agent, InstanceInfo } from '../../models';
 import { AgentSwitcherComponent } from '../agent-switcher/agent-switcher.component';
 import { InstanceService } from '../../services/instance.service';
+import { TabStateService } from '../../services/tab-state.service';
 
 export interface InstanceTreeNode {
   instance: InstanceInfo;
@@ -22,6 +23,7 @@ export interface InstanceTreeNode {
 })
 export class InstanceListComponent implements AfterViewInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
+  private readonly tabStateService = inject(TabStateService);
 
   // Signal inputs
   readonly agents = input<Agent[]>([]);
@@ -118,6 +120,14 @@ export class InstanceListComponent implements AfterViewInit, OnDestroy {
     error: { bg: '#f43f5e20', text: '#f43f5e' },
     terminated: { bg: '#343541', text: '#6e6e80' },
   };
+
+  /**
+   * Get the current project context for navigation.
+   * Returns 'all' when on the All tab, or the project ID otherwise.
+   */
+  protected getProjectContext(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
 
   getAgentInfo(agentDir: string): Agent | undefined {
     const agentId = agentDir.split('/').pop() || agentDir;

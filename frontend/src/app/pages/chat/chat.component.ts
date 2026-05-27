@@ -320,7 +320,8 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.api.createInstance(agentPath, undefined, projectId).subscribe({
       next: (instance) => {
         // Instance will appear in instanceService via polling
-        this.router.navigate(['/instances', instance.instance_id]);
+        const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+        this.router.navigate(['/projects', projectContext, 'instances', instance.instance_id]);
       },
       error: (err) => {
         console.error('Failed to create instance:', err);

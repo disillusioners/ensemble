@@ -16,6 +16,7 @@ import { Subscription, switchMap, of, catchError, tap } from 'rxjs';
 import { JobService } from '../../services/job.service';
 import { JobSseService } from '../../services/job-sse.service';
 import { ProjectService } from '../../services/project.service';
+import { TabStateService } from '../../services/tab-state.service';
 import { QueueService } from '../../services/queue.service';
 import { ApiService } from '../../services/api.service';
 import { JobCardComponent } from '../../components/job-card/job-card.component';
@@ -55,6 +56,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly jobService = inject(JobService);
   private readonly jobSseService = inject(JobSseService);
   private readonly projectService = inject(ProjectService);
+  private readonly tabStateService = inject(TabStateService);
   private readonly queueService = inject(QueueService);
   private readonly api = inject(ApiService);
   private readonly dialog = inject(MatDialog);
@@ -625,7 +627,8 @@ export class JobsComponent implements OnInit, OnDestroy {
   }
 
   protected onDrawerViewInstance(instanceId: string): void {
-    this.router.navigate(['/instances', instanceId]);
+    const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+    this.router.navigate(['/projects', projectContext, 'instances', instanceId]);
   }
 
   protected getAgentDisplayName(agentId: string): string {

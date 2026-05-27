@@ -4,6 +4,7 @@ import { Router } from '@angular/router';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { ApiService } from '../../services/api.service';
 import { SseService } from '../../services/sse.service';
+import { TabStateService } from '../../services/tab-state.service';
 import { AgentSelectorComponent } from '../../components/agent-selector/agent-selector.component';
 import type { Agent, AgentCreate, InstanceInfo } from '../../models';
 
@@ -20,7 +21,16 @@ export class HomeComponent implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly router = inject(Router);
   private readonly sseService = inject(SseService);
+  private readonly tabStateService = inject(TabStateService);
   private pollInterval: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Get the current project context for navigation.
+   * Returns 'all' when on the All tab, or the project ID otherwise.
+   */
+  protected getProjectContext(): string {
+    return this.tabStateService.activeProjectId() ?? 'all';
+  }
 
   readonly agents = signal<Agent[]>([]);
   readonly instances = signal<InstanceInfo[]>([]);
@@ -104,7 +114,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.api.createInstance(agentPath).subscribe({
       next: (instance) => {
         this.instances.update(prev => [instance, ...prev]);
-        this.router.navigate(['/instances', instance.instance_id]);
+        this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
       error: (err) => {
         console.error('Failed to create instance:', err);
@@ -115,10 +125,11 @@ export class HomeComponent implements OnInit, OnDestroy {
   }
 
   protected onContinueInstance(instanceId: string): void {
+    const projectId = this.getProjectContext();
     if (instanceId === 'latest' && this.instances().length > 0) {
-      this.router.navigate(['/instances', this.instances()[0].instance_id]);
+      this.router.navigate(['/projects', projectId, 'instances', this.instances()[0].instance_id]);
     } else if (instanceId !== 'latest') {
-      this.router.navigate(['/instances', instanceId]);
+      this.router.navigate(['/projects', projectId, 'instances', instanceId]);
     }
   }
 
@@ -159,7 +170,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.api.createInstance(agentPath).subscribe({
       next: (instance) => {
         this.instances.update(prev => [instance, ...prev]);
-        this.router.navigate(['/instances', instance.instance_id]);
+        this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
       error: (err) => {
         console.error('Failed to start Mother instance:', err);
@@ -176,7 +187,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.api.createInstance(agentPath).subscribe({
       next: (instance) => {
         this.instances.update(prev => [instance, ...prev]);
-        this.router.navigate(['/instances', instance.instance_id]);
+        this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
       error: (err) => {
         console.error('Failed to create instance:', err);
@@ -188,7 +199,7 @@ export class HomeComponent implements OnInit, OnDestroy {
 
   protected onViewInstances(): void {
     if (this.instances().length > 0) {
-      this.router.navigate(['/instances', this.instances()[0].instance_id]);
+      this.router.navigate(['/projects', this.getProjectContext(), 'instances', this.instances()[0].instance_id]);
     }
   }
 }
