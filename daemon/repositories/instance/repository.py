@@ -18,6 +18,9 @@ from .models import Instance, InstanceHierarchy, InstanceStatus
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
 
+# Safety limit for tree traversal — prevents infinite loops from circular references
+_MAX_TRAVERSAL_DEPTH = 256
+
 
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
@@ -196,7 +199,7 @@ class SQLModelInstanceRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             current_id = instance_id
-            for _ in range(256):
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
                 instance = db_session.get(Instance, current_id)
                 if instance is None:
                     return None
@@ -222,7 +225,7 @@ class SQLModelInstanceRepository:
             
             result = [root_id]
             queue = [root_id]
-            for _ in range(256):
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
                 if not queue:
                     break
                 current_id = queue.pop(0)
@@ -247,7 +250,7 @@ class SQLModelInstanceRepository:
         with SQLModelSession(self.engine) as db_session:
             ancestors = []
             current_id = instance_id
-            for _ in range(256):
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
                 instance = db_session.get(Instance, current_id)
                 if instance is None or instance.parent_id is None:
                     break

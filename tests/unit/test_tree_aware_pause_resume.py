@@ -16,7 +16,6 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.cancellation import CancellationReason
 
 
 class TestTreeAwarePauseCascade:
