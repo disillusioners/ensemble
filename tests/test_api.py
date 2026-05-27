@@ -52,6 +52,11 @@ async def mock_manager():
         "created_at": "2024-01-01T00:00:00",
         "updated_at": "2024-01-01T00:00:00"
     })
+    manager.get_queue_stats = Mock(return_value={
+        "pending_count": 0,
+        "processing_count": 0,
+        "oldest_message_age_seconds": None
+    })
     # Mock async enqueue_message (worker pool path)
     manager.enqueue_message = AsyncMock(return_value=Mock(
         message_id="test-message-id",

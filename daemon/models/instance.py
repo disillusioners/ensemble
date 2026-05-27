@@ -54,6 +54,8 @@ class InstanceInfo(BaseModel):
     mcp_tool_names: list[str] | None = Field(default=None, description="List of MCP tool names available to this instance")
     created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
+    pending_count: int | None = Field(default=None, description="Count of incomplete message jobs (READY + PROCESSING + RETRYING)")
+    waiting_for: int | None = Field(default=None, description="Count of pending child completions")
 
     model_config = ConfigDict(
         json_schema_extra={

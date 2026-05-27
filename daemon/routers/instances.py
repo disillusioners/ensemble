@@ -176,6 +176,8 @@ async def get_instance(
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
+        waiting_for=instance_meta.get("waiting_for"),
+        pending_count=manager.get_queue_stats(instance_id).get("pending_count"),
     )
 
 
