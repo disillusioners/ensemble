@@ -639,42 +639,46 @@ class InstanceLifecycleService:
 
         # 4. Iterate over all nodes in the tree and resume each one
         for node_id in tree_ids:
-            meta = repo.get(node_id)
+            try:
+                meta = repo.get(node_id)
 
-            if meta is None:
-                logger.warning(f"Instance {node_id[:8]}... not found in DB, skipping resume")
+                if meta is None:
+                    logger.warning(f"Instance {node_id[:8]}... not found in DB, skipping resume")
+                    skipped_ids.append(node_id)
+                    continue
+
+                # Skip if not paused (already running or other status)
+                if meta.status != InstanceStatus.PAUSED.value:
+                    logger.info(f"Instance {node_id[:8]}... is not paused (status={meta.status}), skipping")
+                    skipped_ids.append(node_id)
+                    continue
+
+                # Determine waiting_for value:
+                # - If resuming from root/parent: waiting_for stays 0 for all nodes
+                # - If resuming from child: only ANCESTORS get waiting_for = 1
+                if is_root_resume:
+                    waiting_for_value = 0
+                else:
+                    # Only ancestors get waiting_for = 1, others stay at 0
+                    waiting_for_value = 1 if node_id in ancestor_ids else 0
+
+                # Update DB status to running and clear paused_at
+                repo.update(
+                    node_id,
+                    status=InstanceStatus.RUNNING.value,
+                    paused_at=None,  # Clear paused_at on resume
+                    waiting_for=waiting_for_value,
+                )
+                logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={waiting_for_value})")
+                resumed_ids.append(node_id)
+
+                # Emit status_change event for running status
+                await self._manager._live_hub.stream_status_change(
+                    node_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id
+                )
+            except Exception as e:
+                logger.error(f"Failed to resume node {node_id[:8]}...: {e}")
                 skipped_ids.append(node_id)
-                continue
-
-            # Skip if not paused (already running or other status)
-            if meta.status != InstanceStatus.PAUSED.value:
-                logger.info(f"Instance {node_id[:8]}... is not paused (status={meta.status}), skipping")
-                skipped_ids.append(node_id)
-                continue
-
-            # Determine waiting_for value:
-            # - If resuming from root/parent: waiting_for stays 0 for all nodes
-            # - If resuming from child: only ANCESTORS get waiting_for = 1
-            if is_root_resume:
-                waiting_for_value = 0
-            else:
-                # Only ancestors get waiting_for = 1, others stay at 0
-                waiting_for_value = 1 if node_id in ancestor_ids else 0
-
-            # Update DB status to running and clear paused_at
-            repo.update(
-                node_id,
-                status=InstanceStatus.RUNNING.value,
-                paused_at=None,  # Clear paused_at on resume
-                waiting_for=waiting_for_value,
-            )
-            logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={waiting_for_value})")
-            resumed_ids.append(node_id)
-
-            # Emit status_change event for running status
-            await self._manager._live_hub.stream_status_change(
-                node_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id
-            )
 
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 
