@@ -126,8 +126,10 @@ class TestChildInstanceResume:
         # Verify cancellation_token is a CancellationToken
         assert hasattr(call_kwargs["cancellation_token"], "is_cancelled")
 
-        # Verify return value
-        assert result == {"instance_id": instance_id, "job_id": None, "message_id": None}
+        # Verify return value includes the generated message_id
+        assert result["instance_id"] == instance_id
+        assert result["job_id"] is None
+        assert result["message_id"] == call_kwargs["message_id"]
 
     @pytest.mark.asyncio
     async def test_child_resume_silent_cascade_resume(self, instance_manager, mock_manager):
@@ -157,8 +159,10 @@ class TestChildInstanceResume:
         assert call_kwargs["is_retry"] is True
         assert call_kwargs["message_source"] == "cascade_resume"
 
-        # Verify return value
-        assert result == {"instance_id": instance_id, "job_id": None, "message_id": None}
+        # Verify return value includes the generated message_id
+        assert result["instance_id"] == instance_id
+        assert result["job_id"] is None
+        assert result["message_id"] == call_kwargs["message_id"]
 
     @pytest.mark.asyncio
     async def test_child_resume_cancelled_error_handling(self, instance_manager, mock_manager):
