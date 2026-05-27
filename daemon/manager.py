@@ -1823,17 +1823,28 @@ class InstanceManager:
         if not old_jobs:
             # Child instances don't have JobQueue entries (they use WorkerPool).
             # Handle child resume by calling _process_message_with_tracking directly.
+            meta = self._instance_repository.get(instance_id)
+            if meta and meta.status not in (InstanceStatus.PAUSED.value, InstanceStatus.RUNNING.value):
+                logger.warning(f"Child instance {instance_id[:8]}... not in PAUSED/RUNNING state (status={meta.status}), skipping resume")
+
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
             cts = CancellationTokenSource()
-            result = await self._process_message_with_tracking(
-                instance_id=instance_id,
-                message=message,
-                message_id=str(uuid.uuid4()),
-                cancellation_token=cts.token,
-                is_retry=silent,
-                message_source="api",
-            )
-            return {"instance_id": instance_id, "result": result}
+            try:
+                result = await self._process_message_with_tracking(
+                    instance_id=instance_id,
+                    message=message,
+                    message_id=str(uuid.uuid4()),
+                    cancellation_token=cts.token,
+                    is_retry=silent,
+                    message_source="cascade_resume",
+                )
+                return {"instance_id": instance_id, "job_id": None, "message_id": None}
+            except asyncio.CancelledError:
+                logger.info(f"Child resume cancelled for instance {instance_id[:8]}...")
+                return None
+            except Exception as e:
+                logger.error(f"Child resume failed for instance {instance_id[:8]}...: {e}")
+                raise
 
         old_job = old_jobs[0]
         message_id = old_job.job_metadata.get("message_id") if old_job.job_metadata else None
