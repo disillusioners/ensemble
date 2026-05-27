@@ -1829,16 +1829,31 @@ class InstanceManager:
 
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
             cts = CancellationTokenSource()
+            message_id = str(uuid.uuid4())
             try:
                 result = await self._process_message_with_tracking(
                     instance_id=instance_id,
                     message=message,
-                    message_id=str(uuid.uuid4()),
+                    message_id=message_id,
                     cancellation_token=cts.token,
                     is_retry=silent,
                     message_source="cascade_resume",
                 )
-                return {"instance_id": instance_id, "job_id": None, "message_id": None}
+
+                # Check if this instance is a child that has completed all work.
+                # This may create a completion report task for the parent.
+                try:
+                    if hasattr(self, '_process_child_completion_and_notify_parent'):
+                        await self._process_child_completion_and_notify_parent(
+                            instance_id, message_id
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Completion check failed for resumed child instance {instance_id[:8]}...: {e}",
+                        exc_info=True,
+                    )
+
+                return {"instance_id": instance_id, "job_id": None, "message_id": message_id}
             except asyncio.CancelledError:
                 logger.info(f"Child resume cancelled for instance {instance_id[:8]}...")
                 return None
@@ -1853,6 +1868,7 @@ class InstanceManager:
 
         # 2. Create fresh cancellation token
         cts = CancellationTokenSource()
+        msg_id = str(uuid.uuid4())
 
         try:
             # 3. Re-execute directly — bypasses queue entirely
@@ -1862,11 +1878,24 @@ class InstanceManager:
             result = await self._process_message_with_tracking(
                 instance_id=instance_id,
                 message=message,
-                message_id=str(uuid.uuid4()),
+                message_id=msg_id,
                 cancellation_token=cts.token,
                 is_retry=silent,
                 message_source="api",
             )
+
+            # Check if this instance is a child that has completed all work.
+            # This may create a completion report task for the parent.
+            try:
+                if hasattr(self, '_process_child_completion_and_notify_parent'):
+                    await self._process_child_completion_and_notify_parent(
+                        instance_id, message_id
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Completion check failed for resumed instance {instance_id[:8]}...: {e}",
+                    exc_info=True,
+                )
 
             # Check if this instance is waiting for children (waiting_for > 0).
             # The waiting_for counter is the authoritative signal — not the status field.
