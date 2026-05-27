@@ -1,7 +1,7 @@
 <div class="modal-container">
   <!-- Backdrop -->
   <div class="modal-backdrop" (click)="handleClose()"></div>
-  
+
   <!-- Modal -->
   <div class="modal-content animate-fade-in">
     <!-- Header -->
@@ -99,7 +99,7 @@
               formControlName="queue_id"
               class="form-select"
             >
-              <option value="">Default queue</option>
+              <option value="">Default queue (defer)</option>
               @for (queue of queues(); track queue.queue_id) {
                 <option [value]="queue.queue_id">
                   {{ queue.queue_name }} ({{ getQueueTypeLabel(queue.queue_type) }})
