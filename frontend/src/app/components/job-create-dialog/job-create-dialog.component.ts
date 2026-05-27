@@ -128,7 +128,7 @@ export class JobCreateDialogComponent implements OnInit, OnDestroy {
       next: (queues) => {
         this.queues.set(queues);
         // Default to system_defer_queue if available
-        const defaultQueue = queues.find(q => q.queue_id === 'system_defer_queue');
+        const defaultQueue = queues.find(q => q.queue_name === 'system_defer_queue');
         if (defaultQueue) {
           this.form.get('queue_id')?.setValue(defaultQueue.queue_id);
         }
