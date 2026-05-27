@@ -236,13 +236,13 @@ class SQLModelInstanceRepository:
             return result
 
     def get_ancestor_ids(self, instance_id: str) -> list[str]:
-        """Get all ancestor instance IDs (parent, grandparent, ..., root).
+        """Get all ancestor instance IDs (parent, grandparent, ..., up to root).
         
         Args:
             instance_id: Starting instance ID.
             
         Returns:
-            List of ancestor IDs from parent to root. Empty list if no parent.
+            List of ancestor IDs from parent to root (inclusive). Empty list if no parent.
         """
         with SQLModelSession(self.engine) as db_session:
             ancestors = []
