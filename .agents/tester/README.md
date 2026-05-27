@@ -60,7 +60,20 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-27 project-aware-url-routing)
+## Test Results (Latest: 2026-05-27 child-resume-message)
+
+### Child Instance Resume — Message Appended (2026-05-27)
+- **Branch**: `fix/child-resume-message`
+- **Commits**: `9d454fe` (fix) + `52d1950` (tests)
+- **New Child Resume Tests**: 8/8 PASS (`tests/unit/test_child_resume.py`)
+- **Regression**: 58/58 PASS (resume append + tree-aware + tree traversal)
+- **ensure.md**: PASS — dev.sh stable (30s timeout, clean shutdown)
+- **Quick Fixes**: 1 (is_cancelled property access in test)
+- **Fix**: `resume_processing_job()` else branch handles child instances (WorkerPool path)
+- **Verified**: CancelledError, general exceptions, fresh UUID, message_source="cascade_resume"
+- See `.agents/tester/RESULTS/2026-05-27-child-resume-message.md` for full report
+
+### Child Resume Status: ✅ READY (8 new tests, 58 regression tests, 0 failures, dev.sh stable)
 
 ### Project-Aware Instance URL Routing (2026-05-27)
 - **Branch**: `latest`
