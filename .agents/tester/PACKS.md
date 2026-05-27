@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 74 packs
-- Unit: 60 | Integration: 1 | Mock: 6 | E2E: 6
+- Total: 75 packs
+- Unit: 60 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -17,7 +17,7 @@
 | defer_race_condition_test | tests/job_queue/test_select_next_eligible_job.py | Defer job race condition fix: _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration | 2 min | 2026-05-25 | ✅ PASS (16/16, c4f6e17 fix, 0 failures, 1089 suite pass) |
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-05-25 | ✅ PASS (1089 passed, 19 skipped, defer-race-condition + 16 new tests, 0 regressions) |
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format, tool registration, agent definition, crash recovery | 2 min | 2026-04-24 | ✅ PASS (38 passed, 0 failed, 2 benign bugs found) |
-| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**, **project-aware URL routing (77 tests)**) | 2 min | 2026-05-27 | ✅ PASS (800/800, c66075b + 86f46eb, 77 new routing tests, 22 suites, 17s) |
+| frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**, **project-aware URL routing (77 tests)**) | 2 min | 2026-05-27 | ✅ PASS (800/800, commit 8fd82db + 917060a, instances tabs no regression) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | models_split_unit_test | tests/unit/test_models_split.py | Phase 2 models split: backward compat, __all__ completeness, cross-module refs, instantiation, HealthResponse, Pydantic behavior | 2 min | 2026-04-23 | ✅ PASS (30 passed, Phase 6 no regression) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-23 | ⚠️ FILE NOT FOUND (stale entry) |
@@ -93,6 +93,7 @@
 | stop_resume_spawn_e2e_test | test/packs/stop_resume_spawn_e2e_test.py | Stop→Resume→Spawn Instance: verify spawn_instance works after stop/resume, multiple cycles, no "no running event loop" | 5 min | 2026-05-15 | ✅ PASS (async def fix verified, spawn works after resume, 2 cycles, no errors) |
 | pause_ttl_cold_resume_e2e_test | test/packs/pause_ttl_cold_resume_e2e_test.py | Pause TTL + Cold Resume: pause→paused_at set→daemon restart→cold resume→completed, status transitions | 5 min | 2026-05-16 | ✅ PASS (9/9 steps, cold resume from checkpoint verified) |
 | project_tabs_e2e_test | frontend/e2e/project-tabs.spec.ts | Project tabs: default state, add/switch/close tab, persistence, menu filtering | 5 min | 2026-04-23 | ✅ PASS |
+| instances_project_tabs_e2e_test | frontend/e2e/instances-project-tabs.spec.ts | Instances page project tabs: visibility, switching, state persistence, filtering, empty state | 5 min | 2026-05-27 | ✅ PASS (5/5 scenarios, commit 917060a) |
 | mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-22 | ✅ PASS (8/8 checks, feature/fix-mcp-cold-load) |
 | mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-22 | ✅ PASS (16/16 checks, feature/fix-mcp-cold-load) |
 
