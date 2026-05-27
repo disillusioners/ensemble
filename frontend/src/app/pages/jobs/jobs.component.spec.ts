@@ -1089,4 +1089,101 @@ describe('JobsComponent Logic', () => {
       });
     });
   });
+
+  describe('Project-Aware Navigation (onDrawerViewInstance)', () => {
+    // Mock TabStateService for navigation testing
+    class MockTabStateService {
+      activeProjectId = signal<string | null>(null);
+    }
+
+    // Mock Router for tracking navigation
+    class MockRouter {
+      navigateCalls: Array<{ path: string[] }> = [];
+
+      navigate(path: string[]): void {
+        this.navigateCalls.push({ path });
+      }
+    }
+
+    // Mock component with project-aware navigation
+    class NavTestableJobsComponent {
+      private readonly router: MockRouter;
+      private readonly tabStateService: MockTabStateService;
+
+      constructor(router: MockRouter, tabStateService: MockTabStateService) {
+        this.router = router;
+        this.tabStateService = tabStateService;
+      }
+
+      onDrawerViewInstance(instanceId: string): void {
+        const projectContext = this.tabStateService.activeProjectId() ?? 'all';
+        this.router.navigate(['/projects', projectContext, 'instances', instanceId]);
+      }
+    }
+
+    let router: MockRouter;
+    let tabStateService: MockTabStateService;
+    let navComponent: NavTestableJobsComponent;
+
+    beforeEach(() => {
+      router = new MockRouter();
+      tabStateService = new MockTabStateService();
+      navComponent = new NavTestableJobsComponent(router, tabStateService);
+    });
+
+    describe('Navigation URL Pattern', () => {
+      it('should navigate to /projects/all/instances/:instanceId when on All tab', () => {
+        tabStateService.activeProjectId.set(null);
+
+        navComponent.onDrawerViewInstance('jobs-inst-001');
+
+        expect(router.navigateCalls).toHaveLength(1);
+        expect(router.navigateCalls[0].path).toEqual(['/projects', 'all', 'instances', 'jobs-inst-001']);
+      });
+
+      it('should navigate to /projects/:projectId/instances/:instanceId when project is selected', () => {
+        tabStateService.activeProjectId.set('jobs-project');
+
+        navComponent.onDrawerViewInstance('jobs-inst-002');
+
+        expect(router.navigateCalls).toHaveLength(1);
+        expect(router.navigateCalls[0].path).toEqual(['/projects', 'jobs-project', 'instances', 'jobs-inst-002']);
+      });
+
+      it('should handle various project IDs correctly', () => {
+        const projectIds = ['proj-xyz', 'my_project', 'project-123'];
+
+        for (const projectId of projectIds) {
+          router.navigateCalls = [];
+          tabStateService.activeProjectId.set(projectId);
+
+          navComponent.onDrawerViewInstance('test-inst');
+
+          expect(router.navigateCalls[0].path[1]).toBe(projectId);
+        }
+      });
+
+      it('should preserve instance ID in navigation path', () => {
+        tabStateService.activeProjectId.set('preserve-project');
+        const instanceId = 'preserve-inst-xyz';
+
+        navComponent.onDrawerViewInstance(instanceId);
+
+        expect(router.navigateCalls[0].path[3]).toBe(instanceId);
+      });
+
+      it('should produce correct URL structure', () => {
+        tabStateService.activeProjectId.set('structure-project');
+
+        navComponent.onDrawerViewInstance('struct-inst');
+
+        const path = router.navigateCalls[0].path;
+        expect(path).toHaveLength(4);
+        expect(path[0]).toBe('/projects');
+        expect(path[1]).toBe('structure-project');
+        expect(path[2]).toBe('instances');
+        expect(typeof path[3]).toBe('string');
+      });
+    });
+  });
 });

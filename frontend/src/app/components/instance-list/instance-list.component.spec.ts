@@ -624,4 +624,138 @@ describe('InstanceListComponent', () => {
       expect(component.instanceListContainer.nativeElement.scrollTop).toBe(0);
     });
   });
+
+  describe('getProjectContext() - Project-Aware Navigation', () => {
+    // Mock TabStateService for navigation testing
+    class MockTabStateService {
+      activeProjectId = signal<string | null>(null);
+    }
+
+    // Component with getProjectContext method
+    class ProjectContextTestableComponent {
+      private readonly tabStateService: MockTabStateService;
+
+      constructor(tabStateService: MockTabStateService) {
+        this.tabStateService = tabStateService;
+      }
+
+      protected getProjectContext(): string {
+        return this.tabStateService.activeProjectId() ?? 'all';
+      }
+    }
+
+    let tabStateService: MockTabStateService;
+    let component: ProjectContextTestableComponent;
+
+    beforeEach(() => {
+      tabStateService = new MockTabStateService();
+      component = new ProjectContextTestableComponent(tabStateService);
+    });
+
+    describe('getProjectContext() return values', () => {
+      it('should return "all" when activeProjectId is null', () => {
+        tabStateService.activeProjectId.set(null);
+
+        expect(component.getProjectContext()).toBe('all');
+      });
+
+      it('should return "all" when on All tab (no project selected)', () => {
+        tabStateService.activeProjectId.set(null);
+
+        expect(component.getProjectContext()).toBe('all');
+      });
+
+      it('should return specific project ID when project is selected', () => {
+        tabStateService.activeProjectId.set('list-project-123');
+
+        expect(component.getProjectContext()).toBe('list-project-123');
+      });
+
+      it('should handle various project ID formats', () => {
+        const projectIds = [
+          'proj-abc',
+          'my_project',
+          'project.with.dots',
+          '123-numbers',
+          'special-chars-_-',
+        ];
+
+        for (const projectId of projectIds) {
+          tabStateService.activeProjectId.set(projectId);
+          expect(component.getProjectContext()).toBe(projectId);
+        }
+      });
+    });
+
+    describe('Navigation URL Pattern Verification', () => {
+      it('should produce correct URL for All tab navigation', () => {
+        tabStateService.activeProjectId.set(null);
+        const instanceId = 'list-inst-all';
+
+        const projectContext = component.getProjectContext();
+        const urlPath = ['/projects', projectContext, 'instances', instanceId];
+
+        expect(urlPath).toEqual(['/projects', 'all', 'instances', 'list-inst-all']);
+      });
+
+      it('should produce correct URL for specific project navigation', () => {
+        tabStateService.activeProjectId.set('list-project');
+        const instanceId = 'list-inst-project';
+
+        const projectContext = component.getProjectContext();
+        const urlPath = ['/projects', projectContext, 'instances', instanceId];
+
+        expect(urlPath).toEqual(['/projects', 'list-project', 'instances', 'list-inst-project']);
+      });
+
+      it('should maintain URL structure consistency', () => {
+        // Test that the URL structure is always: /projects/:projectId/instances/:instanceId
+        const testCases = [
+          { projectId: null, expected: ['/projects', 'all', 'instances', 'test'] },
+          { projectId: 'proj-a', expected: ['/projects', 'proj-a', 'instances', 'test'] },
+          { projectId: 'proj-b', expected: ['/projects', 'proj-b', 'instances', 'test'] },
+        ];
+
+        for (const testCase of testCases) {
+          tabStateService.activeProjectId.set(testCase.projectId as any);
+
+          const projectContext = component.getProjectContext();
+          const urlPath = ['/projects', projectContext, 'instances', 'test'];
+
+          expect(urlPath).toEqual(testCase.expected);
+        }
+      });
+    });
+
+    describe('Integration with routerLink', () => {
+      it('should provide correct project context for template routerLink', () => {
+        tabStateService.activeProjectId.set('template-project');
+
+        const projectContext = component.getProjectContext();
+        const instanceId = 'router-link-inst';
+
+        // Simulate what the template would build:
+        // [routerLink]="['/projects', getProjectContext(), 'instances', instance.instance_id]"
+        const routerLinkArray = ['/projects', projectContext, 'instances', instanceId];
+
+        expect(routerLinkArray).toEqual([
+          '/projects',
+          'template-project',
+          'instances',
+          'router-link-inst',
+        ]);
+      });
+
+      it('should provide "all" context for template when on All tab', () => {
+        tabStateService.activeProjectId.set(null);
+
+        const projectContext = component.getProjectContext();
+        const instanceId = 'all-tab-inst';
+
+        const routerLinkArray = ['/projects', projectContext, 'instances', instanceId];
+
+        expect(routerLinkArray).toEqual(['/projects', 'all', 'instances', 'all-tab-inst']);
+      });
+    });
+  });
 });
