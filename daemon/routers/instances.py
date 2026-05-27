@@ -261,27 +261,27 @@ async def resume_instance(
 
     # Cascade resume (sets PAUSED→RUNNING for target + children)
     result = await manager.resume_instance_cascade(instance_id)
+    target_id = result.get("target_id", instance_id)
 
     # Resume processing jobs for all resumed instances (including children)
     # Target instance gets the user message; children resume silently from checkpoint
     resume_results = {}
     for rid in result["resumed_ids"]:
-        try:
-            is_target = rid == instance_id
-            job_result = await manager.resume_processing_job(
-                rid,
-                message=message_text if is_target else "resume",
-                silent=not is_target,  # silent=True for children
-            )
-            resume_results[rid] = job_result
-        except Exception as e:
-            logger.warning(f"Failed to resume job for instance {rid[:8]}...: {e}")
-            resume_results[rid] = {"error": str(e)}
+        is_target = rid == target_id
+        job_result = await manager.resume_processing_job(
+            rid,
+            message=message_text if is_target else "resume",
+            silent=not is_target,
+        )
+        if job_result is None:
+            logger.debug(f"No active PROCESSING job for instance {rid[:8]}... (was IDLE/WAITING_CHILDREN)")
+        resume_results[rid] = job_result if job_result is not None else {"status": "no_active_job"}
 
     return {
         "resumed": True,
         "resumed_ids": result["resumed_ids"],
         "skipped_ids": result["skipped_ids"],
+        "target_id": target_id,
         "resume_results": resume_results,
     }
 

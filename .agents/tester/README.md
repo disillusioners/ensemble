@@ -60,7 +60,22 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-26 resume-append-message)
+## Test Results (Latest: 2026-05-27 tree-aware-pause-resume-phase4)
+
+### Tree-Aware Pause/Resume — Phase 4 (2026-05-27)
+- **Branch**: `latest`
+- **Commits**: `56b76e7` (tree traversal tests) + `9f08b4c` (cascade lifecycle tests + quick fix)
+- **New Tree Traversal Tests**: 23/23 PASS (`tests/unit/test_tree_traversal.py`) — real in-memory SQLite
+- **New Cascade Lifecycle Tests**: 27/27 PASS (`tests/unit/test_tree_aware_pause_resume.py`) — waiting_for semantics verified
+- **Existing Cascade Tests**: 19/19 PASS (regression)
+- **API Regression**: 43/43 PASS
+- **Total**: 112/112 PASS, 0 regressions
+- **ensure.md**: PASS — dev.sh stable (30s timeout)
+- **Quick Fixes**: 1 commit (try-except per node in resume matching pause behavior)
+- **Critical Design Verified**: PAUSE resets all waiting_for=0, RESUME from root=all 0, RESUME from child=ancestors get 1
+- See `.agents/tester/RESULTS/2026-05-27-tree-aware-pause-resume-phase4.md` for full report
+
+### Phase 4 Status: ✅ READY (50 new tests, 0 regressions, waiting_for semantics verified, dev.sh stable)
 
 ### Resume — Message Appends Not Replaces (2026-05-26)
 - **Branch**: `latest`

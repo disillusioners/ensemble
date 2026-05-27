@@ -18,6 +18,9 @@ from .models import Instance, InstanceHierarchy, InstanceStatus
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
 
+# Safety limit for tree traversal — prevents infinite loops from circular references
+_MAX_TRAVERSAL_DEPTH = 256
+
 
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
@@ -180,6 +183,80 @@ class SQLModelInstanceRepository:
             if instance is None or instance.parent_id is None:
                 return None
         return self.get(instance.parent_id)
+
+    # --------------------------------------------------------
+    # TREE TRAVERSAL
+    # --------------------------------------------------------
+
+    def get_tree_root_id(self, instance_id: str) -> str | None:
+        """Get the root instance ID by traversing up the parent chain.
+        
+        Args:
+            instance_id: Starting instance ID.
+            
+        Returns:
+            Root instance ID, or None if instance not found.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            current_id = instance_id
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
+                instance = db_session.get(Instance, current_id)
+                if instance is None:
+                    return None
+                if instance.parent_id is None:
+                    return current_id
+                current_id = instance.parent_id
+            return None
+
+    def get_tree_ids(self, root_id: str) -> list[str]:
+        """Get all instance IDs in the tree starting from root_id (BFS).
+        
+        Args:
+            root_id: Root instance ID to start traversal.
+            
+        Returns:
+            List of instance IDs including root_id and all descendants.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            # Check root exists
+            root = db_session.get(Instance, root_id)
+            if root is None:
+                return []
+            
+            result = [root_id]
+            queue = [root_id]
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
+                if not queue:
+                    break
+                current_id = queue.pop(0)
+                child_ids = list(db_session.exec(
+                    select(InstanceHierarchy.child_id).where(InstanceHierarchy.parent_id == current_id)
+                ))
+                for child_id in child_ids:
+                    if child_id not in result:
+                        result.append(child_id)
+                        queue.append(child_id)
+            return result
+
+    def get_ancestor_ids(self, instance_id: str) -> list[str]:
+        """Get all ancestor instance IDs (parent, grandparent, ..., up to root).
+        
+        Args:
+            instance_id: Starting instance ID.
+            
+        Returns:
+            List of ancestor IDs from parent to root (inclusive). Empty list if no parent.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            ancestors = []
+            current_id = instance_id
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
+                instance = db_session.get(Instance, current_id)
+                if instance is None or instance.parent_id is None:
+                    break
+                ancestors.append(instance.parent_id)
+                current_id = instance.parent_id
+            return ancestors
 
     # --------------------------------------------------------
     # LIST
