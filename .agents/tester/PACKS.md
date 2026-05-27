@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 76 packs
-- Unit: 61 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 77 packs
+- Unit: 62 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -68,6 +68,7 @@
 | instance_termination_cleanup_unit_test | tests/job_queue/test_instance_termination_job_cleanup.py | Instance termination job cleanup: start_job terminal state checks, terminate_instance job sweep, orphan detection, find_jobs_by_instance FAILED status, shared constants | 2 min | 2026-05-26 | ✅ PASS (23/23, feature/fix-pause-job-complete, 0 regressions) |
 | pause_while_processing_unit_test | tests/job_queue/test_pause_while_processing.py | Pause while processing: CancelledError re-raise, pause vs shutdown distinction, concurrent.futures variant, normal completion unaffected | 2 min | 2026-05-26 | ✅ PASS (12/12, feature/fix-pause-job-complete, 0 regressions) |
 | resume_child_notification_test | tests/unit/test_resume_child_notification.py | Child completion notification in resume: WorkerPool path, JobQueue path, no-parent graceful, error handling (both branches) | 2 min | 2026-05-28 | ✅ PASS (9/9, resume-child-notification, 0 regressions) |
+| completion_report_idempotency_test | tests/unit/test_completion_report_idempotency.py | Completion report idempotency fix: force_notify stale delete, idempotency preserved, edge cases (waiting_for=0, multiple children, error handling), manager wrapper | 2 min | 2026-05-28 | ✅ PASS (11/11, force_notify idempotency fix, 0 regressions) |
 
 ## Integration Test Packs
 

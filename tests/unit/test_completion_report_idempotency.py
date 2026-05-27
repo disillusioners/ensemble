@@ -371,14 +371,14 @@ class TestEdgeCases:
     """Test suite for edge cases in the force_notify behavior."""
 
     @pytest.mark.asyncio
-    async def test_waiting_for_zero_with_stale_report_skips(
+    async def test_waiting_for_zero_with_stale_report_still_deletes(
         self, mock_manager, mock_events_service, mock_instance, mock_parent_instance_waiting_for_zero, mock_stale_report
     ):
-        """Edge case: waiting_for=0 with stale report + force_notify=True → skip.
+        """Edge case: waiting_for=0 with stale report + force_notify=True → deletes and proceeds.
 
-        When parent's waiting_for=0, it means all children have been processed
-        and the report was already consumed. Even with force_notify=True, we
-        should skip to avoid duplicate notifications.
+        P0b fix: The previous waiting_for > 0 check was dead code (pause resets waiting_for to 0).
+        With force_notify=True, we ALWAYS delete the stale report and proceed with fresh notification.
+        This is defense-in-depth - the main fix is the stale cleanup in resume_processing_job().
         """
         mock_instance.parent_id = mock_parent_instance_waiting_for_zero.instance_id
         mock_manager._instance_repository.get.return_value = mock_instance
@@ -408,17 +408,28 @@ class TestEdgeCases:
                     new_callable=AsyncMock,
                     return_value="Child completed with result"
                 ):
-                    await service._process_child_completion_and_notify_parent(
-                        "child-instance-123",
-                        "msg-resume-789",
-                        force_notify=True
-                    )
+                    with patch.object(
+                        service, "_create_completion_report",
+                        new_callable=AsyncMock,
+                        return_value=(MagicMock(), MagicMock(), "new-report-msg-123")
+                    ):
+                        with patch.object(
+                            service, "_create_completion_events",
+                            new_callable=AsyncMock,
+                            return_value=(MagicMock(), MagicMock())
+                        ):
+                            await service._process_child_completion_and_notify_parent(
+                                "child-instance-123",
+                                "msg-resume-789",
+                                force_notify=True
+                            )
 
-        # Verify stale report was NOT deleted (already consumed by all parents)
-        session.delete.assert_not_called()
+        # P0b fix: Stale report SHOULD be deleted when force_notify=True
+        # (regardless of waiting_for, which was dead code anyway)
+        session.delete.assert_called_once()
 
-        # Verify parent was NOT updated (notification skipped)
-        mock_update_parent.assert_not_called()
+        # Verify parent was updated (fresh notification sent)
+        mock_update_parent.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_force_notify_true_no_stale_report_proceeds_normally(

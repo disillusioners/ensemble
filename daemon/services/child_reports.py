@@ -295,29 +295,20 @@ Provide a concise summary:"""
         if existing_report is not None:
             # Check if this is a stale report from a paused instance (force_notify case)
             if force_notify:
-                parent = session.get(Instance, instance.parent_id)
-                if parent and parent.waiting_for > 0:
-                    # Parent still has children waiting - this report was never consumed
-                    # Delete the stale report and proceed with fresh notification
-                    logger.warning(
-                        f"STALE REPORT DETECTED for child {instance_id[:8]}... message {completed_message_id[:8]}...: "
-                        f"parent {instance.parent_id[:8]}... has waiting_for={parent.waiting_for} > 0, "
-                        f"deleting stale report {existing_report.message_id[:8]}... and proceeding"
-                    )
-                    session.delete(existing_report)
-                    logger.info(
-                        f"Idempotency check PASSED (force_notify): child {instance_id[:8]}..., "
-                        f"message {completed_message_id[:8]}..., stale report deleted"
-                    )
-                    return True, "stale_report_cleaned"
-                else:
-                    # Parent's waiting_for == 0, report was already consumed
-                    logger.info(
-                        f"Completion report already consumed for child {instance_id[:8]}... "
-                        f"message {completed_message_id[:8]}..., skipping (parent waiting_for=0)"
-                    )
-                    return False, "already_consumed"
-            
+                # P0b FIX: Delete stale report unconditionally and proceed with fresh notification.
+                # The stale cleanup in resume_processing_job() handles most cases, but this is
+                # defense-in-depth for any edge case where a stale report somehow matches.
+                logger.warning(
+                    f"STALE REPORT DETECTED for child {instance_id[:8]}... message {completed_message_id[:8]}...: "
+                    f"deleting stale report {existing_report.message_id[:8]}... and proceeding with fresh notification"
+                )
+                session.delete(existing_report)
+                logger.info(
+                    f"Idempotency check PASSED (force_notify): child {instance_id[:8]}..., "
+                    f"message {completed_message_id[:8]}..., stale report deleted"
+                )
+                return True, "stale_report_cleaned"
+
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
                 f"message {completed_message_id[:8]}..., skipping duplicate"
@@ -700,12 +691,7 @@ Provide a concise summary:"""
             # Idempotency checks
             should_send, skip_reason = await self._should_send_completion_report(session, instance_id, completed_message_id, force_notify)
             if not should_send:
-                if force_notify and skip_reason == "stale_report_cleaned":
-                    logger.warning(
-                        f"Instance {instance_id[:8]}... force_notify=True, stale report was cleaned, proceeding with notification"
-                    )
-                else:
-                    logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
+                logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
                 return
 
             # Check if this is a tool invocation (explore/experience)

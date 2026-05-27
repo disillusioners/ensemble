@@ -62,6 +62,18 @@ tests/
 
 ## Test Results (Latest: 2026-05-28 resume-child-notification)
 
+### Completion Report Idempotency Fix (2026-05-28)
+- **Files**: `tests/unit/test_completion_report_idempotency.py` (11 tests)
+- **New Tests**: 11/11 PASS (force_notify, stale report deletion, idempotency preserved, edge cases)
+- **Regression**: 4,829/4,831 PASS (2 pre-existing failures, 0 regressions)
+- **Quick Fixes**: 1 (manager wrapper missing `force_notify` parameter)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Bug Tested**: After resume, child's completion report found by idempotency check, parent never notified
+- **Fix Location**: `daemon/manager.py` + `daemon/services/child_reports.py`
+- **Commit**: `4e01668`
+
+### Idempotency Fix Status: ✅ READY (11 new tests, 4,829 regression tests, 0 regressions, dev.sh stable)
+
 ### Child Completion Notification in Resume Path (2026-05-28)
 - **File**: `tests/unit/test_resume_child_notification.py`
 - **New Tests**: 9/9 PASS (notification called in both branches of resume_processing_job)

@@ -340,3 +340,350 @@ class TestChildInstanceResume:
         assert hasattr(token, "is_cancelled")
         # Fresh token should not be cancelled (is_cancelled is a property, not a method)
         assert token.is_cancelled is False
+
+
+# ─── Test Class 2: Stale Completion Report Cleanup ─────────────────────────────────
+
+
+class MockInstanceMetaWithParent:
+    """Mock instance metadata with parent_id for testing stale report cleanup."""
+
+    def __init__(
+        self,
+        instance_id: str = "child-instance-123",
+        status: str = InstanceStatus.PAUSED.value,
+        parent_id: str = "parent-123"
+    ):
+        self.instance_id = instance_id
+        self.status = status
+        self.parent_id = parent_id
+
+
+class MockStaleReport:
+    """Mock stale completion report message."""
+
+    def __init__(self, message_id: str, source: str, parent_id: str = "parent-123"):
+        self.message_id = message_id
+        self.source = source
+        self.instance_id = parent_id  # Parent's queue
+
+
+class TestStaleCompletionReportCleanup:
+    """Test suite for stale completion report cleanup during resume.
+
+    These tests verify that resume_processing_job() cleans up stale completion
+    reports from the parent's message queue before resuming a child instance.
+    This prevents the parent from receiving outdated notifications with old msg_ids.
+    """
+
+    def _create_stale_test_mocks(
+        self,
+        instance_id: str,
+        parent_id: str,
+        stale_reports: list = None,
+        mock_process_child: bool = True
+    ):
+        """Create mocks for stale report cleanup tests.
+
+        Args:
+            instance_id: The child instance ID
+            parent_id: The parent instance ID
+            stale_reports: List of stale reports to return from query
+            mock_process_child: Whether to mock _process_child_completion_and_notify_parent
+
+        Returns:
+            Tuple of (instance_manager, mock_manager, mock_session, session_context)
+        """
+        from contextlib import contextmanager
+
+        # Create mock job queue service
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service._repository = MagicMock()
+        mock_job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
+
+        # Create mock queue repository
+        mock_queue_repository = MagicMock()
+
+        # Create mock instance repository
+        mock_instance_repository = MagicMock()
+        mock_instance_repository.get = MagicMock(
+            return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=parent_id)
+        )
+
+        # Create mock manager
+        mock_manager = MagicMock()
+        mock_manager._job_queue_service = mock_job_queue_service
+        mock_manager._queue_repository = mock_queue_repository
+        mock_manager._instance_repository = mock_instance_repository
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+
+        # Mock _process_child_completion_and_notify_parent if requested
+        if mock_process_child:
+            mock_manager._process_child_completion_and_notify_parent = AsyncMock()
+
+        # Create mock engine for Session
+        mock_engine = MagicMock()
+
+        # Create mock session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=parent_id))
+        exec_result = MagicMock()
+        exec_result.all = MagicMock(return_value=stale_reports or [])
+        mock_session.exec = MagicMock(return_value=exec_result)
+        mock_session.delete = MagicMock()
+
+        # Create context manager that yields the mock session
+        @contextmanager
+        def session_context(*args, **kwargs):
+            yield mock_session
+
+        # Create instance manager with all mocks
+        instance_manager = InstanceManager.__new__(InstanceManager)
+        instance_manager._job_queue_service = mock_job_queue_service
+        instance_manager._queue_repository = mock_queue_repository
+        instance_manager._instance_repository = mock_instance_repository
+        instance_manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+        instance_manager._engine = mock_engine  # Enable Session usage
+
+        if mock_process_child:
+            instance_manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
+
+        return instance_manager, mock_manager, mock_session, session_context
+
+    @pytest.mark.asyncio
+    async def test_stale_reports_are_cleaned_up_during_resume(self):
+        """Test 1: Stale reports are cleaned up during resume.
+
+        Scenario:
+        1. Child instance has a parent
+        2. Parent's queue has a stale completion report (with old msg_id)
+        3. resume_processing_job() is called
+        4. Stale report should be deleted from parent's queue
+        5. Fresh report (with new msg_id) will be created after completion
+        """
+        instance_id = "child-instance-123"
+        parent_id = "parent-123"
+        stale_msg_id = "msg-old-stale-123"
+
+        # Create stale report
+        stale_report = MockStaleReport(
+            message_id=stale_msg_id,
+            source=f"internal_report:{instance_id}:{stale_msg_id}",
+            parent_id=parent_id
+        )
+
+        # Setup manager with mocks
+        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
+            instance_id=instance_id,
+            parent_id=parent_id,
+            stale_reports=[stale_report]
+        )
+
+        # Patch Session to use our mock
+        with patch("daemon.manager.Session", session_context):
+            result = await instance_manager.resume_processing_job(
+                instance_id, message="resume", silent=False
+            )
+
+        # Verify _process_message_with_tracking was called
+        mock_manager._process_message_with_tracking.assert_called_once()
+
+        # Verify stale report was deleted
+        assert mock_session.delete.called, \
+            "Expected session.delete() to be called to remove stale report"
+        mock_session.delete.assert_called_with(stale_report)
+
+        # Verify session.commit() was called after deleting stale reports
+        assert mock_session.commit.called, \
+            "Expected session.commit() to be called after deleting stale reports"
+
+        # Verify _process_child_completion_and_notify_parent was called with fresh message_id
+        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
+        call_args = mock_manager._process_child_completion_and_notify_parent.call_args
+        assert call_args[0][0] == instance_id  # instance_id
+
+        # The second arg should be the fresh message_id (a UUID)
+        fresh_msg_id = call_args[0][1]
+        try:
+            uuid.UUID(fresh_msg_id)
+        except ValueError:
+            pytest.fail(f"Expected fresh message_id to be a UUID, got: {fresh_msg_id}")
+
+        # Verify force_notify=True
+        assert call_args[1]["force_notify"] is True
+
+    @pytest.mark.asyncio
+    async def test_multiple_stale_reports_for_same_child_are_all_cleaned_up(self):
+        """Test 2: Multiple stale reports for same child are all cleaned up.
+
+        Scenario:
+        1. Child instance has multiple stale reports from multiple failed attempts
+        2. resume_processing_job() is called
+        3. ALL stale reports should be deleted
+        4. Only the fresh report should remain after completion
+        """
+        instance_id = "child-instance-multi"
+        parent_id = "parent-multi"
+
+        # Create multiple stale reports with different msg_ids
+        stale_report_1 = MockStaleReport(
+            message_id="msg-old-attempt-1",
+            source=f"internal_report:{instance_id}:msg-old-attempt-1",
+            parent_id=parent_id
+        )
+        stale_report_2 = MockStaleReport(
+            message_id="msg-old-attempt-2",
+            source=f"internal_report:{instance_id}:msg-old-attempt-2",
+            parent_id=parent_id
+        )
+        stale_report_3 = MockStaleReport(
+            message_id="msg-old-attempt-3",
+            source=f"internal_report:{instance_id}:msg-old-attempt-3",
+            parent_id=parent_id
+        )
+        stale_reports = [stale_report_1, stale_report_2, stale_report_3]
+
+        # Setup manager with mocks
+        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
+            instance_id=instance_id,
+            parent_id=parent_id,
+            stale_reports=stale_reports
+        )
+
+        with patch("daemon.manager.Session", session_context):
+            result = await instance_manager.resume_processing_job(
+                instance_id, message="resume", silent=False
+            )
+
+        # Verify all 3 stale reports were deleted
+        assert mock_session.delete.call_count == 3, \
+            f"Expected 3 stale reports to be deleted, got {mock_session.delete.call_count} calls"
+
+        # Verify session.commit() was called after deleting stale reports
+        assert mock_session.commit.called, \
+            "Expected session.commit() to be called after deleting stale reports"
+
+        # Verify _process_child_completion_and_notify_parent was called once
+        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_stale_reports_for_other_children_are_not_cleaned_up(self):
+        """Test 3: Stale reports for OTHER children are NOT cleaned up.
+
+        Scenario:
+        1. Child A has a stale report
+        2. Child B has a stale report (but should NOT be returned by query)
+        3. Resume child A
+        4. Only child A's stale report should be deleted
+        5. Child B's stale report should remain (not queried)
+        """
+        instance_id_a = "child-a"
+        instance_id_b = "child-b"
+        parent_id = "parent-shared"
+
+        # Create stale reports for both children
+        stale_report_a = MockStaleReport(
+            message_id="msg-old-a",
+            source=f"internal_report:{instance_id_a}:msg-old-a",
+            parent_id=parent_id
+        )
+        # Note: stale_report_b is NOT included in the query results - this simulates
+        # the query only returning reports for the specific child being resumed
+
+        # Setup manager - only return child A's report
+        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
+            instance_id=instance_id_a,
+            parent_id=parent_id,
+            stale_reports=[stale_report_a]  # Only child A's report
+        )
+
+        with patch("daemon.manager.Session", session_context):
+            result = await instance_manager.resume_processing_job(
+                instance_id_a, message="resume", silent=False
+            )
+
+        # Verify only 1 report was deleted (child A's)
+        assert mock_session.delete.call_count == 1, \
+            f"Expected only 1 stale report to be deleted (child A's), got {mock_session.delete.call_count}"
+
+        # Verify session.commit() was called after deleting stale reports
+        assert mock_session.commit.called, \
+            "Expected session.commit() to be called after deleting stale reports"
+
+        # Verify the deleted report was child A's
+        mock_session.delete.assert_called_with(stale_report_a)
+
+    @pytest.mark.asyncio
+    async def test_no_stale_reports_resume_still_works(self):
+        """Test 4: No stale reports — resume still works.
+
+        Scenario:
+        1. Child instance has no stale reports in parent's queue
+        2. resume_processing_job() is called
+        3. Fresh report should be created successfully
+        4. No errors should occur
+        """
+        instance_id = "child-no-stale"
+        parent_id = "parent-no-stale"
+
+        # Setup manager with no stale reports
+        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
+            instance_id=instance_id,
+            parent_id=parent_id,
+            stale_reports=[]  # No stale reports
+        )
+
+        with patch("daemon.manager.Session", session_context):
+            result = await instance_manager.resume_processing_job(
+                instance_id, message="resume", silent=False
+            )
+
+        # Verify resume completed successfully
+        assert result is not None
+        assert result["instance_id"] == instance_id
+
+        # Verify _process_message_with_tracking was called
+        mock_manager._process_message_with_tracking.assert_called_once()
+
+        # Verify _process_child_completion_and_notify_parent was called with fresh msg_id
+        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
+        call_args = mock_manager._process_child_completion_and_notify_parent.call_args
+        fresh_msg_id = call_args[0][1]
+        try:
+            uuid.UUID(fresh_msg_id)
+        except ValueError:
+            pytest.fail(f"Expected fresh message_id to be a UUID, got: {fresh_msg_id}")
+
+    @pytest.mark.asyncio
+    async def test_child_without_parent_no_stale_cleanup(self, instance_manager, mock_manager):
+        """Edge case: Child without parent — stale cleanup skipped.
+
+        When a child instance has no parent_id, the stale report cleanup
+        should be skipped entirely (no database query).
+        """
+        instance_id = "orphan-child"
+
+        # Setup: Child has NO parent (parent_id is None) - use regular MockInstanceMeta
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[]
+        )
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(instance_id=instance_id, status=InstanceStatus.PAUSED.value)
+        )
+
+        mock_manager._process_child_completion_and_notify_parent = AsyncMock()
+
+        # Note: No _engine means the cleanup is skipped in test mode
+        # The code checks: if hasattr(self, '_engine') and self._engine
+        # Since instance_manager doesn't have _engine, it logs debug and skips
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=False
+        )
+
+        # Verify resume completed successfully
+        assert result is not None
+        assert result["instance_id"] == instance_id
+
+        # Verify _process_message_with_tracking was called
+        mock_manager._process_message_with_tracking.assert_called_once()
