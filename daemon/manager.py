@@ -1825,7 +1825,7 @@ class InstanceManager:
             # Handle child resume by calling _process_message_with_tracking directly.
             meta = self._instance_repository.get(instance_id)
             if meta and meta.status not in (InstanceStatus.PAUSED.value, InstanceStatus.RUNNING.value):
-                logger.warning(f"Child instance {instance_id[:8]}... not in PAUSED/RUNNING state (status={meta.status}), skipping resume")
+                logger.warning(f"Child instance {instance_id[:8]}... not in PAUSED/RUNNING state (status={meta.status}), unexpected state")
 
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
             cts = CancellationTokenSource()
