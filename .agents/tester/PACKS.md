@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 72 packs
-- Unit: 58 | Integration: 1 | Mock: 6 | E2E: 6
+- Total: 74 packs
+- Unit: 60 | Integration: 1 | Mock: 6 | E2E: 6
 
 ## Unit Test Packs
 
@@ -47,6 +47,8 @@
 | memory_compaction_unit_test | tests/unit/tools/test_inner_soul_compaction.py | Phase 3 compaction: file locking, atomic writes, deduplication, structure preservation | 2 min | 2026-05-19 | ✅ PASS (42 tests, feature/unified-memory-architecture) |
 | memory_archive_unit_test | tests/unit/tools/test_archive_lifecycle.py | Phase 4 archive: path validation, traversal protection, symlinks, auto-archive, rate limiting | 2 min | 2026-05-19 | ✅ PASS (29 tests, feature/unified-memory-architecture) |
 | memory_integration_test | tests/test_memory_integration.py | Integration: full lifecycle, compound requests, concurrent writes, RAG redirect, edge cases, regression | 2 min | 2026-05-19 | ✅ PASS (28 tests, feature/unified-memory-architecture) |
+| tree_traversal_unit_test | tests/unit/test_tree_traversal.py | Repository tree traversal: get_tree_root_id, get_tree_ids, get_ancestor_ids (real in-memory SQLite) | 2 min | 2026-05-27 | ✅ PASS (23/23, Phase 4 tree-aware pause/resume) |
+| tree_aware_cascade_unit_test | tests/unit/test_tree_aware_pause_resume.py | Cascade pause/resume: waiting_for semantics, full-tree behavior, router silent flag, edge cases | 2 min | 2026-05-27 | ✅ PASS (27/27, Phase 4 tree-aware pause/resume) |
 | memory_edge_cases_test | tests/unit/tools/test_memory_edge_cases.py | Edge cases: path traversal, symlinks, rate limiting, compaction boundaries, concurrent writes, collision, unicode | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
 | cn_tools_unit_test | tests/unit/tools/test_critical_notes.py | Critical Notes tools: add (validation, categories, priorities), merge (keyword overlap, shorter summary), eviction (priority order, max capacity), list, remove | 2 min | 2026-05-20 | ✅ PASS (36 tests, feature/critical-notes Phase 5) |
 | cn_injection_unit_test | tests/unit/test_critical_notes_injection.py | format_project_context injection: CN section formatting, priority icons, deduplication, non-dict skip, reference handling | 2 min | 2026-05-20 | ✅ PASS (14 tests, feature/critical-notes Phase 5) |
