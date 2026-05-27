@@ -95,7 +95,9 @@ export class InstancesComponent implements OnInit, OnDestroy {
     }
 
     const agentPath = `./agents/${agent.id}`;
-    this.api.createInstance(agentPath).subscribe({
+    const projectId = this.getProjectContext();
+    const actualProjectId = projectId === 'all' ? undefined : projectId;
+    this.api.createInstance(agentPath, undefined, actualProjectId).subscribe({
       next: (instance) => {
         this.router.navigate(['/projects', this.getProjectContext(), 'instances', instance.instance_id]);
       },
