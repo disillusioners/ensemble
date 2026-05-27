@@ -565,7 +565,7 @@ class TestPausedAtField:
     async def test_pause_single_sets_paused_at_field(self, mock_manager):
         """Verify _pause_single() sets paused_at field via repository update."""
         instance_id = "test-pause-instance"
-        
+
         # Track calls to update
         update_calls = []
         def track_update(*args, **kwargs):
@@ -575,28 +575,32 @@ class TestPausedAtField:
             result.instance_id = instance_id
             return result
         mock_manager._instance_repository.update = track_update
-        
+
+        # Mock the new tree traversal methods
+        mock_manager._instance_repository.get_tree_root_id.return_value = instance_id
+        mock_manager._instance_repository.get_tree_ids.return_value = [instance_id]
+
         # Create mock meta for the instance
         mock_meta = MagicMock()
         mock_meta.instance_id = instance_id
         mock_meta.status = "running"
         mock_meta.waiting_for = 0
         mock_manager._instance_repository.get.return_value = mock_meta
-        
+
         # Call pause_instance_cascade
         from daemon.manager import InstanceManager
         await InstanceManager.pause_instance_cascade(mock_manager, instance_id)
-        
+
         # Verify update was called with paused_at set
         assert len(update_calls) >= 1, "update() should have been called"
-        
+
         # Find the call that updates status to paused
         pause_update = None
         for call in update_calls:
             if call.get('status') == 'paused':
                 pause_update = call
                 break
-        
+
         assert pause_update is not None, "update() should have been called with status='paused'"
         assert 'paused_at' in pause_update, "paused_at should be included in update"
         assert pause_update['paused_at'] is not None, "paused_at should not be None"

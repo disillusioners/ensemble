@@ -1,7 +1,7 @@
 """Tests for pause_instance_cascade functionality.
 
-Tests the cascade pause feature that recursively pauses instances and their children
-using DFS traversal. Verifies proper handling of:
+Tests the cascade pause feature that pauses instances and their children
+using tree traversal helpers. Verifies proper handling of:
 - Single instances without children
 - Instances with direct children
 - Nested child hierarchies
@@ -58,11 +58,7 @@ class TestPauseInstanceCascade:
         children: list[str] | None = None,
         waiting_for: int = 0,
     ) -> Instance:
-        """Create a mock Instance object.
-
-        Note: The repository's _enrich_instance converts children from JSON string
-        to a Python list, so we mock with a list directly.
-        """
+        """Create a mock Instance object."""
         instance = MagicMock(spec=Instance)
         instance.instance_id = instance_id
         instance.status = status
@@ -81,8 +77,9 @@ class TestPauseInstanceCascade:
         - update called with status='paused' and paused_at
         """
         instance_id = "test-instance-123"
-        # First call: get instance at line 485
-        # Second call: _pause_single at line 433
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = instance_id
+        mock_repo.get_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -92,7 +89,6 @@ class TestPauseInstanceCascade:
         mock_registry.cancel_by_instance.assert_called_once_with(
             instance_id, CancellationReason.USER_STOPPED
         )
-        # Now uses update() with paused_at instead of update_status()
         mock_repo.update.assert_called_once()
         call_kwargs = mock_repo.update.call_args[1]
         assert call_kwargs["status"] == "paused"
@@ -105,12 +101,16 @@ class TestPauseInstanceCascade:
 
         Verifies:
         - paused_ids contains parent and all children
-        - DFS traversal pauses children first, then parent
-        - update called 3 times (once per instance) with paused_at
+        - All instances are paused using tree traversal
+        - update called for each instance
         """
         parent_id = "parent-instance"
         child1_id = "child-1"
         child2_id = "child-2"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -125,10 +125,9 @@ class TestPauseInstanceCascade:
 
         result = await lifecycle_service.pause_instance_cascade(parent_id)
 
-        # All instances should be paused (children first, then parent)
+        # All instances should be paused
         assert set(result["paused_ids"]) == {parent_id, child1_id, child2_id}
         assert result["skipped_ids"] == []
-        # Now uses update() with paused_at instead of update_status()
         assert mock_repo.update.call_count == 3
         # Verify all updates have paused_at
         for call in mock_repo.update.call_args_list:
@@ -147,13 +146,16 @@ class TestPauseInstanceCascade:
 
         Verifies:
         - All 4 instances are paused
-        - DFS traversal: child1 → grandchild1 → child2 → parent
-        - All updates include paused_at
+        - Tree traversal handles nested hierarchy
         """
         parent_id = "parent"
         child1_id = "child1"
         child2_id = "child2"
         grandchild_id = "grandchild1"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, grandchild_id, child2_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -172,7 +174,6 @@ class TestPauseInstanceCascade:
 
         assert set(result["paused_ids"]) == {parent_id, child1_id, child2_id, grandchild_id}
         assert result["skipped_ids"] == []
-        # Now uses update() with paused_at
         assert mock_repo.update.call_count == 4
 
     @pytest.mark.asyncio
@@ -186,6 +187,8 @@ class TestPauseInstanceCascade:
         - update NOT called (no change needed)
         """
         instance_id = "paused-instance"
+        mock_repo.get_tree_root_id.return_value = instance_id
+        mock_repo.get_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
@@ -213,6 +216,10 @@ class TestPauseInstanceCascade:
         child1_id = "child1-running"
         child2_id = "child2-paused"
 
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+
         def get_side_effect(instance_id):
             if instance_id == parent_id:
                 return self._make_instance(parent_id, status="running", children=[child1_id, child2_id])
@@ -227,7 +234,7 @@ class TestPauseInstanceCascade:
         result = await lifecycle_service.pause_instance_cascade(parent_id)
 
         assert set(result["paused_ids"]) == {parent_id, child1_id}
-        assert result["skipped_ids"] == [child2_id]
+        assert set(result["skipped_ids"]) == {child2_id}
         # Only 2 instances should have update called with paused_at
         assert mock_repo.update.call_count == 2
 
@@ -237,19 +244,22 @@ class TestPauseInstanceCascade:
 
         Verifies:
         - paused_ids is empty
-        - skipped_ids is empty
+        - skipped_ids contains the instance (falls back to instance_id, then skips due to not found)
         - No crashes or errors
-        - No interactions with registry or repo update
+        - cancel_by_instance NOT called (no instance to cancel)
         """
         instance_id = "nonexistent-instance"
-        mock_repo.get.return_value = None
+        mock_repo.get_tree_root_id.return_value = None  # Root not found
+        mock_repo.get_tree_ids.return_value = [instance_id]  # Falls back to instance_id
+        mock_repo.get.return_value = None  # Instance doesn't exist
 
         result = await lifecycle_service.pause_instance_cascade(instance_id)
 
         assert result["paused_ids"] == []
-        assert result["skipped_ids"] == []
+        # Falls back to instance_id, but that instance doesn't exist, so skipped
+        assert result["skipped_ids"] == [instance_id]
+        # cancel_by_instance is NOT called for non-existent instances
         mock_registry.cancel_by_instance.assert_not_called()
-        mock_repo.update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pause_child_becomes_paused_during_cascade(self, lifecycle_service, mock_repo, mock_registry):
@@ -260,6 +270,10 @@ class TestPauseInstanceCascade:
         """
         parent_id = "parent"
         child_id = "child"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -297,6 +311,10 @@ class TestPauseInstanceCascade:
         child_id = "child"
         grandchild_id = "grandchild"
 
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child_id, grandchild_id]
+
         def get_side_effect(instance_id):
             if instance_id == parent_id:
                 return self._make_instance(parent_id, status="running", children=[child_id])
@@ -316,33 +334,6 @@ class TestPauseInstanceCascade:
         assert mock_repo.update.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_pause_circular_reference_detected(self, lifecycle_service, mock_repo, mock_registry):
-        """Test that circular references are detected and skipped.
-
-        Scenario: Parent's children includes itself (A -> [A]).
-
-        Verifies:
-        - No infinite recursion (warning is logged)
-        - The circular child is added to skipped_ids during cascade
-        - Parent still gets paused (root call proceeds)
-        """
-        instance_id = "circular-instance"
-
-        # Create an instance where children includes itself
-        mock_repo.get.return_value = self._make_instance(
-            instance_id, status="running", children=[instance_id]
-        )
-
-        result = await lifecycle_service.pause_instance_cascade(instance_id)
-
-        # Parent is paused (root call proceeds)
-        assert result["paused_ids"] == [instance_id]
-        # The circular reference is detected during recursion and skipped
-        assert result["skipped_ids"] == [instance_id]
-        # Only one update should be called
-        assert mock_repo.update.call_count == 1
-
-    @pytest.mark.asyncio
     async def test_pause_child_exception_does_not_block_siblings(self, lifecycle_service, mock_repo, mock_registry):
         """Test that an exception when pausing one child doesn't block siblings.
 
@@ -359,6 +350,10 @@ class TestPauseInstanceCascade:
         child1_id = "child1"
         child2_id = "child2"
         child3_id = "child3"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id, child3_id]
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -383,29 +378,6 @@ class TestPauseInstanceCascade:
         assert mock_repo.update.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_pause_depth_limit_protection(self, lifecycle_service, mock_repo, mock_registry):
-        """Test that depth limit protection prevents excessive recursion.
-
-        Scenario: Call with _depth=257 (exceeds limit of 256).
-
-        Verifies:
-        - Returns immediately with skipped_ids containing the instance
-        - No further processing occurs
-        """
-        instance_id = "deep-instance"
-        mock_repo.get.return_value = self._make_instance(instance_id, status="running")
-
-        # Call with _depth exceeding the limit (257 > 256)
-        result = await lifecycle_service.pause_instance_cascade(instance_id, _depth=257)
-
-        # Should skip due to depth limit
-        assert result["skipped_ids"] == [instance_id]
-        assert result["paused_ids"] == []
-        # Should not attempt to pause or update status
-        mock_registry.cancel_by_instance.assert_not_called()
-        mock_repo.update.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_pause_parent_with_waiting_for_resets_counter(self, lifecycle_service, mock_repo, mock_registry):
         """Test that pausing a parent with waiting_for=3 resets waiting_for to 0.
 
@@ -419,6 +391,8 @@ class TestPauseInstanceCascade:
         """
         parent_id = "parent-waiting"
 
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id]
         mock_repo.get.return_value = self._make_instance(
             parent_id, status="running", waiting_for=3
         )
@@ -446,6 +420,8 @@ class TestPauseInstanceCascade:
         """
         parent_id = "parent-not-waiting"
 
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id]
         mock_repo.get.return_value = self._make_instance(
             parent_id, status="running", waiting_for=0
         )
@@ -473,6 +449,8 @@ class TestPauseInstanceCascade:
         """
         instance_id = "leaf-instance"
 
+        mock_repo.get_tree_root_id.return_value = instance_id
+        mock_repo.get_tree_ids.return_value = [instance_id]
         mock_repo.get.return_value = self._make_instance(
             instance_id, status="running", children=[], waiting_for=0
         )
@@ -540,30 +518,45 @@ class TestResumeInstanceCascade:
     @pytest.mark.asyncio
     async def test_resume_single_instance_no_children(self, lifecycle_service, mock_repo):
         """Test resuming a single paused instance with no children.
-        
+
         Verifies:
         - resumed_ids contains the instance
         - skipped_ids is empty
         - update called with status='running' and paused_at=None
+        - target_id is returned
         """
         instance_id = "test-instance-123"
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = instance_id
+        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
 
         result = await lifecycle_service.resume_instance_cascade(instance_id)
 
         assert result["resumed_ids"] == [instance_id]
         assert result["skipped_ids"] == []
+        assert result["target_id"] == instance_id
         mock_repo.update.assert_called_once()
         call_kwargs = mock_repo.update.call_args[1]
         assert call_kwargs["status"] == "running"
         assert call_kwargs["paused_at"] is None
+        assert call_kwargs["waiting_for"] == 0  # From root resume, waiting_for stays 0
 
     @pytest.mark.asyncio
     async def test_resume_instance_with_children(self, lifecycle_service, mock_repo):
-        """Test resuming a parent instance with direct children."""
+        """Test resuming a parent instance with direct children.
+
+        When resuming from root, all nodes get waiting_for=0.
+        """
         parent_id = "parent-instance"
         child1_id = "child-1"
         child2_id = "child-2"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_ancestor_ids.return_value = []  # No ancestors for root
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -580,21 +573,66 @@ class TestResumeInstanceCascade:
 
         assert set(result["resumed_ids"]) == {parent_id, child1_id, child2_id}
         assert result["skipped_ids"] == []
+        assert result["target_id"] == parent_id
         assert mock_repo.update.call_count == 3
         for call in mock_repo.update.call_args_list:
             assert call[1]["status"] == "running"
             assert call[1]["paused_at"] is None
+            assert call[1]["waiting_for"] == 0  # All get 0 when resuming from root
+
+    @pytest.mark.asyncio
+    async def test_resume_instance_from_child(self, lifecycle_service, mock_repo):
+        """Test resuming from a child instance (not root).
+
+        When resuming from a child, only ancestors get waiting_for=1.
+        """
+        parent_id = "parent-instance"
+        child1_id = "child-1"
+        child2_id = "child-2"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        # Child1's ancestors are [parent_id]
+        mock_repo.get_ancestor_ids.return_value = [parent_id]
+
+        def get_side_effect(instance_id):
+            if instance_id == parent_id:
+                return self._make_instance(parent_id, status="paused", children=[child1_id, child2_id])
+            elif instance_id == child1_id:
+                return self._make_instance(child1_id, status="paused")
+            elif instance_id == child2_id:
+                return self._make_instance(child2_id, status="paused")
+            return None
+
+        mock_repo.get.side_effect = get_side_effect
+
+        # Resume from child1 (not root)
+        result = await lifecycle_service.resume_instance_cascade(child1_id)
+
+        assert set(result["resumed_ids"]) == {parent_id, child1_id, child2_id}
+        assert result["skipped_ids"] == []
+        assert result["target_id"] == child1_id
+
+        # Check waiting_for values
+        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
+        assert update_calls[parent_id]["waiting_for"] == 1  # Ancestor gets 1
+        assert update_calls[child1_id]["waiting_for"] == 0  # Resumed node gets 0
+        assert update_calls[child2_id]["waiting_for"] == 0  # Sibling gets 0
 
     @pytest.mark.asyncio
     async def test_resume_already_running_instance(self, lifecycle_service, mock_repo):
         """Test resuming an instance that is already running (not paused).
-        
+
         Verifies:
         - resumed_ids is empty
         - skipped_ids contains the instance
         - update NOT called
         """
         instance_id = "running-instance"
+        mock_repo.get_tree_root_id.return_value = instance_id
+        mock_repo.get_tree_ids.return_value = [instance_id]
+        mock_repo.get_ancestor_ids.return_value = []
         mock_repo.get.return_value = self._make_instance(instance_id, status="running")
 
         result = await lifecycle_service.resume_instance_cascade(instance_id)
@@ -609,6 +647,11 @@ class TestResumeInstanceCascade:
         parent_id = "parent"
         child1_id = "child1-paused"
         child2_id = "child2-running"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = parent_id
+        mock_repo.get_tree_ids.return_value = [parent_id, child1_id, child2_id]
+        mock_repo.get_ancestor_ids.return_value = []
 
         def get_side_effect(instance_id):
             if instance_id == parent_id:
@@ -631,10 +674,69 @@ class TestResumeInstanceCascade:
     async def test_resume_nonexistent_instance(self, lifecycle_service, mock_repo):
         """Test resuming a non-existent instance."""
         instance_id = "nonexistent-instance"
-        mock_repo.get.return_value = None
+        mock_repo.get_tree_root_id.return_value = None
+        mock_repo.get_tree_ids.return_value = [instance_id]  # Falls back to instance_id
+        mock_repo.get_ancestor_ids.return_value = []
+        mock_repo.get.return_value = None  # Instance doesn't exist
 
         result = await lifecycle_service.resume_instance_cascade(instance_id)
 
         assert result["resumed_ids"] == []
-        assert result["skipped_ids"] == []
+        # Falls back to instance_id, but doesn't exist, so skipped
+        assert result["skipped_ids"] == [instance_id]
+        assert result["target_id"] == instance_id
         mock_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_deeply_nested_child(self, lifecycle_service, mock_repo):
+        """Test resuming from a deeply nested child.
+
+        Hierarchy:
+            root
+            └── parent
+                └── child
+                    └── grandchild
+
+        When resuming from grandchild:
+        - ancestors are [child, parent, root]
+        - root gets waiting_for=1 (is ancestor)
+        - parent gets waiting_for=1 (is ancestor)
+        - child gets waiting_for=1 (is ancestor, parent of grandchild)
+        - grandchild gets waiting_for=0 (resumed node)
+        """
+        root_id = "root"
+        parent_id = "parent"
+        child_id = "child"
+        grandchild_id = "grandchild"
+
+        # Mock tree traversal methods
+        mock_repo.get_tree_root_id.return_value = root_id
+        mock_repo.get_tree_ids.return_value = [root_id, parent_id, child_id, grandchild_id]
+        # Grandchild's ancestors: [child, parent, root]
+        mock_repo.get_ancestor_ids.return_value = [child_id, parent_id, root_id]
+
+        def get_side_effect(instance_id):
+            if instance_id == root_id:
+                return self._make_instance(root_id, status="paused", children=[parent_id])
+            elif instance_id == parent_id:
+                return self._make_instance(parent_id, status="paused", children=[child_id])
+            elif instance_id == child_id:
+                return self._make_instance(child_id, status="paused", children=[grandchild_id])
+            elif instance_id == grandchild_id:
+                return self._make_instance(grandchild_id, status="paused")
+            return None
+
+        mock_repo.get.side_effect = get_side_effect
+
+        result = await lifecycle_service.resume_instance_cascade(grandchild_id)
+
+        assert set(result["resumed_ids"]) == {root_id, parent_id, child_id, grandchild_id}
+        assert result["skipped_ids"] == []
+        assert result["target_id"] == grandchild_id
+
+        # Check waiting_for values
+        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
+        assert update_calls[root_id]["waiting_for"] == 1  # Ancestor
+        assert update_calls[parent_id]["waiting_for"] == 1  # Ancestor
+        assert update_calls[child_id]["waiting_for"] == 1  # Ancestor
+        assert update_calls[grandchild_id]["waiting_for"] == 0  # Resumed node

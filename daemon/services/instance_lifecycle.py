@@ -493,36 +493,33 @@ class InstanceLifecycleService:
 
         return True
 
-    async def pause_instance_cascade(
-        self, instance_id: str, *, _visited: set[str] | None = None, _depth: int = 0
-    ) -> dict:
+    async def pause_instance_cascade(self, instance_id: str) -> dict:
         """Pause an instance and cascade to all children (soft pause).
 
-        Recursively pauses the target instance and all its descendants.
+        Uses tree traversal helpers to find and pause the entire tree.
         Cancels active requests and sets status to paused (resumable).
         Does NOT remove instances from memory or release locks.
 
         Args:
             instance_id: The ID of the instance to pause.
-            _visited: Internal set for circular reference detection.
-            _depth: Internal counter for depth limit protection.
 
         Returns dict with:
           - paused_ids: list of all instance IDs that were paused
           - skipped_ids: list of instance IDs that were already paused (skipped)
         """
-        # Depth guard
-        if _depth > 256:
-            logger.error(f"Max cascade depth exceeded at {instance_id[:8]}...")
-            return {"paused_ids": [], "skipped_ids": [instance_id]}
+        repo = self._manager._instance_repository
 
-        # Circular reference guard
-        if _visited is None:
-            _visited = set()
-        if instance_id in _visited:
-            logger.warning(f"Circular reference detected: {instance_id[:8]}..., skipping")
+        # 1. Find root of the tree
+        root_id = repo.get_tree_root_id(instance_id)
+        if root_id is None:
+            # Fall back to instance_id itself if not found
+            root_id = instance_id
+
+        # 2. Get ALL node IDs in the tree
+        tree_ids = repo.get_tree_ids(root_id)
+        if not tree_ids:
+            logger.warning(f"No tree found for instance {instance_id[:8]}...")
             return {"paused_ids": [], "skipped_ids": [instance_id]}
-        _visited.add(instance_id)
 
         paused_ids: list[str] = []
         skipped_ids: list[str] = []
@@ -535,7 +532,7 @@ class InstanceLifecycleService:
                 target_id: The ID of the instance to pause.
                 prefetched_meta: Pre-fetched metadata (avoids redundant DB lookup).
             """
-            meta = prefetched_meta or self._manager._instance_repository.get(target_id)
+            meta = prefetched_meta or repo.get(target_id)
 
             if meta is None:
                 logger.warning(f"Instance {target_id[:8]}... not found in DB, skipping pause")
@@ -564,14 +561,14 @@ class InstanceLifecycleService:
             # to prevent deadlock on resume (children are paused too)
             paused_at = datetime.utcnow().isoformat()
             if meta.waiting_for and meta.waiting_for > 0:
-                self._manager._instance_repository.update(
+                repo.update(
                     target_id,
                     status=InstanceStatus.PAUSED.value,
                     waiting_for=0,
                     paused_at=paused_at,
                 )
             else:
-                self._manager._instance_repository.update(
+                repo.update(
                     target_id,
                     status=InstanceStatus.PAUSED.value,
                     paused_at=paused_at,
@@ -586,112 +583,100 @@ class InstanceLifecycleService:
             logger.info(f"Paused instance {target_id[:8]}...")
             return True
 
-        # Get instance metadata for cascade
-        meta = self._manager._instance_repository.get(instance_id)
-
-        if meta is None:
-            logger.warning(f"Root instance {instance_id[:8]}... not found in DB")
-            return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
-
-        # Cascade to children first (DFS)
-        if meta.children:
-            for child_id in list(meta.children):
-                try:
-                    logger.info(f"Cascading pause to child instance: {child_id[:8]}...")
-                    child_result = await self.pause_instance_cascade(
-                        child_id, _visited=_visited, _depth=_depth + 1
+        # 3. Iterate over all nodes in the tree and pause each one
+        for node_id in tree_ids:
+            try:
+                meta = repo.get(node_id)
+                if _pause_single(node_id, prefetched_meta=meta):
+                    paused_ids.append(node_id)
+                    # Emit status_change event for paused status
+                    await self._manager._live_hub.stream_status_change(
+                        node_id, InstanceStatus.PAUSED.value, agent_id=meta.agent_id if meta else None
                     )
-                    paused_ids.extend(child_result["paused_ids"])
-                    skipped_ids.extend(child_result["skipped_ids"])
-                except Exception as e:
-                    logger.error(f"Failed to pause child {child_id[:8]}...: {e}")
-                    skipped_ids.append(child_id)
-
-        # Pause self (pass prefetched meta to avoid redundant DB lookup)
-        if _pause_single(instance_id, prefetched_meta=meta):
-            paused_ids.append(instance_id)
-            # Emit status_change event for paused status
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.PAUSED.value, agent_id=meta.agent_id if meta else None)
-        else:
-            skipped_ids.append(instance_id)
+                else:
+                    skipped_ids.append(node_id)
+            except Exception as e:
+                logger.error(f"Failed to pause node {node_id[:8]}...: {e}")
+                skipped_ids.append(node_id)
 
         return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
-    async def resume_instance_cascade(
-        self, instance_id: str, *, _visited: set[str] | None = None, _depth: int = 0
-    ) -> dict:
+    async def resume_instance_cascade(self, instance_id: str) -> dict:
         """Resume an instance and cascade to all children.
 
-        Recursively resumes the target instance and all its descendants.
+        Uses tree traversal helpers to find and resume the entire tree.
         Sets status to RUNNING and clears paused_at.
         Does NOT re-spawn or restart instances - just unpauses them.
 
         Args:
             instance_id: The ID of the instance to resume.
-            _visited: Internal set for circular reference detection.
-            _depth: Internal counter for depth limit protection.
 
         Returns dict with:
           - resumed_ids: list of all instance IDs that were resumed
           - skipped_ids: list of instance IDs that were skipped (not paused)
+          - target_id: the instance_id that was passed to this method
         """
-        # Depth guard
-        if _depth > 256:
-            logger.error(f"Max cascade depth exceeded at {instance_id[:8]}...")
-            return {"resumed_ids": [], "skipped_ids": [instance_id]}
+        repo = self._manager._instance_repository
 
-        # Circular reference guard
-        if _visited is None:
-            _visited = set()
-        if instance_id in _visited:
-            logger.warning(f"Circular reference detected: {instance_id[:8]}..., skipping")
-            return {"resumed_ids": [], "skipped_ids": [instance_id]}
-        _visited.add(instance_id)
+        # 1. Find root of the tree
+        root_id = repo.get_tree_root_id(instance_id)
+        if root_id is None:
+            # Fall back to instance_id itself if not found
+            root_id = instance_id
+
+        # 2. Get ALL node IDs in the tree
+        tree_ids = repo.get_tree_ids(root_id)
+        if not tree_ids:
+            logger.warning(f"No tree found for instance {instance_id[:8]}...")
+            return {"resumed_ids": [], "skipped_ids": [instance_id], "target_id": instance_id}
+
+        # 3. Get ancestors of the SELECTED instance (for waiting_for logic)
+        ancestor_ids = set(repo.get_ancestor_ids(instance_id))
+        is_root_resume = (instance_id == root_id)
 
         resumed_ids: list[str] = []
         skipped_ids: list[str] = []
 
-        # Get instance metadata for cascade
-        meta = self._manager._instance_repository.get(instance_id)
+        # 4. Iterate over all nodes in the tree and resume each one
+        for node_id in tree_ids:
+            meta = repo.get(node_id)
 
-        if meta is None:
-            logger.warning(f"Root instance {instance_id[:8]}... not found in DB")
-            return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids}
+            if meta is None:
+                logger.warning(f"Instance {node_id[:8]}... not found in DB, skipping resume")
+                skipped_ids.append(node_id)
+                continue
 
-        # Cascade to children first (DFS)
-        if meta.children:
-            for child_id in list(meta.children):
-                try:
-                    logger.info(f"Cascading resume to child instance: {child_id[:8]}...")
-                    child_result = await self.resume_instance_cascade(
-                        child_id, _visited=_visited, _depth=_depth + 1
-                    )
-                    resumed_ids.extend(child_result["resumed_ids"])
-                    skipped_ids.extend(child_result["skipped_ids"])
-                except Exception as e:
-                    logger.error(f"Failed to resume child {child_id[:8]}...: {e}")
-                    skipped_ids.append(child_id)
+            # Skip if not paused (already running or other status)
+            if meta.status != InstanceStatus.PAUSED.value:
+                logger.info(f"Instance {node_id[:8]}... is not paused (status={meta.status}), skipping")
+                skipped_ids.append(node_id)
+                continue
 
-        # Resume self
-        # Skip if not paused (already running or other status)
-        if meta.status != InstanceStatus.PAUSED.value:
-            logger.info(f"Instance {instance_id[:8]}... is not paused (status={meta.status}), skipping")
-            skipped_ids.append(instance_id)
-        else:
+            # Determine waiting_for value:
+            # - If resuming from root/parent: waiting_for stays 0 for all nodes
+            # - If resuming from child: only ANCESTORS get waiting_for = 1
+            if is_root_resume:
+                waiting_for_value = 0
+            else:
+                # Only ancestors get waiting_for = 1, others stay at 0
+                waiting_for_value = 1 if node_id in ancestor_ids else 0
+
             # Update DB status to running and clear paused_at
-            # NOTE: waiting_for is NOT restored on resume — it was reset during pause
-            # to prevent deadlock. Children are also resumed, so the count would be stale.
-            self._manager._instance_repository.update(
-                instance_id,
+            repo.update(
+                node_id,
                 status=InstanceStatus.RUNNING.value,
                 paused_at=None,  # Clear paused_at on resume
+                waiting_for=waiting_for_value,
             )
-            logger.info(f"Resumed instance {instance_id[:8]}...")
-            resumed_ids.append(instance_id)
-            # Emit status_change event for running status
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id)
+            logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={waiting_for_value})")
+            resumed_ids.append(node_id)
 
-        return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids}
+            # Emit status_change event for running status
+            await self._manager._live_hub.stream_status_change(
+                node_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id
+            )
+
+        return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 
     async def get_instance(self, instance_id: str) -> CompiledStateGraph:
         """Get an instance graph.
