@@ -1802,6 +1802,33 @@ class InstanceManager:
         """
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
 
+    def _cleanup_stale_completion_reports(self, instance_id: str) -> int:
+        """Remove stale completion reports for child from parent's queue. Never raises."""
+        if not (hasattr(self, '_engine') and self._engine):
+            return 0
+        try:
+            with Session(self._engine) as session:
+                # Note: This fetches instance meta in the helper's own session context
+                # (separate from the caller's session) to avoid cross-session issues.
+                meta = session.get(Instance, instance_id)
+                if not meta or not meta.parent_id:
+                    return 0
+                stale_reports = session.exec(
+                    select(MessageQueue)
+                    .where(MessageQueue.instance_id == meta.parent_id)
+                    .where(MessageQueue.source.startswith(f"internal_report:{instance_id}:"))
+                ).all()
+                if stale_reports:
+                    for report in stale_reports:
+                        session.delete(report)
+                    session.commit()
+                    logger.info(f"Cleaned up {len(stale_reports)} stale report(s) for child {instance_id[:8]}...")
+                    return len(stale_reports)
+                return 0
+        except Exception as e:
+            logger.warning(f"Stale report cleanup failed for {instance_id[:8]}...: {e}")
+            return 0
+
     async def resume_processing_job(self, instance_id: str, message: str = "resume", silent: bool = False) -> dict | None:
         """Resume a paused instance's PROCESSING job from checkpoint.
 
@@ -1831,26 +1858,7 @@ class InstanceManager:
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
 
             # P0a FIX: Clean up stale completion reports from parent's queue before resume
-            # After pause, parent may have old reports with OLD_msg_id that would never be consumed
-            if hasattr(self, '_engine') and self._engine:
-                with Session(self._engine) as session:
-                    meta = session.get(Instance, instance_id)
-                    if meta and meta.parent_id:
-                        stale_reports = session.exec(
-                            select(MessageQueue)
-                            .where(MessageQueue.instance_id == meta.parent_id)
-                            .where(MessageQueue.source.startswith(f"internal_report:{instance_id}:"))
-                        ).all()
-                        if stale_reports:
-                            for report in stale_reports:
-                                session.delete(report)
-                            logger.info(
-                                f"Cleaned up {len(stale_reports)} stale completion report(s) for child {instance_id[:8]}... "
-                                f"from parent {meta.parent_id[:8]}... queue"
-                            )
-                            session.commit()
-            else:
-                logger.debug(f"Stale report cleanup skipped for {instance_id[:8]}...: _engine not available (test mode)")
+            self._cleanup_stale_completion_reports(instance_id)
 
             cts = CancellationTokenSource()
             message_id = str(uuid.uuid4())
@@ -1892,27 +1900,8 @@ class InstanceManager:
         logger.info(f"Resuming PROCESSING job {old_job.job_id[:8]}... for instance {instance_id[:8]}...")
 
         # P0a FIX: Clean up stale completion reports from parent's queue before resume
-        # After pause, parent may have old reports with OLD_msg_id that would never be consumed
         # This must happen BEFORE processing, matching Branch 1 (WorkerPool path) ordering
-        if hasattr(self, '_engine') and self._engine:
-            with Session(self._engine) as session:
-                meta = session.get(Instance, instance_id)
-                if meta and meta.parent_id:
-                    stale_reports = session.exec(
-                        select(MessageQueue)
-                        .where(MessageQueue.instance_id == meta.parent_id)
-                        .where(MessageQueue.source.startswith(f"internal_report:{instance_id}:"))
-                    ).all()
-                    if stale_reports:
-                        for report in stale_reports:
-                            session.delete(report)
-                        logger.info(
-                            f"Cleaned up {len(stale_reports)} stale completion report(s) for child {instance_id[:8]}... "
-                            f"from parent {meta.parent_id[:8]}... queue"
-                        )
-                        session.commit()
-        else:
-            logger.debug(f"Stale report cleanup skipped for {instance_id[:8]}...: _engine not available (test mode)")
+        self._cleanup_stale_completion_reports(instance_id)
 
         # 2. Create fresh cancellation token
         cts = CancellationTokenSource()

@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-28 resume-child-notification)
+## Test Results (Latest: 2026-05-28 p0-stale-cleanup)
+
+### P0 Cleanup — Stale Report Cleanup + force_notify Simplification (2026-05-28)
+- **Files**: `tests/unit/test_p0_stale_cleanup.py` (10 tests)
+- **New Tests**: 10/10 PASS (stale cleanup 5, force_notify simplification 3, integration 2)
+- **Regression**: 3,273 passed, 1 pre-existing failure, 0 regressions
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Commit**: `e1e6889`
+
+### P0 Cleanup Status: ✅ READY (10 new tests, 3,273 regression tests, 0 regressions, dev.sh stable)
 
 ### Completion Report Idempotency Fix (2026-05-28)
 - **Files**: `tests/unit/test_completion_report_idempotency.py` (11 tests)
