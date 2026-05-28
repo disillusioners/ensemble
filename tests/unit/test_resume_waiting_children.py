@@ -1,14 +1,13 @@
-"""Tests for waiting_for > 0 skip path in resume_processing_job (Round 2 fix).
+"""Tests for resume_processing_job new queue flow behavior.
 
-The Round 2 fix changed from status-based check (status == WAITING_CHILDREN)
-to waiting_for > 0 check. This is more correct because:
-- status may be RUNNING during resume
-- waiting_for accurately tracks pending child work regardless of status
+The new implementation routes through the normal queue flow:
+- Child instances (no old_jobs): enqueue_message() via WorkerPool
+- Parent instances (has old_jobs): cancel old jobs, complete stale messages, enqueue_message_via_jq()
 
-When waiting_for > 0, complete_job() should be skipped because
-JobFeedbackObserver will complete the job when all children finish.
+The waiting_for > 0 check is now handled by JobFeedbackObserver, not resume_processing_job.
 """
 
+import uuid
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 import logging
@@ -40,6 +39,15 @@ class MockMessageResult:
         self.content = content
 
 
+class MockAsyncMessageResult:
+    """Mock async message result returned by enqueue_message."""
+
+    def __init__(self, message_id: str = None):
+        self.message_id = message_id or str(uuid.uuid4())
+        self.instance_id = None
+        self.status = "queued"
+
+
 class MockJob:
     """Mock job returned by find_processing_message_jobs_by_instance."""
 
@@ -62,6 +70,7 @@ def mock_queue_repository():
     """Create mock queue repository."""
     repo = MagicMock()
     repo.complete = MagicMock()
+    repo.list_by_instance = MagicMock(return_value=[])
     return repo
 
 
@@ -79,7 +88,10 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+    # Mock enqueue_message for WorkerPool path
+    manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
+    # Mock enqueue_message_via_jq for JobQueue path
+    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
     return manager
 
 
@@ -91,26 +103,26 @@ def instance_manager(mock_manager):
     manager._job_queue_service = mock_manager._job_queue_service
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
-    manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+    manager.enqueue_message = mock_manager.enqueue_message
+    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
     return manager
 
 
-class TestWaitingForSkip:
-    """Test suite for waiting_for > 0 skip behavior in parent resume (Round 2)."""
+class TestResumeQueueFlow:
+    """Test suite for new resume queue flow behavior.
+
+    The new implementation routes through the normal queue flow:
+    - Child instances (no old_jobs): enqueue_message() via WorkerPool
+    - Parent instances (has old_jobs): cancel old jobs, complete stale messages, enqueue_message_via_jq()
+
+    The waiting_for > 0 check is now handled by JobFeedbackObserver, not resume_processing_job.
+    """
 
     @pytest.mark.asyncio
-    async def test_waiting_for_one_skips_complete_job(
-        self, instance_manager, mock_manager, caplog
+    async def test_parent_instance_with_old_jobs_enqueues_via_jobqueue(
+        self, instance_manager, mock_manager
     ):
-        """CORE FIX TEST: waiting_for=1, status=RUNNING → complete_job() SKIPPED.
-
-        This is the actual scenario that was failing before Round 2:
-        - Status was RUNNING (not WAITING_CHILDREN)
-        - But waiting_for was 1 (waiting for children)
-        - The status check in Round 1 failed to detect this
-
-        With waiting_for > 0 check, this now works correctly.
-        """
+        """Parent instance with old_jobs should cancel them and enqueue via JobQueue."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
         message_id = "msg-xyz-456"
@@ -120,194 +132,158 @@ class TestWaitingForSkip:
             return_value=[MockJob(job_id=job_id, message_id=message_id)]
         )
 
-        # KEY: status=RUNNING, waiting_for=1 (the actual failing scenario)
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=1
-            )
-        )
-
-        with caplog.at_level(logging.INFO):
-            result = await instance_manager.resume_processing_job(
-                instance_id, message="resume"
-            )
-
-        # Verify _process_message_with_tracking was called
-        mock_manager._process_message_with_tracking.assert_called_once()
-
-        # Core assertion: complete_job should NOT be called
-        mock_manager._job_queue_service.complete_job.assert_not_called()
-
-        # Verify return value indicates waiting_children
-        assert result == {"job_id": job_id, "message_id": message_id, "status": "waiting_children"}
-
-        # Verify diagnostic log was emitted
-        assert any(
-            "waiting_for=1" in record.message and "skipping_completion=True" in record.message
-            for record in caplog.records
-        ), "Expected diagnostic log with waiting_for=1 and skipping_completion=True"
-
-    @pytest.mark.asyncio
-    async def test_waiting_for_zero_completes_job(self, instance_manager, mock_manager):
-        """Normal path: waiting_for=0 → complete_job() SHOULD be called."""
-        instance_id = "parent-instance-normal"
-        job_id = "job-normal-123"
-        message_id = "msg-normal-456"
-
-        # Setup: old_jobs returns a PROCESSING job
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # waiting_for=0 means no pending children, should complete
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=0
-            )
-        )
-
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
-        # Verify complete_job WAS called
-        mock_manager._job_queue_service.complete_job.assert_called_once()
+        # Old job should be cancelled
+        mock_manager._job_queue_service.complete_job.assert_called()
         call_args = mock_manager._job_queue_service.complete_job.call_args
-        assert call_args[0][0] == job_id
-        assert call_args[0][1] == DemandState.COMPLETED
+        assert call_args[0][0] == job_id  # job_id
+        assert call_args[0][1] == DemandState.CANCELLED  # cancelled
 
-        # Verify return value has job_id
-        assert result["job_id"] == job_id
-        assert result["message_id"] == message_id
+        # Should enqueue via JobQueue path
+        mock_manager.enqueue_message_via_jq.assert_called_once()
+        jq_kwargs = mock_manager.enqueue_message_via_jq.call_args[1]
+        assert jq_kwargs["instance_id"] == instance_id
+        assert jq_kwargs["message"] == "resume"
+        assert jq_kwargs["source"] == "cascade_resume"
 
-    @pytest.mark.asyncio
-    async def test_waiting_for_none_completes_job(self, instance_manager, mock_manager):
-        """Edge case: waiting_for=None should NOT skip (treat as 0)."""
-        instance_id = "parent-instance-none-wf"
-        job_id = "job-none-wf-123"
-        message_id = "msg-none-wf-456"
-
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # waiting_for=None should be treated as 0 (don't skip)
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=None
-            )
-        )
-
-        result = await instance_manager.resume_processing_job(
-            instance_id, message="resume"
-        )
-
-        # complete_job should be called (None treated as 0)
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-
-        # Verify return value has job_id
-        assert result["job_id"] == job_id
+        # Return should include message_id from enqueue
+        assert result["instance_id"] == instance_id
+        assert result["message_id"] is not None
 
     @pytest.mark.asyncio
-    async def test_waiting_for_multiple_skips_complete_job(self, instance_manager, mock_manager):
-        """Edge case: waiting_for=3 (multiple children) → should skip completion."""
-        instance_id = "parent-instance-multi"
-        job_id = "job-multi-123"
-        message_id = "msg-multi-456"
-
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # waiting_for=3 means waiting for 3 children
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=3
-            )
-        )
-
-        result = await instance_manager.resume_processing_job(
-            instance_id, message="resume"
-        )
-
-        # complete_job should NOT be called
-        mock_manager._job_queue_service.complete_job.assert_not_called()
-
-        # Verify return value
-        assert result["job_id"] == job_id
-        assert result["status"] == "waiting_children"
-
-    @pytest.mark.asyncio
-    async def test_instance_not_found_completes_job(self, instance_manager, mock_manager):
-        """When instance is None (not found), complete_job SHOULD be called (falls through)."""
-        instance_id = "parent-instance-none"
-        job_id = "job-none-123"
-        message_id = "msg-none-456"
-
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # Instance not found (None) - should fall through to complete_job
-        mock_manager._instance_repository.get = MagicMock(return_value=None)
-
-        result = await instance_manager.resume_processing_job(
-            instance_id, message="resume"
-        )
-
-        # complete_job WAS called (exception handler or None default)
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-
-        # Verify return value has job_id
-        assert result["job_id"] == job_id
-
-    @pytest.mark.asyncio
-    async def test_repository_exception_completes_job(self, instance_manager, mock_manager):
-        """When instance_repository.get raises, complete_job SHOULD still be called."""
-        instance_id = "parent-instance-exception"
-        job_id = "job-exception-123"
-        message_id = "msg-exception-456"
-
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # Instance repository raises exception - should be caught, allow completion
-        mock_manager._instance_repository.get = MagicMock(
-            side_effect=RuntimeError("Database connection failed")
-        )
-
-        result = await instance_manager.resume_processing_job(
-            instance_id, message="resume"
-        )
-
-        # complete_job WAS called (exception handler allows it)
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-
-        # Verify return value has job_id
-        assert result["job_id"] == job_id
-
-    @pytest.mark.asyncio
-    async def test_diagnostic_log_emitted_with_correct_values(
-        self, instance_manager, mock_manager, caplog
+    async def test_child_instance_no_old_jobs_enqueues_via_workerpool(
+        self, instance_manager, mock_manager
     ):
-        """Verify the diagnostic log message contains correct waiting_for and skip values."""
-        instance_id = "parent-instance-diag"
-        job_id = "job-diag-123"
-        message_id = "msg-diag-456"
+        """Child instance (no old_jobs) should enqueue via WorkerPool."""
+        instance_id = "child-instance-456"
 
+        # Setup: no old jobs (child instance uses WorkerPool)
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
+            return_value=[]
         )
 
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=True
+        )
+
+        # Should NOT call JobQueue path
+        mock_manager.enqueue_message_via_jq.assert_not_called()
+
+        # Should enqueue via WorkerPool path
+        mock_manager.enqueue_message.assert_called_once()
+        wp_kwargs = mock_manager.enqueue_message.call_args[1]
+        assert wp_kwargs["instance_id"] == instance_id
+        assert wp_kwargs["message"] == "resume"
+        assert wp_kwargs["source"] == "cascade_resume"
+        assert wp_kwargs["metadata"]["resume_mode"] is True
+
+        # Return should include message_id
+        assert result["instance_id"] == instance_id
+        assert result["job_id"] is None
+        assert result["message_id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_silent_mode_passes_resume_mode_true(
+        self, instance_manager, mock_manager
+    ):
+        """silent=True should pass resume_mode=True to enqueue."""
+        instance_id = "child-instance-silent"
+
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[]
+        )
+
+        await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=True
+        )
+
+        mock_manager.enqueue_message.assert_called_once()
+        wp_kwargs = mock_manager.enqueue_message.call_args[1]
+        assert wp_kwargs["metadata"]["resume_mode"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_silent_mode_passes_resume_mode_false(
+        self, instance_manager, mock_manager
+    ):
+        """silent=False should pass resume_mode=False to enqueue."""
+        instance_id = "child-instance-non-silent"
+
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[]
+        )
+
+        await instance_manager.resume_processing_job(
+            instance_id, message="continue working", silent=False
+        )
+
+        mock_manager.enqueue_message.assert_called_once()
+        wp_kwargs = mock_manager.enqueue_message.call_args[1]
+        assert wp_kwargs["metadata"]["resume_mode"] is False
+
+    @pytest.mark.asyncio
+    async def test_multiple_old_jobs_all_cancelled(
+        self, instance_manager, mock_manager
+    ):
+        """Multiple old jobs should all be cancelled."""
+        instance_id = "parent-instance-multi"
+        job_id_1 = "job-1-123"
+        job_id_2 = "job-2-456"
+
+        # Setup: multiple old jobs
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[
+                MockJob(job_id=job_id_1, message_id="msg-1"),
+                MockJob(job_id=job_id_2, message_id="msg-2"),
+            ]
+        )
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume"
+        )
+
+        # Both jobs should be cancelled
+        assert mock_manager._job_queue_service.complete_job.call_count == 2
+
+        # Should still enqueue via JobQueue
+        mock_manager.enqueue_message_via_jq.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_enqueue_failure_returns_none(
+        self, instance_manager, mock_manager
+    ):
+        """When enqueue fails, should return None."""
+        instance_id = "child-instance-fail"
+
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[]
+        )
+
+        # Simulate enqueue failure
+        mock_manager.enqueue_message.side_effect = RuntimeError("enqueue failed")
+
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume"
+        )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_parent_resume_with_waiting_for_uses_jobqueue_path(
+        self, instance_manager, mock_manager
+    ):
+        """Parent with old_jobs uses JobQueue path regardless of waiting_for."""
+        instance_id = "parent-waiting-for"
+        job_id = "job-waiting-123"
+
+        # Has old_jobs → uses JobQueue path
+        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[MockJob(job_id=job_id, message_id="msg-1")]
+        )
+
+        # Even with waiting_for > 0, should use JobQueue path
         mock_manager._instance_repository.get = MagicMock(
             return_value=MockInstanceMeta(
                 instance_id=instance_id,
@@ -316,55 +292,16 @@ class TestWaitingForSkip:
             )
         )
 
-        with caplog.at_level(logging.INFO):
-            result = await instance_manager.resume_processing_job(
-                instance_id, message="resume"
-            )
-
-        # Verify complete_job was skipped
-        mock_manager._job_queue_service.complete_job.assert_not_called()
-
-        # Verify log contains expected values
-        log_found = False
-        for record in caplog.records:
-            if f"waiting_for=2" in record.message and "skipping_completion=True" in record.message:
-                log_found = True
-                break
-
-        assert log_found, "Expected log with waiting_for=2 and skipping_completion=True"
-
-        # Verify return value
-        assert result["status"] == "waiting_children"
-
-    @pytest.mark.asyncio
-    async def test_waiting_for_one_with_waiting_children_status_skips(
-        self, instance_manager, mock_manager
-    ):
-        """Both waiting_for=1 AND status=WAITING_CHILDREN should skip (belt and suspenders)."""
-        instance_id = "parent-instance-both"
-        job_id = "job-both-123"
-        message_id = "msg-both-456"
-
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
-        )
-
-        # Both conditions present - should skip
-        mock_manager._instance_repository.get = MagicMock(
-            return_value=MockInstanceMeta(
-                instance_id=instance_id,
-                status=InstanceStatus.WAITING_CHILDREN.value,
-                waiting_for=1
-            )
-        )
-
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
-        # complete_job should NOT be called
-        mock_manager._job_queue_service.complete_job.assert_not_called()
+        # Should use JobQueue path
+        mock_manager.enqueue_message_via_jq.assert_called_once()
+        mock_manager.enqueue_message.assert_not_called()
 
-        # Verify return value
-        assert result["job_id"] == job_id
-        assert result["status"] == "waiting_children"
+        # Old job should be cancelled
+        mock_manager._job_queue_service.complete_job.assert_called()
+
+        # Result should have message_id
+        assert result["message_id"] is not None

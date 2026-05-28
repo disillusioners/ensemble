@@ -1239,6 +1239,7 @@ class InstanceManager:
         source: str = "api",
         priority: int = 1,
         images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message using the worker pool (DB-backed) path.
         
@@ -1251,6 +1252,7 @@ class InstanceManager:
             source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
+            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
         
         Returns:
             AsyncMessageResult with message_id and status.
@@ -1261,6 +1263,7 @@ class InstanceManager:
             source=source,
             priority=priority,
             images=images,
+            metadata=metadata,
         )
 
     async def enqueue_message_via_jq(
@@ -1270,6 +1273,7 @@ class InstanceManager:
         source: str = "api",
         priority: int = 1,
         images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message via JobQueue instead of WorkerPool.
 
@@ -1283,6 +1287,7 @@ class InstanceManager:
             source: Source identifier (e.g., "api", "web", "telegram:user:123").
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
+            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
 
         Returns:
             AsyncMessageResult with message_id and status.
@@ -1293,6 +1298,7 @@ class InstanceManager:
             source=source,
             priority=priority,
             images=images,
+            metadata=metadata,
         )
 
     async def _process_message_with_tracking(
@@ -1463,7 +1469,7 @@ class InstanceManager:
             session, instance_id, parent_id, report_message_id, waiting_for_remaining
         )
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, force_notify: bool = False) -> None:
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -1478,10 +1484,9 @@ class InstanceManager:
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
-            force_notify: If True, handle stale reports from paused instances (resume case).
         """
         return await self._child_reports_service._process_child_completion_and_notify_parent(
-            instance_id, completed_message_id, force_notify=force_notify
+            instance_id, completed_message_id
         )
 
     async def _send_error_report(
@@ -1802,37 +1807,13 @@ class InstanceManager:
         """
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
 
-    def _cleanup_stale_completion_reports(self, instance_id: str) -> int:
-        """Remove stale completion reports for child from parent's queue. Never raises."""
-        if not (hasattr(self, '_engine') and self._engine):
-            return 0
-        try:
-            with Session(self._engine) as session:
-                # Note: This fetches instance meta in the helper's own session context
-                # (separate from the caller's session) to avoid cross-session issues.
-                meta = session.get(Instance, instance_id)
-                if not meta or not meta.parent_id:
-                    return 0
-                stale_reports = session.exec(
-                    select(MessageQueue)
-                    .where(MessageQueue.instance_id == meta.parent_id)
-                    .where(MessageQueue.source.startswith(f"internal_report:{instance_id}:"))
-                ).all()
-                if stale_reports:
-                    for report in stale_reports:
-                        session.delete(report)
-                    session.commit()
-                    logger.info(f"Cleaned up {len(stale_reports)} stale report(s) for child {instance_id[:8]}...")
-                    return len(stale_reports)
-                return 0
-        except Exception as e:
-            logger.warning(f"Stale report cleanup failed for {instance_id[:8]}...: {e}")
-            return 0
-
     async def resume_processing_job(self, instance_id: str, message: str = "resume", silent: bool = False) -> dict | None:
-        """Resume a paused instance's PROCESSING job from checkpoint.
+        """Resume a paused instance by enqueuing via the normal queue flow.
 
-        Directly re-executes the existing job by calling _process_message_with_tracking().
+        This method routes through the normal message processing path:
+        - Child instances (no JobQueue job): use WorkerPool via enqueue_message()
+        - Parent instances (has JobQueue job): cancel old jobs, then use enqueue_message_via_jq()
+
         When silent=False (default), appends the resume message to the conversation.
         When silent=True, resumes from checkpoint without appending any new message.
 
@@ -1841,161 +1822,89 @@ class InstanceManager:
             message: The resume message text (ignored when silent=True and checkpoint exists).
             silent: If True, resume from checkpoint without injecting a new message.
 
-        Returns dict with result info, or None if no PROCESSING job found.
+        Returns dict with result info (instance_id, job_id, message_id), or None on error.
         """
+        from .services.job_queue_service import DemandState
+
         # 1. Find existing PROCESSING MESSAGE job(s) for this instance
         old_jobs = await asyncio.to_thread(
             self._job_queue_service._repository.find_processing_message_jobs_by_instance,
             instance_id
         )
+
         if not old_jobs:
+            # Child instance path: use WorkerPool via enqueue_message()
             # Child instances don't have JobQueue entries (they use WorkerPool).
-            # Handle child resume by calling _process_message_with_tracking directly.
-            meta = self._instance_repository.get(instance_id)
-            if meta and meta.status not in (InstanceStatus.PAUSED.value, InstanceStatus.RUNNING.value):
-                logger.warning(f"Child instance {instance_id[:8]}... not in PAUSED/RUNNING state (status={meta.status}), unexpected state")
+            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
-            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), resuming via WorkerPool")
-
-            # P0a FIX: Clean up stale completion reports from parent's queue before resume
-            self._cleanup_stale_completion_reports(instance_id)
-
-            cts = CancellationTokenSource()
-            message_id = str(uuid.uuid4())
+            # Enqueue a message via WorkerPool path with resume_mode metadata
             try:
-                result = await self._process_message_with_tracking(
+                result = await self.enqueue_message(
                     instance_id=instance_id,
                     message=message,
-                    message_id=message_id,
-                    cancellation_token=cts.token,
-                    is_retry=silent,
-                    message_source="cascade_resume",
+                    source="cascade_resume",
+                    metadata={"resume_mode": silent},
                 )
-
-                # Check if this instance is a child that has completed all work.
-                # This may create a completion report task for the parent.
-                try:
-                    logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
-                    if hasattr(self, '_process_child_completion_and_notify_parent'):
-                        logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
-                        # Use fresh message_id and force_notify=True for resume case
-                        await self._process_child_completion_and_notify_parent(
-                            instance_id, message_id, force_notify=True
-                        )
-                        logger.info(f"Instance {instance_id[:8]}... child completion notification done")
-                except Exception as e:
-                    logger.error(f"Instance {instance_id[:8]}... child completion notification FAILED: {e}", exc_info=True)
-
-                return {"instance_id": instance_id, "job_id": None, "message_id": message_id}
-            except asyncio.CancelledError:
-                logger.info(f"Child resume cancelled for instance {instance_id[:8]}...")
-                return None
+                logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8]}...")
+                return {
+                    "instance_id": instance_id,
+                    "job_id": None,
+                    "message_id": result.message_id,
+                }
             except Exception as e:
-                logger.error(f"Child resume failed for instance {instance_id[:8]}...: {e}")
-                raise
+                logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {e}")
+                return None
 
+        # Parent instance path: has JobQueue job, cancel it and enqueue via JobQueue
         old_job = old_jobs[0]
-        message_id = old_job.job_metadata.get("message_id") if old_job.job_metadata else None
+        logger.info(f"Found PROCESSING job {old_job.job_id[:8]}... for instance {instance_id[:8]}..., canceling and re-enqueuing via JobQueue")
 
-        logger.info(f"Resuming PROCESSING job {old_job.job_id[:8]}... for instance {instance_id[:8]}...")
+        # 2. Cancel old job(s) - mark as CANCELLED (superseded by resume)
+        for job in old_jobs:
+            try:
+                await self._job_queue_service.complete_job(
+                    job.job_id,
+                    DemandState.CANCELLED,
+                    error="Superseded by resume"
+                )
+                logger.info(f"Cancelled old job {job.job_id[:8]}... for resume")
+            except Exception as e:
+                logger.warning(f"Failed to cancel old job {job.job_id[:8]}...: {e}")
 
-        # P0a FIX: Clean up stale completion reports from parent's queue before resume
-        # This must happen BEFORE processing, matching Branch 1 (WorkerPool path) ordering
-        self._cleanup_stale_completion_reports(instance_id)
-
-        # 2. Create fresh cancellation token
-        cts = CancellationTokenSource()
-        msg_id = str(uuid.uuid4())
-
+        # 3. Complete any non-completed MessageQueue entries for this instance
+        #    These are stale entries from the previous processing attempt
         try:
-            # 3. Re-execute directly — bypasses queue entirely
-            # When silent=True, is_retry=True → graph_input=None → pure checkpoint resume
-            # When silent=False, is_retry=False → graph_input has the new "resume" message
-            #   → LangGraph loads checkpoint AND appends new message
-            result = await self._process_message_with_tracking(
+            pending_messages = await asyncio.to_thread(
+                self._queue_repository.list_by_instance,
+                instance_id,
+                statuses=[MessageStatus.PENDING.value, MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value]
+            )
+            for msg in pending_messages:
+                try:
+                    await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
+                    logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
+                except Exception as e:
+                    logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
+
+        # 4. Enqueue new message via JobQueue path
+        try:
+            result = await self.enqueue_message_via_jq(
                 instance_id=instance_id,
                 message=message,
-                message_id=msg_id,
-                cancellation_token=cts.token,
-                is_retry=silent,
-                message_source="api",
+                source="cascade_resume",
+                metadata={"resume_mode": silent},
             )
-
-            # Check if this instance is a child that has completed all work.
-            # This may create a completion report task for the parent.
-            try:
-                logger.info(f"Instance {instance_id[:8]}... checking hasattr for notification: {hasattr(self, '_process_child_completion_and_notify_parent')}")
-                if hasattr(self, '_process_child_completion_and_notify_parent'):
-                    logger.info(f"Instance {instance_id[:8]}... graph complete, calling child completion notification")
-                    # Use fresh msg_id (not old message_id) to avoid idempotency mismatch
-                    await self._process_child_completion_and_notify_parent(
-                        instance_id, msg_id, force_notify=True
-                    )
-                    logger.info(f"Instance {instance_id[:8]}... child completion notification done")
-            except Exception as e:
-                logger.error(f"Instance {instance_id[:8]}... child completion notification FAILED: {e}", exc_info=True)
-
-            # Check if this instance is waiting for children (waiting_for > 0).
-            # The waiting_for counter is the authoritative signal — not the status field.
-            # Status may be RUNNING during resume, but waiting_for accurately tracks pending work.
-            # If waiting_for > 0, defer job completion — JobFeedbackObserver will complete the job
-            # when all children finish and waiting_for decrements to 0.
-            skip_complete = False
-            try:
-                instance = await asyncio.to_thread(
-                    self._instance_repository.get, instance_id
-                )
-                waiting_for = instance.waiting_for if instance else 0
-                skip_complete = waiting_for > 0
-                logger.info(
-                    f"Instance {instance_id[:8]}... post-resume: status={instance.status if instance else 'N/A'}, "
-                    f"waiting_for={waiting_for}, skipping_completion={skip_complete}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"resume_processing_job: failed to check instance state for {instance_id[:8]}..., "
-                    f"proceeding with job completion: {e}"
-                )
-
-            if skip_complete:
-                logger.info(f"Instance {instance_id[:8]}... has {waiting_for} pending children, deferring job completion")
-                return {"job_id": old_job.job_id, "message_id": message_id, "status": "waiting_children"}
-
-            # 4. Complete the old job on success
-            await self._job_queue_service.complete_job(
-                old_job.job_id,
-                DemandState.COMPLETED,
-                result_summary=result.content if result else None
-            )
-
-            # 5. Complete the old message queue entry
-            if message_id:
-                await asyncio.to_thread(self._queue_repository.complete, message_id)
-
-            logger.info(f"Resumed job {old_job.job_id[:8]}... completed successfully")
-            return {"job_id": old_job.job_id, "message_id": message_id}
-
-        except asyncio.CancelledError:
-            logger.info(f"Resumed job cancelled again for instance {instance_id[:8]}...")
-            try:
-                await self._job_queue_service.complete_job(
-                    old_job.job_id, DemandState.CANCELLED, error="Cancelled by user during resume"
-                )
-                if message_id:
-                    await asyncio.to_thread(self._queue_repository.fail, message_id, "Cancelled by user during resume")
-            except Exception:
-                pass
-            return None
-
+            logger.info(f"Instance {instance_id[:8]}... enqueued via JobQueue: message_id={result.message_id[:8]}...")
+            return {
+                "instance_id": instance_id,
+                "job_id": None,  # Job ID will be assigned by JobQueueService when job is created
+                "message_id": result.message_id,
+            }
         except Exception as e:
-            logger.error(f"Resumed job failed for instance {instance_id[:8]}...: {e}")
-            try:
-                await self._job_queue_service.complete_job(
-                    old_job.job_id, DemandState.FAILED, error=str(e)
-                )
-            except Exception:
-                pass
-            raise
+            logger.error(f"Failed to enqueue message via JobQueue for instance {instance_id[:8]}...: {e}")
+            return None
 
     async def _publish_instance_lifecycle_event(
         self,

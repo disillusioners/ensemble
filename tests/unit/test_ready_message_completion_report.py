@@ -139,7 +139,7 @@ class TestReadyMessageDoesNotBlock:
                 session,
                 "child-123",
                 completed_message_id="msg-resume-789",
-                force_notify=False
+
             )
 
         # Core assertion: report should be sent (READY does NOT block)
@@ -170,7 +170,7 @@ class TestReadyMessageDoesNotBlock:
                 session,
                 "child-123",
                 completed_message_id="msg-resume-789",
-                force_notify=False
+
             )
 
         # PROCESSING message SHOULD block report
@@ -201,7 +201,7 @@ class TestReadyMessageDoesNotBlock:
                 session,
                 "child-123",
                 completed_message_id="msg-resume-789",
-                force_notify=False
+
             )
 
         # RETRYING message SHOULD block report
@@ -231,7 +231,7 @@ class TestReadyMessageDoesNotBlock:
                 session,
                 "child-123",
                 completed_message_id="msg-new-789",
-                force_notify=False
+
             )
 
         # No messages - report should proceed
@@ -269,7 +269,7 @@ class TestEdgeCases:
                 session,
                 "child-123",
                 completed_message_id="msg-resume-789",
-                force_notify=False
+
             )
 
         # Multiple READY messages should NOT block
@@ -300,7 +300,7 @@ class TestEdgeCases:
                 session,
                 "child-123",
                 completed_message_id="msg-resume-789",
-                force_notify=False
+
             )
 
         # PROCESSING message should block (even with READY messages present)
@@ -330,7 +330,7 @@ class TestEdgeCases:
                 session,
                 "child-123",
                 completed_message_id="msg-final-789",
-                force_notify=False
+
             )
 
         # Only COMPLETED messages - report should proceed
@@ -366,7 +366,7 @@ class TestDiagnosticLogging:
                     session,
                     "child-123",
                     completed_message_id="msg-resume-789",
-                    force_notify=False
+    
                 )
 
         # Verify the log mentions PROCESSING/RETRYING
@@ -399,7 +399,7 @@ class TestDiagnosticLogging:
                     session,
                     "child-123",
                     completed_message_id="msg-new-789",
-                    force_notify=False
+    
                 )
 
         # Verify the log mentions idempotency check passed
@@ -426,7 +426,7 @@ class TestDiagnosticLogging:
             return_value=create_session_context(session1)
         ):
             _, reason1 = await service._should_send_completion_report(
-                session1, "child-123", "msg-1", force_notify=False
+                session1, "child-123", "msg-1"
             )
 
         # Test 2: no_completed_message_id (edge case - completed_message_id is None)
@@ -440,7 +440,7 @@ class TestDiagnosticLogging:
             return_value=create_session_context(session2)
         ):
             _, reason2 = await service._should_send_completion_report(
-                session2, "child-123", None, force_notify=False
+                session2, "child-123", None
             )
 
         # Test 3: no_parent_id
@@ -453,7 +453,7 @@ class TestDiagnosticLogging:
             return_value=create_session_context(session3)
         ):
             _, reason3 = await service._should_send_completion_report(
-                session3, "child-123", "msg-3", force_notify=False
+                session3, "child-123", "msg-3"
             )
 
         # Verify all reason strings are specific and different
@@ -461,78 +461,3 @@ class TestDiagnosticLogging:
         assert reason2 == "no_completed_message_id"
         assert reason3 == "no_parent_id"
         assert len({reason1, reason2, reason3}) == 3, "All reason strings should be unique"
-
-
-# ─── Integration with force_notify Tests ───────────────────────────────────────
-
-
-class TestForceNotifyWithReadyMessages:
-    """Test suite for READY message handling with force_notify parameter."""
-
-    @pytest.mark.asyncio
-    async def test_force_notify_with_ready_message_proceeds(self, mock_manager, mock_events_service):
-        """force_notify=True with READY message → report should proceed.
-
-        Even with force_notify=True, READY messages should not block.
-        """
-        child_instance = create_child_instance()
-        session = create_mock_session(pending_count=0, existing_instance=child_instance)
-
-        service = ChildReportsService(
-            manager=mock_manager,
-            events_service=mock_events_service,
-        )
-
-        with patch(
-            "daemon.services.child_reports.Session",
-            return_value=create_session_context(session)
-        ):
-            should_send, reason = await service._should_send_completion_report(
-                session,
-                "child-123",
-                completed_message_id="msg-resume-789",
-                force_notify=True  # Force notify
-            )
-
-        # READY message + force_notify → report should proceed
-        assert should_send is True
-        assert reason == "all_checks_passed"
-
-    @pytest.mark.asyncio
-    async def test_force_notify_cleans_stale_report_and_proceeds(self, mock_manager, mock_events_service):
-        """force_notify=True with existing stale report → delete stale and proceed.
-
-        This tests the full flow: READY messages don't block, and if there's
-        a stale report, it gets deleted.
-        """
-        child_instance = create_child_instance()
-
-        # Create stale report
-        stale_report = MagicMock(spec=MessageQueue)
-        stale_report.message_id = "stale-msg-456"
-        stale_report.source = "internal_report:child-123:msg-old-123"
-
-        session = create_mock_session(pending_count=0, existing_instance=child_instance, existing_report=stale_report)
-
-        service = ChildReportsService(
-            manager=mock_manager,
-            events_service=mock_events_service,
-        )
-
-        with patch(
-            "daemon.services.child_reports.Session",
-            return_value=create_session_context(session)
-        ):
-            should_send, reason = await service._should_send_completion_report(
-                session,
-                "child-123",
-                completed_message_id="msg-resume-789",
-                force_notify=True  # Force notify to delete stale report
-            )
-
-        # With force_notify, stale report should be deleted and report should proceed
-        assert should_send is True
-        assert reason == "stale_report_cleaned"
-
-        # Verify stale report was deleted
-        session.delete.assert_called_once_with(stale_report)

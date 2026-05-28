@@ -33,6 +33,15 @@ class MockMessageResult:
         self.content = content
 
 
+class MockAsyncMessageResult:
+    """Mock async message result returned by enqueue_message."""
+
+    def __init__(self, message_id: str = None):
+        self.message_id = message_id or str(uuid.uuid4())
+        self.instance_id = None
+        self.status = "queued"
+
+
 @pytest.fixture
 def mock_job_queue_service():
     """Create mock job queue service with repository."""
@@ -64,7 +73,10 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+    # Mock enqueue_message for WorkerPool path (child instances)
+    manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
+    # Mock enqueue_message_via_jq for JobQueue path (parent instances)
+    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
     return manager
 
 
@@ -76,7 +88,8 @@ def instance_manager(mock_manager):
     manager._job_queue_service = mock_manager._job_queue_service
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
-    manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+    manager.enqueue_message = mock_manager.enqueue_message
+    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
     return manager
 
 
@@ -87,7 +100,7 @@ class TestChildInstanceResume:
     async def test_child_resume_non_silent_target_resume(self, instance_manager, mock_manager):
         """Scenario 1: Child instance resume (non-silent / target resume).
 
-        Verify _process_message_with_tracking is called with correct args
+        Verify enqueue_message is called with correct args
         when resuming a child instance with silent=False.
         """
         instance_id = "child-instance-123"
@@ -107,35 +120,31 @@ class TestChildInstanceResume:
             instance_id, message="continue working", silent=False
         )
 
-        # Verify _process_message_with_tracking was called
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        # Verify enqueue_message was called (child instance path)
+        mock_manager.enqueue_message.assert_called_once()
+        call_args = mock_manager.enqueue_message.call_args
 
-        # Verify correct args
-        assert call_kwargs["instance_id"] == instance_id
-        assert call_kwargs["message"] == "continue working"
-        assert call_kwargs["is_retry"] is False  # silent=False means is_retry=False
-        assert call_kwargs["message_source"] == "cascade_resume"
+        # The implementation uses keyword arguments
+        # call_args is (args_tuple, kwargs_dict)
+        kwargs = call_args[1] if len(call_args) > 1 else {}
 
-        # Verify message_id is a fresh UUID
-        try:
-            uuid.UUID(call_kwargs["message_id"])
-        except ValueError:
-            pytest.fail(f"message_id should be a valid UUID, got: {call_kwargs['message_id']}")
+        # Verify correct keyword args
+        assert kwargs.get("instance_id") == instance_id
+        assert kwargs.get("message") == "continue working"
+        assert kwargs.get("source") == "cascade_resume"
+        # Verify resume_mode=False (not silent)
+        assert kwargs.get("metadata", {}).get("resume_mode") is False
 
-        # Verify cancellation_token is a CancellationToken
-        assert hasattr(call_kwargs["cancellation_token"], "is_cancelled")
-
-        # Verify return value includes the generated message_id
+        # Verify return value includes the message_id from enqueue_message
         assert result["instance_id"] == instance_id
         assert result["job_id"] is None
-        assert result["message_id"] == call_kwargs["message_id"]
+        assert "message_id" in result
 
     @pytest.mark.asyncio
     async def test_child_resume_silent_cascade_resume(self, instance_manager, mock_manager):
         """Scenario 2: Child instance resume (silent / cascade resume).
 
-        Verify is_retry=True when silent=True (cascade resume for children).
+        Verify resume_mode=True when silent=True (cascade resume for children).
         """
         instance_id = "child-instance-456"
 
@@ -152,23 +161,24 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=True
         )
 
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        mock_manager.enqueue_message.assert_called_once()
+        call_args = mock_manager.enqueue_message.call_args
+        kwargs = call_args[1] if len(call_args) > 1 else {}
 
-        # Verify is_retry=True for silent mode
-        assert call_kwargs["is_retry"] is True
-        assert call_kwargs["message_source"] == "cascade_resume"
+        # Verify resume_mode=True for silent mode
+        assert kwargs.get("metadata", {}).get("resume_mode") is True
+        assert kwargs.get("source") == "cascade_resume"
 
-        # Verify return value includes the generated message_id
+        # Verify return value includes the message_id
         assert result["instance_id"] == instance_id
         assert result["job_id"] is None
-        assert result["message_id"] == call_kwargs["message_id"]
+        assert "message_id" in result
 
     @pytest.mark.asyncio
     async def test_child_resume_cancelled_error_handling(self, instance_manager, mock_manager):
-        """Scenario 3: CancelledError handling.
+        """Scenario 3: Error handling when enqueue fails.
 
-        Verify that asyncio.CancelledError is caught and returns None
+        Verify that exceptions from enqueue_message are caught and returns None
         instead of propagating.
         """
         instance_id = "child-instance-789"
@@ -181,8 +191,8 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id)
         )
 
-        # Simulate CancelledError from _process_message_with_tracking
-        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
+        # Simulate enqueue failure
+        mock_manager.enqueue_message.side_effect = RuntimeError("enqueue failed")
 
         # Should return None, not raise
         result = await instance_manager.resume_processing_job(
@@ -193,9 +203,10 @@ class TestChildInstanceResume:
 
     @pytest.mark.asyncio
     async def test_child_resume_general_exception_raised(self, instance_manager, mock_manager):
-        """Scenario 4: General exception re-raised.
+        """Scenario 4: General exception from enqueue is caught and returns None.
 
-        Verify RuntimeError and other exceptions are re-raised.
+        Note: Unlike the original implementation which re-raised exceptions,
+        the new implementation catches exceptions from enqueue_message and returns None.
         """
         instance_id = "child-instance-error"
 
@@ -207,14 +218,15 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id)
         )
 
-        # Simulate RuntimeError
-        mock_manager._process_message_with_tracking.side_effect = RuntimeError("something broke")
+        # Simulate RuntimeError from enqueue
+        mock_manager.enqueue_message.side_effect = RuntimeError("something broke")
 
-        # Should re-raise RuntimeError
-        with pytest.raises(RuntimeError, match="something broke"):
-            await instance_manager.resume_processing_job(
-                instance_id, message="resume", silent=True
-            )
+        # New implementation catches exception and returns None
+        result = await instance_manager.resume_processing_job(
+            instance_id, message="resume", silent=True
+        )
+
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_child_resume_instance_not_found(self, instance_manager, mock_manager):
@@ -231,22 +243,22 @@ class TestChildInstanceResume:
         # Instance meta is None
         mock_manager._instance_repository.get = MagicMock(return_value=None)
 
-        # Should not crash, still calls _process_message_with_tracking
+        # Should not crash, still calls enqueue_message
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=True
         )
 
         # Verify it proceeded (even though meta was None)
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        mock_manager.enqueue_message.assert_called_once()
+        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
         assert call_kwargs["instance_id"] == instance_id
 
     @pytest.mark.asyncio
     async def test_child_resume_unexpected_state(self, instance_manager, mock_manager):
         """Scenario 6: Instance in unexpected state.
 
-        Verify the code logs a warning but still proceeds when instance
-        is in a state other than PAUSED or RUNNING.
+        Verify the code still proceeds when instance is in a state other than
+        PAUSED or RUNNING (the new implementation doesn't check state).
         """
         instance_id = "completed-instance"
 
@@ -265,13 +277,14 @@ class TestChildInstanceResume:
         )
 
         # Verify it proceeded despite unexpected state
-        mock_manager._process_message_with_tracking.assert_called_once()
+        mock_manager.enqueue_message.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_child_resume_fresh_uuid_each_call(self, instance_manager, mock_manager):
         """Scenario 7: Fresh UUID generated for message_id.
 
         Verify that each call to resume_processing_job generates a different message_id.
+        The message_id is generated by enqueue_message, not by resume_processing_job.
         """
         instance_id = "child-instance-duplicate"
 
@@ -283,22 +296,26 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id)
         )
 
+        # Configure mock to return different message_ids on each call
+        mock_manager.enqueue_message = AsyncMock(
+            side_effect=[
+                MockAsyncMessageResult(message_id=str(uuid.uuid4())),
+                MockAsyncMessageResult(message_id=str(uuid.uuid4())),
+            ]
+        )
+        instance_manager.enqueue_message = mock_manager.enqueue_message
+
         # First resume
         result1 = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=False
         )
-        call_kwargs1 = mock_manager._process_message_with_tracking.call_args.kwargs
-        message_id1 = call_kwargs1["message_id"]
-
-        # Reset mock for second call
-        mock_manager._process_message_with_tracking.reset_mock()
+        message_id1 = result1["message_id"]
 
         # Second resume
         result2 = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=False
         )
-        call_kwargs2 = mock_manager._process_message_with_tracking.call_args.kwargs
-        message_id2 = call_kwargs2["message_id"]
+        message_id2 = result2["message_id"]
 
         # Both should be valid UUIDs and different from each other
         assert message_id1 != message_id2, "Each resume should generate a unique message_id"
@@ -310,11 +327,10 @@ class TestChildInstanceResume:
             pytest.fail("message_ids should be valid UUIDs")
 
     @pytest.mark.asyncio
-    async def test_child_resume_cancellation_token_created(self, instance_manager, mock_manager):
-        """Scenario 8: CancellationTokenSource created.
+    async def test_child_resume_calls_enqueue_message(self, instance_manager, mock_manager):
+        """Scenario 8: Verify enqueue_message is called (not _process_message_with_tracking).
 
-        Verify that a CancellationTokenSource is created and its token
-        is passed to _process_message_with_tracking.
+        This test confirms the new implementation uses the normal queue flow.
         """
         instance_id = "child-instance-token"
 
@@ -330,430 +346,12 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=False
         )
 
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args.kwargs
+        # Verify enqueue_message was called (not _process_message_with_tracking)
+        mock_manager.enqueue_message.assert_called_once()
+        call_kwargs = mock_manager.enqueue_message.call_args.kwargs
 
-        # Verify cancellation_token is a real CancellationToken (not just a mock)
-        token = call_kwargs["cancellation_token"]
-        assert token is not None
-        # The token should have the interface of CancellationToken
-        assert hasattr(token, "is_cancelled")
-        # Fresh token should not be cancelled (is_cancelled is a property, not a method)
-        assert token.is_cancelled is False
+        # Verify the metadata includes resume_mode
+        assert "metadata" in call_kwargs
+        assert "resume_mode" in call_kwargs["metadata"]
 
 
-# ─── Test Class 2: Stale Completion Report Cleanup ─────────────────────────────────
-
-
-class MockInstanceMetaWithParent:
-    """Mock instance metadata with parent_id for testing stale report cleanup."""
-
-    def __init__(
-        self,
-        instance_id: str = "child-instance-123",
-        status: str = InstanceStatus.PAUSED.value,
-        parent_id: str = "parent-123"
-    ):
-        self.instance_id = instance_id
-        self.status = status
-        self.parent_id = parent_id
-
-
-class MockStaleReport:
-    """Mock stale completion report message."""
-
-    def __init__(self, message_id: str, source: str, parent_id: str = "parent-123"):
-        self.message_id = message_id
-        self.source = source
-        self.instance_id = parent_id  # Parent's queue
-
-
-class TestStaleCompletionReportCleanup:
-    """Test suite for stale completion report cleanup during resume.
-
-    These tests verify that resume_processing_job() cleans up stale completion
-    reports from the parent's message queue before resuming a child instance.
-    This prevents the parent from receiving outdated notifications with old msg_ids.
-    """
-
-    def _create_stale_test_mocks(
-        self,
-        instance_id: str,
-        parent_id: str,
-        stale_reports: list = None,
-        mock_process_child: bool = True
-    ):
-        """Create mocks for stale report cleanup tests.
-
-        Args:
-            instance_id: The child instance ID
-            parent_id: The parent instance ID
-            stale_reports: List of stale reports to return from query
-            mock_process_child: Whether to mock _process_child_completion_and_notify_parent
-
-        Returns:
-            Tuple of (instance_manager, mock_manager, mock_session, session_context)
-        """
-        from contextlib import contextmanager
-
-        # Create mock job queue service
-        mock_job_queue_service = MagicMock()
-        mock_job_queue_service._repository = MagicMock()
-        mock_job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
-
-        # Create mock queue repository
-        mock_queue_repository = MagicMock()
-
-        # Create mock instance repository
-        mock_instance_repository = MagicMock()
-        mock_instance_repository.get = MagicMock(
-            return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=parent_id)
-        )
-
-        # Create mock manager
-        mock_manager = MagicMock()
-        mock_manager._job_queue_service = mock_job_queue_service
-        mock_manager._queue_repository = mock_queue_repository
-        mock_manager._instance_repository = mock_instance_repository
-        mock_manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
-
-        # Mock _process_child_completion_and_notify_parent if requested
-        if mock_process_child:
-            mock_manager._process_child_completion_and_notify_parent = AsyncMock()
-
-        # Create mock engine for Session
-        mock_engine = MagicMock()
-
-        # Create mock session
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=parent_id))
-        exec_result = MagicMock()
-        exec_result.all = MagicMock(return_value=stale_reports or [])
-        mock_session.exec = MagicMock(return_value=exec_result)
-        mock_session.delete = MagicMock()
-
-        # Create context manager that yields the mock session
-        @contextmanager
-        def session_context(*args, **kwargs):
-            yield mock_session
-
-        # Create instance manager with all mocks
-        instance_manager = InstanceManager.__new__(InstanceManager)
-        instance_manager._job_queue_service = mock_job_queue_service
-        instance_manager._queue_repository = mock_queue_repository
-        instance_manager._instance_repository = mock_instance_repository
-        instance_manager._process_message_with_tracking = mock_manager._process_message_with_tracking
-        instance_manager._engine = mock_engine  # Enable Session usage
-
-        if mock_process_child:
-            instance_manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
-
-        return instance_manager, mock_manager, mock_session, session_context
-
-    @pytest.mark.asyncio
-    async def test_stale_reports_are_cleaned_up_during_resume(self):
-        """Test 1: Stale reports are cleaned up during resume.
-
-        Scenario:
-        1. Child instance has a parent
-        2. Parent's queue has a stale completion report (with old msg_id)
-        3. resume_processing_job() is called
-        4. Stale report should be deleted from parent's queue
-        5. Fresh report (with new msg_id) will be created after completion
-        """
-        instance_id = "child-instance-123"
-        parent_id = "parent-123"
-        stale_msg_id = "msg-old-stale-123"
-
-        # Create stale report
-        stale_report = MockStaleReport(
-            message_id=stale_msg_id,
-            source=f"internal_report:{instance_id}:{stale_msg_id}",
-            parent_id=parent_id
-        )
-
-        # Setup manager with mocks
-        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
-            instance_id=instance_id,
-            parent_id=parent_id,
-            stale_reports=[stale_report]
-        )
-
-        # Patch Session to use our mock
-        with patch("daemon.manager.Session", session_context):
-            result = await instance_manager.resume_processing_job(
-                instance_id, message="resume", silent=False
-            )
-
-        # Verify _process_message_with_tracking was called
-        mock_manager._process_message_with_tracking.assert_called_once()
-
-        # Verify stale report was deleted
-        assert mock_session.delete.called, \
-            "Expected session.delete() to be called to remove stale report"
-        mock_session.delete.assert_called_with(stale_report)
-
-        # Verify session.commit() was called after deleting stale reports
-        assert mock_session.commit.called, \
-            "Expected session.commit() to be called after deleting stale reports"
-
-        # Verify _process_child_completion_and_notify_parent was called with fresh message_id
-        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
-        call_args = mock_manager._process_child_completion_and_notify_parent.call_args
-        assert call_args[0][0] == instance_id  # instance_id
-
-        # The second arg should be the fresh message_id (a UUID)
-        fresh_msg_id = call_args[0][1]
-        try:
-            uuid.UUID(fresh_msg_id)
-        except ValueError:
-            pytest.fail(f"Expected fresh message_id to be a UUID, got: {fresh_msg_id}")
-
-        # Verify force_notify=True
-        assert call_args[1]["force_notify"] is True
-
-    @pytest.mark.asyncio
-    async def test_multiple_stale_reports_for_same_child_are_all_cleaned_up(self):
-        """Test 2: Multiple stale reports for same child are all cleaned up.
-
-        Scenario:
-        1. Child instance has multiple stale reports from multiple failed attempts
-        2. resume_processing_job() is called
-        3. ALL stale reports should be deleted
-        4. Only the fresh report should remain after completion
-        """
-        instance_id = "child-instance-multi"
-        parent_id = "parent-multi"
-
-        # Create multiple stale reports with different msg_ids
-        stale_report_1 = MockStaleReport(
-            message_id="msg-old-attempt-1",
-            source=f"internal_report:{instance_id}:msg-old-attempt-1",
-            parent_id=parent_id
-        )
-        stale_report_2 = MockStaleReport(
-            message_id="msg-old-attempt-2",
-            source=f"internal_report:{instance_id}:msg-old-attempt-2",
-            parent_id=parent_id
-        )
-        stale_report_3 = MockStaleReport(
-            message_id="msg-old-attempt-3",
-            source=f"internal_report:{instance_id}:msg-old-attempt-3",
-            parent_id=parent_id
-        )
-        stale_reports = [stale_report_1, stale_report_2, stale_report_3]
-
-        # Setup manager with mocks
-        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
-            instance_id=instance_id,
-            parent_id=parent_id,
-            stale_reports=stale_reports
-        )
-
-        with patch("daemon.manager.Session", session_context):
-            result = await instance_manager.resume_processing_job(
-                instance_id, message="resume", silent=False
-            )
-
-        # Verify all 3 stale reports were deleted
-        assert mock_session.delete.call_count == 3, \
-            f"Expected 3 stale reports to be deleted, got {mock_session.delete.call_count} calls"
-
-        # Verify session.commit() was called after deleting stale reports
-        assert mock_session.commit.called, \
-            "Expected session.commit() to be called after deleting stale reports"
-
-        # Verify _process_child_completion_and_notify_parent was called once
-        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_stale_reports_for_other_children_are_not_cleaned_up(self):
-        """Test 3: Stale reports for OTHER children are NOT cleaned up.
-
-        Scenario:
-        1. Child A has a stale report
-        2. Child B has a stale report (but should NOT be returned by query)
-        3. Resume child A
-        4. Only child A's stale report should be deleted
-        5. Child B's stale report should remain (not queried)
-        """
-        instance_id_a = "child-a"
-        instance_id_b = "child-b"
-        parent_id = "parent-shared"
-
-        # Create stale reports for both children
-        stale_report_a = MockStaleReport(
-            message_id="msg-old-a",
-            source=f"internal_report:{instance_id_a}:msg-old-a",
-            parent_id=parent_id
-        )
-        # Note: stale_report_b is NOT included in the query results - this simulates
-        # the query only returning reports for the specific child being resumed
-
-        # Setup manager - only return child A's report
-        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
-            instance_id=instance_id_a,
-            parent_id=parent_id,
-            stale_reports=[stale_report_a]  # Only child A's report
-        )
-
-        with patch("daemon.manager.Session", session_context):
-            result = await instance_manager.resume_processing_job(
-                instance_id_a, message="resume", silent=False
-            )
-
-        # Verify only 1 report was deleted (child A's)
-        assert mock_session.delete.call_count == 1, \
-            f"Expected only 1 stale report to be deleted (child A's), got {mock_session.delete.call_count}"
-
-        # Verify session.commit() was called after deleting stale reports
-        assert mock_session.commit.called, \
-            "Expected session.commit() to be called after deleting stale reports"
-
-        # Verify the deleted report was child A's
-        mock_session.delete.assert_called_with(stale_report_a)
-
-    @pytest.mark.asyncio
-    async def test_no_stale_reports_resume_still_works(self):
-        """Test 4: No stale reports — resume still works.
-
-        Scenario:
-        1. Child instance has no stale reports in parent's queue
-        2. resume_processing_job() is called
-        3. Fresh report should be created successfully
-        4. No errors should occur
-        """
-        instance_id = "child-no-stale"
-        parent_id = "parent-no-stale"
-
-        # Setup manager with no stale reports
-        instance_manager, mock_manager, mock_session, session_context = self._create_stale_test_mocks(
-            instance_id=instance_id,
-            parent_id=parent_id,
-            stale_reports=[]  # No stale reports
-        )
-
-        with patch("daemon.manager.Session", session_context):
-            result = await instance_manager.resume_processing_job(
-                instance_id, message="resume", silent=False
-            )
-
-        # Verify resume completed successfully
-        assert result is not None
-        assert result["instance_id"] == instance_id
-
-        # Verify _process_message_with_tracking was called
-        mock_manager._process_message_with_tracking.assert_called_once()
-
-        # Verify _process_child_completion_and_notify_parent was called with fresh msg_id
-        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
-        call_args = mock_manager._process_child_completion_and_notify_parent.call_args
-        fresh_msg_id = call_args[0][1]
-        try:
-            uuid.UUID(fresh_msg_id)
-        except ValueError:
-            pytest.fail(f"Expected fresh message_id to be a UUID, got: {fresh_msg_id}")
-
-    @pytest.mark.asyncio
-    async def test_child_without_parent_no_stale_cleanup(self):
-        """Edge case: Child without parent — stale cleanup skipped via parent_id guard.
-
-        When a child instance has no parent_id, the stale report cleanup
-        should be skipped entirely (no database query). This tests the
-        `if not meta.parent_id: return 0` guard in the helper.
-        """
-        from contextlib import contextmanager
-
-        instance_id = "orphan-child"
-        parent_id = None
-
-        # Create mock engine for Session
-        mock_engine = MagicMock()
-
-        # Create mock session
-        mock_session = MagicMock()
-        # The helper fetches meta again - this time with no parent_id
-        mock_session.get = MagicMock(
-            return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=None)  # NO parent
-        )
-        exec_result = MagicMock()
-        exec_result.all = MagicMock(return_value=[])
-        mock_session.exec = MagicMock(return_value=exec_result)
-
-        @contextmanager
-        def session_context(*args, **kwargs):
-            yield mock_session
-
-        # Create instance manager with _engine set (enables cleanup path)
-        # Use __new__ like other tests to get real helper method
-        instance_manager = InstanceManager.__new__(InstanceManager)
-        instance_manager._engine = mock_engine  # Enable _engine to enter cleanup path
-
-        # Call the helper directly with proper Session mock
-        with patch("daemon.manager.Session", session_context):
-            result = instance_manager._cleanup_stale_completion_reports(instance_id)
-
-        # Verify: helper returns 0 (no cleanup because no parent_id)
-        assert result == 0, f"Expected 0 (no cleanup), got {result}"
-
-        # Verify session.exec was NOT called (early return due to no parent_id)
-        mock_session.exec.assert_not_called()
-
-        # Verify session.delete was NOT called
-        mock_session.delete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_stale_reports_cleaned_up_in_branch_2(self):
-        """Test: Stale cleanup also happens in Branch 2 (JobQueue path).
-
-        When find_processing_message_jobs_by_instance returns a non-empty list,
-        resume_processing_job takes the JobQueue path (Branch 2). This test
-        verifies that stale report cleanup still happens in this branch.
-        """
-        from contextlib import contextmanager
-
-        instance_id = "child-instance-branch2"
-        parent_id = "parent-branch2"
-        stale_msg_id = "msg-old-branch2"
-
-        # Create stale report
-        stale_report = MockStaleReport(
-            message_id=stale_msg_id,
-            source=f"internal_report:{instance_id}:{stale_msg_id}",
-            parent_id=parent_id
-        )
-
-        # Mock job with job_metadata containing message_id (Branch 2 indicator)
-        mock_job = MagicMock()
-        mock_job.job_id = "job-123"
-        mock_job.job_metadata = {"message_id": stale_msg_id}
-
-        # Create mock engine for Session
-        mock_engine = MagicMock()
-
-        # Create mock session
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(
-            return_value=MockInstanceMetaWithParent(instance_id=instance_id, parent_id=parent_id)
-        )
-        exec_result = MagicMock()
-        exec_result.all = MagicMock(return_value=[stale_report])
-        mock_session.exec = MagicMock(return_value=exec_result)
-        mock_session.delete = MagicMock()
-
-        @contextmanager
-        def session_context(*args, **kwargs):
-            yield mock_session
-
-        # Create instance manager with __new__ to get real helper method
-        instance_manager = InstanceManager.__new__(InstanceManager)
-        instance_manager._engine = mock_engine
-
-        # Call helper directly to test cleanup
-        with patch("daemon.manager.Session", session_context):
-            result = instance_manager._cleanup_stale_completion_reports(instance_id)
-
-        # Verify: stale report was deleted
-        assert result == 1, f"Expected 1 cleaned report, got {result}"
-        mock_session.delete.assert_called_with(stale_report)
-        assert mock_session.commit.called

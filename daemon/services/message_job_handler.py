@@ -96,14 +96,17 @@ class MessageJobHandler:
             message_id = job.job_metadata.get("message_id") if job.job_metadata else None
             message_source = job.job_metadata.get("source", "api") if job.job_metadata else "api"
             images = job.job_metadata.get("images") if job.job_metadata else None
+            # resume_mode: if True, treat as checkpoint resume (is_retry=True)
+            resume_mode = job.job_metadata.get("resume_mode", False) if job.job_metadata else False
 
-            # Call the shared processing function — NOT modified
+            # Call the shared processing function
+            # When resume_mode=True, is_retry=True → graph_input=None → pure checkpoint resume
             result = await self._manager._process_message_with_tracking(
                 instance_id=instance_id,
                 message=job.message,
                 message_id=message_id,
                 cancellation_token=cts.token,
-                is_retry=False,
+                is_retry=resume_mode,
                 retry_count=0,
                 message_source=message_source,
                 images=images,

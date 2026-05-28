@@ -199,10 +199,14 @@ class ProcessMessageProcessor(BaseProcessor):
         message_content = message.content if message else ""
         message_source = message.source if message else None
         message_images = getattr(message, 'images', None) if message else None
-        is_retry = task.retry_count > 0
+        # resume_mode: if True in message metadata, treat as checkpoint resume
+        message_metadata = getattr(message, 'message_metadata', None) if message else None
+        resume_mode = message_metadata.get("resume_mode", False) if message_metadata else False
+        is_retry = task.retry_count > 0 or resume_mode
         
         try:
             # Process the message via manager's existing logic (LangGraph execution)
+            # When resume_mode=True or retry_count>0, is_retry=True → graph_input=None → pure checkpoint resume
             result = await self._manager._process_message_with_tracking(
                 instance_id=task.instance_id,
                 message=message_content,
