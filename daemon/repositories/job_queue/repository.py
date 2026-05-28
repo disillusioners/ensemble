@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, select as sql_select
@@ -516,7 +516,7 @@ class JobRepository:
         return self.update(
             job_id,
             status=JobStatus.PROCESSING.value,
-            started_at=datetime.utcnow().isoformat(),
+            started_at=datetime.now(timezone.utc).isoformat(),
             instance_id=instance_id,
         )
 
@@ -530,7 +530,7 @@ class JobRepository:
         Note: No deleted_at IS NULL check needed here — defense is at the query level above
         (list_pending_by_project, list_all_pending, list_pending_by_queue all exclude deleted jobs)
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
             from_status=JobStatus.PENDING.value,
@@ -545,7 +545,7 @@ class JobRepository:
         result_summary: str | None = None,
     ) -> JobItem | None:
         """Complete a job (PROCESSING -> COMPLETED)."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
             from_status=JobStatus.PROCESSING.value,
@@ -560,7 +560,7 @@ class JobRepository:
         error_message: str,
     ) -> JobItem | None:
         """Fail a job (PROCESSING -> FAILED)."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
             from_status=JobStatus.PROCESSING.value,
@@ -575,7 +575,7 @@ class JobRepository:
         if job is None:
             return None
 
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         if job.status == JobStatus.PENDING.value:
             return self.atomic_transition(
@@ -602,7 +602,7 @@ class JobRepository:
         error_message: str,
     ) -> JobItem | None:
         """Terminate a job (PROCESSING -> CANCELLED). No retry triggered."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
             from_status=JobStatus.PROCESSING.value,
@@ -632,7 +632,7 @@ class JobRepository:
                 return None
             if job.deleted_at is not None:
                 return job  # Already deleted, idempotent
-            job.deleted_at = datetime.utcnow().isoformat()
+            job.deleted_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             db_session.refresh(job)
             return job
@@ -724,7 +724,7 @@ class JobRepository:
             has passed.
         """
         with SQLModelSession(self.engine) as session:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             stmt = (
                 select(JobItem)
                 .where(JobItem.status == JobStatus.FAILED.value)

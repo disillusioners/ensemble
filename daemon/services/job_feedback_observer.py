@@ -12,7 +12,7 @@ Key behaviors:
 - Provides health monitoring with periodic logging
 """
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -247,7 +247,7 @@ class JobFeedbackObserver:
             return
 
         # Map status to action using atomic transition
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         try:
             if status == "completed":
                 # Use atomic_transition for PROCESSING -> COMPLETED

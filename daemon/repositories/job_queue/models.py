@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -69,8 +69,8 @@ class JobQueue(SQLModel, table=True):
     default_max_retries: int | None = Field(default=None)
     
     # Timestamps
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @model_validator(mode="after")
     def enforce_defer_concurrency_limit(self) -> "JobQueue":
@@ -133,7 +133,7 @@ class JobItem(SQLModel, table=True):
     status: str = Field(default=JobStatus.PENDING.value)
 
     # Timing
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     started_at: str | None = None
     completed_at: str | None = None
 
@@ -216,7 +216,7 @@ class JobLock(SQLModel, table=True):
     queue_id: str = Field(index=True)
     job_id: str = Field(index=True)
     instance_id: str | None = Field(default=None, index=True)
-    acquired_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    acquired_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class DeadLetterItem(SQLModel, table=True):
@@ -256,7 +256,7 @@ class DeadLetterItem(SQLModel, table=True):
     failed_at: str
     
     # DLQ metadata
-    moved_to_dlq_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    moved_to_dlq_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     reason: str  # "MAX_RETRIES", "MANUAL", "CIRCUIT_BREAKER", etc.
     
     # Optional metadata storage

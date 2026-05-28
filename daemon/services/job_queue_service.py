@@ -11,7 +11,7 @@ import enum
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -189,7 +189,7 @@ class JobQueueService:
                         'agent_id': job.agent_id,
                         'result': job.result_summary or '',
                         'error': error,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': datetime.now(timezone.utc).isoformat()
                     }, ensure_ascii=False)}\n"
                     f"```"
                 )
@@ -292,7 +292,7 @@ class JobQueueService:
                 # Check TTL - jobs older than TTL are treated as new
                 try:
                     created_time = datetime.fromisoformat(existing.created_at)
-                    ttl_cutoff = datetime.utcnow() - timedelta(hours=self._idempotency_key_ttl_hours)
+                    ttl_cutoff = datetime.now(timezone.utc) - timedelta(hours=self._idempotency_key_ttl_hours)
                     if created_time < ttl_cutoff:
                         # Job is older than TTL, treat as new
                         logger.info(

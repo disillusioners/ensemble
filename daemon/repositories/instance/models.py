@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import enum
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, String
@@ -39,7 +39,7 @@ class InstanceHierarchy(SQLModel, table=True):
 
     parent_id: str = Field(primary_key=True)
     child_id: str = Field(primary_key=True)
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class Instance(SQLModel, table=True):
@@ -68,8 +68,8 @@ class Instance(SQLModel, table=True):
     # For watchdog timeout detection
     last_activity_at: datetime | None = Field(default=None)
     
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     paused_at: str | None = Field(default=None, index=True)
     
     @property

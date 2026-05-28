@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Tuple
 
 from sqlalchemy import delete as sql_delete, func, text
@@ -100,7 +100,7 @@ class DeadLetterRepository:
                 stmt = stmt.where(DeadLetterItem.reason == reason)
                 count_stmt = count_stmt.where(DeadLetterItem.reason == reason)
             if min_age_hours is not None:
-                cutoff = datetime.utcnow() - timedelta(hours=min_age_hours)
+                cutoff = datetime.now(timezone.utc) - timedelta(hours=min_age_hours)
                 cutoff_str = cutoff.isoformat()
                 stmt = stmt.where(DeadLetterItem.moved_to_dlq_at <= cutoff_str)
                 count_stmt = count_stmt.where(DeadLetterItem.moved_to_dlq_at <= cutoff_str)
@@ -165,7 +165,7 @@ class DeadLetterRepository:
         Returns:
             Number of items deleted.
         """
-        cutoff_date = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         cutoff_str = cutoff_date.isoformat()
         
         with SQLModelSession(self.engine) as session:

@@ -35,8 +35,8 @@ class CriticalNotesPriority(str, enum.Enum):
 class CriticalNotes(BaseModel):
     """A single critical notes entry for a project."""
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     source_agent: str = ""
     category: str
     priority: str
@@ -206,8 +206,8 @@ class Project(SQLModel, table=True):
     creator_instance_id: str | None = None
     creator_agent_id: str | None = None
     
-    created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     
     # Runtime-only attributes (not stored in DB)
     _tags: list[str] = []

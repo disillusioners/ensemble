@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
@@ -43,4 +43,4 @@ class JobWatcher(SQLModel, table=True):
         sa_column=Column(JSON)
     )
 
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

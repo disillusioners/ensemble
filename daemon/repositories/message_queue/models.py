@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column
@@ -61,7 +61,7 @@ class MessageQueue(SQLModel, table=True):
         sa_column=Column("metadata", JSON)
     )
     
-    enqueued_at: datetime = Field(default_factory=datetime.utcnow)
+    enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     processing_started_at: datetime | None = Field(default=None)
     last_activity_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)

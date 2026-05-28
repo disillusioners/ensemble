@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, List
 
 from daemon.repositories.job_queue import DeadLetterItem, JobRepository
@@ -125,7 +125,7 @@ class DeadLetterService:
             priority=job.priority,
             error_message=job.error_message or "",
             retry_count=job.retry_count,
-            failed_at=job.failed_at or datetime.utcnow().isoformat(),
+            failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
             reason=reason,
             metadata_json=job.job_metadata,
         )
@@ -200,7 +200,7 @@ class DeadLetterService:
                 priority=job.priority,
                 error_message=job.error_message or "",
                 retry_count=job.retry_count,
-                failed_at=job.failed_at or datetime.utcnow().isoformat(),
+                failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
                 reason=reason,
                 metadata_json=job.job_metadata,
             )

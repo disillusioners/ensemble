@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +97,7 @@ class SQLModelInstanceRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             agent_name = get_agent_name(agent_dir)
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             
             instance = Instance(
                 instance_id=instance_id,
@@ -336,7 +336,7 @@ class SQLModelInstanceRepository:
                 if hasattr(instance, key):
                     setattr(instance, key, value)
 
-            instance.updated_at = datetime.utcnow().isoformat()
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             db_session.refresh(instance)
 
@@ -367,7 +367,7 @@ class SQLModelInstanceRepository:
 
             instance.instance_metadata["title"] = title
             flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.utcnow().isoformat()
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             db_session.refresh(instance)
 
@@ -382,7 +382,7 @@ class SQLModelInstanceRepository:
 
             instance.instance_metadata[key] = value
             flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.utcnow().isoformat()
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             db_session.refresh(instance)
 
@@ -397,7 +397,7 @@ class SQLModelInstanceRepository:
 
             instance.instance_metadata.pop(key, None)
             flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.utcnow().isoformat()
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             db_session.refresh(instance)
 

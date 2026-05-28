@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, update
@@ -51,7 +51,7 @@ class JobQueueRepository:
         Returns:
             Created JobQueue object.
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with SQLModelSession(self.engine) as db_session:
             queue = JobQueue(
@@ -179,7 +179,7 @@ class JobQueueRepository:
                     setattr(queue, key, value)
 
             # Always update updated_at
-            queue.updated_at = datetime.utcnow().isoformat()
+            queue.updated_at = datetime.now(timezone.utc).isoformat()
 
             db_session.commit()
             db_session.refresh(queue)

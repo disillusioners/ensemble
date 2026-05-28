@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -559,7 +559,7 @@ class InstanceLifecycleService:
             # 3. Update DB status to paused
             # Reset waiting_for to 0 if instance was waiting for children
             # to prevent deadlock on resume (children are paused too)
-            paused_at = datetime.utcnow().isoformat()
+            paused_at = datetime.now(timezone.utc).isoformat()
             if meta.waiting_for and meta.waiting_for > 0:
                 repo.update(
                     target_id,

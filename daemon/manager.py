@@ -915,7 +915,7 @@ class InstanceManager:
                 
                 # List paused instances
                 paused_instances, _ = self._instance_repository.list(status=InstanceStatus.PAUSED.value)
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 
                 released_count = 0
                 for instance in paused_instances:

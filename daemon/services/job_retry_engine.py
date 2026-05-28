@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlmodel import Session as SQLModelSession
@@ -214,7 +214,7 @@ class JobRetryEngine:
             if self.should_retry(job, queue, config):
                 # Calculate backoff and next_retry_at
                 delay_seconds = self.calculate_backoff(job.retry_count, config)
-                next_retry = datetime.utcnow() + timedelta(seconds=delay_seconds)
+                next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
                 next_retry_at = next_retry.isoformat()
                 
                 # Validate transition is allowed
