@@ -217,7 +217,7 @@ Provide a concise summary:"""
             # Fallback: count messages and provide basic summary
             return f"{prefix}, below is the response: Completed {len(messages)} message(s)."
 
-    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None, force_notify: bool = False) -> tuple[bool, str | None]:
+    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None) -> tuple[bool, str | None]:
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we do not send duplicate completion reports:
@@ -231,7 +231,6 @@ Provide a concise summary:"""
             session: Database session.
             instance_id: The child instance ID to check.
             completed_message_id: The message ID that just completed (can be None).
-            force_notify: If True, handle stale reports from paused instances.
             
         Returns:
             Tuple of (should_send, stale_report_reason): 
@@ -240,8 +239,7 @@ Provide a concise summary:"""
         """
         logger.debug(
             f"_should_send_completion_report called: instance_id={instance_id[:8] if instance_id else None}, "
-            f"completed_message_id={completed_message_id[:8] if completed_message_id else None}, "
-            f"force_notify={force_notify}"
+            f"completed_message_id={completed_message_id[:8] if completed_message_id else None}"
         )
         
         # Guard: Can't do idempotency check without message_id
@@ -302,22 +300,6 @@ Provide a concise summary:"""
         ).first()
         
         if existing_report is not None:
-            # Check if this is a stale report from a paused instance (force_notify case)
-            if force_notify:
-                # P0b FIX: Delete stale report unconditionally and proceed with fresh notification.
-                # The stale cleanup in resume_processing_job() handles most cases, but this is
-                # defense-in-depth for any edge case where a stale report somehow matches.
-                logger.warning(
-                    f"STALE REPORT DETECTED for child {instance_id[:8]}... message {completed_message_id[:8]}...: "
-                    f"deleting stale report {existing_report.message_id[:8]}... and proceeding with fresh notification"
-                )
-                session.delete(existing_report)
-                logger.info(
-                    f"Idempotency check PASSED (force_notify): child {instance_id[:8]}..., "
-                    f"message {completed_message_id[:8]}..., stale report deleted"
-                )
-                return True, "stale_report_cleaned"
-
             logger.debug(
                 f"Completion report already queued for child {instance_id[:8]}... "
                 f"message {completed_message_id[:8]}..., skipping duplicate"
@@ -571,7 +553,7 @@ Provide a concise summary:"""
             return f"{prefix}, below is the response:\n{last_assistant_content}"
         return None
 
-    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, force_notify: bool = False) -> None:
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
         
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
@@ -580,9 +562,8 @@ Provide a concise summary:"""
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
-            force_notify: If True, handle stale reports from paused instances (resume case).
         """
-        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}, force_notify={force_notify}")
+        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
         
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
         # Get instance's agent_id for the report
@@ -698,7 +679,7 @@ Provide a concise summary:"""
                 return
             
             # Idempotency checks
-            should_send, skip_reason = await self._should_send_completion_report(session, instance_id, completed_message_id, force_notify)
+            should_send, skip_reason = await self._should_send_completion_report(session, instance_id, completed_message_id)
             if not should_send:
                 logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
                 return
