@@ -221,7 +221,7 @@ Provide a concise summary:"""
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we do not send duplicate completion reports:
-        1. No pending messages (READY, RETRYING) for the instance
+        1. No pending messages (PROCESSING, RETRYING) for the instance
         2. No existing completion report for this specific message
         
         The idempotency key includes the message_id so each message completion
@@ -252,7 +252,6 @@ Provide a concise summary:"""
                 .select_from(MessageQueue)
                 .where(MessageQueue.instance_id == instance_id)
                 .where(MessageQueue.status.in_([
-                    MessageStatus.READY.value,
                     MessageStatus.PROCESSING.value,
                     MessageStatus.RETRYING.value,
                 ]))
@@ -268,7 +267,6 @@ Provide a concise summary:"""
             .where(MessageQueue.instance_id == instance_id)
             .where(MessageQueue.message_id != completed_message_id)
             .where(MessageQueue.status.in_([
-                MessageStatus.READY.value,
                 MessageStatus.PROCESSING.value,  # Include - excluded by ID instead
                 MessageStatus.RETRYING.value,
             ]))
@@ -277,7 +275,7 @@ Provide a concise summary:"""
         if pending_count > 0:
             logger.info(
                 f"Instance {instance_id[:8]}... has {pending_count} pending messages "
-                f"(READY/PROCESSING/RETRYING), skipping completion report"
+                f"(PROCESSING/RETRYING), skipping completion report"
             )
             return False, "pending_messages_exist"
         
