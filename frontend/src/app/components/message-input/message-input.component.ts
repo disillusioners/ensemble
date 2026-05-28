@@ -96,7 +96,8 @@ export class MessageInputComponent {
   handleResume(): void {
     const text = this.message().trim();
     this.resumeInstance.emit(text);  // empty string means "resume" (backend default)
-    // Don't clear here — parent clears on success via clearInput()
+    // Clear immediately on Enter - parent will restore on API error if needed
+    this.clearInput();
   }
 
   clearInput(): void {
