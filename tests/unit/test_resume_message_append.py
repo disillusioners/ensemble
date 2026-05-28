@@ -219,8 +219,12 @@ class TestResumeMessageIdUniqueness:
         assert msg_id1 != msg_id2, "Each resume should generate a unique message_id"
 
     @pytest.mark.asyncio
-    async def test_silent_mode_still_generates_message_id(self, instance_manager, mock_manager):
-        """Test that silent=True still generates a fresh message_id."""
+    async def test_silent_mode_skips_enqueue_and_returns_none_message_id(self, instance_manager, mock_manager):
+        """Test that silent=True skips enqueue and returns None for message_id.
+        
+        When silent=True (cascade resume), the child should NOT receive a message
+        enqueued. The parent's send_message tool will deliver the actual work.
+        """
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
             return_value=[]
         )
@@ -230,12 +234,12 @@ class TestResumeMessageIdUniqueness:
             "test-instance", message="resume", silent=True
         )
 
-        # Should have a message_id
-        assert result["message_id"] is not None
+        # Silent mode should NOT enqueue any message
+        mock_manager.enqueue_message.assert_not_called()
 
-        # Verify enqueue was called with resume_mode=True
-        kwargs = mock_manager.enqueue_message.call_args[1]
-        assert kwargs["metadata"]["resume_mode"] is True
+        # Should return silent resume result with None message_id
+        assert result["message_id"] is None
+        assert result["status"] == "silent_resume"
 
     @pytest.mark.asyncio
     async def test_message_content_preserved_in_enqueue(self, instance_manager, mock_manager):

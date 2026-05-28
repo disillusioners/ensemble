@@ -144,7 +144,8 @@ class TestChildInstanceResume:
     async def test_child_resume_silent_cascade_resume(self, instance_manager, mock_manager):
         """Scenario 2: Child instance resume (silent / cascade resume).
 
-        Verify resume_mode=True when silent=True (cascade resume for children).
+        When silent=True, the child should NOT receive a message enqueued.
+        The parent's send_message tool will deliver the actual work.
         """
         instance_id = "child-instance-456"
 
@@ -161,25 +162,21 @@ class TestChildInstanceResume:
             instance_id, message="resume", silent=True
         )
 
-        mock_manager.enqueue_message.assert_called_once()
-        call_args = mock_manager.enqueue_message.call_args
-        kwargs = call_args[1] if len(call_args) > 1 else {}
+        # Silent mode should NOT enqueue any message
+        mock_manager.enqueue_message.assert_not_called()
 
-        # Verify resume_mode=True for silent mode
-        assert kwargs.get("metadata", {}).get("resume_mode") is True
-        assert kwargs.get("source") == "cascade_resume"
-
-        # Verify return value includes the message_id
+        # Verify return value indicates silent resume
         assert result["instance_id"] == instance_id
         assert result["job_id"] is None
-        assert "message_id" in result
+        assert result["message_id"] is None
+        assert result["status"] == "silent_resume"
 
     @pytest.mark.asyncio
-    async def test_child_resume_cancelled_error_handling(self, instance_manager, mock_manager):
-        """Scenario 3: Error handling when enqueue fails.
+    async def test_child_resume_silent_mode_no_enqueue(self, instance_manager, mock_manager):
+        """Scenario 3: Silent mode (cascade resume) skips enqueue entirely.
 
-        Verify that exceptions from enqueue_message are caught and returns None
-        instead of propagating.
+        When silent=True, the child should NOT receive a message enqueued,
+        so there's no enqueue to fail. This tests the silent path.
         """
         instance_id = "child-instance-789"
 
@@ -191,22 +188,21 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id)
         )
 
-        # Simulate enqueue failure
-        mock_manager.enqueue_message.side_effect = RuntimeError("enqueue failed")
-
-        # Should return None, not raise
+        # Silent mode should NOT call enqueue_message
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=True
         )
 
-        assert result is None
+        # Should return silent resume result (no enqueue)
+        assert result["instance_id"] == instance_id
+        assert result["status"] == "silent_resume"
+        assert result["message_id"] is None
 
     @pytest.mark.asyncio
     async def test_child_resume_general_exception_raised(self, instance_manager, mock_manager):
         """Scenario 4: General exception from enqueue is caught and returns None.
 
-        Note: Unlike the original implementation which re-raised exceptions,
-        the new implementation catches exceptions from enqueue_message and returns None.
+        For non-silent mode, exceptions from enqueue_message should be caught.
         """
         instance_id = "child-instance-error"
 
@@ -218,12 +214,12 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id)
         )
 
-        # Simulate RuntimeError from enqueue
+        # Simulate RuntimeError from enqueue (non-silent mode)
         mock_manager.enqueue_message.side_effect = RuntimeError("something broke")
 
-        # New implementation catches exception and returns None
+        # Non-silent mode: exception should be caught and return None
         result = await instance_manager.resume_processing_job(
-            instance_id, message="resume", silent=True
+            instance_id, message="resume", silent=False
         )
 
         assert result is None
@@ -233,6 +229,7 @@ class TestChildInstanceResume:
         """Scenario 5: Instance not found (meta is None).
 
         Verify the code handles missing instance metadata gracefully.
+        For non-silent mode, it should still call enqueue_message.
         """
         instance_id = "nonexistent-instance"
 
@@ -243,9 +240,9 @@ class TestChildInstanceResume:
         # Instance meta is None
         mock_manager._instance_repository.get = MagicMock(return_value=None)
 
-        # Should not crash, still calls enqueue_message
+        # Non-silent mode: should still call enqueue_message
         result = await instance_manager.resume_processing_job(
-            instance_id, message="resume", silent=True
+            instance_id, message="resume", silent=False
         )
 
         # Verify it proceeded (even though meta was None)
@@ -259,6 +256,7 @@ class TestChildInstanceResume:
 
         Verify the code still proceeds when instance is in a state other than
         PAUSED or RUNNING (the new implementation doesn't check state).
+        For non-silent mode, it should still call enqueue_message.
         """
         instance_id = "completed-instance"
 
@@ -271,9 +269,9 @@ class TestChildInstanceResume:
             return_value=MockInstanceMeta(instance_id=instance_id, status="COMPLETED")
         )
 
-        # Should not crash, still proceeds
+        # Non-silent mode: should still proceed
         result = await instance_manager.resume_processing_job(
-            instance_id, message="resume", silent=True
+            instance_id, message="resume", silent=False
         )
 
         # Verify it proceeded despite unexpected state

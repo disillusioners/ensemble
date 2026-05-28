@@ -144,20 +144,30 @@ class TestChildNotificationWorkerPoolPath:
         assert result["message_id"] is not None
 
     @pytest.mark.asyncio
-    async def test_child_silent_mode(self, instance_manager, mock_manager):
-        """Silent mode passes resume_mode=True to enqueue."""
+    async def test_child_silent_mode_skips_enqueue(self, instance_manager, mock_manager):
+        """Silent mode for child instance skips enqueue entirely.
+        
+        When silent=True (cascade resume), the child should NOT receive a message
+        enqueued. The parent's send_message tool will deliver the actual work.
+        """
         instance_id = "child-instance-silent"
 
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
             return_value=[]
         )
 
-        await instance_manager.resume_processing_job(
+        result = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=True
         )
 
-        kwargs = mock_manager.enqueue_message.call_args[1]
-        assert kwargs["metadata"]["resume_mode"] is True
+        # Silent mode should NOT enqueue any message
+        mock_manager.enqueue_message.assert_not_called()
+        
+        # Should return a silent resume result
+        assert result["instance_id"] == instance_id
+        assert result["job_id"] is None
+        assert result["message_id"] is None
+        assert result["status"] == "silent_resume"
 
     @pytest.mark.asyncio
     async def test_child_enqueues_message_id_from_enqueue(self, instance_manager, mock_manager):

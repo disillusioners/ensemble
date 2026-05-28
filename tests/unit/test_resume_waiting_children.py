@@ -170,7 +170,7 @@ class TestResumeQueueFlow:
     async def test_child_instance_no_old_jobs_enqueues_via_workerpool(
         self, instance_manager, mock_manager
     ):
-        """Child instance (no old_jobs) should enqueue via WorkerPool."""
+        """Child instance (no old_jobs) with silent=False should enqueue via WorkerPool."""
         instance_id = "child-instance-456"
 
         # Setup: no old jobs (child instance uses WorkerPool)
@@ -179,7 +179,7 @@ class TestResumeQueueFlow:
         )
 
         result = await instance_manager.resume_processing_job(
-            instance_id, message="resume", silent=True
+            instance_id, message="resume", silent=False
         )
 
         # Should NOT call JobQueue path
@@ -191,7 +191,7 @@ class TestResumeQueueFlow:
         assert wp_kwargs["instance_id"] == instance_id
         assert wp_kwargs["message"] == "resume"
         assert wp_kwargs["source"] == "cascade_resume"
-        assert wp_kwargs["metadata"]["resume_mode"] is True
+        assert wp_kwargs["metadata"]["resume_mode"] is False
 
         # Return should include message_id
         assert result["instance_id"] == instance_id
@@ -199,23 +199,28 @@ class TestResumeQueueFlow:
         assert result["message_id"] is not None
 
     @pytest.mark.asyncio
-    async def test_silent_mode_passes_resume_mode_true(
+    async def test_silent_mode_skips_enqueue(
         self, instance_manager, mock_manager
     ):
-        """silent=True should pass resume_mode=True to enqueue."""
+        """silent=True for child instance skips enqueue entirely."""
         instance_id = "child-instance-silent"
 
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
             return_value=[]
         )
 
-        await instance_manager.resume_processing_job(
+        result = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=True
         )
 
-        mock_manager.enqueue_message.assert_called_once()
-        wp_kwargs = mock_manager.enqueue_message.call_args[1]
-        assert wp_kwargs["metadata"]["resume_mode"] is True
+        # Silent mode should NOT enqueue any message
+        mock_manager.enqueue_message.assert_not_called()
+        
+        # Should return silent resume result
+        assert result["instance_id"] == instance_id
+        assert result["job_id"] is None
+        assert result["message_id"] is None
+        assert result["status"] == "silent_resume"
 
     @pytest.mark.asyncio
     async def test_non_silent_mode_passes_resume_mode_false(

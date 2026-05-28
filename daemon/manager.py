@@ -1847,6 +1847,18 @@ class InstanceManager:
         if not old_jobs:
             # Child instance path: use WorkerPool via enqueue_message()
             # Child instances don't have JobQueue entries (they use WorkerPool).
+            # When silent=True (cascade resume), DON'T enqueue any message.
+            # The parent's send_message tool will send the child its actual work.
+            # Only the selected target instance gets the resume message injected.
+            if silent:
+                logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, silent=True — skipping message enqueue (child will resume via parent's send_message)")
+                return {
+                    "instance_id": instance_id,
+                    "job_id": None,
+                    "message_id": None,
+                    "status": "silent_resume",
+                }
+            
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata
