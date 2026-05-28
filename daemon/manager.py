@@ -1367,7 +1367,7 @@ class InstanceManager:
         """Check if completion report should be sent (idempotency checks).
         
         Performs two checks to ensure we do not send duplicate completion reports:
-        1. No pending messages (READY, RETRYING) for the instance
+        1. No pending messages (PROCESSING, RETRYING) for the instance
         2. No existing completion report for this specific message
         
         The idempotency key includes the message_id so each message completion
