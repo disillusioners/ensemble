@@ -57,10 +57,9 @@ This is the dual-path resume architecture that handles the difference between ro
 
 **Root Instance Path:**
 1. Finds existing PROCESSING MESSAGE job for the instance
-2. Cleans stale message entries (PROCESSING/RETRYING → COMPLETED)
-3. Preserves PENDING messages for post-resume delivery
-4. Schedules background task via `_resume_processing_background()`
-5. Uses checkpoint resume with optional message injection
+2. Cleans stale message entries: PROCESSING/RETRYING → COMPLETED; **PENDING messages are preserved for post-resume delivery** (not completed)
+3. Schedules background task via `_resume_processing_background()`
+4. Uses checkpoint resume with optional message injection
 
 **Child Instance Path:**
 1. No JobQueue job exists (children use WorkerPool directly)
@@ -73,6 +72,12 @@ This is the dual-path resume architecture that handles the difference between ro
 - `images`: Optional base64 images for multimodal content
 
 **Returns:** `dict` with `{instance_id, job_id, message_id, status}`
+
+The `status` field has 4 possible values:
+- `resuming` — instance has a checkpoint, `_resume_processing_background()` is running (root path)
+- `queued` — instance enqueued via WorkerPool (child path, non-silent)
+- `silent_resume` — instance resumed silently with no checkpoint, no message (child path, silent=True)
+- `already_resuming` — instance is already being resumed (deduplication guard)
 
 ---
 
@@ -492,7 +497,11 @@ sequenceDiagram
             MessageJobHandler->>MessageJobHandler: Re-raise for failure
         end
         InstanceLifecycle->>Repository: Update status=PAUSED, paused_at=now
-        InstanceLifecycle->>Repository: waiting_for=0
+        alt waiting_for > 0
+            InstanceLifecycle->>Repository: waiting_for=0
+        else waiting_for == 0
+            Note over InstanceLifecycle: waiting_for unchanged (was already 0)
+        end
         InstanceLifecycle->>User: Emit SSE status_change
     end
     API-->>User: {paused_ids: [...], skipped_ids: [...]}
@@ -508,7 +517,6 @@ sequenceDiagram
     participant InstanceLifecycle
     participant Repository
     participant Manager
-    participant MessageJobHandler
     participant Graph
 
     User->>API: POST /instances/{id}/resume
@@ -521,18 +529,14 @@ sequenceDiagram
         InstanceLifecycle->>User: Emit SSE status_change
     end
     API->>Manager: resume_processing_job(target_id, message, silent=False)
-    Note over Manager: For target instance:<br/>- Find PROCESSING job<br/>- Set resume_mode=True<br/>- Clean stale messages
-    Manager->>MessageJobHandler: handle(job)
-    MessageJobHandler->>Graph: _process_message_with_tracking(resume_mode=True)
-    Note over Graph: graph_input = {"messages": [HumanMessage(content=message)]}
+    Note over Manager: For target instance:<br/>- Find PROCESSING job<br/>- Clean stale messages (PROCESSING/RETRYING)<br/>- Preserve PENDING messages
+    Manager->>Manager: _resume_processing_background() [asyncio.create_task]
+    Manager->>Manager: _process_message_with_tracking(is_retry=True)
+    Manager->>Graph: ainvoke(graph_input) [checkpoint resume + message injection]
     Graph->>Graph: Resume from checkpoint + inject message
-    Graph-->>MessageJobHandler: MessageResult
-    MessageJobHandler->>MessageJobHandler: Check waiting_for > 0
-    alt waiting_for > 0
-        MessageJobHandler->>MessageJobHandler: Defer completion, return
-    else waiting_for == 0
-        MessageJobHandler->>MessageJobHandler: complete_job(COMPLETED)
-    end
+    Graph-->>Manager: MessageResult
+    Manager->>Manager: _process_child_completion_and_notify_parent()
+    Manager->>Manager: complete_job(COMPLETED)
     API-->>User: {resumed_ids: [...], resume_results: {...}}
 ```
 
@@ -794,13 +798,13 @@ config = {
 ```mermaid
 stateDiagram-v2
     [*] --> pending: enqueue()
-    pending --> processing: start_job()
+    pending --> processing: (start)
     processing --> completed: complete_job()
     processing --> failed: fail_job() / max_retries
     processing --> cancelled: cancel_job()
     processing --> cancelled: shutdown
     pending --> cancelled: cancel_job()
-    pending --> processing: (startup recovery)
+    processing --> pending: (requeue)
     failed --> pending: retry_job()
     failed --> dead_letter: max_retries_exceeded
     failed --> cancelled: cancel_after_fail
@@ -820,7 +824,7 @@ Note: Valid transitions per `daemon/services/job_state_machine.py`:
 - `failed → pending` (retry)
 - `failed → dead_letter` (dead_letter)
 - `failed → cancelled` (cancel_after_fail)
-- `dead_letter → pending` (replay)
+- `dead_letter → pending` (replay) — dead_letter is replayable, not strictly terminal
 
 ### Instance Status Lifecycle
 
@@ -890,31 +894,34 @@ stateDiagram-v2
 # In pause_instance_cascade()
 tree_ids = repo.get_tree_ids(root_id)
 for node_id in tree_ids:
-    repo.update(node_id, status=PAUSED, waiting_for=0, paused_at=now)
-
-# In resume_instance_cascade()
-for node_id in tree_ids:
-    repo.update(node_id, status=RUNNING, paused_at=None)
+    # Conditional: only reset waiting_for if instance was waiting for children
+    if meta.waiting_for and meta.waiting_for > 0:
+        repo.update(node_id, status=PAUSED, waiting_for=0, paused_at=now)
+    else:
+        repo.update(node_id, status=PAUSED, paused_at=now)
 ```
 
 ---
 
-### 6.2 Why Root Keeps Job Alive But Child Uses Normal Queue?
+### 6.2 Why Root Uses Direct Resume vs Child Uses Normal Queue?
 
 **Root Instance:**
-- Keeps `PROCESSING` job alive during pause
-- Resume injects message via `resume_processing_job()`
-- Job completes when graph finishes
+- Uses the existing JobQueue `PROCESSING` job (not a new enqueue)
+- The `_resume_processing_job()` method schedules `_resume_processing_background()` as an asyncio task
+- `_resume_processing_background()` calls `_process_message_with_tracking()` **directly** (not via MessageJobHandler)
+- Checkpoint resume with message injection via `graph_input` (LangGraph `add_messages` reducer appends the message to checkpoint state)
+- Job is completed by `_resume_processing_background()` after processing finishes
 
 **Child Instance:**
-- Uses normal WorkerPool queue
-- Child may have `PROCESSING` task (normal flow)
-- Resume via normal task claiming (`claim_task()`)
+- No JobQueue job exists (children use WorkerPool directly)
+- When `silent=True` (cascade resume): skips enqueue, child resumes via parent's `send_message`
+- When `silent=False`: enqueues message via `enqueue_message()` → WorkerPool task claiming path
+- Uses normal `ProcessMessageProcessor` → `_process_message_with_tracking()` flow
 
 **Rationale:**
-- Root is user-facing → Need immediate response
-- Child is background → Normal async processing is fine
-- Different code paths prevent interference
+- Root is user-facing → checkpoint resume preserves exact conversation state
+- Child is background → normal async WorkerPool processing is sufficient
+- Different code paths prevent interference and respect the JobQueue / WorkerPool boundary
 
 ---
 
@@ -1124,6 +1131,26 @@ return {
 **Prevention:**
 - UI should disable resume button during operation
 - API could add idempotency key (not implemented)
+
+---
+
+### 7.7 Daemon Restart with Paused Instances
+
+**Scenario:** Daemon restarts (crash, deployment, manual restart) with paused instances in the database.
+
+**What Happens:**
+- Paused instances remain in `status=PAUSED` in the database
+- Their in-memory graphs are lost (released on restart)
+- No background task automatically resumes them
+
+**Operational Implication:**
+- The operator must manually resume paused instances via the API (`POST /instances/{id}/resume`)
+- This is intentional — the system does not auto-resume on restart to avoid unexpected agent behavior after downtime
+- Paused instances can remain in this state indefinitely until manually resumed
+
+**Mitigation:**
+- Monitor for long-paused instances in production
+- Consider adding a startup warning or health check for paused instances
 
 ---
 
