@@ -1852,7 +1852,7 @@ class InstanceManager:
                     "message_id": result.message_id,
                 }
             except Exception as e:
-                logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {e}")
+                logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {type(e).__name__}: {e}")
                 return None
 
         # Parent instance path: has JobQueue job, cancel it and enqueue via JobQueue
@@ -1903,7 +1903,7 @@ class InstanceManager:
                 "message_id": result.message_id,
             }
         except Exception as e:
-            logger.error(f"Failed to enqueue message via JobQueue for instance {instance_id[:8]}...: {e}")
+            logger.error(f"Failed to enqueue message via JobQueue for instance {instance_id[:8]}...: {type(e).__name__}: {e}")
             return None
 
     async def _publish_instance_lifecycle_event(

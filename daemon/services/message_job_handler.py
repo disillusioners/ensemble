@@ -153,6 +153,13 @@ class MessageJobHandler:
                         f"deferring job completion for {job.job_id[:8]}..."
                     )
                     skip_complete = True
+                elif instance and (instance.waiting_for or 0) > 0:
+                    logger.info(
+                        f"MessageJobHandler: instance {instance_id[:8]}... has "
+                        f"waiting_for={instance.waiting_for} (status={instance.status}), "
+                        f"deferring completion for job {job.job_id[:8]}..."
+                    )
+                    skip_complete = True
             except Exception as e:
                 logger.warning(
                     f"MessageJobHandler: failed to check instance status for {instance_id[:8]}..., "
