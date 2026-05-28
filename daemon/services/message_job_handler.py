@@ -98,6 +98,8 @@ class MessageJobHandler:
             images = job.job_metadata.get("images") if job.job_metadata else None
             # resume_mode: if True, treat as checkpoint resume (is_retry=True)
             resume_mode = job.job_metadata.get("resume_mode", False) if job.job_metadata else False
+            # silent: if True, skip message injection during checkpoint resume
+            silent = job.job_metadata.get("silent", False) if job.job_metadata else False
 
             # Call the shared processing function
             # When resume_mode=True, is_retry=True → graph_input=None → pure checkpoint resume
@@ -110,6 +112,7 @@ class MessageJobHandler:
                 retry_count=0,
                 message_source=message_source,
                 images=images,
+                silent=silent,
             )
 
             # Mark message as completed so pending_count queries don't keep counting it

@@ -1311,6 +1311,7 @@ class InstanceManager:
         retry_count: int = 0,  # FIX: C3 — new parameter
         message_source: str | None = None,  # Source of message (e.g., "internal_agent:xxx", "api", "telegram:xxx")
         images: list[str] | None = None,  # Images for multimodal messages
+        silent: bool = False,  # If True, skip message injection during checkpoint resume
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -1325,7 +1326,8 @@ class InstanceManager:
             is_retry: If True, attempt to resume from checkpoint.
             message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
                 Used to skip project injection for internal agent messages.
-            images: Optional list of base64-encoded images for multimodal content.
+            images: Optional list of base64-encoded images for multimodal messages.
+            silent: If True, resume from checkpoint without injecting any message.
 
         Returns:
             MessageResult with response data.
@@ -1342,6 +1344,7 @@ class InstanceManager:
             retry_count=retry_count,
             message_source=message_source,
             images=images,
+            silent=silent,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
@@ -1847,13 +1850,13 @@ class InstanceManager:
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata
-            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, metadata={{'resume_mode': silent}}")
+            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, metadata={{'resume_mode': silent, 'silent': silent}}")
             try:
                 result = await self.enqueue_message(
                     instance_id=instance_id,
                     message=message,
                     source="cascade_resume",
-                    metadata={"resume_mode": silent},
+                    metadata={"resume_mode": silent, "silent": silent},
                 )
                 logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8]}...")
                 return {
@@ -1902,7 +1905,8 @@ class InstanceManager:
                     logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
             completed_count = sum(1 for msg in pending_messages if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value))
             pending_count = sum(1 for msg in pending_messages if msg.status == MessageStatus.PENDING.value)
-            logger.info(f"[RESUME] instance={instance_id[:8]} cleaned {completed_count} stale PROCESSING/RETRYING messages, preserved {pending_count} PENDING messages")
+            if completed_count > 0 or pending_count > 0:
+                logger.info(f"[RESUME] instance={instance_id[:8]} cleaned {completed_count} stale PROCESSING/RETRYING messages, preserved {pending_count} PENDING messages")
         except Exception as e:
             logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
 
@@ -1919,6 +1923,7 @@ class InstanceManager:
                 is_retry=True,  # Triggers checkpoint resume
                 retry_count=0,
                 message_source="cascade_resume",
+                silent=silent,  # Pass through silent flag
             )
             logger.info(f"Root instance {instance_id[:8]}... resumed from checkpoint successfully")
         except Exception as e:

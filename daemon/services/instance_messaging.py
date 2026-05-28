@@ -691,6 +691,7 @@ class InstanceMessagingService:
         retry_count: int = 0,
         message_source: str | None = None,
         images: list[str] | None = None,
+        silent: bool = False,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
         
@@ -705,6 +706,7 @@ class InstanceMessagingService:
             is_retry: If True, attempt to resume from checkpoint.
             message_source: Source of the message (e.g., "agent:xxx", "api", "telegram:xxx").
             images: Optional list of base64-encoded images for multimodal content.
+            silent: If True, resume from checkpoint without injecting any message.
 
         Returns:
             MessageResult with response data.
@@ -856,8 +858,27 @@ class InstanceMessagingService:
         if is_retry:
             has_ckpt = await self._has_checkpoint(instance_id)
             if has_ckpt:
-                logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{retry_count})")
-                graph_input = None  # LangGraph will resume from checkpoint
+                # Inject resume message into checkpoint state via aupdate_state()
+                # The add_messages reducer will APPEND (not replace) — safe
+                # Silent mode: skip injection entirely, just resume from checkpoint
+                content = _build_message_content(message, images)
+                if content and not silent:
+                    try:
+                        await graph.aupdate_state(
+                            config,
+                            {"messages": [HumanMessage(content=content, id=message_id)]},
+                            as_node="agent",
+                        )
+                        logger.info(f"Injected resume message for instance {instance_id[:8]}... via aupdate_state")
+                    except Exception as e:
+                        # Fallback: fresh execution with explicit message
+                        logger.error(f"Failed to inject resume message via aupdate_state for {instance_id[:8]}...: {e}")
+                        graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+                    else:
+                        graph_input = None  # Resume from updated checkpoint
+                else:
+                    # Silent mode or empty message: just resume from checkpoint without injection
+                    graph_input = None
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
                 content = _build_message_content(message, images)
@@ -866,10 +887,6 @@ class InstanceMessagingService:
             # First attempt - add message to conversation
             content = _build_message_content(message, images)
             graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
-
-        # Log graph_input decision
-        has_ckpt = await self._has_checkpoint(instance_id) if is_retry else False
-        logger.info(f"[RESUME] instance={instance_id[:8]} is_retry={is_retry}, has_checkpoint={has_ckpt}, graph_input={'None (checkpoint_resume)' if graph_input is None else 'HumanMessage (fresh)'}, path={'checkpoint_resume' if graph_input is None else 'fresh_execution'}")
         
         # Build user message for pre-emit - use multimodal content if images present
         user_msg = HumanMessage(content=_build_message_content(message, images), id=message_id)

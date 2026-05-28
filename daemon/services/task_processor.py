@@ -203,6 +203,8 @@ class ProcessMessageProcessor(BaseProcessor):
         message_metadata = getattr(message, 'message_metadata', None) if message else None
         resume_mode = message_metadata.get("resume_mode", False) if message_metadata else False
         is_retry = task.retry_count > 0 or resume_mode
+        # silent: if True, skip message injection during checkpoint resume
+        silent = message_metadata.get("silent", False) if message_metadata else False
         
         try:
             # Process the message via manager's existing logic (LangGraph execution)
@@ -216,6 +218,7 @@ class ProcessMessageProcessor(BaseProcessor):
                 retry_count=task.retry_count,
                 message_source=message_source,
                 images=message_images,
+                silent=silent,
             )
             
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
