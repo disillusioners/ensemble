@@ -858,26 +858,16 @@ class InstanceMessagingService:
         if is_retry:
             has_ckpt = await self._has_checkpoint(instance_id)
             if has_ckpt:
-                # Inject resume message into checkpoint state via aupdate_state()
-                # The add_messages reducer will APPEND (not replace) — safe
-                # Silent mode: skip injection entirely, just resume from checkpoint
+                # Pass resume message as graph_input instead of aupdate_state.
+                # aupdate_state(as_node="agent") clears checkpoint's next=() causing
+                # astream(None) to return instantly without running the graph.
+                # LangGraph's add_messages reducer appends the HumanMessage to existing
+                # checkpoint messages, so the agent sees full history + new message.
                 content = _build_message_content(message, images)
                 if content and not silent:
-                    try:
-                        await graph.aupdate_state(
-                            config,
-                            {"messages": [HumanMessage(content=content, id=message_id)]},
-                            as_node="agent",
-                        )
-                        logger.info(f"Injected resume message for instance {instance_id[:8]}... via aupdate_state")
-                    except Exception as e:
-                        # Fallback: fresh execution with explicit message
-                        logger.error(f"Failed to inject resume message via aupdate_state for {instance_id[:8]}...: {e}")
-                        graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
-                    else:
-                        graph_input = None  # Resume from updated checkpoint
+                    graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
                 else:
-                    # Silent mode or empty message: just resume from checkpoint without injection
+                    # Pure checkpoint resume (silent mode or no content)
                     graph_input = None
             else:
                 logger.warning(f"Retry for instance {instance_id[:8]}... but no checkpoint found, re-adding message")
