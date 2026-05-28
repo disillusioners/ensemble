@@ -120,7 +120,13 @@ export class MessageInputComponent {
     const keyboardEvent = event as KeyboardEvent;
     if (keyboardEvent.shiftKey) return; // Allow newline
     event.preventDefault();
-    this.handleSubmit();
+    // When instance is paused, Enter should resume with the message
+    // instead of attempting a normal send
+    if (this.isInstancePaused()) {
+      this.handleResume();
+    } else {
+      this.handleSubmit();
+    }
   }
 
   onAttachClick(): void {
