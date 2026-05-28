@@ -10,7 +10,7 @@ Idempotency behavior:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -54,7 +54,7 @@ def make_mock_job(
     job.queue_id = None
     job.idempotency_key = idempotency_key
     job.job_metadata = {}
-    job.created_at = (created_at or datetime.utcnow()).isoformat()
+    job.created_at = (created_at or datetime.now(timezone.utc)).isoformat()
     return job
 
 
@@ -639,7 +639,7 @@ class TestIdempotentEnqueueTTL:
         - The existing job is NOT returned
         """
         # Create an old job (30 hours ago, TTL is 24 hours)
-        old_time = datetime.utcnow() - timedelta(hours=30)
+        old_time = datetime.now(timezone.utc) - timedelta(hours=30)
         existing_job = make_mock_job(
             job_id="old-job-1",
             status=JobStatus.PENDING.value,
@@ -679,7 +679,7 @@ class TestIdempotentEnqueueTTL:
         - The existing job is returned
         """
         # Create a recent job (10 hours ago, TTL is 24 hours)
-        recent_time = datetime.utcnow() - timedelta(hours=10)
+        recent_time = datetime.now(timezone.utc) - timedelta(hours=10)
         existing_job = make_mock_job(
             job_id="recent-job-1",
             status=JobStatus.PENDING.value,
@@ -723,7 +723,7 @@ class TestIdempotentEnqueueTTL:
         service.set_config(mock_config)
         
         # Create a job that's 2 hours old
-        old_time = datetime.utcnow() - timedelta(hours=2)
+        old_time = datetime.now(timezone.utc) - timedelta(hours=2)
         existing_job = make_mock_job(
             job_id="old-job-custom",
             status=JobStatus.PENDING.value,
@@ -763,7 +763,7 @@ class TestIdempotentEnqueueTTL:
         - A new job is created
         """
         # Create a job exactly at TTL boundary (24 hours ago)
-        boundary_time = datetime.utcnow() - timedelta(hours=24, minutes=0)
+        boundary_time = datetime.now(timezone.utc) - timedelta(hours=24, minutes=0)
         existing_job = make_mock_job(
             job_id="boundary-job",
             status=JobStatus.PENDING.value,
