@@ -550,7 +550,11 @@ async def invoke_agent_and_wait(
             source=f"internal_invoke_and_wait:{parent_id or 'system'}",
         )
         
-        # 4. Wait for completion (success or error)
+        # 4. Re-register if resuming from checkpoint (child may have completed while unregisterd)
+        if not registry.is_registered(instance_id):
+            registry.register(instance_id)
+        
+        # 5. Wait for completion (success or error)
         result = await registry.wait_for(instance_id, timeout=timeout)
         
         if result is None:

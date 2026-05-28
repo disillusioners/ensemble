@@ -272,7 +272,11 @@ def main():
     log("STEP 3: Send message to leader")
     log("-" * 40)
 
-    message_content = "ask coder to say hi back, this is a test workflow, coder don't need call any tool, just hello"
+    message_content = (
+        "IMPORTANT: Spawn a coder instance and send it this exact message: "
+        "'Just reply with the word HELLO. Do NOT use any tools. Do NOT call any functions. "
+        "Just say HELLO and nothing else.' Wait for the coder to respond."
+    )
     msg_result = send_message(leader_id, message_content)
     if not msg_result:
         log("WARNING: Could not send message, continuing anyway...")
@@ -302,9 +306,16 @@ def main():
     else:
         log("WARNING: Could not get child info")
 
-    # Step 5: Pause the parent (leader) - cascades to child
+    # Step 5: Wait 2 seconds after child creation
     log("")
-    log("STEP 5: Pause parent (leader)")
+    log("STEP 5: Wait 2 seconds after child creation")
+    log("-" * 40)
+    log("Waiting 2 seconds before pause...")
+    time.sleep(2)
+
+    # Step 6: Pause ONLY the parent (leader) - cascade pauses child too
+    log("")
+    log("STEP 6: Pause parent (leader) with cascade")
     log("-" * 40)
 
     pause_result = pause_instance(leader_id)
@@ -320,46 +331,32 @@ def main():
     log(f"After pause - Leader status: {leader_state.get('status') if leader_state else '?'}")
     log(f"After pause - Child status: {child_state.get('status') if child_state else '?'}")
 
-    # Step 6: Resume sequence
+    # Step 7: Wait 3 seconds, then resume ONLY parent (cascade resumes child too)
     log("")
-    log("STEP 6: Resume sequence")
+    log("STEP 7: Wait 3 seconds, then resume parent with cascade")
     log("-" * 40)
 
-    # Wait 3 seconds
-    log("Waiting 3 seconds...")
+    log("Waiting 3 seconds while paused...")
     time.sleep(3)
 
-    # Resume child first
-    log("Resuming CHILD first (parent still paused)...")
-    resume_child = resume_instance(child_id)
-    if resume_child:
-        log(f"Child resume response: resumed_ids={resume_child.get('resumed_ids', [])}")
-
-    time.sleep(1)
-    child_state = get_instance(child_id)
-    log(f"After child resume - Child status: {child_state.get('status') if child_state else '?'}")
-
-    # Wait 3 more seconds
-    log("Waiting 3 more seconds...")
-    time.sleep(3)
-
-    # Resume parent
-    log("Resuming PARENT...")
+    log("Resuming PARENT (cascade will resume child too)...")
     resume_parent = resume_instance(leader_id, message="resume")
     if resume_parent:
         log(f"Parent resume response: resumed_ids={resume_parent.get('resumed_ids', [])}")
 
     time.sleep(1)
     leader_state = get_instance(leader_id)
+    child_state = get_instance(child_id)
     log(f"After parent resume - Leader status: {leader_state.get('status') if leader_state else '?'}")
+    log(f"After parent resume - Child status: {child_state.get('status') if child_state else '?'}")
 
-    # Step 7: Wait for work to complete
+    # Step 8: Wait 20 seconds for work to complete
     log("")
-    log("STEP 7: Wait for work to complete")
+    log("STEP 8: Wait for work to complete")
     log("-" * 40)
 
-    log("Waiting 15 seconds for completion...")
-    time.sleep(15)
+    log("Waiting 60 seconds for completion...")
+    time.sleep(60)
 
     # Fetch final states
     leader_state = get_instance(leader_id)
@@ -373,7 +370,7 @@ def main():
     log(f"  Child status: {child_state.get('status') if child_state else '?'}")
     log(f"  Total messages in leader: {len(leader_messages)}")
 
-    # Step 8: Print SUMMARY
+    # Step 9: Print SUMMARY
     log("")
     log("=" * 70)
     log("SUMMARY")

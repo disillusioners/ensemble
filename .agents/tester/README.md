@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-28 p0-stale-cleanup)
+## Test Results (Latest: 2026-05-28 ready-message-fix)
+
+### READY Messages Blocking Completion Report Fix (2026-05-28)
+- **Files**: `tests/unit/test_ready_message_completion_report.py` (12 tests)
+- **New Tests**: 12/12 PASS (core bug 4, edge cases 3, diagnostic logging 3, force_notify 2)
+- **Regression**: 4,844/4,847 PASS (3 pre-existing failures, 0 regressions)
+- **Quick Fixes**: 1 (removed READY from blocking statuses in child_reports.py)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Bug Tested**: READY messages incorrectly blocked completion report after resume
+- **Fix Location**: `daemon/services/child_reports.py` — `_should_send_completion_report()`
+- **Commit**: `47e1a43`
+
+### READY Message Fix Status: ✅ READY (12 new tests, 4,844 regression tests, 0 regressions, dev.sh stable)
 
 ### P0 Cleanup — Stale Report Cleanup + force_notify Simplification (2026-05-28)
 - **Files**: `tests/unit/test_p0_stale_cleanup.py` (10 tests)

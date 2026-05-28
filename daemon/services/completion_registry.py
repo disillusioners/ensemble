@@ -173,6 +173,18 @@ class CompletionRegistry:
             )
             return result
 
+    def is_registered(self, instance_id: str) -> bool:
+        """Check if an instance is currently registered.
+
+        Args:
+            instance_id: Unique identifier for the instance.
+
+        Returns:
+            True if the instance is registered, False otherwise.
+        """
+        with self._lock:
+            return instance_id in self._events
+
     def unregister(self, instance_id: str) -> None:
         """Remove all registry entries for an instance.
 

@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 78 packs
-- Unit: 63 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 79 packs
+- Unit: 64 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -103,6 +103,7 @@
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton | 2 min | 2026-05-20 | ✅ PASS (17/17, notification system) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |
 | notification_lifecycle_hook_test | tests/unit/test_notification_lifecycle_hook.py | Lifecycle hook: root instance notification, child exclusion, payload correctness, edge cases, EventBus integration | 2 min | 2026-05-20 | ✅ PASS (15/15, notification system) |
+| ready_message_unit_test | tests/unit/test_ready_message_completion_report.py | READY messages blocking completion report: core bug 4, edge cases 3, diagnostic logging 3, force_notify 2 | 2 min | 2026-05-28 | ✅ PASS (12/12, commit 47e1a43, 0 regressions) |
 
 ---
 
