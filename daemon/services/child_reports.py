@@ -238,6 +238,12 @@ Provide a concise summary:"""
             - should_send: True if should proceed with sending report, False to skip.
             - stale_report_reason: None if should_send=True, or reason string if skipped.
         """
+        logger.debug(
+            f"_should_send_completion_report called: instance_id={instance_id[:8] if instance_id else None}, "
+            f"completed_message_id={completed_message_id[:8] if completed_message_id else None}, "
+            f"force_notify={force_notify}"
+        )
+        
         # Guard: Can't do idempotency check without message_id
         if completed_message_id is None:
             # Just count all pending messages for the instance
@@ -251,7 +257,7 @@ Provide a concise summary:"""
                     MessageStatus.RETRYING.value,
                 ]))
             ).scalar_one()
-            return pending_count > 0, None
+            return pending_count > 0, "no_completed_message_id"
         
         # Check for pending/processing messages for this instance
         # Exclude only the completed message by ID (not by status) so that
@@ -269,16 +275,21 @@ Provide a concise summary:"""
         ).scalar_one()
         
         if pending_count > 0:
-            logger.debug(
-                f"Instance {instance_id[:8]}... has {pending_count} pending messages, "
-                f"skipping completion check"
+            logger.info(
+                f"Instance {instance_id[:8]}... has {pending_count} pending messages "
+                f"(READY/PROCESSING/RETRYING), skipping completion report"
             )
-            return False, None
+            return False, "pending_messages_exist"
         
         # Idempotency: Check if completion report already sent for THIS message
         instance = session.get(Instance, instance_id)
-        if instance is None or instance.parent_id is None:
-            return False, None
+        if instance is None:
+            logger.info(f"Instance {instance_id[:8]}... not found, skipping completion report")
+            return False, "instance_not_found"
+        
+        if instance.parent_id is None:
+            logger.info(f"Instance {instance_id[:8]}... has no parent_id, skipping completion report")
+            return False, "no_parent_id"
             
         # Use message_id in source so each completion generates a unique report
         existing_report = session.exec(
@@ -319,7 +330,7 @@ Provide a concise summary:"""
             f"Idempotency check PASSED: child {instance_id[:8]}..., "
             f"message {completed_message_id[:8]}..., no existing report found"
         )
-        return True, None
+        return True, "all_checks_passed"
 
     async def _create_completion_report(
         self,
