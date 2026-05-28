@@ -132,8 +132,8 @@ class TestChildInstanceResume:
         assert kwargs.get("instance_id") == instance_id
         assert kwargs.get("message") == "continue working"
         assert kwargs.get("source") == "cascade_resume"
-        # Verify resume_mode=False (not silent)
-        assert kwargs.get("metadata", {}).get("resume_mode") is False
+        # Verify resume_mode=True (controls checkpoint resume, independent of silent flag)
+        assert kwargs.get("metadata", {}).get("resume_mode") is True
 
         # Verify return value includes the message_id from enqueue_message
         assert result["instance_id"] == instance_id

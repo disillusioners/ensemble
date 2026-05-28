@@ -1815,7 +1815,13 @@ class InstanceManager:
         """
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
 
-    async def resume_processing_job(self, instance_id: str, message: str = "resume", silent: bool = False) -> dict | None:
+    async def resume_processing_job(
+        self,
+        instance_id: str,
+        message: str = "resume",
+        silent: bool = False,
+        images: list[str] | None = None,
+    ) -> dict | None:
         """Resume a paused instance by resuming from checkpoint.
 
         This method routes based on instance type:
@@ -1829,6 +1835,7 @@ class InstanceManager:
             instance_id: The instance ID.
             message: The resume message text (ignored when silent=True and checkpoint exists).
             silent: If True, resume from checkpoint without injecting a new message.
+            images: Optional list of base64-encoded images for multimodal content.
 
         Returns dict with result info (instance_id, job_id, message_id), or None on error.
         """
@@ -1862,13 +1869,14 @@ class InstanceManager:
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata
-            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, metadata={{'resume_mode': silent, 'silent': silent}}")
+            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, silent={silent}")
             try:
                 result = await self.enqueue_message(
                     instance_id=instance_id,
                     message=message,
                     source="cascade_resume",
-                    metadata={"resume_mode": silent, "silent": silent},
+                    images=images,
+                    metadata={"resume_mode": True, "silent": silent},
                 )
                 logger.info(f"Child instance {instance_id[:8]}... enqueued via WorkerPool: message_id={result.message_id[:8]}...")
                 return {
@@ -1936,6 +1944,7 @@ class InstanceManager:
                 retry_count=0,
                 message_source="cascade_resume",
                 silent=silent,  # Pass through silent flag
+                images=images,
             )
             logger.info(f"Root instance {instance_id[:8]}... resumed from checkpoint successfully")
         except Exception as e:

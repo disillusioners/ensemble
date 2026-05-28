@@ -191,7 +191,7 @@ class TestResumeQueueFlow:
         assert wp_kwargs["instance_id"] == instance_id
         assert wp_kwargs["message"] == "resume"
         assert wp_kwargs["source"] == "cascade_resume"
-        assert wp_kwargs["metadata"]["resume_mode"] is False
+        assert wp_kwargs["metadata"]["resume_mode"] is True
 
         # Return should include message_id
         assert result["instance_id"] == instance_id
@@ -223,10 +223,10 @@ class TestResumeQueueFlow:
         assert result["status"] == "silent_resume"
 
     @pytest.mark.asyncio
-    async def test_non_silent_mode_passes_resume_mode_false(
+    async def test_non_silent_mode_passes_resume_mode_true(
         self, instance_manager, mock_manager
     ):
-        """silent=False should pass resume_mode=False to enqueue."""
+        """silent=False should pass resume_mode=True to enqueue (always True for resume ops)."""
         instance_id = "child-instance-non-silent"
 
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
@@ -239,7 +239,7 @@ class TestResumeQueueFlow:
 
         mock_manager.enqueue_message.assert_called_once()
         wp_kwargs = mock_manager.enqueue_message.call_args[1]
-        assert wp_kwargs["metadata"]["resume_mode"] is False
+        assert wp_kwargs["metadata"]["resume_mode"] is True
 
     @pytest.mark.asyncio
     async def test_multiple_old_jobs_uses_first_job(

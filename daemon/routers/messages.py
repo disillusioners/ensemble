@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +15,9 @@ from daemon.services.live_event_hub import LiveEventHub
 from sse_starlette.sse import EventSourceResponse
 
 
+logger = logging.getLogger(__name__)
+
+
 router = APIRouter(prefix="/instances", tags=["instances-messages"])
 
 
@@ -23,35 +27,92 @@ def _get_manager(request: Request) -> Any:
 
 
 # 1. POST /instances/{instance_id}/messages - Send message
-@router.post("/{instance_id}/messages", response_model=MessageResponse)
-async def send_message(instance_id: str, message: MessageCreate, request: Request):
-    """Send a message to an instance (async via queue)."""
+@router.post("/{instance_id}/messages")
+async def send_message(instance_id: str, message: MessageCreate, request: Request) -> dict:
+    """Send a message to an instance (async via queue).
+    
+    If the instance is PAUSED, automatically resumes it with the user's message.
+    """
     manager = _get_manager(request)
     
-    # Check instance exists
+    # Check instance exists and get its status FIRST (before any enqueue)
     try:
-        await manager.get_instance(instance_id)
+        instance_info = manager.get_instance_info(instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
                 code=ErrorCodes.INSTANCE_NOT_FOUND,
-                message=f"Instance not found: {instance_id}"
-            ).model_dump()
+                message=f"Instance not found: {instance_id}",
+            ).model_dump(),
         )
-
-    # Check if images are provided but vision model is not configured
+    
+    # Validate images
     if message.images and not manager.config.llm.model_vision:
         raise HTTPException(
             status_code=400,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
                 message="Images provided but model_vision is not configured. "
-                        "Set OPENAI_MODEL_VISION environment variable or model_vision in config.yaml."
-            ).model_dump()
+                        "Set OPENAI_MODEL_VISION environment variable or model_vision in config.yaml.",
+            ).model_dump(),
         )
-
-    # Enqueue the message via JobQueue (non-blocking)
+    
+    # --- PAUSED INSTANCE: Skip enqueue, go straight to resume ---
+    if instance_info.get("status") == InstanceStatus.PAUSED.value:
+        logger.info(f"Instance {instance_id[:8]}... is PAUSED, auto-resuming with user message")
+        
+        # Cascade resume (same pattern as resume endpoint)
+        try:
+            resume_result = await manager.resume_instance_cascade(instance_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=ErrorResponse(
+                    code=ErrorCodes.INTERNAL_ERROR,
+                    message=f"Failed to resume instance: {e}",
+                ).model_dump(),
+            )
+        
+        target_id = resume_result.get("target_id", instance_id)
+        
+        # Resume processing jobs for all resumed instances
+        resume_results = {}
+        for resumed_id in resume_result["resumed_ids"]:
+            is_target = resumed_id == target_id
+            try:
+                job_result = await manager.resume_processing_job(
+                    resumed_id,
+                    message=message.content if is_target else "resume",
+                    silent=not is_target,
+                    images=message.images if is_target else None,  # Pass images for target only
+                )
+            except Exception as e:
+                logger.warning(f"Failed to resume processing for {resumed_id[:8]}...: {e}")
+                job_result = {"status": "error", "error": str(e)}
+            if job_result is None:
+                logger.debug(f"No active PROCESSING job for instance {resumed_id[:8]}... (was IDLE/WAITING_CHILDREN)")
+            resume_results[resumed_id] = job_result if job_result is not None else {"status": "no_active_job"}
+        
+        return {
+            "message_id": None,  # No message queued — resume injects directly
+            "role": "user",
+            "content": message.content,
+            "thinking": None,
+            "thinking_extracted": None,
+            "tool_calls": None,
+            "images": None,
+            "auto_resumed": True,
+            "resume_info": {
+                "resumed": True,
+                "resumed_ids": resume_result["resumed_ids"],
+                "skipped_ids": resume_result["skipped_ids"],
+                "target_id": target_id,
+                "resume_results": resume_results,
+            },
+        }
+    
+    # --- NORMAL PATH: Not paused, enqueue message ---
     try:
         result = await manager.enqueue_message_via_jq(
             instance_id=instance_id,
@@ -64,14 +125,11 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
             status_code=500,
             detail=ErrorResponse(
                 code=ErrorCodes.INTERNAL_ERROR,
-                message=f"Failed to enqueue message: {str(e)}"
-            ).model_dump()
+                message=f"Failed to enqueue message: {str(e)}",
+            ).model_dump(),
         )
-
-    # Create response with queued status
-    now = datetime.now(timezone.utc)
-
-    return MessageResponse(
+    
+    response_data = MessageResponse(
         message_id=result.message_id,
         role="assistant",
         content="",  # Response will come async
@@ -79,8 +137,13 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
         thinking_extracted=None,
         tool_calls=None,
         images=None,  # Images are stored in message_queue, not in response
-        created_at=now,
-    )
+        created_at=datetime.now(timezone.utc),
+    ).model_dump()
+    
+    response_data["auto_resumed"] = False
+    response_data["resume_info"] = None
+    
+    return response_data
 
 
 # 2. GET /instances/{instance_id}/messages/{message_id} - Get message status

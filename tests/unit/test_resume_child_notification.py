@@ -136,7 +136,7 @@ class TestChildNotificationWorkerPoolPath:
         assert kwargs["instance_id"] == instance_id
         assert kwargs["message"] == "resume"
         assert kwargs["source"] == "cascade_resume"
-        assert kwargs["metadata"]["resume_mode"] is False
+        assert kwargs["metadata"]["resume_mode"] is True
 
         # Verify return
         assert result["instance_id"] == instance_id
