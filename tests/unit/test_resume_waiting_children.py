@@ -240,7 +240,7 @@ class TestResumeQueueFlow:
     async def test_multiple_old_jobs_uses_first_job(
         self, instance_manager, mock_manager
     ):
-        """Multiple old jobs: only the first one is used, others are ignored."""
+        """Multiple old jobs: first one is used for COMPLETED, others are CANCELLED (W4)."""
         instance_id = "parent-instance-multi"
         job_id_1 = "job-1-123"
         job_id_2 = "job-2-456"
@@ -269,11 +269,17 @@ class TestResumeQueueFlow:
         # Should use the first job only
         mock_manager._process_message_with_tracking.assert_called_once()
 
-        # Should complete only the first job as COMPLETED
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-        call_args = mock_manager._job_queue_service.complete_job.call_args
-        assert call_args[0][0] == job_id_1  # first job_id
-        assert call_args[0][1] == DemandState.COMPLETED
+        # W4: complete_job called twice - extra job CANCELLED, primary job COMPLETED
+        mock_manager._job_queue_service.complete_job.assert_called()
+        calls = mock_manager._job_queue_service.complete_job.call_args_list
+        
+        # First call: cancel extra job
+        assert calls[0][0][0] == job_id_2
+        assert calls[0][0][1] == DemandState.CANCELLED
+        
+        # Last call: complete primary job
+        assert calls[-1][0][0] == job_id_1
+        assert calls[-1][0][1] == DemandState.COMPLETED
 
     @pytest.mark.asyncio
     async def test_enqueue_failure_returns_none(

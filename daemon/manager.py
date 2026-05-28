@@ -1859,6 +1859,15 @@ class InstanceManager:
         old_job = old_jobs[0]
         logger.info(f"Found PROCESSING job {old_job.job_id[:8]}... for root instance {instance_id[:8]}..., resuming from checkpoint")
 
+        # W4: Clean up extra jobs if multiple PROCESSING jobs exist
+        if len(old_jobs) > 1:
+            logger.warning(f"Multiple PROCESSING jobs for {instance_id[:8]}...")
+            for extra in old_jobs[1:]:
+                try:
+                    await self._job_queue_service.complete_job(extra.job_id, DemandState.CANCELLED, error="Superseded by primary job resume")
+                except Exception:
+                    pass
+
         # 1. Clean stale MessageQueue entries (PENDING, PROCESSING, RETRYING)
         #    These are stale entries from the previous processing attempt
         try:
@@ -1868,11 +1877,14 @@ class InstanceManager:
                 statuses=[MessageStatus.PENDING.value, MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value]
             )
             for msg in pending_messages:
-                try:
-                    await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
-                    logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
-                except Exception as e:
-                    logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
+                if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value):
+                    try:
+                        await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
+                        logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
+                    except Exception as e:
+                        logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
+                elif msg.status == MessageStatus.PENDING.value:
+                    logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
         except Exception as e:
             logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
 
@@ -1902,11 +1914,10 @@ class InstanceManager:
             return None
 
         # 4. Process child completion and notify parent
-        if hasattr(self, '_process_child_completion_and_notify_parent'):
-            try:
-                await self._process_child_completion_and_notify_parent(instance_id, message_id)
-            except Exception as e:
-                logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
+        try:
+            await self._process_child_completion_and_notify_parent(instance_id, message_id)
+        except Exception as e:
+            logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
 
         # 5. Check waiting_for > 0 — if still waiting for children, don't complete the job
         skip_complete = False
@@ -1918,6 +1929,7 @@ class InstanceManager:
                 skip_complete = True
         except Exception as e:
             logger.warning(f"Failed to check instance status for completion: {e}")
+            skip_complete = True  # Safe: don't complete if we can't verify
 
         if skip_complete:
             logger.info(f"Root instance {instance_id[:8]}... still waiting for children, job stays PROCESSING")
@@ -1928,11 +1940,14 @@ class InstanceManager:
             }
 
         # 6. Complete the existing job (same job, not a new one!)
-        await self._job_queue_service.complete_job(
-            old_job.job_id,
-            DemandState.COMPLETED,
-            result_summary=result.content if result else None,
-        )
+        try:
+            await self._job_queue_service.complete_job(
+                old_job.job_id,
+                DemandState.COMPLETED,
+                result_summary=result.content if result else None,
+            )
+        except Exception as e:
+            logger.warning(f"Job {old_job.job_id[:8]}... already transitioned: {e}")
 
         return {
             "instance_id": instance_id,

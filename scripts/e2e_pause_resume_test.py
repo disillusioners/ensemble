@@ -213,17 +213,49 @@ def wait_for_child(parent_id: str, timeout: int = CHILD_APPEAR_TIMEOUT) -> str |
     return None
 
 
+def get_jobs(instance_id: str | None = None, status: str | None = None) -> list:
+    """Get jobs, optionally filtered by instance_id or status."""
+    params = {}
+    if instance_id is not None:
+        params["instance_id"] = instance_id  # Will filter client-side
+    if status is not None:
+        params["status"] = status
+
+    try:
+        resp = requests.get(f"{API_BASE}/jobs", params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        jobs = data.get("jobs", [])
+        # Filter by instance_id client-side if provided (API may not support it)
+        if instance_id is not None:
+            jobs = [j for j in jobs if j.get("instance_id") == instance_id]
+        return jobs
+    except requests.exceptions.RequestException as e:
+        log(f"Error getting jobs: {e}")
+        return []
+
+
 def find_child_completion_report(parent_id: str, child_id: str) -> dict | None:
     """Look for a child completion report in parent's messages."""
     messages = get_messages(parent_id)
 
     # Look for messages that indicate child completion
-    # This could be a message from child or about child completion
+    # Completion reports have type="COMPLETION_REPORT" and source="internal_report:{child_id}:..."
     for msg in messages:
         content = str(msg.get("content", "")).lower()
         role = msg.get("role", "")
+        msg_type = msg.get("type", "")
+        source = msg.get("source", "")
 
-        # Check for child completion indicators
+        # Check for COMPLETION_REPORT type messages (system messages about child completion)
+        if msg_type == "COMPLETION_REPORT" and child_id in source:
+            return msg
+
+        # Check for internal_report source format: internal_report:{child_id}:{message_id}
+        if source.startswith("internal_report:") and child_id in source:
+            return msg
+
+        # Fallback: check content patterns (for backwards compatibility)
         if child_id[:8] in str(msg.get("content", "")):
             return msg
         if "completed" in content and "coder" in content:
@@ -232,6 +264,44 @@ def find_child_completion_report(parent_id: str, child_id: str) -> dict | None:
             return msg
 
     return None
+
+
+def check_job_continuity(leader_id: str, original_job_id: str | None) -> tuple[bool, str]:
+    """Verify the original PROCESSING job completed (not cancelled + recreated).
+
+    Args:
+        leader_id: The leader instance ID to check jobs for.
+        original_job_id: The job ID that was PROCESSING when we paused.
+
+    Returns:
+        Tuple of (passed: bool, details: str)
+    """
+    if not original_job_id:
+        return False, "No original job ID captured"
+
+    # Get all jobs for this instance
+    jobs = get_jobs(instance_id=leader_id)
+    if not jobs:
+        return False, "No jobs found for instance"
+
+    # Find the original job
+    original_job = None
+    for job in jobs:
+        if job.get("job_id") == original_job_id:
+            original_job = job
+            break
+
+    if not original_job:
+        return False, f"Original job {original_job_id} not found in job history"
+
+    # Check if it completed (not cancelled)
+    job_status = original_job.get("status")
+    if job_status == "completed":
+        return True, f"Original job {original_job_id} completed (PASS)"
+    elif job_status == "cancelled":
+        return False, f"Original job {original_job_id} was cancelled - job was recreated (FAIL)"
+    else:
+        return False, f"Original job {original_job_id} has unexpected status: {job_status}"
 
 
 def main():
@@ -306,11 +376,21 @@ def main():
     else:
         log("WARNING: Could not get child info")
 
-    # Step 5: Wait 2 seconds after child creation
+    # Step 5: Wait 2 seconds after child creation, capture job ID before pause
     log("")
-    log("STEP 5: Wait 2 seconds after child creation")
+    log("STEP 5: Wait 2 seconds and capture job ID for continuity check")
     log("-" * 40)
     log("Waiting 2 seconds before pause...")
+
+    # Capture the PROCESSING job ID before pausing
+    leader_jobs_before_pause = get_jobs(instance_id=leader_id, status="processing")
+    if leader_jobs_before_pause:
+        original_job_id = leader_jobs_before_pause[0].get("job_id")
+        log(f"Captured PROCESSING job ID: {original_job_id}")
+    else:
+        original_job_id = None
+        log("WARNING: No PROCESSING job found for leader before pause")
+
     time.sleep(2)
 
     # Step 6: Pause ONLY the parent (leader) - cascade pauses child too
@@ -322,6 +402,8 @@ def main():
     if not pause_result:
         log("FATAL: Could not pause leader")
         sys.exit(1)
+
+    log(f"Original job ID for continuity check: {original_job_id or 'N/A'}")
 
     # Verify both are paused
     time.sleep(1)
@@ -350,7 +432,7 @@ def main():
     log(f"After parent resume - Leader status: {leader_state.get('status') if leader_state else '?'}")
     log(f"After parent resume - Child status: {child_state.get('status') if child_state else '?'}")
 
-    # Step 8: Wait 20 seconds for work to complete
+    # Step 8: Wait 60 seconds for work to complete
     log("")
     log("STEP 8: Wait for work to complete")
     log("-" * 40)
@@ -399,7 +481,26 @@ def main():
     for i, msg in enumerate(leader_messages):
         content = str(msg.get("content", ""))[:150]
         role = msg.get("role", "?")
-        log(f"  [{i}] {role}: {content}...")
+        msg_type = msg.get("type", "")
+        source = msg.get("source", "")
+        log(f"  [{i}] {role} (type={msg_type}): {content}...")
+        if source:
+            log(f"       source: {source}")
+
+    # Step 10: Job Continuity Check
+    log("")
+    log("=" * 70)
+    log("JOB CONTINUITY CHECK")
+    log("=" * 70)
+
+    job_continuity_passed, job_continuity_details = check_job_continuity(leader_id, original_job_id)
+    log(f"Job continuity: {job_continuity_details}")
+
+    # Also show all jobs for the instance for debugging
+    all_jobs = get_jobs(instance_id=leader_id)
+    log(f"Jobs for leader instance ({len(all_jobs)} total):")
+    for job in all_jobs:
+        log(f"  - job_id={job.get('job_id')[:16]}... status={job.get('status')} created={job.get('created_at', '')[:19]}")
 
     # Test result
     log("")
@@ -411,6 +512,7 @@ def main():
     # - Child should be COMPLETED
     # - Parent should not be stuck in WAITING_CHILDREN indefinitely
     # - Child report should reach parent
+    # - Original job should have completed (not cancelled + recreated)
 
     success = True
     issues = []
@@ -427,6 +529,10 @@ def main():
     if not report_found:
         issues.append("Child completion report not found in parent messages")
         # Don't fail the test on this - it might just be formatted differently
+
+    if not job_continuity_passed:
+        issues.append(f"Job continuity check failed: {job_continuity_details}")
+        success = False
 
     if success:
         log("ALL CHECKS PASSED")
