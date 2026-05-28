@@ -234,8 +234,8 @@ class JobRepository:
                 stmt = stmt.where(JobItem.queue_id == queue_id)
             
             stmt = stmt.order_by(
-                col(JobItem.priority).desc(),
-                col(JobItem.created_at).desc()
+                col(JobItem.created_at).desc(),
+                col(JobItem.priority).desc()
             ).offset(offset).limit(limit)
             
             jobs = list(db_session.exec(stmt))
