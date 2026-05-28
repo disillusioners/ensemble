@@ -1826,11 +1826,15 @@ class InstanceManager:
         """
         from .services.job_queue_service import DemandState
 
+        logger.info(f"[RESUME] instance={instance_id[:8]} resume_processing_job called, message={repr(message)}, silent={silent}")
+
         # 1. Find existing PROCESSING MESSAGE job(s) for this instance
         old_jobs = await asyncio.to_thread(
             self._job_queue_service._repository.find_processing_message_jobs_by_instance,
             instance_id
         )
+
+        logger.info(f"[RESUME] instance={instance_id[:8]} old_jobs_count={len(old_jobs)}, branch={'root' if old_jobs else 'child'}")
 
         if not old_jobs:
             # Child instance path: use WorkerPool via enqueue_message()
@@ -1838,6 +1842,7 @@ class InstanceManager:
             logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata
+            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, metadata={{'resume_mode': silent}}")
             try:
                 result = await self.enqueue_message(
                     instance_id=instance_id,
@@ -1885,6 +1890,9 @@ class InstanceManager:
                         logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
                 elif msg.status == MessageStatus.PENDING.value:
                     logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
+            completed_count = sum(1 for msg in pending_messages if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value))
+            pending_count = sum(1 for msg in pending_messages if msg.status == MessageStatus.PENDING.value)
+            logger.info(f"[RESUME] instance={instance_id[:8]} cleaned {completed_count} stale PROCESSING/RETRYING messages, preserved {pending_count} PENDING messages")
         except Exception as e:
             logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
 
@@ -1893,6 +1901,7 @@ class InstanceManager:
 
         # 3. Directly call _process_message_with_tracking with is_retry=True
         #    This will resume from checkpoint (graph_input=None when checkpoint exists)
+        logger.info(f"[RESUME] instance={instance_id[:8]} branch=root, calling _process_message_with_tracking, is_retry=True, message={repr(message if not silent else '')}, silent={silent}")
         try:
             result = await self._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1903,6 +1912,7 @@ class InstanceManager:
                 message_source="cascade_resume",
             )
             logger.info(f"Root instance {instance_id[:8]}... resumed from checkpoint successfully")
+            logger.info(f"[RESUME] instance={instance_id[:8]} graph_execution_complete, result_content_len={len(result.content) if result and result.content else 0}")
         except Exception as e:
             logger.error(f"Failed to resume root instance {instance_id[:8]}...: {type(e).__name__}: {e}")
             # Mark the job as FAILED on failure
@@ -1930,6 +1940,9 @@ class InstanceManager:
         except Exception as e:
             logger.warning(f"Failed to check instance status for completion: {e}")
             skip_complete = True  # Safe: don't complete if we can't verify
+
+        waiting_for = getattr(instance, 'waiting_for', None) if instance else None
+        logger.info(f"[RESUME] instance={instance_id[:8]} waiting_for={waiting_for}, skip_complete={skip_complete}")
 
         if skip_complete:
             logger.info(f"Root instance {instance_id[:8]}... still waiting for children, job stays PROCESSING")

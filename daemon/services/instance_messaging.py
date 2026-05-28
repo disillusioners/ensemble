@@ -360,8 +360,12 @@ class InstanceMessagingService:
             config = {"configurable": {"thread_id": instance_id}}
             # Get the current state from async checkpointer
             state = await self._checkpointer.aget(config)
-            return state is not None
-        except Exception:
+            result = state is not None
+            msg_count = len(state.values.get("messages", [])) if state else 0
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, checkpoint_exists={state is not None}, msg_count={msg_count}, thread_id={instance_id}")
+            return result
+        except Exception as e:
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
             return False
 
     async def _get_message_count(self, instance_id: str) -> int:
@@ -847,9 +851,10 @@ class InstanceMessagingService:
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
             await self._maybe_compact_context(instance_id, graph, config)
-        
+
         if is_retry:
-            if await self._has_checkpoint(instance_id):
+            has_ckpt = await self._has_checkpoint(instance_id)
+            if has_ckpt:
                 logger.info(f"Resuming instance {instance_id[:8]}... from checkpoint (retry #{retry_count})")
                 graph_input = None  # LangGraph will resume from checkpoint
             else:
@@ -860,12 +865,17 @@ class InstanceMessagingService:
             # First attempt - add message to conversation
             content = _build_message_content(message, images)
             graph_input = {"messages": [HumanMessage(content=content, id=message_id)]}
+
+        # Log graph_input decision
+        has_ckpt = await self._has_checkpoint(instance_id) if is_retry else False
+        logger.info(f"[RESUME] instance={instance_id[:8]} is_retry={is_retry}, has_checkpoint={has_ckpt}, graph_input={'None (checkpoint_resume)' if graph_input is None else 'HumanMessage (fresh)'}, path={'checkpoint_resume' if graph_input is None else 'fresh_execution'}")
         
         # Build user message for pre-emit - use multimodal content if images present
         user_msg = HumanMessage(content=_build_message_content(message, images), id=message_id)
         
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
+        logger.info(f"[RESUME] instance={instance_id[:8]} is_retry={is_retry}, emitting_user_message_sse=True, message_id={message_id[:8]}, message_len={len(message) if message else 0}")
         await self._manager._live_hub.stream_message(
             instance_id=instance_id,
             message=user_serialized,
@@ -878,6 +888,7 @@ class InstanceMessagingService:
         tool_outputs: dict = {}
         event_index = 0  # Sequence counter for checkpoint_id
         _dispatched_msg_ids: set[str] = set()  # Track dispatched message IDs for dedup
+        _first_event_logged = False  # Flag for first event logging
 
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
@@ -899,6 +910,12 @@ class InstanceMessagingService:
                     else:
                         mode = "updates"
                         data = event
+                    
+                    # Log first event from LangGraph
+                    if not _first_event_logged:
+                        node_name = list(data.keys())[0] if data else "unknown"
+                        logger.info(f"[RESUME] instance={instance_id[:8]} first_event_node={node_name}, event_count=1")
+                        _first_event_logged = True
                     
                     if mode == "updates":
                         # Progressive delivery: dispatch AI messages from "agent" node immediately

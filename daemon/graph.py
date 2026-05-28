@@ -607,10 +607,19 @@ def build_instance_graph(
     graph.add_edge("nudge", "agent")
     
     compiled = graph.compile(checkpointer=checkpointer)
-    
+
     # Late bind graph reference
     graph_ref[0] = compiled
-    
+
+    # RESUME diagnostic: log checkpointer configuration
+    checkpointer_type = type(checkpointer).__name__ if checkpointer else "None"
+    checkpointer_extra = getattr(checkpointer, "__class__", None)
+    if checkpointer_extra:
+        checkpointer_extra = f"{checkpointer_extra.__module__}.{checkpointer_extra.__name__}"
+    else:
+        checkpointer_extra = str(checkpointer)[:80] if checkpointer else "None"
+    logger.info(f"[RESUME] Graph compiled: checkpointer={checkpointer_type} ({checkpointer_extra}), nodes=[agent, tools, nudge], edges=[START->agent, agent->{{tools,agent,nudge,END}}, tools->agent, nudge->agent]")
+
     return compiled
 
 
