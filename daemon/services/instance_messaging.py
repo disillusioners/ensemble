@@ -358,11 +358,11 @@ class InstanceMessagingService:
         """Check if a checkpoint exists for this instance."""
         try:
             config = {"configurable": {"thread_id": instance_id}}
-            # Get the current state from async checkpointer
             state = await self._checkpointer.aget(config)
             result = state is not None
-            msg_count = len(state.values.get("messages", [])) if state else 0
-            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, checkpoint_exists={state is not None}, msg_count={msg_count}, thread_id={instance_id}")
+            channel_values = state.get("channel_values", {}) if state else {}
+            msg_count = len(channel_values.get("messages", []))
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, msg_count={msg_count}")
             return result
         except Exception as e:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
@@ -373,8 +373,9 @@ class InstanceMessagingService:
         try:
             config = {"configurable": {"thread_id": instance_id}}
             state = await self._checkpointer.aget(config)
-            if state and state.values:
-                messages = state.values.get("messages", [])
+            if state:
+                channel_values = state.get("channel_values", {})
+                messages = channel_values.get("messages", [])
                 return len(messages) if messages else 0
             return 0
         except Exception:
@@ -875,7 +876,6 @@ class InstanceMessagingService:
         
         user_serialized = serialize_message(user_msg)
         user_serialized["instance_id"] = instance_id
-        logger.info(f"[RESUME] instance={instance_id[:8]} is_retry={is_retry}, emitting_user_message_sse=True, message_id={message_id[:8]}, message_len={len(message) if message else 0}")
         await self._manager._live_hub.stream_message(
             instance_id=instance_id,
             message=user_serialized,
@@ -888,7 +888,6 @@ class InstanceMessagingService:
         tool_outputs: dict = {}
         event_index = 0  # Sequence counter for checkpoint_id
         _dispatched_msg_ids: set[str] = set()  # Track dispatched message IDs for dedup
-        _first_event_logged = False  # Flag for first event logging
 
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
@@ -910,12 +909,6 @@ class InstanceMessagingService:
                     else:
                         mode = "updates"
                         data = event
-                    
-                    # Log first event from LangGraph
-                    if not _first_event_logged:
-                        node_name = list(data.keys())[0] if data else "unknown"
-                        logger.info(f"[RESUME] instance={instance_id[:8]} first_event_node={node_name}, event_count=1")
-                        _first_event_logged = True
                     
                     if mode == "updates":
                         # Progressive delivery: dispatch AI messages from "agent" node immediately
