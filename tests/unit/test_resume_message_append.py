@@ -88,6 +88,7 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
     # Mock _process_child_completion_and_notify_parent
     manager._process_child_completion_and_notify_parent = AsyncMock()
+    manager._graph_tasks = {}
     return manager
 
 
@@ -105,6 +106,7 @@ def instance_manager(mock_manager):
     manager.enqueue_message = mock_manager.enqueue_message
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
+    manager._graph_tasks = {}
     return manager
 
 
@@ -144,11 +146,7 @@ class TestResumeMessageIdUniqueness:
 
     @pytest.mark.asyncio
     async def test_parent_resume_generates_unique_message_id(self, instance_manager, mock_manager):
-        """Test that parent resume (has old_jobs) generates a fresh message_id.
-
-        With the new implementation, message_id is generated via uuid.uuid4()
-        directly in resume_processing_job.
-        """
+        """Test that parent resume (has old_jobs) generates a fresh message_id and returns immediately."""
         from daemon.repositories.instance.models import InstanceStatus
 
         old_message_id = "original-msg-123"
@@ -173,10 +171,11 @@ class TestResumeMessageIdUniqueness:
             "test-instance", message="resume", silent=False
         )
 
-        # Verify _process_message_with_tracking was called with is_retry=True
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
-        assert call_kwargs["is_retry"] is True
+        # Should return immediately with "resuming" status
+        assert result["status"] == "resuming"
+
+        # Should NOT call _process_message_with_tracking synchronously
+        mock_manager._process_message_with_tracking.assert_not_called()
 
         # Result should have a fresh message_id (not the old one)
         assert result["message_id"] is not None

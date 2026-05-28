@@ -1851,6 +1851,12 @@ class InstanceManager:
 
         logger.info(f"[RESUME] instance={instance_id[:8]} old_jobs_count={len(old_jobs)}, branch={'root' if old_jobs else 'child'}")
 
+        # Deduplication: prevent multiple concurrent resume tasks for the same instance
+        existing_task = self._graph_tasks.get(instance_id)
+        if existing_task and not existing_task.done():
+            logger.warning(f"Resume already in progress for {instance_id[:8]}")
+            return {"instance_id": instance_id, "job_id": old_jobs[0].job_id if old_jobs else None, "message_id": None, "status": "already_resuming"}
+
         if not old_jobs:
             # Child instance path: use WorkerPool via enqueue_message()
             # Child instances don't have JobQueue entries (they use WorkerPool).
@@ -1883,6 +1889,7 @@ class InstanceManager:
                     "instance_id": instance_id,
                     "job_id": None,
                     "message_id": result.message_id,
+                    "status": "queued",
                 }
             except Exception as e:
                 logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {type(e).__name__}: {e}")
@@ -1933,12 +1940,60 @@ class InstanceManager:
         # 2. Create a fresh message_id for tracking (not enqueued, just for internal tracking)
         message_id = str(uuid.uuid4())
 
-        # 3. Directly call _process_message_with_tracking with is_retry=True
-        #    This will resume from checkpoint (graph_input=None when checkpoint exists)
+        # 3. Return immediately - processing happens in background task
+        #    This allows the HTTP response to return fast while the LLM processes asynchronously
+        logger.info(f"[RESUME] instance={instance_id[:8]} scheduling background processing for job {old_job.job_id[:8]}...")
+
+        # Create background task for processing and job completion
+        # Store in _graph_tasks so it can be cancelled by pause_instance_cascade
+        task = asyncio.create_task(self._resume_processing_background(
+            instance_id=instance_id,
+            message=message if not silent else "",
+            message_id=message_id,
+            old_job_id=old_job.job_id,
+            silent=silent,
+            images=images,
+        ))
+        self._graph_tasks[instance_id] = task
+
+        return {
+            "instance_id": instance_id,
+            "job_id": old_job.job_id,
+            "message_id": message_id,
+            "status": "resuming",
+        }
+
+    async def _resume_processing_background(
+        self,
+        instance_id: str,
+        message: str,
+        message_id: str,
+        old_job_id: str,
+        silent: bool,
+        images: list[str] | None,
+    ) -> None:
+        """Background task for resumed processing.
+
+        Runs _process_message_with_tracking, handles completion/child notification,
+        and completes the job. This runs asynchronously after the HTTP response
+        has already been sent.
+
+        Args:
+            instance_id: The instance ID.
+            message: The resume message text.
+            message_id: The internal tracking message ID.
+            old_job_id: The JobQueue job ID to complete.
+            silent: If True, resume from checkpoint without injecting a new message.
+            images: Optional list of base64-encoded images for multimodal content.
+        """
+        from .services.job_queue_service import DemandState
+
         try:
+            # 1. Call _process_message_with_tracking with is_retry=True
+            #    This will resume from checkpoint (graph_input=None when checkpoint exists)
             result = await self._process_message_with_tracking(
                 instance_id=instance_id,
-                message=message if not silent else "",
+                message=message,
                 message_id=message_id,
                 is_retry=True,  # Triggers checkpoint resume
                 retry_count=0,
@@ -1946,58 +2001,62 @@ class InstanceManager:
                 silent=silent,  # Pass through silent flag
                 images=images,
             )
-            logger.info(f"Root instance {instance_id[:8]}... resumed from checkpoint successfully")
+            logger.info(f"[RESUME] instance={instance_id[:8]} background processing completed successfully")
+
+            # 2. Process child completion and notify parent
+            try:
+                await self._process_child_completion_and_notify_parent(instance_id, message_id)
+            except Exception as e:
+                logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
+
+            # 3. Check waiting_for > 0 — if still waiting for children, don't complete the job
+            skip_complete = False
+            try:
+                instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
+                if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                    skip_complete = True
+                elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
+                    skip_complete = True
+            except Exception as e:
+                logger.warning(f"Failed to check instance status for completion: {e}")
+                skip_complete = True  # Safe: don't complete if we can't verify
+
+            if skip_complete:
+                logger.info(f"[RESUME] instance={instance_id[:8]} still waiting for children, job stays PROCESSING")
+                return
+
+            # 4. Complete the existing job (same job, not a new one!)
+            try:
+                await self._job_queue_service.complete_job(
+                    old_job_id,
+                    DemandState.COMPLETED,
+                    result_summary=result.content if result else None,
+                )
+                logger.info(f"[RESUME] instance={instance_id[:8]} job {old_job_id[:8]}... marked COMPLETED")
+            except Exception as e:
+                logger.warning(f"Job {old_job_id[:8]}... already transitioned: {e}")
+
         except Exception as e:
-            logger.error(f"Failed to resume root instance {instance_id[:8]}...: {type(e).__name__}: {e}")
+            logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
             # Mark the job as FAILED on failure
-            await self._job_queue_service.complete_job(
-                old_job.job_id,
-                DemandState.FAILED,
-                error=f"Resume failed: {e}"
-            )
-            return None
+            try:
+                await self._job_queue_service.complete_job(
+                    old_job_id,
+                    DemandState.FAILED,
+                    error=f"Resume failed: {e}"
+                )
+            except Exception:
+                pass
 
-        # 4. Process child completion and notify parent
-        try:
-            await self._process_child_completion_and_notify_parent(instance_id, message_id)
-        except Exception as e:
-            logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
-
-        # 5. Check waiting_for > 0 — if still waiting for children, don't complete the job
-        skip_complete = False
-        try:
-            instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
-            if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
-                skip_complete = True
-            elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
-                skip_complete = True
-        except Exception as e:
-            logger.warning(f"Failed to check instance status for completion: {e}")
-            skip_complete = True  # Safe: don't complete if we can't verify
-
-        if skip_complete:
-            logger.info(f"Root instance {instance_id[:8]}... still waiting for children, job stays PROCESSING")
-            return {
-                "instance_id": instance_id,
-                "job_id": old_job.job_id,
-                "message_id": message_id,
-            }
-
-        # 6. Complete the existing job (same job, not a new one!)
-        try:
-            await self._job_queue_service.complete_job(
-                old_job.job_id,
-                DemandState.COMPLETED,
-                result_summary=result.content if result else None,
-            )
-        except Exception as e:
-            logger.warning(f"Job {old_job.job_id[:8]}... already transitioned: {e}")
-
-        return {
-            "instance_id": instance_id,
-            "job_id": old_job.job_id,
-            "message_id": message_id,
-        }
+            # Update instance status to ERROR
+            try:
+                self._instance_repository.update_instance(
+                    instance_id,
+                    status=InstanceStatus.ERROR.value,
+                )
+                logger.info(f"[RESUME] instance={instance_id[:8]} status set to ERROR")
+            except Exception:
+                pass
 
     async def _publish_instance_lifecycle_event(
         self,

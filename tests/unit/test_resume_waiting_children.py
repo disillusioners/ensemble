@@ -94,6 +94,7 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
     # Mock _process_child_completion_and_notify_parent
     manager._process_child_completion_and_notify_parent = AsyncMock()
+    manager._graph_tasks = {}
     return manager
 
 
@@ -108,6 +109,7 @@ def instance_manager(mock_manager):
     manager.enqueue_message = mock_manager.enqueue_message
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
+    manager._graph_tasks = {}
     return manager
 
 
@@ -125,7 +127,7 @@ class TestResumeQueueFlow:
     async def test_parent_instance_with_old_jobs_resumes_from_checkpoint(
         self, instance_manager, mock_manager
     ):
-        """Root instance with old_jobs should resume from checkpoint via _process_message_with_tracking."""
+        """Root instance with old_jobs should schedule background processing and return immediately."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
         message_id = "msg-xyz-456"
@@ -148,23 +150,17 @@ class TestResumeQueueFlow:
             instance_id, message="resume"
         )
 
-        # Should call _process_message_with_tracking with is_retry=True
-        mock_manager._process_message_with_tracking.assert_called_once()
-        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
-        assert call_kwargs["instance_id"] == instance_id
-        assert call_kwargs["is_retry"] is True
-        assert call_kwargs["message_source"] == "cascade_resume"
-
-        # Should complete the existing job as COMPLETED (not cancelled)
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-        call_args = mock_manager._job_queue_service.complete_job.call_args
-        assert call_args[0][0] == job_id  # job_id
-        assert call_args[0][1] == DemandState.COMPLETED  # completed
-
-        # Return should include the existing job_id
+        # Should return immediately with "resuming" status
         assert result["instance_id"] == instance_id
         assert result["job_id"] == job_id
         assert result["message_id"] is not None
+        assert result["status"] == "resuming"
+
+        # Should NOT call _process_message_with_tracking synchronously (it's in background)
+        mock_manager._process_message_with_tracking.assert_not_called()
+
+        # Should NOT complete the job synchronously (it's in background)
+        mock_manager._job_queue_service.complete_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_child_instance_no_old_jobs_enqueues_via_workerpool(
@@ -245,7 +241,7 @@ class TestResumeQueueFlow:
     async def test_multiple_old_jobs_uses_first_job(
         self, instance_manager, mock_manager
     ):
-        """Multiple old jobs: first one is used for COMPLETED, others are CANCELLED (W4)."""
+        """Multiple old jobs: first one is used for resume, others are CANCELLED (W4)."""
         instance_id = "parent-instance-multi"
         job_id_1 = "job-1-123"
         job_id_2 = "job-2-456"
@@ -271,20 +267,22 @@ class TestResumeQueueFlow:
             instance_id, message="resume"
         )
 
-        # Should use the first job only
-        mock_manager._process_message_with_tracking.assert_called_once()
+        # Should return immediately with "resuming" status
+        assert result["status"] == "resuming"
+        assert result["job_id"] == job_id_1  # First job is used
 
-        # W4: complete_job called twice - extra job CANCELLED, primary job COMPLETED
-        mock_manager._job_queue_service.complete_job.assert_called()
+        # Should NOT call _process_message_with_tracking synchronously
+        mock_manager._process_message_with_tracking.assert_not_called()
+
+        # W4: Should cancel extra job synchronously (this is still synchronous)
+        mock_manager._job_queue_service.complete_job.assert_called_once()
         calls = mock_manager._job_queue_service.complete_job.call_args_list
-        
-        # First call: cancel extra job
+
+        # Only the extra job is cancelled synchronously
         assert calls[0][0][0] == job_id_2
         assert calls[0][0][1] == DemandState.CANCELLED
-        
-        # Last call: complete primary job
-        assert calls[-1][0][0] == job_id_1
-        assert calls[-1][0][1] == DemandState.COMPLETED
+
+        # The primary job is completed in background, not here
 
     @pytest.mark.asyncio
     async def test_enqueue_failure_returns_none(
@@ -310,7 +308,7 @@ class TestResumeQueueFlow:
     async def test_parent_resume_with_waiting_for_keeps_job_processing(
         self, instance_manager, mock_manager
     ):
-        """Root instance with waiting_for > 0 keeps job as PROCESSING, doesn't complete it."""
+        """Root instance with waiting_for > 0 keeps job as PROCESSING - background task handles this."""
         instance_id = "parent-waiting-for"
         job_id = "job-waiting-123"
 
@@ -332,15 +330,13 @@ class TestResumeQueueFlow:
             instance_id, message="resume"
         )
 
-        # Should still call _process_message_with_tracking
-        mock_manager._process_message_with_tracking.assert_called_once()
-
-        # Should NOT complete the job (stays PROCESSING)
-        mock_manager._job_queue_service.complete_job.assert_not_called()
-
-        # Should call _process_child_completion_and_notify_parent
-        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
-
-        # Result should have the existing job_id
+        # Should return immediately with "resuming" status
+        assert result["status"] == "resuming"
         assert result["job_id"] == job_id
         assert result["message_id"] is not None
+
+        # Should NOT call _process_message_with_tracking synchronously
+        mock_manager._process_message_with_tracking.assert_not_called()
+
+        # Should NOT complete the job synchronously
+        mock_manager._job_queue_service.complete_job.assert_not_called()
