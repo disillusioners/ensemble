@@ -1,8 +1,8 @@
 """Tests for resume_processing_job new queue flow behavior.
 
-The new implementation routes through the normal queue flow:
+The new implementation routes based on instance type:
 - Child instances (no old_jobs): enqueue_message() via WorkerPool
-- Parent instances (has old_jobs): cancel old jobs, complete stale messages, enqueue_message_via_jq()
+- Root instances (has old_jobs): resume existing PROCESSING job from checkpoint via _process_message_with_tracking
 
 The waiting_for > 0 check is now handled by JobFeedbackObserver, not resume_processing_job.
 """
@@ -90,8 +90,10 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._instance_repository = mock_instance_repository
     # Mock enqueue_message for WorkerPool path
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
-    # Mock enqueue_message_via_jq for JobQueue path
-    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
+    # Mock _process_message_with_tracking for JobQueue path (root instances)
+    manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+    # Mock _process_child_completion_and_notify_parent
+    manager._process_child_completion_and_notify_parent = AsyncMock()
     return manager
 
 
@@ -104,25 +106,26 @@ def instance_manager(mock_manager):
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
     manager.enqueue_message = mock_manager.enqueue_message
-    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
+    manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+    manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     return manager
 
 
 class TestResumeQueueFlow:
     """Test suite for new resume queue flow behavior.
 
-    The new implementation routes through the normal queue flow:
+    The new implementation routes based on instance type:
     - Child instances (no old_jobs): enqueue_message() via WorkerPool
-    - Parent instances (has old_jobs): cancel old jobs, complete stale messages, enqueue_message_via_jq()
+    - Root instances (has old_jobs): resume from checkpoint via _process_message_with_tracking
 
     The waiting_for > 0 check is now handled by JobFeedbackObserver, not resume_processing_job.
     """
 
     @pytest.mark.asyncio
-    async def test_parent_instance_with_old_jobs_enqueues_via_jobqueue(
+    async def test_parent_instance_with_old_jobs_resumes_from_checkpoint(
         self, instance_manager, mock_manager
     ):
-        """Parent instance with old_jobs should cancel them and enqueue via JobQueue."""
+        """Root instance with old_jobs should resume from checkpoint via _process_message_with_tracking."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
         message_id = "msg-xyz-456"
@@ -132,25 +135,35 @@ class TestResumeQueueFlow:
             return_value=[MockJob(job_id=job_id, message_id=message_id)]
         )
 
+        # Instance is complete (waiting_for=0)
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+                waiting_for=0
+            )
+        )
+
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
-        # Old job should be cancelled
-        mock_manager._job_queue_service.complete_job.assert_called()
+        # Should call _process_message_with_tracking with is_retry=True
+        mock_manager._process_message_with_tracking.assert_called_once()
+        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
+        assert call_kwargs["instance_id"] == instance_id
+        assert call_kwargs["is_retry"] is True
+        assert call_kwargs["message_source"] == "cascade_resume"
+
+        # Should complete the existing job as COMPLETED (not cancelled)
+        mock_manager._job_queue_service.complete_job.assert_called_once()
         call_args = mock_manager._job_queue_service.complete_job.call_args
         assert call_args[0][0] == job_id  # job_id
-        assert call_args[0][1] == DemandState.CANCELLED  # cancelled
+        assert call_args[0][1] == DemandState.COMPLETED  # completed
 
-        # Should enqueue via JobQueue path
-        mock_manager.enqueue_message_via_jq.assert_called_once()
-        jq_kwargs = mock_manager.enqueue_message_via_jq.call_args[1]
-        assert jq_kwargs["instance_id"] == instance_id
-        assert jq_kwargs["message"] == "resume"
-        assert jq_kwargs["source"] == "cascade_resume"
-
-        # Return should include message_id from enqueue
+        # Return should include the existing job_id
         assert result["instance_id"] == instance_id
+        assert result["job_id"] == job_id
         assert result["message_id"] is not None
 
     @pytest.mark.asyncio
@@ -224,10 +237,10 @@ class TestResumeQueueFlow:
         assert wp_kwargs["metadata"]["resume_mode"] is False
 
     @pytest.mark.asyncio
-    async def test_multiple_old_jobs_all_cancelled(
+    async def test_multiple_old_jobs_uses_first_job(
         self, instance_manager, mock_manager
     ):
-        """Multiple old jobs should all be cancelled."""
+        """Multiple old jobs: only the first one is used, others are ignored."""
         instance_id = "parent-instance-multi"
         job_id_1 = "job-1-123"
         job_id_2 = "job-2-456"
@@ -240,15 +253,27 @@ class TestResumeQueueFlow:
             ]
         )
 
+        # Instance is complete (waiting_for=0)
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+                waiting_for=0
+            )
+        )
+
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
-        # Both jobs should be cancelled
-        assert mock_manager._job_queue_service.complete_job.call_count == 2
+        # Should use the first job only
+        mock_manager._process_message_with_tracking.assert_called_once()
 
-        # Should still enqueue via JobQueue
-        mock_manager.enqueue_message_via_jq.assert_called_once()
+        # Should complete only the first job as COMPLETED
+        mock_manager._job_queue_service.complete_job.assert_called_once()
+        call_args = mock_manager._job_queue_service.complete_job.call_args
+        assert call_args[0][0] == job_id_1  # first job_id
+        assert call_args[0][1] == DemandState.COMPLETED
 
     @pytest.mark.asyncio
     async def test_enqueue_failure_returns_none(
@@ -271,23 +296,23 @@ class TestResumeQueueFlow:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_parent_resume_with_waiting_for_uses_jobqueue_path(
+    async def test_parent_resume_with_waiting_for_keeps_job_processing(
         self, instance_manager, mock_manager
     ):
-        """Parent with old_jobs uses JobQueue path regardless of waiting_for."""
+        """Root instance with waiting_for > 0 keeps job as PROCESSING, doesn't complete it."""
         instance_id = "parent-waiting-for"
         job_id = "job-waiting-123"
 
-        # Has old_jobs → uses JobQueue path
+        # Has old_jobs
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
             return_value=[MockJob(job_id=job_id, message_id="msg-1")]
         )
 
-        # Even with waiting_for > 0, should use JobQueue path
+        # With waiting_for > 0, job should stay PROCESSING
         mock_manager._instance_repository.get = MagicMock(
             return_value=MockInstanceMeta(
                 instance_id=instance_id,
-                status=InstanceStatus.RUNNING.value,
+                status=InstanceStatus.WAITING_CHILDREN.value,
                 waiting_for=2
             )
         )
@@ -296,12 +321,15 @@ class TestResumeQueueFlow:
             instance_id, message="resume"
         )
 
-        # Should use JobQueue path
-        mock_manager.enqueue_message_via_jq.assert_called_once()
-        mock_manager.enqueue_message.assert_not_called()
+        # Should still call _process_message_with_tracking
+        mock_manager._process_message_with_tracking.assert_called_once()
 
-        # Old job should be cancelled
-        mock_manager._job_queue_service.complete_job.assert_called()
+        # Should NOT complete the job (stays PROCESSING)
+        mock_manager._job_queue_service.complete_job.assert_not_called()
 
-        # Result should have message_id
+        # Should call _process_child_completion_and_notify_parent
+        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
+
+        # Result should have the existing job_id
+        assert result["job_id"] == job_id
         assert result["message_id"] is not None

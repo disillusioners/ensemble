@@ -1,11 +1,11 @@
 """Tests for resume_processing_job message ID uniqueness.
 
 These tests verify that resume_processing_job always generates a fresh UUID
-for the message_id parameter, now via enqueue_message/enqueue_message_via_jq.
+for the message_id parameter.
 
 With the new implementation:
 1. Child instances: enqueue_message() generates a fresh message_id
-2. Parent instances: enqueue_message_via_jq() generates a fresh message_id
+2. Root instances: resume_processing_job generates a fresh UUID via uuid.uuid4()
 
 This ensures LangGraph's add_messages reducer appends messages correctly.
 """
@@ -43,6 +43,13 @@ class MockAsyncMessageResult:
         self.status = "queued"
 
 
+class MockMessageResult:
+    """Mock message result returned by _process_message_with_tracking."""
+
+    def __init__(self, content: str = "Resume completed"):
+        self.content = content
+
+
 @pytest.fixture
 def mock_job_queue_service():
     """Create mock job queue service with repository."""
@@ -75,9 +82,12 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Mock enqueue methods for new queue flow
+    # Mock enqueue_message for WorkerPool path (child instances)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
-    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
+    # Mock _process_message_with_tracking for JobQueue path (root instances)
+    manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+    # Mock _process_child_completion_and_notify_parent
+    manager._process_child_completion_and_notify_parent = AsyncMock()
     return manager
 
 
@@ -93,7 +103,8 @@ def instance_manager(mock_manager):
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
     manager.enqueue_message = mock_manager.enqueue_message
-    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
+    manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+    manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     return manager
 
 
@@ -135,14 +146,26 @@ class TestResumeMessageIdUniqueness:
     async def test_parent_resume_generates_unique_message_id(self, instance_manager, mock_manager):
         """Test that parent resume (has old_jobs) generates a fresh message_id.
 
-        With the new implementation, message_id comes from enqueue_message_via_jq result.
+        With the new implementation, message_id is generated via uuid.uuid4()
+        directly in resume_processing_job.
         """
+        from daemon.repositories.instance.models import InstanceStatus
+
         old_message_id = "original-msg-123"
         old_job = MockJob(message_id=old_message_id)
 
-        # Has old_jobs - parent instance path
+        # Has old_jobs - root instance path
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
             return_value=[old_job]
+        )
+
+        # Instance is complete (waiting_for=0)
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MagicMock(
+                instance_id="test-instance",
+                status=InstanceStatus.RUNNING.value,
+                waiting_for=0
+            )
         )
 
         # Call resume_processing_job
@@ -150,12 +173,19 @@ class TestResumeMessageIdUniqueness:
             "test-instance", message="resume", silent=False
         )
 
-        # Verify enqueue_message_via_jq was called
-        mock_manager.enqueue_message_via_jq.assert_called_once()
+        # Verify _process_message_with_tracking was called with is_retry=True
+        mock_manager._process_message_with_tracking.assert_called_once()
+        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
+        assert call_kwargs["is_retry"] is True
 
         # Result should have a fresh message_id (not the old one)
         assert result["message_id"] is not None
-        # Note: The new implementation generates fresh UUID via enqueue, not from old job
+
+        # Verify it's a valid UUID
+        try:
+            uuid.UUID(result["message_id"])
+        except ValueError:
+            pytest.fail(f"message_id should be a valid UUID, got: {result['message_id']}")
 
     @pytest.mark.asyncio
     async def test_each_call_generates_different_message_id(self, instance_manager, mock_manager):

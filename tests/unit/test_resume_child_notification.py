@@ -2,11 +2,10 @@
 
 With the new implementation:
 1. Child instances (no old_jobs): enqueue_message() via WorkerPool
-2. Parent instances (has old_jobs): cancel old jobs, complete stale messages, enqueue_message_via_jq()
+2. Root instances (has old_jobs): resume from checkpoint via _process_message_with_tracking
 
-The _process_child_completion_and_notify_parent call is now handled by queue handlers
-(MessageJobHandler.handle() and ProcessMessageProcessor.process()), not by resume_processing_job directly.
-The resume_mode metadata is passed through the queue to set is_retry=True for checkpoint resume.
+The _process_child_completion_and_notify_parent is now called directly by resume_processing_job
+for root instances, after processing completes successfully.
 """
 
 import uuid
@@ -40,6 +39,13 @@ class MockAsyncMessageResult:
         self.message_id = message_id or str(uuid.uuid4())
         self.instance_id = None
         self.status = "queued"
+
+
+class MockMessageResult:
+    """Mock message result returned by _process_message_with_tracking."""
+
+    def __init__(self, content: str = "Resume completed"):
+        self.content = content
 
 
 class MockJob:
@@ -82,10 +88,12 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Mock enqueue_message for WorkerPool path
+    # Mock enqueue_message for WorkerPool path (child instances)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
-    # Mock enqueue_message_via_jq for JobQueue path
-    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
+    # Mock _process_message_with_tracking for JobQueue path (root instances)
+    manager._process_message_with_tracking = AsyncMock(return_value=MockMessageResult())
+    # Mock _process_child_completion_and_notify_parent
+    manager._process_child_completion_and_notify_parent = AsyncMock()
     return manager
 
 
@@ -98,7 +106,8 @@ def instance_manager(mock_manager):
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
     manager.enqueue_message = mock_manager.enqueue_message
-    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
+    manager._process_message_with_tracking = mock_manager._process_message_with_tracking
+    manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     return manager
 
 
@@ -174,11 +183,11 @@ class TestChildNotificationWorkerPoolPath:
 
 
 class TestChildNotificationJobQueuePath:
-    """Test suite for JobQueue path (parent instances) in new queue flow."""
+    """Test suite for JobQueue path (root instances) in new queue flow."""
 
     @pytest.mark.asyncio
-    async def test_parent_enqueues_via_jobqueue(self, instance_manager, mock_manager):
-        """Parent instance (has old_jobs) should enqueue via JobQueue."""
+    async def test_parent_resumes_from_checkpoint(self, instance_manager, mock_manager):
+        """Root instance (has old_jobs) should resume from checkpoint via _process_message_with_tracking."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
 
@@ -186,43 +195,66 @@ class TestChildNotificationJobQueuePath:
             return_value=[MockJob(job_id=job_id, message_id="msg-456")]
         )
 
+        # Instance is complete (waiting_for=0)
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+                waiting_for=0
+            )
+        )
+
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=False
         )
 
-        # Old job should be cancelled
-        mock_manager._job_queue_service.complete_job.assert_called()
+        # Should call _process_message_with_tracking with is_retry=True
+        mock_manager._process_message_with_tracking.assert_called_once()
+        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
+        assert call_kwargs["instance_id"] == instance_id
+        assert call_kwargs["is_retry"] is True
+        assert call_kwargs["message_source"] == "cascade_resume"
 
-        # Should use JobQueue path
-        mock_manager.enqueue_message_via_jq.assert_called_once()
-        mock_manager.enqueue_message.assert_not_called()
+        # Should complete the existing job as COMPLETED
+        from daemon.services.job_queue_service import DemandState
+        mock_manager._job_queue_service.complete_job.assert_called_once_with(
+            job_id, DemandState.COMPLETED, result_summary="Resume completed"
+        )
 
-        # Verify enqueue was called with correct args
-        kwargs = mock_manager.enqueue_message_via_jq.call_args[1]
-        assert kwargs["instance_id"] == instance_id
-        assert kwargs["message"] == "resume"
-        assert kwargs["source"] == "cascade_resume"
-        assert kwargs["metadata"]["resume_mode"] is False
+        # Should call _process_child_completion_and_notify_parent
+        mock_manager._process_child_completion_and_notify_parent.assert_called_once()
 
         # Verify return
         assert result["instance_id"] == instance_id
+        assert result["job_id"] == job_id
         assert result["message_id"] is not None
 
     @pytest.mark.asyncio
-    async def test_parent_silent_mode(self, instance_manager, mock_manager):
-        """Silent mode passes resume_mode=True to enqueue via JobQueue."""
+    async def test_parent_silent_mode_resumes_checkpoint(self, instance_manager, mock_manager):
+        """Silent mode should pass empty message to _process_message_with_tracking."""
         instance_id = "parent-instance-silent"
+        job_id = "job-xyz-789"
 
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id="job-123", message_id="msg-456")]
+            return_value=[MockJob(job_id=job_id, message_id="msg-456")]
+        )
+
+        # Instance is complete (waiting_for=0)
+        mock_manager._instance_repository.get = MagicMock(
+            return_value=MockInstanceMeta(
+                instance_id=instance_id,
+                status=InstanceStatus.RUNNING.value,
+                waiting_for=0
+            )
         )
 
         await instance_manager.resume_processing_job(
             instance_id, message="resume", silent=True
         )
 
-        kwargs = mock_manager.enqueue_message_via_jq.call_args[1]
-        assert kwargs["metadata"]["resume_mode"] is True
+        call_kwargs = mock_manager._process_message_with_tracking.call_args[1]
+        # When silent=True, message should be empty string
+        assert call_kwargs["message"] == ""
 
 
 class TestChildNotificationErrorHandling:
@@ -246,18 +278,29 @@ class TestChildNotificationErrorHandling:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_jobqueue_enqueue_failure_returns_none(self, instance_manager, mock_manager):
-        """When enqueue_message_via_jq fails, should return None."""
+    async def test_jobqueue_process_failure_returns_none(self, instance_manager, mock_manager):
+        """When _process_message_with_tracking fails, should mark job as FAILED and return None."""
+        from daemon.services.job_queue_service import DemandState
+
         instance_id = "parent-instance-fail"
+        job_id = "job-123"
 
         mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id="job-123", message_id="msg-456")]
+            return_value=[MockJob(job_id=job_id, message_id="msg-456")]
         )
 
-        mock_manager.enqueue_message_via_jq.side_effect = RuntimeError("enqueue failed")
+        mock_manager._process_message_with_tracking.side_effect = RuntimeError("processing failed")
 
         result = await instance_manager.resume_processing_job(
             instance_id, message="resume"
         )
 
         assert result is None
+
+        # Job should be marked as FAILED (not cancelled)
+        # Note: error message is prefixed with "Resume failed: "
+        mock_manager._job_queue_service.complete_job.assert_called_once()
+        call_args = mock_manager._job_queue_service.complete_job.call_args
+        assert call_args[0][0] == job_id
+        assert call_args[0][1] == DemandState.FAILED
+        assert "processing failed" in call_args[1]["error"]

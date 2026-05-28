@@ -1808,11 +1808,11 @@ class InstanceManager:
         return await self._lifecycle_service.resume_instance_cascade(instance_id)
 
     async def resume_processing_job(self, instance_id: str, message: str = "resume", silent: bool = False) -> dict | None:
-        """Resume a paused instance by enqueuing via the normal queue flow.
+        """Resume a paused instance by resuming from checkpoint.
 
-        This method routes through the normal message processing path:
+        This method routes based on instance type:
         - Child instances (no JobQueue job): use WorkerPool via enqueue_message()
-        - Parent instances (has JobQueue job): cancel old jobs, then use enqueue_message_via_jq()
+        - Root instances (has JobQueue job): resume existing PROCESSING job from checkpoint
 
         When silent=False (default), appends the resume message to the conversation.
         When silent=True, resumes from checkpoint without appending any new message.
@@ -1855,23 +1855,11 @@ class InstanceManager:
                 logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {type(e).__name__}: {e}")
                 return None
 
-        # Parent instance path: has JobQueue job, cancel it and enqueue via JobQueue
+        # Root instance path: has existing PROCESSING JobQueue job
         old_job = old_jobs[0]
-        logger.info(f"Found PROCESSING job {old_job.job_id[:8]}... for instance {instance_id[:8]}..., canceling and re-enqueuing via JobQueue")
+        logger.info(f"Found PROCESSING job {old_job.job_id[:8]}... for root instance {instance_id[:8]}..., resuming from checkpoint")
 
-        # 2. Cancel old job(s) - mark as CANCELLED (superseded by resume)
-        for job in old_jobs:
-            try:
-                await self._job_queue_service.complete_job(
-                    job.job_id,
-                    DemandState.CANCELLED,
-                    error="Superseded by resume"
-                )
-                logger.info(f"Cancelled old job {job.job_id[:8]}... for resume")
-            except Exception as e:
-                logger.warning(f"Failed to cancel old job {job.job_id[:8]}...: {e}")
-
-        # 3. Complete any non-completed MessageQueue entries for this instance
+        # 1. Clean stale MessageQueue entries (PENDING, PROCESSING, RETRYING)
         #    These are stale entries from the previous processing attempt
         try:
             pending_messages = await asyncio.to_thread(
@@ -1888,23 +1876,69 @@ class InstanceManager:
         except Exception as e:
             logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
 
-        # 4. Enqueue new message via JobQueue path
+        # 2. Create a fresh message_id for tracking (not enqueued, just for internal tracking)
+        message_id = str(uuid.uuid4())
+
+        # 3. Directly call _process_message_with_tracking with is_retry=True
+        #    This will resume from checkpoint (graph_input=None when checkpoint exists)
         try:
-            result = await self.enqueue_message_via_jq(
+            result = await self._process_message_with_tracking(
                 instance_id=instance_id,
-                message=message,
-                source="cascade_resume",
-                metadata={"resume_mode": silent},
+                message=message if not silent else "",
+                message_id=message_id,
+                is_retry=True,  # Triggers checkpoint resume
+                retry_count=0,
+                message_source="cascade_resume",
             )
-            logger.info(f"Instance {instance_id[:8]}... enqueued via JobQueue: message_id={result.message_id[:8]}...")
+            logger.info(f"Root instance {instance_id[:8]}... resumed from checkpoint successfully")
+        except Exception as e:
+            logger.error(f"Failed to resume root instance {instance_id[:8]}...: {type(e).__name__}: {e}")
+            # Mark the job as FAILED on failure
+            await self._job_queue_service.complete_job(
+                old_job.job_id,
+                DemandState.FAILED,
+                error=f"Resume failed: {e}"
+            )
+            return None
+
+        # 4. Process child completion and notify parent
+        if hasattr(self, '_process_child_completion_and_notify_parent'):
+            try:
+                await self._process_child_completion_and_notify_parent(instance_id, message_id)
+            except Exception as e:
+                logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
+
+        # 5. Check waiting_for > 0 — if still waiting for children, don't complete the job
+        skip_complete = False
+        try:
+            instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
+            if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                skip_complete = True
+            elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
+                skip_complete = True
+        except Exception as e:
+            logger.warning(f"Failed to check instance status for completion: {e}")
+
+        if skip_complete:
+            logger.info(f"Root instance {instance_id[:8]}... still waiting for children, job stays PROCESSING")
             return {
                 "instance_id": instance_id,
-                "job_id": None,  # Job ID will be assigned by JobQueueService when job is created
-                "message_id": result.message_id,
+                "job_id": old_job.job_id,
+                "message_id": message_id,
             }
-        except Exception as e:
-            logger.error(f"Failed to enqueue message via JobQueue for instance {instance_id[:8]}...: {type(e).__name__}: {e}")
-            return None
+
+        # 6. Complete the existing job (same job, not a new one!)
+        await self._job_queue_service.complete_job(
+            old_job.job_id,
+            DemandState.COMPLETED,
+            result_summary=result.content if result else None,
+        )
+
+        return {
+            "instance_id": instance_id,
+            "job_id": old_job.job_id,
+            "message_id": message_id,
+        }
 
     async def _publish_instance_lifecycle_event(
         self,
