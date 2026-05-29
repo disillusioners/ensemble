@@ -6,6 +6,7 @@ SSE and StreamableHTTP transports.
 
 import asyncio
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from mcp.server.fastmcp import FastMCP
@@ -14,8 +15,6 @@ from daemon.rag.config import is_rag_enabled
 from daemon.tools.knowledge_tools import (
     _enqueue_experience_job,
     _enqueue_kb_update_job,
-    _generate_experience_idempotency_key,
-    _generate_idempotency_key,
     _parse_should_update_kb,
     _SHOULD_UPDATE_KB_PATTERN,
 )
@@ -104,7 +103,7 @@ def create_kb_mcp_server() -> FastMCP:
                 message=message,
                 project_id=project_id,
                 parent_id=_MCP_SYSTEM_PARENT_ID,
-                instance_name=f"mcp-explore-{project_id[:8]}",
+                instance_name=f"mcp-explore-{project_id[:8]}-{uuid.uuid4().hex[:6]}",
                 timeout=300.0,
             )
 
@@ -125,7 +124,7 @@ def create_kb_mcp_server() -> FastMCP:
                         source_instance_id=_MCP_SYSTEM_PARENT_ID,
                     ))
                 except RuntimeError as e:
-                    # No running event loop — log but don't fail the response
+                    # Defensive: ensure_future can raise RuntimeError if event loop is closing
                     logger.warning("Failed to schedule kb-importer job (no event loop): %s", e)
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
@@ -137,7 +136,7 @@ def create_kb_mcp_server() -> FastMCP:
 
         except Exception as e:
             logger.error(f"ensemble_kb_explore failed: {e}", exc_info=True)
-            return f"Error: {e}"
+            return "Error: An internal error occurred while exploring the knowledge base."
 
     @mcp.tool()
     async def ensemble_kb_experience(
@@ -174,12 +173,12 @@ def create_kb_mcp_server() -> FastMCP:
             return "Knowledge recording started."
 
         except RuntimeError as e:
-            # No running event loop
+            # Defensive: ensure_future can raise RuntimeError if event loop is closing
             logger.warning("Failed to schedule experiencer job (no event loop): %s", e)
             return "Error: Failed to schedule knowledge recording. Please try again."
         except Exception as e:
             logger.error(f"ensemble_kb_experience failed: {e}", exc_info=True)
-            return f"Error: {e}"
+            return "Error: An internal error occurred while recording knowledge."
 
     # Eagerly initialize StreamableHTTP session manager
     # (prevents RuntimeError when get_kb_mcp_session_manager() is called later)

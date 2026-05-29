@@ -404,6 +404,6 @@ class TestExploreHandlesExceptionGracefully:
                 mode="hybrid",
             )
         
-        # Should return error message (not raise)
+        # Should return sanitized error message (not expose internal details)
         assert "Error:" in result
-        assert "Agent failed" in result
+        assert "internal error" in result.lower()
