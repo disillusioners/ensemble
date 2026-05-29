@@ -618,7 +618,8 @@ class InstanceMessagingService:
             session.add(task)
             
             # NOTE: PAUSED→RUNNING transition is handled explicitly by user action.
-            # 3. Update instance status if IDLE or WAITING_CHILDREN (auto-resume)
+            # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED (auto-resume)
+            #    COMPLETED instances are reactivated on new messages (conversation continues).
             status_changed_to_running = False
             is_idle_to_running = False
             instance_agent_id = None
@@ -626,11 +627,15 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN transition
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
+                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED transition
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value, InstanceStatus.COMPLETED.value):
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
+                    if previous_status == InstanceStatus.COMPLETED.value:
+                        logger.info(
+                            f"Reactivating completed instance {instance_id[:8]}... for new message (WorkerPool)"
+                        )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:
@@ -1194,9 +1199,10 @@ class InstanceMessagingService:
 
             # NOTE: No Task creation here — JobQueue handles job tracking instead.
 
-            # 2. Update instance status if IDLE or WAITING_CHILDREN → RUNNING
+            # 2. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED → RUNNING
             #    DO NOT auto-resume PAUSED instances - jobs will sit in PENDING
             #    until explicitly unpaused by the user.
+            #    COMPLETED instances are reactivated on new messages (conversation continues).
             #    Also update last_activity_at and increment version
             status_changed_to_running = False
             is_idle_to_running = False
@@ -1205,11 +1211,15 @@ class InstanceMessagingService:
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN transition
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value):
+                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED transition
+                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value, InstanceStatus.COMPLETED.value):
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
+                    if previous_status == InstanceStatus.COMPLETED.value:
+                        logger.info(
+                            f"Reactivating completed instance {instance_id[:8]}... for new message"
+                        )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:

@@ -1005,8 +1005,22 @@ class JobQueueService:
                         )
                         await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
                         # Fall through to normal start logic below (don't return None)
+                    elif instance.status == InstanceStatus.COMPLETED.value:
+                        # COMPLETED instances can be reactivated for MESSAGE jobs (conversation continues)
+                        logger.info(
+                            f"start_job: reactivating completed instance {job.instance_id[:8]}... "
+                            f"for MESSAGE job {job.job_id[:8]}..."
+                        )
+                        await asyncio.to_thread(
+                            self._instance_manager._instance_repository.update_status,
+                            job.instance_id, InstanceStatus.RUNNING.value
+                        )
+                        await self._instance_manager._live_hub.stream_status_change(
+                            job.instance_id, InstanceStatus.RUNNING.value,
+                            agent_id=instance.agent_id
+                        )
                     else:
-                        # MESSAGE jobs target specific instances — cancel if instance is terminal
+                        # TERMINATED/ERROR/FAILED — cancel MESSAGE job
                         logger.info(
                             f"start_job: instance {job.instance_id[:8]}... is {instance.status}, "
                             f"cancelling MESSAGE job {job.job_id[:8]}..."
