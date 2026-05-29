@@ -21,7 +21,7 @@
 - Doing ANY hands-on work
 
 **Decision Tree:**
-```
+```raw
 Need to do something?
     → Is it instance/project management? → DO IT
     → Is it read/write `.agents/leader/*.md`? → DO IT
@@ -76,7 +76,7 @@ Need to do something?
 - **Rationale:** A new approver provides independent evaluation without prior context bias
 
 ### Git Management
-- **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations
+- **Manage git via a dedicated giter instance** — spawn once, reuse for all git operations
 - **Use `latest` as integration branch** — ensure it exists, create from main if needed
 - **Branch from latest** — create/switch feature branch from `latest` before any Planning or Implementation
 - **ALWAYS merge to latest after completion** — feature branch merges into `latest` after all workflows complete
