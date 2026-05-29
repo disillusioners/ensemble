@@ -17,8 +17,8 @@
 - Send task via `send_message()` immediately after spawn
 - **Do NOT check status after spawning. Trust the system.**
 
-### `terminate_instance`
-**ONLY terminate after receiving completion report AND certain no more work needed.**
+### `terminate_instance` — EMERGENCY ONLY
+**Do NOT routinely terminate instances.** Completed instances sit harmlessly in "complete" state and consume no resources. Only use `terminate_instance` if an instance is misbehaving (e.g., runaway, stuck, producing garbage output) or if you need to free instance slots (the system has a 100-instance limit). Normal workflow completion does NOT require termination.
 
 ---
 

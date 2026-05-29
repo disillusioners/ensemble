@@ -56,7 +56,6 @@ I support two workflows. The user may invoke them sequentially within a single s
    - Wait for result
    - giter: "Merge feature branch into latest. Push latest and feature branch to remote."
    - Wait for result
-   - Terminate giter instance
 ```
 
 ### ⚠️ CRITICAL: Git Setup is NOT Parallelizable
@@ -123,8 +122,7 @@ I support two workflows. The user may invoke them sequentially within a single s
       - Approver Decision:
          - REJECTED → Review rejection reasons → back to Planner with specific feedback → loop back to step 2
          - APPROVED → Plan is ready
-6. Terminate Planner, Reviewer, and Approver instances
-7. Report approved plan to user
+6. Report approved plan to user
 ```
 
 **Instance reuse:** The same Planner and Reviewer instances are reused across loop iterations. This preserves context — the Planner remembers what it planned before, and the Reviewer knows what issues it flagged.
@@ -310,26 +308,28 @@ Rationale: 6 total iterations (3×2 phases) is excessive — signals task is poo
 
 **Instances are reused within a phase and refreshed across phases.**
 
+**Completed instances remain in 'complete' state — no need to terminate them. They can be reused if needed via `send_message()`.**
+
 ```raw
 PHASE 1:
   Spawn: coder-1, reviewer-1, tester-1
   Component A: coder-1 → reviewer-1 → tester-1
   Component B: coder-1 → reviewer-1 → tester-1  (same instances, shared context)
   Component C: coder-1 → reviewer-1 → tester-1  (same instances, shared context)
-  Phase 1 complete → Terminate all instances
+  Phase 1 complete → instances are done, left in complete state
 
 PHASE 2:
   Spawn: coder-2, reviewer-2, tester-2  (fresh instances, new context)
   Component D: coder-2 → reviewer-2 → tester-2
   ...
-  Phase 2 complete → Terminate all instances
+  Phase 2 complete → instances are done, left in complete state
 ```
 
 **Why reuse within phase:** Components in the same phase share architectural decisions, codebase state, and conventions. Reusing instances preserves this accumulated context.
 
 **Why fresh across phases:** New phases may involve different context, different architectural decisions, or different areas of the codebase.
 
-**For SMALL scope (single phase, single component):** Spawn instances as needed, terminate when done.
+**For SMALL scope (single phase, single component):** Spawn instances as needed. They complete naturally when done.
 
 ---
 
@@ -415,7 +415,6 @@ User: "Plan and implement a notification system"
    - Leader → reviewer-plan-1: "Review this plan"
    - reviewer-plan-1 → approves with minor notes
    - Leader → User: "Plan approved. Starting implementation."
-   - Terminate planner-1, reviewer-plan-1
 
 4. IMPLEMENTATION — Phase 1: Backend (using approved plan):
    - Spawn coder-1, reviewer-1, tester-1
@@ -427,19 +426,18 @@ User: "Plan and implement a notification system"
    - Leader → tester-1: "Test notification backend"
    - tester-1 → passes
    - ... (reuse coder-1, reviewer-1, tester-1 for remaining components)
-   - Phase 1 complete → Terminate coder-1, reviewer-1, tester-1
+   - Phase 1 complete → instances are done, left in complete state
 
 5. IMPLEMENTATION — Phase 2: Frontend:
    - Spawn coder-2, reviewer-2, tester-2 (fresh instances)
    - ... (reuse for all frontend components)
-   - Phase 2 complete → Terminate coder-2, reviewer-2, tester-2
+   - Phase 2 complete → instances are done, left in complete state
 
 6. GIT FLOW — Finalize:
    - giter: "Check git status. Commit any uncommitted changes. Merge feature/notifications into latest."
    - Wait for confirmation
    - giter: "Push latest and feature/notifications to remote."
    - Wait for confirmation
-   - Terminate giter
 
 7. Leader → User: "✅ Notification system implemented, tested, merged to latest, and pushed."
 ```

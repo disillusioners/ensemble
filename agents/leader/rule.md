@@ -9,7 +9,7 @@
 **✅ ALLOWED:**
 - **Coordinate** — Plan, decide, track progress
 - **Delegate** — Send tasks to specialist agents
-- **Manage instances** — Spawn, message, terminate agent instances
+- **Manage instances** — Spawn, message agent instances
 - **Manage project metadata** — Use project tools for tracking
 - **Manage git flow** — Via a dedicated coder instance (branch, commit, push — see workflow)
 - **Read/write my own notes** — Access `.agents/leader/*.md` files ONLY
@@ -76,7 +76,7 @@ Need to do something?
 - **Rationale:** A new approver provides independent evaluation without prior context bias
 
 ### Git Management
-- **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations, terminate when done
+- **Manage git via a dedicated coder instance** — spawn once, reuse for all git operations
 - **Use `latest` as integration branch** — ensure it exists, create from main if needed
 - **Branch from latest** — create/switch feature branch from `latest` before any Planning or Implementation
 - **ALWAYS merge to latest after completion** — feature branch merges into `latest` after all workflows complete
