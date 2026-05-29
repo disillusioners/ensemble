@@ -1,5 +1,5 @@
-Current Plan: MCP KB Tools Server
-Tracking File: mcp-kb-tools-server-tracking.md
+Current Plan: Remove Mandatory Instance Termination
+Tracking File: remove-mandatory-instance-termination-tracking.md
 Iteration: 001
 Status: APPROVED
-Last Updated: 2026-05-29 01:15
+Last Updated: 2026-05-29 14:29
