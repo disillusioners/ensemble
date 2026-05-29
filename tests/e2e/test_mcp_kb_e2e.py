@@ -31,7 +31,7 @@ TEST_PROJECT_ID = os.environ.get("E2E_PROJECT_ID", "")
 async def mcp_client():
     """Create MCP client connected to the dev server via StreamableHTTP."""
     import httpx
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
     from mcp import ClientSession
 
     # First verify server is reachable
@@ -47,7 +47,7 @@ async def mcp_client():
         pytest.skip(f"Dev server not reachable: {e}")
 
     # Create MCP client
-    async with streamablehttp_client(MCP_HTTP_URL) as (read_stream, write_stream, _):
+    async with streamable_http_client(MCP_HTTP_URL) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             yield session
