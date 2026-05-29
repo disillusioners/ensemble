@@ -910,8 +910,6 @@ Failed job management within projects.
 
 - `MAX_RETRIES` - Exceeded retry limit
 - `MANUAL` - Manually moved to DLQ
-- `TIMEOUT` - Job timed out
-- `ERROR` - Unrecoverable error
 
 ### List DLQ Items
 
@@ -933,7 +931,7 @@ Failed job management within projects.
       "message": "Fix the login bug",
       "source": "api",
       "project_id": "project-uuid",
-      "queue_id": "queue-uuid",
+      "queue_id": "queue-uuid" | null,
       "priority": 5,
       "error_message": "Connection timeout after 3 retries",
       "retry_count": 3,

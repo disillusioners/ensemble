@@ -204,7 +204,7 @@ Launches a subprocess and communicates via stdin/stdout. Best for local command-
 | `command` | string | Yes | Executable command (e.g., `uvx`, `npx`) |
 | `args` | array[string] | No | Command-line arguments |
 | `env` | object | No | Environment variables |
-| `timeout` | number | No | Connection timeout in seconds (default: 30) |
+| `timeout` | number | No | Connection timeout in seconds (default: 30 seconds — null uses the 30s client default) |
 
 **SSRF Protection:**
 
@@ -224,10 +224,10 @@ Connects to an HTTP server that streams events via SSE.
 
 **SSRF Protection:**
 
-- Loopback addresses (127.x.x.x, ::1) blocked by default
-- Private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x) blocked by default
+- Loopback addresses (127.x.x.x, ::1) allowed by default
+- Private networks (10.x.x.x, 172.16-31.x.x, 192.168.x.x) allowed by default
 - Link-local addresses (169.254.x.x) always blocked
-- Set `MCP_ALLOW_LOCAL=true` to allow local addresses (default)
+- Set `MCP_ALLOW_LOCAL=false` to block local addresses for strict SSRF protection
 
 #### StreamableHTTP
 
@@ -612,7 +612,7 @@ Configuration field definition for built-in servers:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCP_ALLOW_LOCAL` | `true` | Allow local addresses (127.x.x.x, 10.x.x.x, etc.) |
+| `MCP_ALLOW_LOCAL` | `true` | Allow local addresses (127.x.x.x, 10.x.x.x, etc.) for MCP servers (default: allow, set `false` for strict SSRF blocking) |
 | `MCP_ALLOW_LOOPBACK` | `true` | Backwards-compatible alias for `MCP_ALLOW_LOCAL` |
 | `MCP_DISABLE_BUILT_IN_WEBFETCH` | `false` | Disable WebFetch built-in server |
 | `MCP_DISABLE_BUILT_IN_CONTEXT7` | `false` | Disable Context7 built-in server |
@@ -625,8 +625,8 @@ Configuration field definition for built-in servers:
 
 For HTTP-based transports (SSE, StreamableHTTP), agents-ensemble validates URLs to prevent Server-Side Request Forgery attacks:
 
-| Address Type | `MCP_ALLOW_LOCAL=true` | `MCP_ALLOW_LOCAL=false` |
-|--------------|------------------------|------------------------|
+| Address Type | `MCP_ALLOW_LOCAL=true` (default) | `MCP_ALLOW_LOCAL=false` |
+|--------------|----------------------------------|--------------------------|
 | Loopback (127.x.x.x, ::1) | Allowed | Blocked |
 | Private (10.x.x.x, 172.16-31.x.x, 192.168.x.x) | Allowed | Blocked |
 | Link-local (169.254.x.x) | Blocked | Blocked |

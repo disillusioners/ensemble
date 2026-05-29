@@ -19,7 +19,7 @@ OpenCode uses **JSON** config (not YAML). Add the MCP server to your config file
   "mcp": {
     "ensemble-kb": {
       "type": "remote",
-      "url": "http://localhost:8079/api/mcp/kb/mcp",
+      "url": "http://localhost:8079/api/mcp/kb",
       "enabled": true
     }
   }
@@ -36,7 +36,7 @@ OpenCode uses **JSON** config (not YAML). Add the MCP server to your config file
   "mcp": {
     "ensemble-kb": {
       "type": "remote",
-      "url": "http://localhost:8079/api/mcp/kb/mcp",
+      "url": "http://localhost:8079/api/mcp/kb",
       "enabled": true
     }
   }
@@ -124,7 +124,7 @@ ensemble_kb_search_projects(query="ensemble")
 from mcp.client.streamable_http import streamable_http_client
 from mcp import ClientSession
 
-MCP_URL = "http://localhost:8079/api/mcp/kb/mcp"
+MCP_URL = "http://localhost:8079/api/mcp/kb"
 
 async with streamable_http_client(MCP_URL) as (read_stream, write_stream, _):
     async with ClientSession(read_stream, write_stream) as session:
@@ -140,7 +140,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp import ClientSession
 
 async def main():
-    MCP_URL = "http://localhost:8079/api/mcp/kb/mcp"
+    MCP_URL = "http://localhost:8079/api/mcp/kb"
     PROJECT_NAME = "my-project"  # Use name, shortname, or UUID
 
     async with streamable_http_client(MCP_URL) as (read_stream, write_stream, _):
@@ -278,19 +278,19 @@ Error: Project 'agents-ensamble' not found. Did you mean 'agents-ensemble' (ens,
 
 | Transport | Endpoint | Best For |
 |-----------|----------|----------|
-| **StreamableHTTP** | `/api/mcp/kb/mcp` | Recommended — modern, stateless, async-friendly |
-| **SSE** | `/api/mcp/kb/sse/sse` | Alternative transport for clients that only support SSE |
+| **StreamableHTTP** | `/api/mcp/kb` | Recommended — modern, stateless, async-friendly |
+| **SSE** | `/api/mcp/kb/sse` | Alternative transport for clients that only support SSE |
 
 Use StreamableHTTP unless you have a specific requirement for SSE.
 
 ```python
 # StreamableHTTP (recommended)
-async with streamable_http_client("http://localhost:8079/api/mcp/kb/mcp") as (...):
+async with streamable_http_client("http://localhost:8079/api/mcp/kb") as (...):
     ...
 
 # SSE fallback
 from mcp.client.sse import sse_client
-async with sse_client("http://localhost:8079/api/mcp/kb/sse/sse") as (...):
+async with sse_client("http://localhost:8079/api/mcp/kb/sse") as (...):
     ...
 ```
 

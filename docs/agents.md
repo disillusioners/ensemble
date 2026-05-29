@@ -47,6 +47,7 @@ The following agents are available:
 | `kb-importer` | KB Importer | 📥 | Prepares and imports documents into RAG knowledge base | — | rag, help, time, mcp |
 | `experiencer` | Experiencer | 🧠 | Extracts entities/relationships from text, records to RAG | — | rag, help, time, mcp |
 | `_mother` | Mother | 🧬 | Creates, modifies, and manages other agents (system agent) | — | instance, self, help, mother, knowledge, mcp |
+| `_baby_template` | Baby Template | 👶 | Template for spawning new agent instances | — | knowledge, mcp |
 
 ### System Agents
 
@@ -55,7 +56,6 @@ Agents prefixed with `_` are **system agents**:
 | ID | Name | Purpose |
 |----|------|---------|
 | `_mother` | Mother | Agent lifecycle management — create, modify, delete agents |
-| `_baby_template` | Baby Template | Template for spawning new agent instances |
 
 ---
 

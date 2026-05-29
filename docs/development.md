@@ -81,7 +81,7 @@ cd frontend
 npm start
 ```
 
-The Angular dev server runs on **port 4200** and proxies API calls to the backend at `localhost:8079` via `proxy.conf.json`.
+The Angular dev server runs on **port 4199** and proxies API calls to the backend at `localhost:8079` via `proxy.conf.json`.
 
 ### Full Development Workflow
 
