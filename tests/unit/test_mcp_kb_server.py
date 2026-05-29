@@ -748,6 +748,73 @@ class TestResolveProject:
         assert error is not None
         assert "not initialized" in error.lower()
 
+    @pytest.mark.asyncio
+    async def test_empty_project_id_returns_error(self, setup_with_repo):
+        """Empty string project_id should return clear error."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        _, error = await kb_server_module._resolve_project(project_id="")
+        assert error is not None
+        assert "empty" in error.lower()
+
+    @pytest.mark.asyncio
+    async def test_empty_project_name_returns_error(self, setup_with_repo):
+        """Empty string project_name should return clear error."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        _, error = await kb_server_module._resolve_project(project_name="")
+        assert error is not None
+        assert "empty" in error.lower()
+
+    @pytest.mark.asyncio
+    async def test_empty_project_path_returns_error(self, setup_with_repo):
+        """Empty string project_path should return clear error."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        _, error = await kb_server_module._resolve_project(project_path="")
+        assert error is not None
+        assert "empty" in error.lower()
+
+    @pytest.mark.asyncio
+    async def test_project_id_takes_priority_over_project_name(self, setup_with_repo, mock_project_repository):
+        """When both project_id and project_name provided, project_id wins."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="id-A",
+            name="Project A",
+        )
+        mock_project_repository.get = MagicMock(return_value=mock_project)
+        
+        # Provide both — project_id should be used, project_name ignored
+        resolved_id, error = await kb_server_module._resolve_project(
+            project_id="id-A",
+            project_name="different-name"
+        )
+        assert resolved_id == "id-A"
+        assert error is None
+        # Verify repo.get was called (project_id branch), NOT get_by_name
+        mock_project_repository.get.assert_called_once_with("id-A")
+
+    @pytest.mark.asyncio
+    async def test_short_name_skips_fuzzy_matching(self, setup_with_repo, mock_project_repository):
+        """Very short project names (< 3 chars) should skip fuzzy matching."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        projects = [_create_mock_project(
+            project_id="id-1",
+            name="ab",
+            shortnames=["ab"],
+        )]
+        mock_project_repository.get_by_name = MagicMock(return_value=None)
+        mock_project_repository.get_by_shortname = MagicMock(return_value=None)
+        mock_project_repository.list_projects = MagicMock(return_value=projects)
+        
+        _, error = await kb_server_module._resolve_project(project_name="ac")  # length 2
+        assert error is not None
+        assert "not found" in error.lower()
+        assert "Available projects" in error  # Falls through to listing, no fuzzy match
+
 
 # =============================================================================
 # Test Cases for ensemble_kb_list_projects

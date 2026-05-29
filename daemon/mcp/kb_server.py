@@ -54,21 +54,44 @@ async def _resolve_project(
 ) -> tuple[str | None, str | None]:
     """Resolve a project identifier to a project_id UUID.
 
+    When multiple identifiers provided, priority: project_id > project_name > project_path.
+
     Returns (project_id, error_message) — one will be None.
     """
     if _manager is None:
         return None, "Server not initialized: manager not set"
 
+    # C2: Empty string validation
+    if project_id is not None and not project_id.strip():
+        return None, "Error: project_id must not be empty."
+    if project_name is not None and not project_name.strip():
+        return None, "Error: project_name must not be empty."
+    if project_path is not None and not project_path.strip():
+        return None, "Error: project_path must not be empty."
+
+    if not project_id and not project_name and not project_path:
+        # Nothing provided
+        repo = _manager._project_repository
+        all_projects = await asyncio.to_thread(repo.list_projects, limit=20)
+        if not all_projects:
+            return None, "No project identifier provided and no projects exist in the system."
+
+        available_hint = ", ".join(
+            f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "")
+            for p in all_projects[:10]
+        )
+        return None, f"No project identifier provided. Please provide project_id, project_name, or project_path. Available projects: {available_hint}"
+
     repo = _manager._project_repository
 
-    # 1. Try project_id (exact match first, then fuzzy UUID)
+    # Priority 1: project_id
     if project_id is not None:
-        # Exact match
+        # Try exact match first (no need for full list)
         project = await asyncio.to_thread(repo.get, project_id)
         if project is not None:
-            return project_id, None
+            return project.project_id, None
 
-        # Fuzzy UUID match
+        # Need fuzzy matching — fetch once
         all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
         best_match = None
         best_ratio = 0.0
@@ -78,35 +101,45 @@ async def _resolve_project(
                 best_ratio = ratio
                 best_match = p
 
+        available_hint = ", ".join(
+            f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "")
+            for p in all_projects[:10]
+        )
+
         if best_ratio >= 0.85:
             return best_match.project_id, None
 
-        # No close UUID match
         if best_ratio >= 0.7:
-            return None, f"Project ID '{project_id}' not found. Did you mean '{best_match.name}' ({best_match.project_id})?"
+            shortnames = f" ({', '.join(best_match.shortnames)})" if best_match.shortnames else ""
+            return None, f"Project ID '{project_id}' not found. Did you mean '{best_match.name}'{shortnames}?"
 
-        names = [f"{p.name} ({p.project_id})" for p in all_projects[:10]]
-        return None, f"Project ID '{project_id}' not found. Available projects: {', '.join(names)}"
+        return None, f"Project ID '{project_id}' not found. Available projects: {available_hint}"
 
-    # 2. Try project_name (exact match on name and shortnames, then fuzzy)
+    # Priority 2: project_name
     if project_name is not None:
-        # Exact name match
+        # Try exact match first (no need for full list)
         project = await asyncio.to_thread(repo.get_by_name, project_name)
         if project is not None:
             return project.project_id, None
 
-        # Exact shortname match
         project = await asyncio.to_thread(repo.get_by_shortname, project_name)
         if project is not None:
             return project.project_id, None
 
-        # Fuzzy name match against name + shortnames
+        # Need fuzzy matching — fetch once
         all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
+
+        # W1: Short name guard
+        if len(project_name) < 3:
+            available_hint = ", ".join(
+                f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "")
+                for p in all_projects[:10]
+            )
+            return None, f"Project '{project_name}' not found. Available projects: {available_hint}"
+
         candidates = []
         for p in all_projects:
-            # Compare against name
             name_ratio = difflib.SequenceMatcher(None, project_name.lower(), p.name.lower()).ratio()
-            # Compare against each shortname
             sn_ratios = [difflib.SequenceMatcher(None, project_name.lower(), sn.lower()).ratio() for sn in (p.shortnames or [])]
             best_sn_ratio = max(sn_ratios) if sn_ratios else 0.0
             best_for_project = max(name_ratio, best_sn_ratio)
@@ -115,25 +148,29 @@ async def _resolve_project(
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 
+        available_hint = ", ".join(
+            f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "")
+            for p in all_projects[:10]
+        )
+
         if candidates and candidates[0][1] >= 0.8:
             return candidates[0][0].project_id, None
 
         if candidates and candidates[0][1] >= 0.6:
             best = candidates[0][0]
             shortnames = f" ({', '.join(best.shortnames)})" if best.shortnames else ""
-            return None, f"Project '{project_name}' not found. Did you mean '{best.name}'{shortnames} ({best.project_id})?"
+            return None, f"Project '{project_name}' not found. Did you mean '{best.name}'{shortnames}?"
 
-        names = [f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "") for p in all_projects[:10]]
-        return None, f"Project '{project_name}' not found. Available projects: {', '.join(names)}"
+        return None, f"Project '{project_name}' not found. Available projects: {available_hint}"
 
-    # 3. Try project_path
+    # Priority 3: project_path
     if project_path is not None:
-        # Exact path match
+        # Try exact match first
         projects = await asyncio.to_thread(repo.get_by_directory, project_path)
         if projects:
             return projects[0].project_id, None
 
-        # Fuzzy path match
+        # Need fuzzy matching — fetch once
         all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
         candidates = []
         for p in all_projects:
@@ -144,23 +181,24 @@ async def _resolve_project(
 
         candidates.sort(key=lambda x: x[1], reverse=True)
 
+        available_hint = ", ".join(
+            f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "")
+            for p in all_projects[:10]
+        )
+
         if candidates and candidates[0][1] >= 0.7:
             return candidates[0][0].project_id, None
 
-        if candidates and candidates[0][1] >= 0.5:
+        # W2: threshold raised to 0.65
+        if candidates and candidates[0][1] >= 0.65:
             best = candidates[0][0]
-            return None, f"Project path '{project_path}' not found. Did you mean '{best.main_directory}' ({best.name}, {best.project_id})?"
+            shortnames = f" ({', '.join(best.shortnames)})" if best.shortnames else ""
+            return None, f"Project path '{project_path}' not found. Did you mean '{best.name}'{shortnames}?"
 
-        paths = [f"{p.main_directory} ({p.name})" for p in all_projects if p.main_directory][:10]
-        return None, f"Project path '{project_path}' not found. Known paths: {', '.join(paths)}"
+        return None, f"Project path '{project_path}' not found. Available projects: {available_hint}"
 
-    # 4. Nothing provided
-    all_projects = await asyncio.to_thread(repo.list_projects, limit=20)
-    if not all_projects:
-        return None, "No project identifier provided and no projects exist in the system."
-
-    names = [f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "") for p in all_projects[:10]]
-    return None, f"No project identifier provided. Please provide project_id, project_name, or project_path. Available projects: {', '.join(names)}"
+    # Should never reach here due to earlier check
+    return None, "No project identifier provided."
 
 
 def create_kb_mcp_server() -> FastMCP:
@@ -353,7 +391,8 @@ def create_kb_mcp_server() -> FastMCP:
             return json.dumps(result, indent=2)
 
         except Exception as e:
-            return f"Error listing projects: {e}"
+            logger.error("ensemble_kb_list_projects failed: %s", e, exc_info=True)
+            return "Error: Failed to list projects."
 
     @mcp.tool()
     async def ensemble_kb_search_projects(
@@ -393,7 +432,8 @@ def create_kb_mcp_server() -> FastMCP:
             return json.dumps(result, indent=2)
 
         except Exception as e:
-            return f"Error searching projects: {e}"
+            logger.error("ensemble_kb_search_projects failed: %s", e, exc_info=True)
+            return "Error: Failed to search projects."
 
     # Eagerly initialize StreamableHTTP session manager
     # (prevents RuntimeError when get_kb_mcp_session_manager() is called later)
