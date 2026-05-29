@@ -205,8 +205,7 @@ async def lifespan(app: FastAPI):
     manager.set_job_queue_service(job_queue_service)
     manager.set_job_queue_mgmt_service(job_queue_mgmt_service)
 
-    # Initialize KB MCP server (eagerly inits StreamableHTTP session manager)
-    kb_mcp = create_kb_mcp_server()
+    # Set KB MCP manager reference (FastMCP instance already created in create_app())
     set_kb_mcp_manager(manager)
     
     # Wire InstanceManager into JobQueueService
@@ -522,6 +521,9 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
 
     # --- MCP KB server mounts (MUST be before catch-all SPA route) ---
+    # Initialize KB MCP server first (creates FastMCP and session manager)
+    kb_mcp = create_kb_mcp_server()
+    # Mount SSE and StreamableHTTP apps
     app.mount("/api/mcp/kb/sse", get_kb_mcp_sse_app("/api/mcp/kb/sse"))
     app.mount("/api/mcp/kb", get_kb_mcp_http_app())
 
