@@ -453,13 +453,13 @@ class TestStartJobInstanceStatusChecks:
         assert result is not None
 
     @pytest.mark.asyncio
-    async def test_start_job_works_for_message_type_jobs(
+    async def test_start_job_reactivates_message_job_for_terminated_instance(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() cancels MESSAGE jobs for terminated instances.
+        """Test that start_job() reactivates MESSAGE jobs for terminated instances.
 
-        MESSAGE jobs have pre-set instance_id, so they should also be
-        cancelled when their target instance is terminated.
+        MESSAGE jobs targeting TERMINATED instances should be reactivated
+        (instance status → RUNNING) and proceed to normal processing.
         """
         instance_id = "terminated-message-instance"
         job_id = "message-job-terminated"
@@ -473,7 +473,11 @@ class TestStartJobInstanceStatusChecks:
             job_type="message",
         )
         mock_repository.get.return_value = job
-        mock_repository.atomic_transition.return_value = True
+        mock_repository.start_job_atomic.return_value = job
+
+        # Mock _live_hub with AsyncMock for stream_status_change
+        mock_instance_manager_with_repo._live_hub = MagicMock()
+        mock_instance_manager_with_repo._live_hub.stream_status_change = AsyncMock()
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -481,8 +485,18 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        assert result is None
-        mock_repository.atomic_transition.assert_called()
+        # Job should be reactivated and proceed to processing (not cancelled)
+        assert result is not None
+        # Instance status should be updated to RUNNING
+        mock_instance_manager_with_repo._instance_repository.update_status.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value
+        )
+        # stream_status_change should be called
+        mock_instance_manager_with_repo._live_hub.stream_status_change.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value, agent_id="test-agent"
+        )
+        # Job should proceed to normal processing (start_job_atomic called)
+        mock_repository.start_job_atomic.assert_called_once_with(job_id, instance_id)
 
 
 # =============================================================================
