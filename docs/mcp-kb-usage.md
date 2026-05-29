@@ -6,41 +6,94 @@ Connect external agent systems to the Ensemble Knowledge Base via MCP (Model Con
 
 ### Configuration
 
-Add to your OpenCode YAML config:
+OpenCode uses **JSON** config (not YAML). Add the MCP server to your config file.
 
-**StreamableHTTP (recommended):**
-```yaml
-mcpServers:
-  ensemble-kb:
-    url: http://localhost:8079/api/mcp/kb/mcp
+**Config file locations** (pick one):
+- **User-level:** `~/.config/opencode/opencode.json` — applies to all projects
+- **Project-level:** `.opencode.json` in your project root — project-specific
+
+**Minimal config — StreamableHTTP (recommended):**
+```json
+{
+  "mcp": {
+    "ensemble-kb": {
+      "type": "remote",
+      "url": "http://localhost:8079/api/mcp/kb/mcp",
+      "enabled": true
+    }
+  }
+}
 ```
 
-**SSE (alternative):**
-```yaml
-mcpServers:
-  ensemble-kb:
-    type: sse
-    url: http://localhost:8079/api/mcp/kb/sse/sse
+**SSE transport (alternative):**
+```json
+{
+  "mcp": {
+    "ensemble-kb": {
+      "type": "sse",
+      "url": "http://localhost:8079/api/mcp/kb/sse/sse",
+      "enabled": true
+    }
+  }
+}
+```
+
+> **Note:** If your config already has other fields (model, provider, etc.), just add the `"mcp"` key alongside them. Don't remove existing settings.
+
+**Full example with typical OpenCode settings:**
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-20250514",
+  "mcp": {
+    "ensemble-kb": {
+      "type": "remote",
+      "url": "http://localhost:8079/api/mcp/kb/mcp",
+      "enabled": true
+    }
+  }
+}
 ```
 
 ### Usage
 
-Once configured, the agent automatically has access to two tools:
+Once configured, the agent automatically has access to four tools:
 - `ensemble_kb_explore` — search the knowledge base
 - `ensemble_kb_experience` — record new knowledge
+- `ensemble_kb_list_projects` — list all available projects
+- `ensemble_kb_search_projects` — fuzzy search projects by name
+
+**Using `project_name` (recommended):**
+
+After config, use the project's name or shortname instead of its UUID:
 
 ```
-# Agent searches the knowledge base
-ensemble_kb_explore(query="How does authentication work?", project_name="my-project")
+# Agent searches the knowledge base by project name
+ensemble_kb_explore(query="How does authentication work?", project_name="agents-ensemble")
 
-# Agent records new findings
-ensemble_kb_experience(text="Auth requires API key in Authorization header", project_name="my-project")
+# Or use a shortname
+ensemble_kb_explore(query="database schema", project_name="ens")
+```
+
+**Using `project_id` (UUID):**
+
+```
+ensemble_kb_explore(query="How does authentication work?", project_id="83da04de-a410-4fb5-9e92-251a99d28a52")
+```
+
+**Discovering projects:**
+
+Not sure which projects are available? List them first:
+
+```
+ensemble_kb_list_projects()
+ensemble_kb_search_projects(query="ensemble")
 ```
 
 ### Prerequisites
 
 - Ensemble daemon running on port 8079
-- A valid project identifier (name, shortname, or UUID — get names via list_projects)
+- A valid project identifier (name, shortname, or UUID — discover via `list_projects`)
 
 ## 2. Quick Start (Python SDK)
 
