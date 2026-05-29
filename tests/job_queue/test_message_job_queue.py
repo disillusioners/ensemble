@@ -14,6 +14,7 @@ Scenarios covered:
 8. Status Endpoint (returns job status)
 9. Error Handling (fail transitions, persist error, retry)
 10. No Project Context (routes to system default)
+11. Instance Reactivation (TERMINATED/ERROR/FAILED → RUNNING for MESSAGE jobs)
 """
 
 import asyncio
@@ -23,6 +24,7 @@ from datetime import datetime
 
 from daemon.repositories.job_queue import JobRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus, JobQueue, QueueType
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_queue_service import JobQueueService, DemandState
 from daemon.services.message_job_handler import MessageJobHandler
 from daemon.manager import MessageResult
@@ -781,3 +783,235 @@ class TestNoProjectContext:
         queue = job_queue_service._queue_repo.get(job.queue_id)
         assert queue is not None
         assert queue.queue_type == QueueType.PARALLEL.value
+
+
+# ── 11. Instance Reactivation (TERMINATED/ERROR/FAILED → RUNNING) ──────────────────
+
+
+class TestMessageJobInstanceReactivation:
+    """Tests for MESSAGE jobs reactivating TERMINATED/ERROR/FAILED instances.
+
+    When a MESSAGE job arrives for a TERMINATED/ERROR/FAILED instance,
+    the instance should be reactivated (status → RUNNING) and the job
+    should proceed (not cancelled).
+    """
+
+    @pytest.fixture
+    def mock_instance_manager(self):
+        """Create mock instance manager with instance_repository and live_hub."""
+        manager = MagicMock()
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.update_status = MagicMock(return_value=True)
+        manager._live_hub = MagicMock()
+        manager._live_hub.stream_status_change = AsyncMock()
+        return manager
+
+    @pytest.fixture
+    def mock_repo(self):
+        """Create mock job repository."""
+        repo = MagicMock()
+        repo.get = MagicMock()
+        repo.start_job_atomic = MagicMock()
+        repo.atomic_transition = MagicMock()
+        repo.update = MagicMock(return_value=None)
+        return repo
+
+    @pytest.fixture
+    def mock_lock_manager(self):
+        """Create mock lock manager."""
+        manager = MagicMock()
+        manager.acquire = AsyncMock(return_value=True)
+        manager.acquire_queue_lock = AsyncMock(return_value=True)
+        manager.release = AsyncMock()
+        manager.release_queue_lock = AsyncMock()
+        return manager
+
+    @pytest.fixture
+    def mock_queue_repo(self):
+        """Create mock queue repository."""
+        repo = MagicMock()
+        repo.get = MagicMock(return_value=MagicMock(concurrency_limit=3))
+        repo.get_concurrency_limit = MagicMock(return_value=3)
+        return repo
+
+    @pytest.fixture
+    def mock_project_repo(self):
+        """Create mock project repository."""
+        repo = MagicMock()
+        project = MagicMock()
+        project.project_id = "project-1"
+        project.job_queue_paused = False
+        repo.get = MagicMock(return_value=project)
+        return repo
+
+    @pytest.fixture
+    def jqs(
+        self, mock_repo, mock_lock_manager, mock_queue_repo,
+        mock_instance_manager, mock_project_repo
+    ):
+        """Create JobQueueService with mocked dependencies."""
+        service = JobQueueService(
+            repository=mock_repo,
+            lock_manager=mock_lock_manager,
+            queue_repo=mock_queue_repo,
+            instance_manager=mock_instance_manager,
+        )
+        service.set_project_repo(mock_project_repo)
+        return service
+
+    def _create_message_job(self, job_id, instance_id, status=JobStatus.PENDING.value):
+        """Helper to create a mock MESSAGE job."""
+        job = MagicMock()
+        job.job_id = job_id
+        job.agent_id = "test-agent"
+        job.project_id = "project-1"
+        job.queue_id = "queue-1"
+        job.status = status
+        job.instance_id = instance_id
+        job.job_type = "message"
+        job.message = "Test message"
+        job.source = "api"
+        return job
+
+    def _create_mock_instance(self, instance_id, status):
+        """Helper to create a mock instance with given status."""
+        instance = MagicMock()
+        instance.instance_id = instance_id
+        instance.status = status
+        instance.agent_id = "test-agent"
+        return instance
+
+    @pytest.mark.asyncio
+    async def test_message_job_reactivates_terminated_instance(
+        self, jqs, mock_repo, mock_instance_manager
+    ):
+        """Test MESSAGE job reactivates TERMINATED instance to RUNNING.
+
+        When a MESSAGE job arrives for a TERMINATED instance:
+        1. Instance status should be updated to RUNNING
+        2. stream_status_change should be called with RUNNING
+        3. Job should NOT be cancelled (proceeds to normal processing)
+        """
+        instance_id = "terminated-instance-123"
+        job_id = "message-job-terminated"
+
+        job = self._create_message_job(job_id, instance_id)
+        mock_repo.get.return_value = job
+        mock_repo.start_job_atomic.return_value = job
+
+        mock_instance_manager._instance_repository.get.return_value = self._create_mock_instance(
+            instance_id, InstanceStatus.TERMINATED.value
+        )
+
+        result = await jqs.start_job(job_id)
+
+        # 1. Instance status should be updated to RUNNING
+        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value
+        )
+
+        # 2. stream_status_change should be called with RUNNING
+        mock_instance_manager._live_hub.stream_status_change.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value,
+            agent_id="test-agent"
+        )
+
+        # 3. Job should NOT be cancelled (atomic_transition to CANCELLED should NOT be called)
+        cancel_calls = [
+            call for call in mock_repo.atomic_transition.call_args_list
+            if call.kwargs.get("to_status") == JobStatus.CANCELLED.value
+        ]
+        assert len(cancel_calls) == 0, "Job should NOT be cancelled for TERMINATED instance"
+
+        # Job should proceed to processing
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_message_job_reactivates_error_instance(
+        self, jqs, mock_repo, mock_instance_manager
+    ):
+        """Test MESSAGE job reactivates ERROR instance to RUNNING.
+
+        When a MESSAGE job arrives for an ERROR instance:
+        1. Instance status should be updated to RUNNING
+        2. stream_status_change should be called with RUNNING
+        3. Job should NOT be cancelled (proceeds to normal processing)
+        """
+        instance_id = "error-instance-123"
+        job_id = "message-job-error"
+
+        job = self._create_message_job(job_id, instance_id)
+        mock_repo.get.return_value = job
+        mock_repo.start_job_atomic.return_value = job
+
+        mock_instance_manager._instance_repository.get.return_value = self._create_mock_instance(
+            instance_id, InstanceStatus.ERROR.value
+        )
+
+        result = await jqs.start_job(job_id)
+
+        # 1. Instance status should be updated to RUNNING
+        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value
+        )
+
+        # 2. stream_status_change should be called with RUNNING
+        mock_instance_manager._live_hub.stream_status_change.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value,
+            agent_id="test-agent"
+        )
+
+        # 3. Job should NOT be cancelled (atomic_transition to CANCELLED should NOT be called)
+        cancel_calls = [
+            call for call in mock_repo.atomic_transition.call_args_list
+            if call.kwargs.get("to_status") == JobStatus.CANCELLED.value
+        ]
+        assert len(cancel_calls) == 0, "Job should NOT be cancelled for ERROR instance"
+
+        # Job should proceed to processing
+        assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_message_job_reactivates_failed_instance(
+        self, jqs, mock_repo, mock_instance_manager
+    ):
+        """Test MESSAGE job reactivates FAILED instance to RUNNING.
+
+        When a MESSAGE job arrives for a FAILED instance:
+        1. Instance status should be updated to RUNNING
+        2. stream_status_change should be called with RUNNING
+        3. Job should NOT be cancelled (proceeds to normal processing)
+        """
+        instance_id = "failed-instance-123"
+        job_id = "message-job-failed"
+
+        job = self._create_message_job(job_id, instance_id)
+        mock_repo.get.return_value = job
+        mock_repo.start_job_atomic.return_value = job
+
+        mock_instance_manager._instance_repository.get.return_value = self._create_mock_instance(
+            instance_id, InstanceStatus.FAILED.value
+        )
+
+        result = await jqs.start_job(job_id)
+
+        # 1. Instance status should be updated to RUNNING
+        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value
+        )
+
+        # 2. stream_status_change should be called with RUNNING
+        mock_instance_manager._live_hub.stream_status_change.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value,
+            agent_id="test-agent"
+        )
+
+        # 3. Job should NOT be cancelled (atomic_transition to CANCELLED should NOT be called)
+        cancel_calls = [
+            call for call in mock_repo.atomic_transition.call_args_list
+            if call.kwargs.get("to_status") == JobStatus.CANCELLED.value
+        ]
+        assert len(cancel_calls) == 0, "Job should NOT be cancelled for FAILED instance"
+
+        # Job should proceed to processing
+        assert result is not None

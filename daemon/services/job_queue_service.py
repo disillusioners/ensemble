@@ -1020,13 +1020,20 @@ class JobQueueService:
                             agent_id=instance.agent_id
                         )
                     else:
-                        # TERMINATED/ERROR/FAILED — cancel MESSAGE job
-                        logger.info(
-                            f"start_job: instance {job.instance_id[:8]}... is {instance.status}, "
-                            f"cancelling MESSAGE job {job.job_id[:8]}..."
+                        # TERMINATED/ERROR/FAILED + MESSAGE: REACTIVATE
+                        await asyncio.to_thread(
+                            self._instance_manager._instance_repository.update_status,
+                            job.instance_id, InstanceStatus.RUNNING.value
                         )
-                        await self.cancel_job(job.job_id)
-                        return None
+                        await self._instance_manager._live_hub.stream_status_change(
+                            job.instance_id, InstanceStatus.RUNNING.value,
+                            agent_id=instance.agent_id
+                        )
+                        logger.info(
+                            f"start_job: reactivating instance {job.instance_id[:8]}... "
+                            f"from {instance.status} for MESSAGE job {job.job_id[:8]}..."
+                        )
+                        # Fall through to normal processing
 
                 if instance.status == InstanceStatus.PAUSED.value:
                     logger.debug(
