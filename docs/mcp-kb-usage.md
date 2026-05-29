@@ -2,7 +2,47 @@
 
 Connect external agent systems to the Ensemble Knowledge Base via MCP (Model Context Protocol).
 
-## 1. Quick Start
+## 1. OpenCode Integration
+
+### Configuration
+
+Add to your OpenCode YAML config:
+
+**StreamableHTTP (recommended):**
+```yaml
+mcpServers:
+  ensemble-kb:
+    url: http://localhost:8079/api/mcp/kb/mcp
+```
+
+**SSE (alternative):**
+```yaml
+mcpServers:
+  ensemble-kb:
+    type: sse
+    url: http://localhost:8079/api/mcp/kb/sse/sse
+```
+
+### Usage
+
+Once configured, the agent automatically has access to two tools:
+- `ensemble_kb_explore` — search the knowledge base
+- `ensemble_kb_experience` — record new knowledge
+
+```
+# Agent searches the knowledge base
+ensemble_kb_explore(query="How does authentication work?", project_id="your-project-uuid")
+
+# Agent records new findings
+ensemble_kb_experience(text="Auth requires API key in Authorization header", project_id="your-project-uuid")
+```
+
+### Prerequisites
+
+- Ensemble daemon running on port 8079
+- A valid project UUID (get it from `/api/projects` endpoint)
+
+## 2. Quick Start (Python SDK)
 
 ### Connection
 
@@ -54,7 +94,7 @@ async def main():
 asyncio.run(main())
 ```
 
-## 2. Tool Reference
+## 3. Tool Reference
 
 ### ensemble_kb_explore
 
@@ -79,7 +119,7 @@ Record new knowledge into the knowledge base (fire-and-forget).
 
 **Returns:** `"Knowledge recording started."` or error message.
 
-## 3. Transport Options
+## 4. Transport Options
 
 | Transport | Endpoint | Best For |
 |-----------|----------|----------|
@@ -99,14 +139,14 @@ async with sse_client("http://localhost:8079/api/mcp/kb/sse/sse") as (...):
     ...
 ```
 
-## 4. Prerequisites
+## 5. Prerequisites
 
 - **Ensemble daemon running** on port 8079 (default dev port)
 - **RAG enabled** — `is_rag_enabled()` must return true (check server logs on startup)
 - **Valid `project_id`** — UUID of an existing project (obtain via `/api/projects`)
 - **FastMCP server name:** `ensemble-kb`
 
-## 5. Query Modes
+## 6. Query Modes
 
 | Mode | When to Use |
 |------|-------------|
@@ -129,7 +169,7 @@ result = await session.call_tool(
 )
 ```
 
-## 6. Error Handling
+## 7. Error Handling
 
 Tools return **error strings** (not exceptions). Always check the response:
 
@@ -155,7 +195,7 @@ else:
 | `Error: An internal error occurred...` | Unexpected server error | Check server logs |
 | `Connection refused` | Server not running | Start daemon with `./dev.sh` |
 
-## 7. Integration Tips
+## 8. Integration Tips
 
 ### LangChain Agents
 
@@ -207,7 +247,7 @@ async def agent_loop(agent, session):
 - **Use `project_id` consistently** — All operations scope to a project
 - **Experience is async** — Fire-and-forget; don't wait for confirmation
 
-## Running Tests
+## 9. Running Tests
 
 ```bash
 # Start dev server
