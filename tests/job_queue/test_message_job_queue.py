@@ -434,6 +434,50 @@ class TestCancelledErrorOnTerminate:
             # Verify complete_job was NOT called
             mock_complete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_message_job_handler_shutdown_propagates_cancelled_error(
+        self, mock_manager, job_queue_service, repository, sample_job_data
+    ):
+        """Test CancelledError handler completes job as CANCELLED and still propagates CancelledError on shutdown.
+
+        Key insight: ANY non-PAUSED CancelledError should complete the job.
+        When instance is terminated, graph task is cancelled first (status still RUNNING),
+        then status is updated to TERMINATED later. So we check for PAUSED vs non-PAUSED.
+        """
+        instance_id = "shutdown-instance"
+
+        # Create and start job
+        job = create_message_job(repository, sample_job_data, instance_id)
+        repository.start_job(job.job_id, instance_id)
+
+        # Create handler
+        handler = MessageJobHandler(
+            manager=mock_manager,
+            job_queue_service=job_queue_service,
+            job_repository=repository,
+        )
+
+        # Mock instance status to RUNNING (shutdown scenario - status not yet TERMINATED)
+        mock_instance = MagicMock()
+        mock_instance.status = "running"
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        # Mock _process_message_with_tracking to raise CancelledError
+        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
+
+        # Mock complete_job to verify it's called
+        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
+            # a. CancelledError IS still raised
+            with pytest.raises(asyncio.CancelledError):
+                await handler.handle(job)
+
+            # b. The job IS completed as CANCELLED
+            mock_complete.assert_called_once_with(
+                job.job_id,
+                demand_state=DemandState.CANCELLED,
+                error="Message processing cancelled (instance terminated)",
+            )
+
 
 # ── 5. Instance Termination ──────────────────────────────────────────────────────
 

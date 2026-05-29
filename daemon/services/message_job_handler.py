@@ -187,28 +187,12 @@ class MessageJobHandler:
                 error="Message processing cancelled",
             )
         except asyncio.CancelledError:
-            # Graph was cancelled — could be pause or shutdown.
-            # Distinguish by checking instance status.
-            try:
-                instance = await asyncio.to_thread(
-                    self._manager._instance_repository.get, instance_id
-                )
-            except Exception:
-                # Repo failed - safest to re-raise and let failure handler deal with it
-                logger.warning(
-                    f"MessageJobHandler: job {job.job_id[:8]}... failed to check "
-                    f"instance status during CancelledError"
-                )
-                raise
+            instance = await asyncio.to_thread(self._manager._instance_repository.get, instance_id)
             if instance and instance.status == InstanceStatus.PAUSED.value:
-                # Pause — leave PROCESSING for resume
-                logger.info(
-                    f"MessageJobHandler: job {job.job_id[:8]}... left PROCESSING "
-                    f"(instance {instance_id[:8]}... was paused)"
-                )
+                # PAUSE → leave PROCESSING for resume
                 return
-            elif instance and instance.status == InstanceStatus.TERMINATED.value:
-                # Terminated — complete job as CANCELLED before re-raising
+            else:
+                # NOT PAUSE (terminate, shutdown, etc.) → complete job as CANCELLED
                 try:
                     await self._job_service.complete_job(
                         job.job_id,
@@ -216,21 +200,8 @@ class MessageJobHandler:
                         error="Message processing cancelled (instance terminated)",
                     )
                 except Exception:
-                    logger.warning(
-                        f"MessageJobHandler: failed to cancel job {job.job_id[:8]}..., "
-                        f"re-raising CancelledError"
-                    )
-                logger.info(
-                    f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
-                    f"(instance terminated)"
-                )
-                raise
-            else:
-                # Other states (RUNNING, etc.) — shutdown, propagate CancelledError
-                logger.info(
-                    f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
-                    f"(not pause, status={instance.status if instance else 'unknown'})"
-                )
+                    logger.warning(f"MessageJobHandler: failed to cancel job {job.job_id[:8]}...")
+                logger.info(f"MessageJobHandler: job {job.job_id[:8]}... cancelled (not pause, status={instance.status if instance else 'unknown'})")
                 raise
         except Exception as e:
             logger.error(
