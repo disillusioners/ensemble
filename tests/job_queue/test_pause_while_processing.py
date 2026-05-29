@@ -385,8 +385,12 @@ class TestPauseVsShutdownDistinction:
         with pytest.raises(asyncio.CancelledError):
             await handler.handle(job)
 
-        # complete_job should NOT be called (error propagates)
-        handler._job_service.complete_job.assert_not_called()
+        # complete_job SHOULD be called with CANCELLED state
+        handler._job_service.complete_job.assert_called_once_with(
+            'job-123',
+            demand_state=DemandState.CANCELLED,
+            error="Message processing cancelled (instance terminated)"
+        )
 
     def test_process_message_processor_pause_raises_cancelled_error(self):
         """Test that ProcessMessageProcessor raises CancelledError when paused."""
