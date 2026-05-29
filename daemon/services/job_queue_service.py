@@ -1005,34 +1005,22 @@ class JobQueueService:
                         )
                         await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
                         # Fall through to normal start logic below (don't return None)
-                    elif instance.status == InstanceStatus.COMPLETED.value:
-                        # COMPLETED instances can be reactivated for MESSAGE jobs (conversation continues)
+                    else:
+                        # MESSAGE: reactivate any terminal instance (COMPLETED/TERMINATED/ERROR/FAILED)
+                        await asyncio.to_thread(
+                            self._instance_manager._instance_repository.update_status,
+                            job.instance_id, InstanceStatus.RUNNING.value
+                        )
+                        await self._instance_manager._live_hub.stream_status_change(
+                            job.instance_id, InstanceStatus.RUNNING.value,
+                            agent_id=instance.agent_id
+                        )
                         logger.info(
-                            f"start_job: reactivating completed instance {job.instance_id[:8]}... "
+                            f"start_job: reactivating {instance.status} instance {job.instance_id[:8]}... "
                             f"for MESSAGE job {job.job_id[:8]}..."
                         )
-                        await asyncio.to_thread(
-                            self._instance_manager._instance_repository.update_status,
-                            job.instance_id, InstanceStatus.RUNNING.value
-                        )
-                        await self._instance_manager._live_hub.stream_status_change(
-                            job.instance_id, InstanceStatus.RUNNING.value,
-                            agent_id=instance.agent_id
-                        )
-                    else:
-                        # TERMINATED/ERROR/FAILED + MESSAGE: REACTIVATE
-                        await asyncio.to_thread(
-                            self._instance_manager._instance_repository.update_status,
-                            job.instance_id, InstanceStatus.RUNNING.value
-                        )
-                        await self._instance_manager._live_hub.stream_status_change(
-                            job.instance_id, InstanceStatus.RUNNING.value,
-                            agent_id=instance.agent_id
-                        )
-                        logger.info(
-                            f"start_job: reactivating instance {job.instance_id[:8]}... "
-                            f"from {instance.status} for MESSAGE job {job.job_id[:8]}..."
-                        )
+                        # NOTE: Revived instances get graph + MCP rebuilt lazily via get_instance().
+                        # Children that were cascade-terminated remain terminated — only the targeted instance is revived.
                         # Fall through to normal processing
 
                 if instance.status == InstanceStatus.PAUSED.value:

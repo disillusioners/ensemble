@@ -926,6 +926,9 @@ class TestMessageJobInstanceReactivation:
         # Job should proceed to processing
         assert result is not None
 
+        # 4. start_job_atomic should be called (job falls through to normal processing)
+        mock_repo.start_job_atomic.assert_called_once_with(job_id, instance_id)
+
     @pytest.mark.asyncio
     async def test_message_job_reactivates_error_instance(
         self, jqs, mock_repo, mock_instance_manager
@@ -971,6 +974,9 @@ class TestMessageJobInstanceReactivation:
         # Job should proceed to processing
         assert result is not None
 
+        # 4. start_job_atomic should be called (job falls through to normal processing)
+        mock_repo.start_job_atomic.assert_called_once_with(job_id, instance_id)
+
     @pytest.mark.asyncio
     async def test_message_job_reactivates_failed_instance(
         self, jqs, mock_repo, mock_instance_manager
@@ -1015,3 +1021,40 @@ class TestMessageJobInstanceReactivation:
 
         # Job should proceed to processing
         assert result is not None
+
+        # 4. start_job_atomic should be called (job falls through to normal processing)
+        mock_repo.start_job_atomic.assert_called_once_with(job_id, instance_id)
+
+    @pytest.mark.asyncio
+    async def test_message_job_does_not_reactivate_paused_instance(
+        self, jqs, mock_repo, mock_instance_manager
+    ):
+        """Test MESSAGE job does NOT reactivate PAUSED instance.
+
+        PAUSED instances have their own resume path (resume_instance),
+        so update_status(RUNNING) should NOT be called by start_job().
+        The job should be skipped (returns None).
+        """
+        instance_id = "paused-instance-123"
+        job_id = "message-job-paused"
+
+        job = self._create_message_job(job_id, instance_id)
+        mock_repo.get.return_value = job
+
+        mock_instance_manager._instance_repository.get.return_value = self._create_mock_instance(
+            instance_id, InstanceStatus.PAUSED.value
+        )
+
+        result = await jqs.start_job(job_id)
+
+        # Job should be skipped (PAUSED instances have their own resume path)
+        assert result is None
+
+        # update_status should NOT be called (PAUSED has separate resume path)
+        mock_instance_manager._instance_repository.update_status.assert_not_called()
+
+        # stream_status_change should NOT be called
+        mock_instance_manager._live_hub.stream_status_change.assert_not_called()
+
+        # start_job_atomic should NOT be called (job skipped entirely)
+        mock_repo.start_job_atomic.assert_not_called()
