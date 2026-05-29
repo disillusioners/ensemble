@@ -207,8 +207,8 @@ class MessageJobHandler:
                     f"(instance {instance_id[:8]}... was paused)"
                 )
                 return
-            else:
-                # Shutdown or other cancel — complete as CANCELLED before re-raising
+            elif instance and instance.status == InstanceStatus.TERMINATED.value:
+                # Terminated — complete job as CANCELLED before re-raising
                 try:
                     await self._job_service.complete_job(
                         job.job_id,
@@ -220,6 +220,13 @@ class MessageJobHandler:
                         f"MessageJobHandler: failed to cancel job {job.job_id[:8]}..., "
                         f"re-raising CancelledError"
                     )
+                logger.info(
+                    f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
+                    f"(instance terminated)"
+                )
+                raise
+            else:
+                # Other states (RUNNING, etc.) — shutdown, propagate CancelledError
                 logger.info(
                     f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
                     f"(not pause, status={instance.status if instance else 'unknown'})"
