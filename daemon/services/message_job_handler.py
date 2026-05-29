@@ -209,11 +209,17 @@ class MessageJobHandler:
                 return
             else:
                 # Shutdown or other cancel — complete as CANCELLED before re-raising
-                await self._job_service.complete_job(
-                    job.job_id,
-                    demand_state=DemandState.CANCELLED,
-                    error="Message processing cancelled (instance terminated)",
-                )
+                try:
+                    await self._job_service.complete_job(
+                        job.job_id,
+                        demand_state=DemandState.CANCELLED,
+                        error="Message processing cancelled (instance terminated)",
+                    )
+                except Exception:
+                    logger.warning(
+                        f"MessageJobHandler: failed to cancel job {job.job_id[:8]}..., "
+                        f"re-raising CancelledError"
+                    )
                 logger.info(
                     f"MessageJobHandler: job {job.job_id[:8]}... cancelled "
                     f"(not pause, status={instance.status if instance else 'unknown'})"
