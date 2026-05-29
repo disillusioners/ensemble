@@ -12,26 +12,14 @@ OpenCode uses **JSON** config (not YAML). Add the MCP server to your config file
 - **User-level:** `~/.config/opencode/opencode.json` — applies to all projects
 - **Project-level:** `.opencode.json` in your project root — project-specific
 
-**Minimal config — StreamableHTTP (recommended):**
+**Config:**
+
 ```json
 {
   "mcp": {
     "ensemble-kb": {
       "type": "remote",
       "url": "http://localhost:8079/api/mcp/kb/mcp",
-      "enabled": true
-    }
-  }
-}
-```
-
-**SSE transport (alternative):**
-```json
-{
-  "mcp": {
-    "ensemble-kb": {
-      "type": "sse",
-      "url": "http://localhost:8079/api/mcp/kb/sse/sse",
       "enabled": true
     }
   }
@@ -54,6 +42,39 @@ OpenCode uses **JSON** config (not YAML). Add the MCP server to your config file
   }
 }
 ```
+
+### oh-my-opencode-slim Plugin
+
+Even with MCP servers configured in `opencode.json`, they **won't work** unless each agent in the slim plugin config explicitly includes the MCP server name in its `"mcps"` array.
+
+**Config file:** `~/.config/opencode/oh-my-opencode-slim.json`
+
+```json
+{
+  "preset": "openai",
+  "presets": {
+    "openai": {
+      "orchestrator": {
+        "model": "litellm/coding",
+        "skills": ["*"],
+        "mcps": ["websearch", "ensemble-kb"]
+      },
+      "oracle": {
+        "model": "litellm/agentic",
+        "skills": [],
+        "mcps": ["ensemble-kb"]
+      }
+    }
+  }
+}
+```
+
+Key points:
+- The MCP server name in `"mcps"` must match the key used in `opencode.json`'s `"mcp"` section (e.g., `"ensemble-kb"`)
+- Each agent that needs KB access must have `"ensemble-kb"` in its `"mcps"` array
+- Without this, the agent can't call the tools even though the MCP server is registered
+
+This two-step setup (register → enable per-agent) gives fine-grained control over which agents can access which tools.
 
 ### Usage
 
