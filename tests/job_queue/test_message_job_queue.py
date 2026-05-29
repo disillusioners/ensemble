@@ -16,6 +16,7 @@ Scenarios covered:
 10. No Project Context (routes to system default)
 """
 
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
@@ -353,6 +354,85 @@ class TestMessageJobCancellation:
         # (Instance status is managed separately by instance_lifecycle)
         # This test verifies cancellation is job-scoped, not instance-scoped
         assert job.instance_id == instance_id
+
+
+# ── 4b. CancelledError Handler (Instance Termination) ─────────────────────────────
+
+
+class TestCancelledErrorOnTerminate:
+    """Tests for asyncio.CancelledError handler when instance is terminated (not paused)."""
+
+    @pytest.mark.asyncio
+    async def test_cancellederror_on_terminate_completes_job_as_cancelled(
+        self, mock_manager, job_queue_service, repository, sample_job_data
+    ):
+        """Test CancelledError handler completes job as CANCELLED when instance is terminated."""
+        instance_id = "terminate-instance"
+
+        # Create and start job
+        job = create_message_job(repository, sample_job_data, instance_id)
+        repository.start_job(job.job_id, instance_id)
+
+        # Create handler
+        handler = MessageJobHandler(
+            manager=mock_manager,
+            job_queue_service=job_queue_service,
+            job_repository=repository,
+        )
+
+        # Mock instance status to TERMINATED (not PAUSED)
+        mock_instance = MagicMock()
+        mock_instance.status = "terminated"
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        # Mock _process_message_with_tracking to raise CancelledError
+        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
+
+        # Mock complete_job to verify it's called
+        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
+            with pytest.raises(asyncio.CancelledError):
+                await handler.handle(job)
+
+            # Verify job was completed as CANCELLED
+            mock_complete.assert_called_once_with(
+                job.job_id,
+                demand_state=DemandState.CANCELLED,
+                error="Message processing cancelled (instance terminated)",
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancellederror_on_pause_leaves_job_processing(
+        self, mock_manager, job_queue_service, repository, sample_job_data
+    ):
+        """Test CancelledError handler does NOT complete job when instance is PAUSED."""
+        instance_id = "paused-instance"
+
+        # Create and start job
+        job = create_message_job(repository, sample_job_data, instance_id)
+        repository.start_job(job.job_id, instance_id)
+
+        # Create handler
+        handler = MessageJobHandler(
+            manager=mock_manager,
+            job_queue_service=job_queue_service,
+            job_repository=repository,
+        )
+
+        # Mock instance status to PAUSED
+        mock_instance = MagicMock()
+        mock_instance.status = "paused"
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        # Mock _process_message_with_tracking to raise CancelledError
+        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
+
+        # Mock complete_job to verify it's NOT called
+        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
+            # Should return without raising (job stays PROCESSING for resume)
+            await handler.handle(job)
+
+            # Verify complete_job was NOT called
+            mock_complete.assert_not_called()
 
 
 # ── 5. Instance Termination ──────────────────────────────────────────────────────
