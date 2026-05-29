@@ -44,7 +44,7 @@ def reset_kb_server_module():
 @pytest.fixture
 def kb_server_setup(reset_kb_server_module, mock_manager):
     """Create KB MCP server with mock manager and return tool functions."""
-    from daemon.mcp import kb_server as kb_server_module
+    import daemon.mcp.kb_server as kb_server_module
     from daemon.rag import config as rag_config_module
     
     # Set the manager

@@ -135,7 +135,7 @@ def create_kb_mcp_server() -> FastMCP:
             return result
 
         except Exception as e:
-            logger.error(f"ensemble_kb_explore failed: {e}", exc_info=True)
+            logger.error("ensemble_kb_explore failed: %s", e, exc_info=True)
             return "Error: An internal error occurred while exploring the knowledge base."
 
     @mcp.tool()
@@ -177,7 +177,7 @@ def create_kb_mcp_server() -> FastMCP:
             logger.warning("Failed to schedule experiencer job (no event loop): %s", e)
             return "Error: Failed to schedule knowledge recording. Please try again."
         except Exception as e:
-            logger.error(f"ensemble_kb_experience failed: {e}", exc_info=True)
+            logger.error("ensemble_kb_experience failed: %s", e, exc_info=True)
             return "Error: An internal error occurred while recording knowledge."
 
     # Eagerly initialize StreamableHTTP session manager
