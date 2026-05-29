@@ -107,6 +107,63 @@ mock_mcp_client.streamable_http = create_mock_module("mcp.client.streamable_http
 mock_mcp_client_stdio = create_mock_module("mcp.client.stdio", {})
 mock_mcp_server = create_mock_module("mcp.server", {"__path__": []})
 mock_mcp_server.stdio = create_mock_module("mcp.server.stdio", {})
+
+
+class MockTool:
+    """Mock tool that wraps a function and exposes fn attribute."""
+    def __init__(self, fn, name, description="", parameters=None):
+        self.fn = fn
+        self.name = name
+        self.description = description
+        self.parameters = parameters or {}
+
+
+class MockToolManager:
+    """Mock tool manager that stores tools and returns them via get_tool."""
+    def __init__(self):
+        self._tools = {}
+
+    def add_tool(self, fn, name, description="", parameters=None):
+        self._tools[name] = MockTool(fn, name, description, parameters)
+
+    def get_tool(self, name):
+        return self._tools.get(name)
+
+    def list_tools(self):
+        return list(self._tools.values())
+
+
+class MockFastMCP:
+    """Mock FastMCP that properly handles tools for testing."""
+    def __init__(self, name="", instructions="", stateless_http=False, json_response=False):
+        self.name = name
+        self.instructions = instructions
+        self._tool_manager = MockToolManager()
+        self._session_manager = MagicMock()
+
+    def tool(self):
+        """Decorator to register a tool - returns the decorator function."""
+        def decorator(func):
+            self._tool_manager.add_tool(func, func.__name__)
+            return func
+        return decorator
+
+    @property
+    def session_manager(self):
+        return self._session_manager
+
+    def streamable_http_app(self):
+        """Return a mock HTTP app."""
+        return MagicMock()
+
+    def sse_app(self, mount_path="/sse"):
+        """Return a mock SSE app."""
+        return MagicMock()
+
+
+mock_mcp_server_fastmcp = create_mock_module("mcp.server.fastmcp", {
+    "FastMCP": MockFastMCP,
+})
 mock_mcp_types = create_mock_module("mcp.types", {
     "TextResourceContents": MagicMock(),
     "ImageResourceContents": MagicMock(),
@@ -145,6 +202,7 @@ _mock_modules = {
     "mcp.client.stdio": mock_mcp_client_stdio,
     "mcp.server": mock_mcp_server,
     "mcp.server.stdio": mock_mcp_server.stdio,
+    "mcp.server.fastmcp": mock_mcp_server_fastmcp,
     "mcp.types": mock_mcp_types,
     "mcp.client.stdio.context_manager": mock_mcp_stdio_client,
     "mcp.shared": mock_mcp_shared,

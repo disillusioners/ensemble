@@ -56,6 +56,14 @@ from daemon.routers import (
     notifications_router,
 )
 
+from daemon.mcp import (
+    create_kb_mcp_server,
+    get_kb_mcp_http_app,
+    get_kb_mcp_session_manager,
+    get_kb_mcp_sse_app,
+    set_kb_mcp_manager,
+)
+
 # Re-export validate_agent_id from utils for backward compatibility
 from daemon.utils import validate_agent_id as validate_agent_id  # noqa: F401
 
@@ -196,6 +204,10 @@ async def lifespan(app: FastAPI):
     # Wire services into InstanceManager
     manager.set_job_queue_service(job_queue_service)
     manager.set_job_queue_mgmt_service(job_queue_mgmt_service)
+
+    # Initialize KB MCP server (eagerly inits StreamableHTTP session manager)
+    kb_mcp = create_kb_mcp_server()
+    set_kb_mcp_manager(manager)
     
     # Wire InstanceManager into JobQueueService
     job_queue_service.set_instance_manager(manager)
@@ -334,8 +346,12 @@ async def lifespan(app: FastAPI):
     set_proj_mgmt_service(job_queue_mgmt_service)
     from daemon.routers.queues import set_job_queue_mgmt_service as set_queue_mgmt_service
     set_queue_mgmt_service(job_queue_mgmt_service)
-    
-    yield
+
+    # Start StreamableHTTP session manager within lifespan
+    session_mgr = get_kb_mcp_session_manager()
+
+    async with session_mgr.run():
+        yield
     
     # Shutdown sequence
     # Stop RetryScheduler first
@@ -504,6 +520,10 @@ def create_app() -> FastAPI:
     api_router.include_router(notifications_router)   # /api/notifications
     
     app.include_router(api_router)
+
+    # --- MCP KB server mounts (MUST be before catch-all SPA route) ---
+    app.mount("/api/mcp/kb/sse", get_kb_mcp_sse_app("/api/mcp/kb/sse"))
+    app.mount("/api/mcp/kb", get_kb_mcp_http_app())
 
     # UI serving endpoints (production)
     @app.get("/")

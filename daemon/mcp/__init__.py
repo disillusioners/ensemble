@@ -17,6 +17,13 @@ from daemon.mcp.tool_adapter import (
     is_mcp_tool,
     adapt_mcp_tools,
 )
+from daemon.mcp.kb_server import (
+    create_kb_mcp_server,
+    get_kb_mcp_http_app,
+    get_kb_mcp_session_manager,
+    get_kb_mcp_sse_app,
+    set_kb_mcp_manager,
+)
 
 __all__ = [
     "McpStdioConfig",
@@ -30,4 +37,9 @@ __all__ = [
     "mcp_tool_name",
     "is_mcp_tool",
     "adapt_mcp_tools",
+    "create_kb_mcp_server",
+    "get_kb_mcp_http_app",
+    "get_kb_mcp_session_manager",
+    "get_kb_mcp_sse_app",
+    "set_kb_mcp_manager",
 ]
