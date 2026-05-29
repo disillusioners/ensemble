@@ -33,9 +33,122 @@ Without RAG, agents rely solely on their training data and immediate context. Li
 
 ---
 
-## Prerequisites
+## Choose Your Setup Path
 
-Before deploying LightRAG, ensure you have:
+### Light / Local *(Recommended Starting Point)*
+
+Simple single-instance deployment. No Kubernetes required. All you need is the LightRAG container and environment variables.
+
+**Best for:** Development, small teams, single-server deployments.
+
+### Full / K8s *(Advanced)*
+
+Production-grade deployment with Helm, separate storage backends, and horizontal scaling.
+
+**Best for:** Production workloads, multiple workspaces, high availability needs.
+
+---
+
+## CRITICAL Configuration
+
+Both setup paths require these two environment variables:
+
+### `WORKSPACE_ISOLATION: "true"`
+
+**Required for agents-ensemble.** This prevents cross-contamination between workspaces in the knowledge graph.
+
+Without isolation, documents and entities from different projects get mixed together, causing agents to retrieve irrelevant context and produce confused responses. This setting ensures each workspace maintains its own isolated graph.
+
+### `ENTITY_TYPES`
+
+Defines the entity types used for knowledge graph extraction. These categories determine what "things" LightRAG identifies when processing documents.
+
+```bash
+ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]'
+```
+
+**This specific list is tuned for the agents-ensemble domain** — it covers the entity types relevant to software projects, teams, and workflows. Do not change unless you have specific domain requirements.
+
+### All Other Variables Are Optional
+
+All other environment variables have sensible defaults. Only tune them when you have specific requirements:
+
+| Category | What to Configure |
+|----------|-------------------|
+| **Auth** | Set `AUTH_ACCOUNTS`, `TOKEN_SECRET`, `LIGHTRAG_API_KEY` to secure your instance |
+| **LLM** | Configure `LLM_BINDING_HOST` and `LLM_BINDING_API_KEY` for your LLM provider |
+| **Embedding** | Configure `EMBEDDING_BINDING_HOST`, `EMBEDDING_MODEL`, and API key |
+| **Storage** | Only needed for Full/K8s setup with external databases |
+
+---
+
+## Light / Local Setup
+
+### Prerequisites
+
+- **Docker** or container runtime
+- **LLM API** — OpenAI-compatible endpoint for text generation
+- **Embedding API** — OpenAI-compatible endpoint for embeddings
+
+### Quick Start
+
+1. **Create environment file** (`lightrag.env`):
+
+```bash
+# Required for agents-ensemble
+WORKSPACE_ISOLATION="true"
+ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]'
+
+# LLM Configuration
+LLM_BINDING_HOST="https://api.openai.com/v1"
+LLM_BINDING_API_KEY="your-llm-api-key"
+LLM_MODEL="gpt-4o"
+
+# Embedding Configuration
+EMBEDDING_BINDING_HOST="https://api.openai.com/v1"
+EMBEDDING_MODEL="text-embedding-3-small"
+EMBEDDING_BINDING_API_KEY="your-embedding-api-key"
+```
+
+2. **Run the container:**
+
+```bash
+docker run -d \
+  --name lightrag \
+  -p 9621:9621 \
+  --env-file lightrag.env \
+  disillusioners/lightrag:v1.6.7
+```
+
+3. **Verify:**
+
+```bash
+curl http://localhost:9621/health
+```
+
+### Minimal Example
+
+For testing, you can start with just the critical variables and rely on defaults:
+
+```bash
+docker run -d \
+  --name lightrag \
+  -p 9621:9621 \
+  -e WORKSPACE_ISOLATION="true" \
+  -e ENTITY_TYPES='["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]' \
+  -e LLM_BINDING_HOST="https://api.openai.com/v1" \
+  -e LLM_BINDING_API_KEY="your-key" \
+  -e EMBEDDING_BINDING_HOST="https://api.openai.com/v1" \
+  -e EMBEDDING_MODEL="text-embedding-3-small" \
+  -e EMBEDDING_BINDING_API_KEY="your-key" \
+  disillusioners/lightrag:v1.6.7
+```
+
+---
+
+## Full / K8s Setup
+
+### Prerequisites
 
 - **Kubernetes cluster** (v1.24+)
 - **Helm 3.x** installed and configured
@@ -44,10 +157,6 @@ Before deploying LightRAG, ensure you have:
 - **Qdrant** — for vector storage (semantic search)
 - **LLM API** — OpenAI-compatible endpoint for text generation
 - **Embedding API** — OpenAI-compatible endpoint for embeddings
-
----
-
-## Setup Steps
 
 ### 1. Prepare Infrastructure
 
@@ -65,70 +174,76 @@ helm install neo4j neo4j-community -n lightrag
 helm install qdrant qdrant/qdrant -n lightrag
 ```
 
-### 2. Configure Your Values
-
-Copy `values.example.yaml` and customize:
+### 2. Install LightRAG with Helm
 
 ```bash
-curl -O https://raw.githubusercontent.com/your-repo/values.example.yaml
-mv values.example.yaml my-values.yaml
-$EDITOR my-values.yaml
+helm repo add lightrag https://charts.example.com
+helm install lightrag lightrag/lightrag -n lightrag
 ```
 
-### 3. Set Required Credentials
+### 3. Configure Values
 
-Update these environment variables in your values file:
+Create `my-values.yaml` with at minimum:
 
 ```yaml
 env:
-  # Authentication
+  # Required for agents-ensemble
+  WORKSPACE_ISOLATION: "true"
+  ENTITY_TYPES: '["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject","Experience","Decision","Convention"]'
+
+  # Auth (set secure values)
   AUTH_ACCOUNTS: "admin:YOUR_SECURE_PASSWORD"
   TOKEN_SECRET: "YOUR_TOKEN_SECRET"
   LIGHTRAG_API_KEY: "YOUR_API_KEY"
 
-  # LLM Configuration
+  # LLM
   LLM_BINDING_HOST: "https://your-llm-provider/v1"
   LLM_BINDING_API_KEY: "YOUR_LLM_API_KEY"
 
-  # Embedding Configuration
+  # Embedding
   EMBEDDING_BINDING_HOST: "https://your-embedding-provider/v1"
   EMBEDDING_MODEL: "text-embedding-3-small"
   EMBEDDING_BINDING_API_KEY: "YOUR_EMBEDDING_API_KEY"
 
-  # Storage Endpoints
+  # Storage (K8s service discovery)
   POSTGRES_HOST: "postgres.lightrag.svc.cluster.local"
   NEO4J_URI: "neo4j://neo4j.lightrag.svc.cluster.local:7687"
   QDRANT_URL: "http://qdrant.lightrag.svc.cluster.local:6333"
 ```
 
-### 4. Install LightRAG
+Apply:
 
 ```bash
-helm install lightrag . -n lightrag -f my-values.yaml
+helm upgrade lightrag lightrag/lightrag -n lightrag -f my-values.yaml
 ```
 
-### 5. Verify Deployment
+### 4. Verify Deployment
 
 ```bash
 kubectl get pods -n lightrag
 kubectl logs -n lightrag -l app.kubernetes.io/name=lightrag
 ```
 
-### 6. Access the API
-
-LightRAG will be available at `http://lightrag.lightrag.svc.cluster.local:9621`
-
-For local access:
+### 5. Access the API
 
 ```bash
+# Within cluster
+curl http://lightrag.lightrag.svc.cluster.local:9621/health
+
+# Local access
 kubectl port-forward -n lightrag svc/lightrag 9621:9621
+curl http://localhost:9621/health
 ```
 
 ---
 
-## Configuration Reference
+## Configuration Reference (Full Options)
 
-### Full Example Values File
+For the complete list of all available configuration options, see the Helm chart's `values.example.yaml` or the [LightRAG GitHub repository](https://github.com/your-repo/lightrag).
+
+### Full Configuration Example
+
+This is a complete Helm values file with all available options:
 
 ```yaml
 replicaCount: 1
@@ -220,15 +335,7 @@ affinity: {}
 |---------|-----|-------------|---------|
 | **General** | `HOST` | Server host | `0.0.0.0` |
 | **General** | `PORT` | Server port | `9621` |
-| **General** | `WEBUI_TITLE` | Web UI title | `LightRAG` |
-| **General** | `WEBUI_DESCRIPTION` | Web UI description | — |
 | **General** | `WORKSPACE_ISOLATION` | Enable workspace isolation | `true` |
-| **Service** | `service.type` | Service type | `ClusterIP` |
-| **Service** | `service.port` | HTTP port | `9621` |
-| **Resources** | `resources.limits.cpu` | CPU limit | `1000m` |
-| **Resources** | `resources.limits.memory` | Memory limit | `4Gi` |
-| **Persistence** | `persistence.ragStorage.size` | RAG data storage | `10Gi` |
-| **Persistence** | `persistence.inputs.size` | Input documents storage | `5Gi` |
 | **Auth** | `AUTH_ACCOUNTS` | User:password pairs | — |
 | **Auth** | `TOKEN_SECRET` | JWT signing secret | — |
 | **Auth** | `LIGHTRAG_API_KEY` | API access key | — |
@@ -237,7 +344,7 @@ affinity: {}
 | **LLM** | `LLM_BINDING_HOST` | API endpoint | — |
 | **LLM** | `LLM_BINDING_API_KEY` | API key for LLM service | — |
 | **Embedding** | `EMBEDDING_BINDING` | Embedding provider | `openai` |
-| **Embedding** | `EMBEDDING_BINDING_HOST` | Embedding API endpoint | — |
+| **Embedding** | `EMBEDDING_HOST` | Embedding API endpoint | — |
 | **Embedding** | `EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
 | **Embedding** | `EMBEDDING_DIM` | Vector dimensions | `1536` |
 | **Embedding** | `EMBEDDING_BINDING_API_KEY` | API key for embedding service | — |
@@ -251,12 +358,23 @@ affinity: {}
 | **PostgreSQL** | `POSTGRES_PASSWORD` | PostgreSQL password | — |
 | **PostgreSQL** | `POSTGRES_DATABASE` | PostgreSQL database name | — |
 | **Neo4j** | `NEO4J_URI` | Neo4j connection URI | — |
-| **Neo4j** | `NEO4J_USERNAME` | Neo4j username | — |
+| **Neo4j** | `NEO4J_USERNAME` | Neo4j username | `neo4j` |
 | **Neo4j** | `NEO4J_PASSWORD` | Neo4j password | — |
 | **Qdrant** | `QDRANT_URL` | Qdrant server URL | — |
-| **Qdrant** | `QDRANT_COLLECTION` | Qdrant collection name | — |
+| **Qdrant** | `QDRANT_COLLECTION` | Qdrant collection name | `lightrag` |
 | **Qdrant** | `QDRANT_API_KEY` | Qdrant API key | — |
-| **Entity Types** | `ENTITY_TYPES` | Graph entity categories | See example |
+| **Entity Types** | `ENTITY_TYPES` | Graph entity categories | See critical config |
+
+### Storage Backend Options
+
+LightRAG supports pluggable storage backends:
+
+| Storage Type | Options |
+|--------------|---------|
+| **KV Storage** | `PGKVStorage` (PostgreSQL), `RedisKVStorage` |
+| **Vector Storage** | `QdrantVectorDBStorage`, `MilvusVectorDBStorage`, ` ChromaVectorDBStorage` |
+| **Graph Storage** | `Neo4JStorage`, `NetworkXStorage` |
+| **Doc Status** | `PGDocStatusStorage` |
 
 ---
 
