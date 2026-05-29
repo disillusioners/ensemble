@@ -31,16 +31,16 @@ Once configured, the agent automatically has access to two tools:
 
 ```
 # Agent searches the knowledge base
-ensemble_kb_explore(query="How does authentication work?", project_id="your-project-uuid")
+ensemble_kb_explore(query="How does authentication work?", project_name="my-project")
 
 # Agent records new findings
-ensemble_kb_experience(text="Auth requires API key in Authorization header", project_id="your-project-uuid")
+ensemble_kb_experience(text="Auth requires API key in Authorization header", project_name="my-project")
 ```
 
 ### Prerequisites
 
 - Ensemble daemon running on port 8079
-- A valid project UUID (get it from `/api/projects` endpoint)
+- A valid project identifier (name, shortname, or UUID — get names via list_projects)
 
 ## 2. Quick Start (Python SDK)
 
@@ -67,7 +67,7 @@ from mcp import ClientSession
 
 async def main():
     MCP_URL = "http://localhost:8079/api/mcp/kb/mcp"
-    PROJECT_ID = "your-project-uuid"
+    PROJECT_NAME = "my-project"  # Use name, shortname, or UUID
 
     async with streamable_http_client(MCP_URL) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
@@ -77,17 +77,21 @@ async def main():
             tools = await session.list_tools()
             print([t.name for t in tools.tools])
 
+            # Discover available projects
+            result = await session.call_tool("ensemble_kb_list_projects", {})
+            print(result.content[0].text)
+
             # Explore the knowledge base
             result = await session.call_tool(
                 "ensemble_kb_explore",
-                {"query": "How does authentication work?", "project_id": PROJECT_ID}
+                {"query": "How does authentication work?", "project_name": PROJECT_NAME}
             )
             print(result.content[0].text)
 
             # Record new knowledge
             result = await session.call_tool(
                 "ensemble_kb_experience",
-                {"text": "Auth requires API key in Authorization header", "project_id": PROJECT_ID}
+                {"text": "Auth requires API key in Authorization header", "project_name": PROJECT_NAME}
             )
             print(result.content[0].text)  # "Knowledge recording started."
 
@@ -103,8 +107,12 @@ Search the knowledge base for relevant information.
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `query` | string | Yes | — | Search query or question |
-| `project_id` | string | Yes | — | Project UUID to search within |
+| `project_id` | string | No* | — | Project UUID |
+| `project_name` | string | No* | — | Project name or shortname |
+| `project_path` | string | No* | — | Project main directory path |
 | `mode` | string | No | "hybrid" | Search mode (see below) |
+
+*At least one project identifier required.
 
 **Returns:** Search results as string.
 
@@ -115,9 +123,82 @@ Record new knowledge into the knowledge base (fire-and-forget).
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `text` | string | Yes | — | Knowledge to record (facts, findings, patterns) |
-| `project_id` | string | Yes | — | Project UUID to record under |
+| `project_id` | string | No* | — | Project UUID |
+| `project_name` | string | No* | — | Project name or shortname |
+| `project_path` | string | No* | — | Project main directory path |
+
+*At least one project identifier required.
 
 **Returns:** `"Knowledge recording started."` or error message.
+
+### ensemble_kb_list_projects
+
+List all available projects in the knowledge base.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | int | No | 50 | Maximum projects to return |
+| `offset` | int | No | 0 | Number of projects to skip |
+| `status` | string | No | None | Filter by status (e.g. "active") |
+
+**Returns:** JSON array of projects with `id`, `name`, `shortnames`, `main_directory`, `status`, `tags`.
+
+### ensemble_kb_search_projects
+
+Search projects by query (fuzzy matching on name/shortname).
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Search query |
+| `limit` | int | No | 20 | Maximum results |
+
+**Returns:** JSON array of matching projects.
+
+### Project Resolution
+
+The explore and experience tools can identify a project in three ways:
+
+1. **project_id** — Exact UUID match. If not found, fuzzy matching suggests similar IDs.
+2. **project_name** — Matches against project name or any shortname. Fuzzy matching tolerates typos.
+3. **project_path** — Matches against the project's main directory. Handles partial paths.
+
+#### Examples
+
+**By name (recommended for external tools):**
+```python
+result = await session.call_tool("ensemble_kb_explore", {
+    "query": "architecture",
+    "project_name": "agents-ensemble"
+})
+```
+
+**By shortname:**
+```python
+result = await session.call_tool("ensemble_kb_explore", {
+    "query": "database", 
+    "project_name": "ens"  # shortname for agents-ensemble
+})
+```
+
+**By path:**
+```python
+result = await session.call_tool("ensemble_kb_experience", {
+    "text": "Uses SQLite with SQLAlchemy ORM",
+    "project_path": "/Users/me/projects/agents-ensemble"
+})
+```
+
+**Fuzzy matching — "Did you mean?":**
+If a project name has a typo, the server suggests the closest match:
+```
+Error: Project 'agents-ensamble' not found. Did you mean 'agents-ensemble' (ens, ensemble) (83da04de-...)?
+```
+
+#### Discovery workflow
+
+1. `ensemble_kb_list_projects` — See all available projects
+2. `ensemble_kb_search_projects` — Search by keyword  
+3. Use the returned name/id/path with explore/experience
 
 ## 4. Transport Options
 
@@ -143,7 +224,7 @@ async with sse_client("http://localhost:8079/api/mcp/kb/sse/sse") as (...):
 
 - **Ensemble daemon running** on port 8079 (default dev port)
 - **RAG enabled** — `is_rag_enabled()` must return true (check server logs on startup)
-- **Valid `project_id`** — UUID of an existing project (obtain via `/api/projects`)
+- **At least one project identifier** — `project_id`, `project_name`, or `project_path`. Use `list_projects` to discover available projects.
 - **FastMCP server name:** `ensemble-kb`
 
 ## 6. Query Modes
@@ -244,7 +325,7 @@ async def agent_loop(agent, session):
 
 - **Keep sessions short-lived** — StreamableHTTP is stateless; create/fetch/destroy
 - **Handle errors gracefully** — Tools return strings, not exceptions
-- **Use `project_id` consistently** — All operations scope to a project
+- **Use any project identifier** — `project_name`, `project_id`, or `project_path` all work
 - **Experience is async** — Fire-and-forget; don't wait for confirmation
 
 ## 9. Running Tests

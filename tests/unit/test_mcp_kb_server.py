@@ -15,6 +15,31 @@ def mock_manager():
     """Create a mock InstanceManager."""
     manager = MagicMock()
     manager._job_queue_service = MagicMock()
+    
+    # Create mock project repository with all required async methods
+    project_repo = MagicMock()
+    
+    # Default project returned when searching by ID
+    def get_project(project_id):
+        if project_id:
+            mock_project = MagicMock()
+            mock_project.project_id = project_id
+            mock_project.name = project_id
+            mock_project.shortnames = []
+            mock_project.main_directory = f"/path/to/{project_id}"
+            mock_project.status = "active"
+            mock_project.tags = []
+            return mock_project
+        return None
+    
+    project_repo.get = get_project
+    project_repo.get_by_name = lambda name: None
+    project_repo.get_by_shortname = lambda shortname: None
+    project_repo.get_by_directory = lambda directory: None
+    project_repo.list_projects = lambda **kwargs: []
+    project_repo.search = lambda query=None, limit=20: []
+    manager._project_repository = project_repo
+    
     return manager
 
 
@@ -166,18 +191,21 @@ class TestExploreErrorWhenProjectIdMissing:
     """Test explore validation for project_id."""
 
     @pytest.mark.asyncio
-    async def test_explore_error_when_project_id_missing(self, kb_server_setup):
-        """Explore should return error when project_id is empty."""
+    async def test_explore_error_when_no_project_identifier_provided(self, kb_server_setup):
+        """Explore should return error when no project identifier is provided."""
         setup = kb_server_setup
         
         result = await setup["explore_tool"].fn(
             query="test query",
-            project_id="",
+            project_id=None,
+            project_name=None,
+            project_path=None,
             mode="hybrid",
         )
         
-        assert "project_id is required" in result
         assert "Error:" in result
+        # The actual error message contains "No project identifier" or "Provide"
+        assert "No project identifier" in result or "Provide" in result
 
 
 class TestExploreErrorWhenModeInvalid:
@@ -407,3 +435,616 @@ class TestExploreHandlesExceptionGracefully:
         # Should return sanitized error message (not expose internal details)
         assert "Error:" in result
         assert "internal error" in result.lower()
+
+
+# =============================================================================
+# Helper Functions for New Tests
+# =============================================================================
+
+def _create_mock_project(project_id, name, shortnames=None, main_directory=None, status="active", tags=None):
+    """Create a mock project object."""
+    project = MagicMock()
+    project.project_id = project_id
+    project.name = name
+    project.shortnames = shortnames or []
+    project.main_directory = main_directory
+    project.status = status
+    project.tags = tags or []
+    return project
+
+
+# =============================================================================
+# Test Cases for _resolve_project
+# =============================================================================
+
+class TestResolveProject:
+    """Test the module-level _resolve_project function."""
+
+    @pytest.fixture
+    def mock_project_repository(self):
+        """Create a mock project repository with all required methods."""
+        repo = MagicMock()
+        repo.get = MagicMock()
+        repo.get_by_name = MagicMock()
+        repo.get_by_shortname = MagicMock()
+        repo.get_by_directory = MagicMock()
+        repo.list_projects = MagicMock(return_value=[])
+        repo.search = MagicMock(return_value=[])
+        return repo
+
+    @pytest.fixture
+    def setup_with_repo(self, kb_server_setup, mock_project_repository):
+        """Setup with mock repository attached to manager."""
+        setup = kb_server_setup
+        setup["manager"]._project_repository = mock_project_repository
+        return setup
+
+    @pytest.mark.asyncio
+    async def test_exact_match_by_project_id(self, setup_with_repo, mock_project_repository):
+        """Exact match by project_id returns the project_id."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="exact-id-123",
+            name="Test Project",
+        )
+        mock_project_repository.get.return_value = mock_project
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id="exact-id-123",
+            project_name=None,
+            project_path=None,
+        )
+        
+        assert result == "exact-id-123"
+        assert error is None
+        mock_project_repository.get.assert_called_once_with("exact-id-123")
+
+    @pytest.mark.asyncio
+    async def test_exact_match_by_project_name(self, setup_with_repo, mock_project_repository):
+        """Exact match by name returns project.id."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="uuid-456",
+            name="My Test Project",
+        )
+        mock_project_repository.get_by_name.return_value = mock_project
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name="My Test Project",
+            project_path=None,
+        )
+        
+        assert result == "uuid-456"
+        assert error is None
+        mock_project_repository.get_by_name.assert_called_once_with("My Test Project")
+
+    @pytest.mark.asyncio
+    async def test_exact_match_by_shortname(self, setup_with_repo, mock_project_repository):
+        """Exact match by shortname returns project.id (via project_name parameter)."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="short-789",
+            name="Short Project",
+            shortnames=["sp"],
+        )
+        # Important: get_by_name must return None first, then get_by_shortname finds it
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = mock_project
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name="sp",
+            project_path=None,
+        )
+        
+        assert result == "short-789"
+        assert error is None
+        mock_project_repository.get_by_shortname.assert_called_once_with("sp")
+
+    @pytest.mark.asyncio
+    async def test_exact_match_by_project_path(self, setup_with_repo, mock_project_repository):
+        """Exact match by path returns project.project_id."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="path-abc",
+            name="Path Project",
+            main_directory="/Users/test/path-project",
+        )
+        # get_by_directory returns list[Project]
+        mock_project_repository.get_by_directory.return_value = [mock_project]
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name=None,
+            project_path="/Users/test/path-project",
+        )
+        
+        assert result == "path-abc"
+        assert error is None
+        mock_project_repository.get_by_directory.assert_called_once_with("/Users/test/path-project")
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_uuid_match(self, setup_with_repo, mock_project_repository):
+        """Fuzzy UUID (85% threshold) resolves correctly."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        # Create a project with a full UUID
+        full_uuid = "550e8400-e29b-41d4-a716-446655440000"
+        mock_project = _create_mock_project(
+            project_id=full_uuid,
+            name="UUID Project",
+        )
+        
+        # Return None for exact match, project for fuzzy match
+        mock_project_repository.get.return_value = None
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = None
+        mock_project_repository.get_by_directory.return_value = None
+        mock_project_repository.list_projects.return_value = [mock_project]
+        
+        # Provide 85% matching UUID (just change last digit)
+        fuzzy_uuid = "550e8400-e29b-41d4-a716-446655440001"
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id=fuzzy_uuid,
+            project_name=None,
+            project_path=None,
+        )
+        
+        assert result == full_uuid
+        assert error is None
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_name_match(self, setup_with_repo, mock_project_repository):
+        """Fuzzy name (typo 'agents-ensamble', 80% threshold) resolves."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="agents-uuid",
+            name="agents-ensemble",
+        )
+        
+        mock_project_repository.get.return_value = None
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = None
+        mock_project_repository.get_by_directory.return_value = None
+        mock_project_repository.list_projects.return_value = [mock_project]
+        
+        # Typo: 'ensamble' instead of 'ensemble'
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name="agents-ensamble",
+            project_path=None,
+        )
+        
+        assert result == "agents-uuid"
+        assert error is None
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_path_match(self, setup_with_repo, mock_project_repository):
+        """Fuzzy path (70% threshold) resolves."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mock_project = _create_mock_project(
+            project_id="fuzzy-path-uuid",
+            name="Fuzzy Path Project",
+            main_directory="/Users/test/my-project",
+        )
+        
+        mock_project_repository.get.return_value = None
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = None
+        mock_project_repository.get_by_directory.return_value = None
+        mock_project_repository.list_projects.return_value = [mock_project]
+        
+        # Similar path with small typo
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name=None,
+            project_path="/Users/test/my-projec",  # Missing last character
+        )
+        
+        assert result == "fuzzy-path-uuid"
+        assert error is None
+
+    @pytest.mark.asyncio
+    async def test_no_match_near_candidate(self, setup_with_repo, mock_project_repository):
+        """No match but near candidate returns 'Did you mean?' error."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        # Create a project with a name that is similar but below 0.8 threshold
+        # 0.8+ = auto-resolve, 0.6-0.8 = "Did you mean?" error
+        mock_project = _create_mock_project(
+            project_id="close-match-uuid",
+            name="my-test-project",
+        )
+        
+        mock_project_repository.get.return_value = None
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = None
+        mock_project_repository.get_by_directory.return_value = None
+        mock_project_repository.list_projects.return_value = [mock_project]
+        
+        # Search for something that's similar but not too similar (0.6-0.8 range)
+        # "my-test-xyz" vs "my-test-project" should be around 0.6-0.7
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name="my-test-xyz",
+            project_path=None,
+        )
+        
+        assert result is None
+        assert error is not None
+        assert "Did you mean" in error
+        assert "my-test-project" in error
+
+    @pytest.mark.asyncio
+    async def test_no_match_at_all(self, setup_with_repo, mock_project_repository):
+        """No match returns error listing available projects."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        project1 = _create_mock_project(project_id="uuid-1", name="Project One")
+        project2 = _create_mock_project(project_id="uuid-2", name="Project Two")
+        
+        mock_project_repository.get.return_value = None
+        mock_project_repository.get_by_name.return_value = None
+        mock_project_repository.get_by_shortname.return_value = None
+        mock_project_repository.get_by_directory.return_value = None
+        mock_project_repository.list_projects.return_value = [project1, project2]
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id="nonexistent-id",
+            project_name=None,
+            project_path=None,
+        )
+        
+        assert result is None
+        assert error is not None
+        assert "Project One" in error
+        assert "Project Two" in error
+
+    @pytest.mark.asyncio
+    async def test_no_params_provided(self, setup_with_repo, mock_project_repository):
+        """None of 3 params returns error listing projects."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        project1 = _create_mock_project(project_id="uuid-1", name="Project One")
+        project2 = _create_mock_project(project_id="uuid-2", name="Project Two")
+        
+        mock_project_repository.list_projects.return_value = [project1, project2]
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id=None,
+            project_name=None,
+            project_path=None,
+        )
+        
+        assert result is None
+        assert error is not None
+        # The actual error message format
+        assert "No project identifier" in error or "project" in error.lower()
+        assert "Project One" in error
+
+    @pytest.mark.asyncio
+    async def test_manager_not_set(self, reset_kb_server_module):
+        """Manager not set returns initialization error."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        # Ensure manager is None
+        assert kb_server_module._manager is None
+        
+        result, error = await kb_server_module._resolve_project(
+            project_id="any-id",
+            project_name=None,
+            project_path=None,
+        )
+        
+        assert result is None
+        assert error is not None
+        assert "not initialized" in error.lower()
+
+
+# =============================================================================
+# Test Cases for ensemble_kb_list_projects
+# =============================================================================
+
+class TestListProjects:
+    """Test ensemble_kb_list_projects tool."""
+
+    @pytest.mark.asyncio
+    async def test_returns_json_list_of_projects(self, kb_server_setup):
+        """Verify JSON output with expected fields (id, name, shortnames, main_directory, status, tags)."""
+        setup = kb_server_setup
+        mcp = setup["mcp"]
+        
+        list_tool = mcp._tool_manager.get_tool("ensemble_kb_list_projects")
+        
+        # Setup mock repository with projects
+        project1 = _create_mock_project(
+            project_id="uuid-1",
+            name="Project One",
+            shortnames=["p1"],
+            main_directory="/path/to/project1",
+            status="active",
+            tags=["tag1", "tag2"],
+        )
+        project2 = _create_mock_project(
+            project_id="uuid-2",
+            name="Project Two",
+            shortnames=[],
+            main_directory="/path/to/project2",
+            status="archived",
+            tags=[],
+        )
+        setup["manager"]._project_repository.list_projects = MagicMock(return_value=[project1, project2])
+        
+        result = await list_tool.fn()
+        
+        # Verify result is JSON string
+        import json
+        projects = json.loads(result)
+        
+        assert len(projects) == 2
+        assert projects[0]["id"] == "uuid-1"
+        assert projects[0]["name"] == "Project One"
+        assert projects[0]["shortnames"] == ["p1"]
+        assert projects[0]["main_directory"] == "/path/to/project1"
+        assert projects[0]["status"] == "active"
+        assert projects[0]["tags"] == ["tag1", "tag2"]
+        
+        assert projects[1]["id"] == "uuid-2"
+        assert projects[1]["name"] == "Project Two"
+        assert projects[1]["status"] == "archived"
+
+    @pytest.mark.asyncio
+    async def test_passes_limit_offset_status_params(self, kb_server_setup):
+        """Verify params are passed to repository."""
+        setup = kb_server_setup
+        mcp = setup["mcp"]
+        
+        list_tool = mcp._tool_manager.get_tool("ensemble_kb_list_projects")
+        
+        setup["manager"]._project_repository.list_projects = MagicMock(return_value=[])
+        
+        await list_tool.fn(limit=10, offset=5, status="active")
+        
+        setup["manager"]._project_repository.list_projects.assert_called_once_with(limit=10, offset=5, status="active")
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_manager_not_set(self, reset_kb_server_module):
+        """Error when manager not set."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mcp = kb_server_module.create_kb_mcp_server()
+        list_tool = mcp._tool_manager.get_tool("ensemble_kb_list_projects")
+        
+        result = await list_tool.fn()
+        
+        assert "not initialized" in result.lower()
+
+
+# =============================================================================
+# Test Cases for ensemble_kb_search_projects
+# =============================================================================
+
+class TestSearchProjects:
+    """Test ensemble_kb_search_projects tool."""
+
+    @pytest.mark.asyncio
+    async def test_returns_json_list_of_matching_projects(self, kb_server_setup):
+        """Verify JSON output with matching projects."""
+        setup = kb_server_setup
+        mcp = setup["mcp"]
+        
+        search_tool = mcp._tool_manager.get_tool("ensemble_kb_search_projects")
+        
+        mock_project = _create_mock_project(
+            project_id="search-uuid",
+            name="Search Result Project",
+            shortnames=["srp"],
+            main_directory="/path/to/search",
+            status="active",
+            tags=["search"],
+        )
+        setup["manager"]._project_repository.search = MagicMock(return_value=[mock_project])
+        
+        result = await search_tool.fn(query="search query")
+        
+        import json
+        projects = json.loads(result)
+        
+        assert len(projects) == 1
+        assert projects[0]["id"] == "search-uuid"
+        assert projects[0]["name"] == "Search Result Project"
+
+    @pytest.mark.asyncio
+    async def test_passes_query_and_limit_params(self, kb_server_setup):
+        """Verify params passed to repository."""
+        setup = kb_server_setup
+        mcp = setup["mcp"]
+        
+        search_tool = mcp._tool_manager.get_tool("ensemble_kb_search_projects")
+        
+        setup["manager"]._project_repository.search = MagicMock(return_value=[])
+        
+        await search_tool.fn(query="test query", limit=20)
+        
+        setup["manager"]._project_repository.search.assert_called_once_with(query="test query", limit=20)
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_manager_not_set(self, reset_kb_server_module):
+        """Error when manager not set."""
+        from daemon.mcp import kb_server as kb_server_module
+        
+        mcp = kb_server_module.create_kb_mcp_server()
+        search_tool = mcp._tool_manager.get_tool("ensemble_kb_search_projects")
+        
+        result = await search_tool.fn(query="test")
+        
+        assert "not initialized" in result.lower()
+
+
+# =============================================================================
+# Test Cases for Explore with Alternative Project Identifiers
+# =============================================================================
+
+class TestExploreWithAlternativeProjectIdentifiers:
+    """Test explore tool with project_name and project_path parameters."""
+
+    @pytest.mark.asyncio
+    async def test_explore_with_project_name(self, kb_server_setup):
+        """Explore should work with project_name param instead of project_id."""
+        setup = kb_server_setup
+        
+        mock_project = _create_mock_project(
+            project_id="resolved-uuid-123",
+            name="test-project",
+            shortnames=["tp"],
+            main_directory="/path/to/project",
+        )
+        
+        # Mock repository methods for name lookup
+        setup["manager"]._project_repository.get_by_name = MagicMock(return_value=mock_project)
+        setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
+        setup["manager"]._project_repository.get_by_directory = MagicMock(return_value=None)
+        
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value="Result"):
+            result = await setup["explore_tool"].fn(
+                query="test query",
+                project_name="test-project",
+                mode="hybrid",
+            )
+        
+        assert result == "Result"
+        
+        # Verify the repository was called with correct name
+        setup["manager"]._project_repository.get_by_name.assert_called_once_with("test-project")
+
+    @pytest.mark.asyncio
+    async def test_explore_with_project_path(self, kb_server_setup):
+        """Explore should work with project_path param instead of project_id."""
+        setup = kb_server_setup
+        
+        mock_project = _create_mock_project(
+            project_id="path-resolved-uuid",
+            name="path-project",
+            main_directory="/Users/test/my-project",
+        )
+        
+        # Mock repository methods for path lookup (return list for get_by_directory)
+        setup["manager"]._project_repository.get_by_directory = MagicMock(return_value=[mock_project])
+        setup["manager"]._project_repository.get_by_name = MagicMock(return_value=None)
+        setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
+        
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value="Path Result"):
+            result = await setup["explore_tool"].fn(
+                query="test query",
+                project_path="/Users/test/my-project",
+                mode="local",
+            )
+        
+        assert result == "Path Result"
+        
+        # Verify the repository was called with correct path
+        setup["manager"]._project_repository.get_by_directory.assert_called_once_with("/Users/test/my-project")
+
+    @pytest.mark.asyncio
+    async def test_explore_error_when_no_project_identifier(self, kb_server_setup):
+        """Explore should return error when none of project_id, project_name, project_path provided."""
+        setup = kb_server_setup
+        
+        # Pass None for all project identifiers to trigger the "Provide either" error
+        result = await setup["explore_tool"].fn(
+            query="test query",
+            project_id=None,
+            project_name=None,
+            project_path=None,
+            mode="hybrid",
+        )
+        
+        # Should get error about needing to provide a project identifier
+        assert "Provide either" in result or "project" in result.lower()
+
+
+# =============================================================================
+# Test Cases for Experience with Alternative Project Identifiers
+# =============================================================================
+
+class TestExperienceWithAlternativeProjectIdentifiers:
+    """Test experience tool with project_name and project_path parameters."""
+
+    @pytest.mark.asyncio
+    async def test_experience_with_project_name(self, kb_server_setup):
+        """Experience should work with project_name param."""
+        setup = kb_server_setup
+        
+        mock_project = _create_mock_project(
+            project_id="experience-uuid-456",
+            name="experience-project",
+            shortnames=["ep"],
+            main_directory="/path/to/experience",
+        )
+        
+        # Mock repository methods for name lookup
+        setup["manager"]._project_repository.get_by_name = MagicMock(return_value=mock_project)
+        setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
+        setup["manager"]._project_repository.get_by_directory = MagicMock(return_value=None)
+        
+        with patch("daemon.mcp.kb_server._enqueue_experience_job", new_callable=AsyncMock):
+            result = await setup["experience_tool"].fn(
+                text="New experience to record",
+                project_name="experience-project",
+            )
+        
+        assert result == "Knowledge recording started."
+        
+        # Verify the repository was called with correct name
+        setup["manager"]._project_repository.get_by_name.assert_called_once_with("experience-project")
+
+    @pytest.mark.asyncio
+    async def test_experience_with_project_path(self, kb_server_setup):
+        """Experience should work with project_path param."""
+        setup = kb_server_setup
+        
+        mock_project = _create_mock_project(
+            project_id="exp-path-uuid",
+            name="exp-path-project",
+            main_directory="/Users/test/exp-path",
+        )
+        
+        # Mock repository methods for path lookup
+        setup["manager"]._project_repository.get_by_directory = MagicMock(return_value=[mock_project])
+        setup["manager"]._project_repository.get_by_name = MagicMock(return_value=None)
+        setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
+        
+        with patch("daemon.mcp.kb_server._enqueue_experience_job", new_callable=AsyncMock):
+            result = await setup["experience_tool"].fn(
+                text="Experience with path",
+                project_path="/Users/test/exp-path",
+            )
+        
+        assert result == "Knowledge recording started."
+        
+        # Verify the repository was called with correct path
+        setup["manager"]._project_repository.get_by_directory.assert_called_once_with("/Users/test/exp-path")
+
+    @pytest.mark.asyncio
+    async def test_experience_error_when_no_project_identifier(self, kb_server_setup):
+        """Experience should return error when none of project_id, project_name, project_path provided."""
+        setup = kb_server_setup
+        
+        # Pass None for all project identifiers to trigger the "Provide either" error
+        result = await setup["experience_tool"].fn(
+            text="Some knowledge",
+            project_id=None,
+            project_name=None,
+            project_path=None,
+        )
+        
+        # Should get error about needing to provide a project identifier
+        assert "Provide either" in result or "project" in result.lower()

@@ -62,12 +62,18 @@ async def test_server_initialization(mcp_client):
 
 @pytest.mark.asyncio
 async def test_tools_listed(mcp_client):
-    """Test that both KB tools are discoverable."""
+    """Test that all KB tools are discoverable."""
     tools_result = await mcp_client.list_tools()
     tool_names = [t.name for t in tools_result.tools]
 
-    assert "ensemble_kb_explore" in tool_names, f"explore not found in {tool_names}"
-    assert "ensemble_kb_experience" in tool_names, f"experience not found in {tool_names}"
+    expected_tools = [
+        "ensemble_kb_explore",
+        "ensemble_kb_experience",
+        "ensemble_kb_list_projects",
+        "ensemble_kb_search_projects",
+    ]
+    for tool in expected_tools:
+        assert tool in tool_names, f"{tool} not found in {tool_names}"
 
 
 @pytest.mark.asyncio
@@ -104,3 +110,48 @@ async def test_experience_tool(mcp_client):
     assert result.content is not None
     text_content = [c for c in result.content if hasattr(c, "text")]
     assert len(text_content) > 0
+
+
+@pytest.mark.asyncio
+async def test_list_projects_tool(mcp_client):
+    """Test listing projects via MCP tool."""
+    result = await mcp_client.call_tool("ensemble_kb_list_projects", {})
+
+    assert result is not None
+    assert result.content is not None
+    text_content = [c for c in result.content if hasattr(c, "text")]
+    assert len(text_content) > 0
+    # Should return JSON array
+    import json
+    data = json.loads(text_content[0].text)
+    assert isinstance(data, list)
+
+
+@pytest.mark.asyncio
+async def test_search_projects_tool(mcp_client):
+    """Test searching projects via MCP tool."""
+    result = await mcp_client.call_tool("ensemble_kb_search_projects", {"query": "agents"})
+
+    assert result is not None
+    assert result.content is not None
+    text_content = [c for c in result.content if hasattr(c, "text")]
+    assert len(text_content) > 0
+    import json
+    data = json.loads(text_content[0].text)
+    assert isinstance(data, list)
+
+
+@pytest.mark.asyncio
+async def test_explore_with_project_name(mcp_client):
+    """Test explore with project_name instead of project_id."""
+    # Skip if no project configured
+    if not TEST_PROJECT_ID:
+        pytest.skip("E2E_PROJECT_ID not set")
+
+    result = await mcp_client.call_tool("ensemble_kb_explore", {
+        "query": "architecture",
+        "project_name": "agents-ensemble",
+    })
+
+    assert result is not None
+    assert result.content is not None

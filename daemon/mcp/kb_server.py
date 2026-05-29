@@ -5,6 +5,8 @@ SSE and StreamableHTTP transports.
 """
 
 import asyncio
+import difflib
+import json
 import logging
 import uuid
 from typing import TYPE_CHECKING
@@ -45,6 +47,122 @@ def set_kb_mcp_manager(manager: "InstanceManager") -> None:
     _manager = manager
 
 
+async def _resolve_project(
+    project_id: str | None = None,
+    project_name: str | None = None,
+    project_path: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a project identifier to a project_id UUID.
+
+    Returns (project_id, error_message) — one will be None.
+    """
+    if _manager is None:
+        return None, "Server not initialized: manager not set"
+
+    repo = _manager._project_repository
+
+    # 1. Try project_id (exact match first, then fuzzy UUID)
+    if project_id is not None:
+        # Exact match
+        project = await asyncio.to_thread(repo.get, project_id)
+        if project is not None:
+            return project_id, None
+
+        # Fuzzy UUID match
+        all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
+        best_match = None
+        best_ratio = 0.0
+        for p in all_projects:
+            ratio = difflib.SequenceMatcher(None, project_id.lower(), p.project_id.lower()).ratio()
+            if ratio >= 0.6 and ratio > best_ratio:
+                best_ratio = ratio
+                best_match = p
+
+        if best_ratio >= 0.85:
+            return best_match.project_id, None
+
+        # No close UUID match
+        if best_ratio >= 0.7:
+            return None, f"Project ID '{project_id}' not found. Did you mean '{best_match.name}' ({best_match.project_id})?"
+
+        names = [f"{p.name} ({p.project_id})" for p in all_projects[:10]]
+        return None, f"Project ID '{project_id}' not found. Available projects: {', '.join(names)}"
+
+    # 2. Try project_name (exact match on name and shortnames, then fuzzy)
+    if project_name is not None:
+        # Exact name match
+        project = await asyncio.to_thread(repo.get_by_name, project_name)
+        if project is not None:
+            return project.project_id, None
+
+        # Exact shortname match
+        project = await asyncio.to_thread(repo.get_by_shortname, project_name)
+        if project is not None:
+            return project.project_id, None
+
+        # Fuzzy name match against name + shortnames
+        all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
+        candidates = []
+        for p in all_projects:
+            # Compare against name
+            name_ratio = difflib.SequenceMatcher(None, project_name.lower(), p.name.lower()).ratio()
+            # Compare against each shortname
+            sn_ratios = [difflib.SequenceMatcher(None, project_name.lower(), sn.lower()).ratio() for sn in (p.shortnames or [])]
+            best_sn_ratio = max(sn_ratios) if sn_ratios else 0.0
+            best_for_project = max(name_ratio, best_sn_ratio)
+            if best_for_project >= 0.6:
+                candidates.append((p, best_for_project))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        if candidates and candidates[0][1] >= 0.8:
+            return candidates[0][0].project_id, None
+
+        if candidates and candidates[0][1] >= 0.6:
+            best = candidates[0][0]
+            shortnames = f" ({', '.join(best.shortnames)})" if best.shortnames else ""
+            return None, f"Project '{project_name}' not found. Did you mean '{best.name}'{shortnames} ({best.project_id})?"
+
+        names = [f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "") for p in all_projects[:10]]
+        return None, f"Project '{project_name}' not found. Available projects: {', '.join(names)}"
+
+    # 3. Try project_path
+    if project_path is not None:
+        # Exact path match
+        projects = await asyncio.to_thread(repo.get_by_directory, project_path)
+        if projects:
+            return projects[0].project_id, None
+
+        # Fuzzy path match
+        all_projects = await asyncio.to_thread(repo.list_projects, limit=200)
+        candidates = []
+        for p in all_projects:
+            if p.main_directory:
+                ratio = difflib.SequenceMatcher(None, project_path.lower(), p.main_directory.lower()).ratio()
+                if ratio >= 0.5:
+                    candidates.append((p, ratio))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        if candidates and candidates[0][1] >= 0.7:
+            return candidates[0][0].project_id, None
+
+        if candidates and candidates[0][1] >= 0.5:
+            best = candidates[0][0]
+            return None, f"Project path '{project_path}' not found. Did you mean '{best.main_directory}' ({best.name}, {best.project_id})?"
+
+        paths = [f"{p.main_directory} ({p.name})" for p in all_projects if p.main_directory][:10]
+        return None, f"Project path '{project_path}' not found. Known paths: {', '.join(paths)}"
+
+    # 4. Nothing provided
+    all_projects = await asyncio.to_thread(repo.list_projects, limit=20)
+    if not all_projects:
+        return None, "No project identifier provided and no projects exist in the system."
+
+    names = [f"{p.name}" + (f" ({', '.join(p.shortnames)})" if p.shortnames else "") for p in all_projects[:10]]
+    return None, f"No project identifier provided. Please provide project_id, project_name, or project_path. Available projects: {', '.join(names)}"
+
+
 def create_kb_mcp_server() -> FastMCP:
     """Create and return the FastMCP server for KB tools.
     
@@ -67,14 +185,18 @@ def create_kb_mcp_server() -> FastMCP:
     @mcp.tool()
     async def ensemble_kb_explore(
         query: str,
-        project_id: str,
+        project_id: str | None = None,
+        project_name: str | None = None,
+        project_path: str | None = None,
         mode: str = "hybrid",
     ) -> str:
         """Search the agents-ensemble knowledge base.
 
         Args:
             query: The question or topic to search for.
-            project_id: Required. The project ID to search within.
+            project_id: Optional project ID to search within.
+            project_name: Optional project name to search within.
+            project_path: Optional project path to search within.
             mode: Search mode - "local", "global", "hybrid", or "naive". Defaults to "hybrid".
 
         Returns:
@@ -83,8 +205,11 @@ def create_kb_mcp_server() -> FastMCP:
         if _manager is None:
             return "Error: KB MCP server not initialized. Please try again later."
 
-        if not project_id:
-            return "Error: project_id is required. Provide the project ID to search within."
+        # Resolve project
+        resolved_id, error = await _resolve_project(project_id, project_name, project_path)
+        if error:
+            return f"Error: {error}"
+        project_id = resolved_id
 
         if mode not in _VALID_MODES:
             return f"Error: Invalid mode '{mode}'. Must be one of: {', '.join(_VALID_MODES)}."
@@ -141,13 +266,17 @@ def create_kb_mcp_server() -> FastMCP:
     @mcp.tool()
     async def ensemble_kb_experience(
         text: str,
-        project_id: str,
+        project_id: str | None = None,
+        project_name: str | None = None,
+        project_path: str | None = None,
     ) -> str:
         """Record new knowledge into the agents-ensemble knowledge base.
 
         Args:
             text: The knowledge text to record (facts, findings, patterns, etc.).
-            project_id: Required. The project ID to record knowledge under.
+            project_id: Optional project ID to record knowledge under.
+            project_name: Optional project name to record knowledge under.
+            project_path: Optional project path to record knowledge under.
 
         Returns:
             Confirmation message.
@@ -155,8 +284,11 @@ def create_kb_mcp_server() -> FastMCP:
         if _manager is None:
             return "Error: KB MCP server not initialized. Please try again later."
 
-        if not project_id:
-            return "Error: project_id is required. Provide the project ID to record knowledge under."
+        # Resolve project
+        resolved_id, error = await _resolve_project(project_id, project_name, project_path)
+        if error:
+            return f"Error: {error}"
+        project_id = resolved_id
 
         if not is_rag_enabled():
             return "Error: Knowledge base (RAG) is not enabled. Configure RAG to use this tool."
@@ -179,6 +311,89 @@ def create_kb_mcp_server() -> FastMCP:
         except Exception as e:
             logger.error("ensemble_kb_experience failed: %s", e, exc_info=True)
             return "Error: An internal error occurred while recording knowledge."
+
+    @mcp.tool()
+    async def ensemble_kb_list_projects(
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+    ) -> str:
+        """List all projects in the ensemble system.
+
+        Args:
+            limit: Maximum number of projects to return (default 50)
+            offset: Number of projects to skip (default 0)
+            status: Optional status filter (e.g. "active")
+
+        Returns:
+            JSON array of projects with id, name, shortnames, main_directory, status, tags
+        """
+        if _manager is None:
+            return "Error: Server not initialized"
+
+        try:
+            projects = await asyncio.to_thread(
+                _manager._project_repository.list_projects,
+                status=status,
+                limit=limit,
+                offset=offset,
+            )
+
+            result = []
+            for p in projects:
+                result.append({
+                    "id": p.project_id,
+                    "name": p.name,
+                    "shortnames": p.shortnames or [],
+                    "main_directory": p.main_directory,
+                    "status": p.status,
+                    "tags": p.tags or [],
+                })
+
+            return json.dumps(result, indent=2)
+
+        except Exception as e:
+            return f"Error listing projects: {e}"
+
+    @mcp.tool()
+    async def ensemble_kb_search_projects(
+        query: str,
+        limit: int = 20,
+    ) -> str:
+        """Search projects by name, description, or shortnames.
+
+        Args:
+            query: Search query string
+            limit: Maximum number of results (default 20)
+
+        Returns:
+            JSON array of matching projects with id, name, shortnames, main_directory, status, tags
+        """
+        if _manager is None:
+            return "Error: Server not initialized"
+
+        try:
+            projects = await asyncio.to_thread(
+                _manager._project_repository.search,
+                query=query,
+                limit=limit,
+            )
+
+            result = []
+            for p in projects:
+                result.append({
+                    "id": p.project_id,
+                    "name": p.name,
+                    "shortnames": p.shortnames or [],
+                    "main_directory": p.main_directory,
+                    "status": p.status,
+                    "tags": p.tags or [],
+                })
+
+            return json.dumps(result, indent=2)
+
+        except Exception as e:
+            return f"Error searching projects: {e}"
 
     # Eagerly initialize StreamableHTTP session manager
     # (prevents RuntimeError when get_kb_mcp_session_manager() is called later)
