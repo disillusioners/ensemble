@@ -230,7 +230,9 @@ class InstanceMapper:
         
         try:
             # Spawn new instance via InstanceManager
+            instance_id = str(uuid.uuid4())
             agent_instance_id = await self.manager.spawn_instance_with_mcp(
+                instance_id=instance_id,
                 agent_id=effective_agent_id,
             )
             
