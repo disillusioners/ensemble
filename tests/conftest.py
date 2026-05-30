@@ -105,6 +105,20 @@ mock_mcp_client.streamable_http = create_mock_module("mcp.client.streamable_http
     "streamablehttp_client": MagicMock(),
 })
 mock_mcp_client_stdio = create_mock_module("mcp.client.stdio", {})
+
+# Create mock slack_bolt modules
+mock_slack_bolt = create_mock_module("slack_bolt", {"__path__": ["slack_bolt"]})
+mock_slack_bolt_adapter = create_mock_module("slack_bolt.adapter", {"__path__": []})
+mock_slack_bolt_adapter_socket_mode = create_mock_module("slack_bolt.adapter.socket_mode", {"__path__": []})
+mock_slack_bolt_adapter_socket_mode_aiohttp = create_mock_module("slack_bolt.adapter.socket_mode.aiohttp", {
+    "AsyncSocketModeHandler": MagicMock()
+})
+mock_slack_bolt.App = MagicMock()
+mock_slack_bolt.WorkflowApp = MagicMock()
+
+# Create mock slack_sdk modules
+mock_slack_sdk = create_mock_module("slack_sdk", {"__path__": ["slack_sdk"]})
+mock_slack_sdk.WebClient = MagicMock()
 mock_mcp_server = create_mock_module("mcp.server", {"__path__": []})
 mock_mcp_server.stdio = create_mock_module("mcp.server.stdio", {})
 
@@ -210,6 +224,13 @@ _mock_modules = {
     # Mock langchain_mcp_adapters
     "langchain_mcp_adapters": mock_langchain_mcp,
     "langchain_mcp_adapters.tools": mock_langchain_mcp_tools,
+    # Mock slack_bolt modules
+    "slack_bolt": mock_slack_bolt,
+    "slack_bolt.adapter": mock_slack_bolt_adapter,
+    "slack_bolt.adapter.socket_mode": mock_slack_bolt_adapter_socket_mode,
+    "slack_bolt.adapter.socket_mode.aiohttp": mock_slack_bolt_adapter_socket_mode_aiohttp,
+    # Mock slack_sdk modules
+    "slack_sdk": mock_slack_sdk,
 }
 
 # Inject mocks into sys.modules BEFORE any test imports happen

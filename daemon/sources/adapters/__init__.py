@@ -2,5 +2,6 @@
 
 from .telegram import TelegramAdapter
 from .scheduler import SchedulerAdapter
+from .slack import SlackAdapter
 
-__all__ = ["TelegramAdapter", "SchedulerAdapter"]
+__all__ = ["TelegramAdapter", "SchedulerAdapter", "SlackAdapter"]

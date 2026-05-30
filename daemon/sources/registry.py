@@ -343,6 +343,13 @@ class SourceRegistry:
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
+        elif source_type == "slack":
+            from .adapters.slack import SlackAdapter
+            adapter = SlackAdapter(config, on_message)
+            # Inject source_repo for DB lookup during send()
+            adapter._source_repo = self._source_repo
+            logger.info(f"SlackAdapter created: default_agent={adapter._default_agent}")
+            return adapter
         else:
             logger.warning(f"Unsupported source type: {source_type}")
             return None
@@ -656,12 +663,29 @@ class SourceRegistry:
             
             logger.debug(f"Getting or creating instance: agent_dir={agent_dir}")
             
+            # Get source_type from adapter
+            adapter = self.get(source_id)
+            source_type = adapter.source_type if adapter else None
+            
+            # Build extra_mapping_metadata for Slack (channel_id, thread_ts from metadata)
+            extra_mapping_metadata = None
+            if source_type == "slack" and msg.metadata:
+                slack_meta = msg.metadata.get("slack", {})
+                if slack_meta:
+                    extra_mapping_metadata = {
+                        "slack_channel_id": slack_meta.get("channel_id"),
+                        "slack_thread_ts": slack_meta.get("thread_ts"),
+                        "slack_workspace_id": slack_meta.get("workspace_id"),
+                        "slack_channel_type": slack_meta.get("channel_type"),
+                    }
+            
             # Get or create the instance
             instance_id = await mapper.get_or_create_instance(
                 source_id=source_id,
                 external_user_id=msg.external_user_id,
                 agent_id=agent_dir,
                 force_new=force_new,
+                extra_mapping_metadata=extra_mapping_metadata,
             )
             
             logger.debug(f"Got instance_id={instance_id}")

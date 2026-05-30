@@ -18,6 +18,7 @@ DEFAULT_RATE_LIMITS = {
     "telegram": RateLimit(messages_per_second=30, burst_size=30),
     "webhook": RateLimit(messages_per_second=100, burst_size=100),
     "whatsapp": RateLimit(messages_per_second=10, burst_size=20),
+    "slack": RateLimit(messages_per_second=50, burst_size=50),
 }
 
 

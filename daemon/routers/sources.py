@@ -110,7 +110,7 @@ async def create_source(source_create: SourceCreate, request: Request):
         )
     
     # Validate source type is supported
-    supported_types = {"telegram", "webhook", "whatsapp", "discord", "scheduler"}
+    supported_types = {"telegram", "webhook", "whatsapp", "discord", "scheduler", "slack"}
     if source_create.source_type.value not in supported_types:
         raise HTTPException(
             status_code=400,
@@ -205,6 +205,9 @@ async def test_source(test_request: SourceTestRequest):
     elif test_request.source_type == SourceType.scheduler:
         # Scheduler doesn't require external connection test
         success, message = True, "Scheduler sources don't require connection testing"
+    elif test_request.source_type == SourceType.slack:
+        from daemon.sources.adapters.slack import SlackAdapter
+        success, message = await SlackAdapter.test_connection(temp_config)
     else:
         success, message = False, f"Unknown source type: {test_request.source_type}"
     

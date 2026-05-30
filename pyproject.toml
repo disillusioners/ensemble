@@ -27,6 +27,8 @@ dependencies = [
     "langchain-mcp-adapters>=0.1.0",
     "pytest>=9.0.2",
     "modelcontextprotocol>=1.0.1",
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.21.0",
 ]
 
 [project.optional-dependencies]

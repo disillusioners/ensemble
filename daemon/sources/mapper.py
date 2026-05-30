@@ -25,7 +25,15 @@ MAX_USER_ID_LENGTH = 256
 # Valid source types
 SOURCE_TYPE_TELEGRAM = "telegram"
 SOURCE_TYPE_WEBHOOK = "webhook"
-VALID_SOURCE_TYPES = {SOURCE_TYPE_TELEGRAM, SOURCE_TYPE_WEBHOOK}
+SOURCE_TYPE_SLACK = "slack"
+VALID_SOURCE_TYPES = {SOURCE_TYPE_TELEGRAM, SOURCE_TYPE_WEBHOOK, SOURCE_TYPE_SLACK}
+
+# Slack composite ID pattern: workspace_id:channel_type:channel_id[:thread_ts]
+# workspace_id: starts with T, W, or B followed by alphanumeric
+# channel_type: U (user/DM), C (channel), G (private channel)
+# channel_id: starts with appropriate prefix
+# thread_ts: timestamp with dot (e.g., 1234567890.123456)
+SLACK_ID_PATTERN = re.compile(r'^[A-Z0-9]+:[UWC][A-Z0-9]+(:[0-9.]+)?$')
 
 
 class ValidationError(Exception):
@@ -75,7 +83,21 @@ def validate_external_user_id(source_type: str, user_id: str) -> str:
                 "(can include hyphens and underscores)"
             )
         return user_id
-    
+
+    elif source_type == SOURCE_TYPE_SLACK:
+        # Slack composite ID: {workspace}:{channel_type}{id}[:{thread_ts}]
+        # Examples:
+        # - DM: T123456:U123456
+        # - Channel: T123456:C123456
+        # - Thread: T123456:C123456:1234567890.123456
+        if not SLACK_ID_PATTERN.match(user_id):
+            raise ValidationError(
+                f"Invalid Slack ID '{user_id}': expected format "
+                "{workspace}:{channel_type}{id}[:{thread_ts}] "
+                "(e.g., T123456:U123456 or T123456:C123456:1234567890.123456)"
+            )
+        return user_id
+
     else:
         # Unknown source type - log warning and allow it (forward compatibility)
         logger.warning(f"Unknown source_type '{source_type}', allowing any user_id")
@@ -172,22 +194,24 @@ class InstanceMapper:
         external_user_id: str,
         agent_id: str,
         force_new: bool = False,
+        extra_mapping_metadata: dict | None = None,
     ) -> str:
         """Get existing instance or create a new one.
-        
+
         Looks up the mapping for the source and external user. If found,
         returns the existing agent_instance_id. If not found, spawns a new
         instance and creates the mapping.
-        
+
         Args:
             source_id: The source identifier.
             external_user_id: The external user ID.
             agent_id: The agent identifier.
             force_new: If True, delete any existing mapping and create a fresh instance.
-            
+            extra_mapping_metadata: Additional metadata to store with the mapping.
+
         Returns:
             The agent_instance_id (UUID string).
-            
+
         Raises:
             Exception: If instance creation fails.
         """
@@ -242,6 +266,10 @@ class InstanceMapper:
                 "source_id": source_id,
                 "external_user_id": external_user_id,
             }
+            
+            # Merge extra mapping metadata if provided (e.g., for Slack channel_id, thread_ts)
+            if extra_mapping_metadata:
+                metadata.update(extra_mapping_metadata)
             
             self.source_repo.create_instance_mapping(
                 source_id=source_id,

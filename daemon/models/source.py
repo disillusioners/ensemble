@@ -22,6 +22,7 @@ class SourceType(str, Enum):
     whatsapp = "whatsapp"
     discord = "discord"
     scheduler = "scheduler"
+    slack = "slack"
 
 
 class SourceCreate(BaseModel):
