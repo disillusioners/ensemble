@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 82 packs
-- Unit: 67 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 86 packs
+- Unit: 71 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -109,6 +109,10 @@
 
 | vision_routing_unit_test | tests/unit/test_vision_routing.py | Vision model routing: images present → vision model, text-only → standard, no model_vision → fallback, no llm_standard → fallback, turn 3+ images, multiple images, mixed content | 2 min | 2026-05-30 | ✅ PASS (13/13, feature/vision-always-on) |
 | compaction_multimodal_unit_test | tests/unit/test_compaction_multimodal.py | Compaction multimodal: emergency_truncate, _truncate_batch_to_fit, ContextCompactor summarization, garbage output prevention, edge cases, integration | 2 min | 2026-05-30 | ✅ PASS (30/30, feature/vision-always-on) |
+| slack_adapter_unit_test | tests/test_slack_adapter.py | Slack adapter: Socket Mode, DM/channel handling, instance mapping, DB lookup metadata gap, blocking DB fix, error handling | 2 min | 2026-05-31 | ✅ PASS (68/68, feature/slack-source) |
+| slack_blocks_unit_test | tests/test_slack_blocks.py | Slack Blocks Kit: markdown_to_blocks conversion, formatting, edge cases | 2 min | 2026-05-31 | ✅ PASS (23/23, feature/slack-source) |
+| slack_rate_limiter_unit_test | tests/test_slack_rate_limiter.py | Slack rate limiter: Tier 1-4, max_wait auto-increase, bucket system, concurrency | 2 min | 2026-05-31 | ✅ PASS (23/23, feature/slack-source) |
+| slack_thread_manager_unit_test | tests/test_slack_thread_manager.py | Slack thread manager: TTL/LRU, race conditions (TOCTOU), eviction, instance lifecycle | 2 min | 2026-05-31 | ✅ PASS (20/20, feature/slack-source) |
 
 ---
 
