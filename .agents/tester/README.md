@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-28 ready-message-fix)
+## Test Results (Latest: 2026-05-30 instance_created-sse)
+
+### instance_created SSE Event Feature (2026-05-30)
+- **Backend**: 4931/4935 PASS (4 pre-existing failures, 0 regressions)
+- **Frontend**: 800/800 PASS (0 regressions)
+- **Notification Broadcaster**: 23/23 PASS (6 instance_created tests)
+- **Live Event Hub**: 54/54 PASS (4 new stream_instance_created tests)
+- **New Tests**: 4 added for `stream_instance_created()` (commit `9a6e742`)
+- **Quick Fixes**: 1 (test_api.py mock method fix, commit `1efa9ba`)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Implementation Review**: All edge cases verified (parent missing, KB filtering, project filtering, rapid spawning, deduplication)
+- **Status**: ✅ READY
 
 ### READY Messages Blocking Completion Report Fix (2026-05-28)
 - **Files**: `tests/unit/test_ready_message_completion_report.py` (12 tests)
