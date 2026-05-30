@@ -260,7 +260,11 @@ class SourceRegistry:
         
         # Create callback wrapper that includes source_id
         async def on_message(msg):
-            await self._handle_message(source_id, msg)
+            try:
+                priority = int(msg.metadata.get("priority", 1))
+            except (ValueError, TypeError):
+                priority = 1
+            await self._handle_message(source_id, msg, priority=priority)
         
         # Create the appropriate adapter
         if source_type == "telegram":
@@ -576,7 +580,7 @@ class SourceRegistry:
         self._supervisor_tasks.pop(source_id, None)
         logger.info(f"Supervisor exiting for adapter: {source_id}")
     
-    async def _handle_message(self, source_id: str, msg: IncomingMessage) -> None:
+    async def _handle_message(self, source_id: str, msg: IncomingMessage, priority: int = 1) -> None:
         """Handle incoming message from an adapter.
         
         This is the callback that adapters call when they receive messages.
@@ -685,7 +689,9 @@ class SourceRegistry:
                 instance_id=instance_id,
                 message=msg.content,
                 source=source,
-                priority=1,
+                priority=priority,
+                images=msg.images,
+                metadata=msg.metadata,
             )
             logger.info(
                 f"✅ Queued message: source_id={source_id}, "
