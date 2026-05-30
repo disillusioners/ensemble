@@ -818,7 +818,7 @@ async def test_send_message_success(client, mock_manager):
 @pytest.mark.asyncio
 async def test_send_message_instance_not_found(client, mock_manager):
     """Test POST /instances/{id}/messages with invalid id."""
-    mock_manager.get_instance.side_effect = KeyError("Instance not found: invalid-id")
+    mock_manager.get_instance_info.side_effect = KeyError("Instance not found: invalid-id")
     
     response = await client.post(
         "/instances/invalid-id/messages",
