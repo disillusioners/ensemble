@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
+from daemon.repositories.instance.repository import KB_AGENT_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,36 @@ class NotificationBroadcaster:
             "agent_id": agent_id,
             "name": agent_name or agent_id.title(),
             "status": status.upper(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        return await self.emit(notification)
+
+    async def emit_instance_created(self, instance_data: dict[str, Any]) -> int:
+        """Emit a notification for newly created root instance (no parent).
+
+        This broadcasts to ALL connected clients so they can add the new
+        root instance to their instance trees.
+
+        KB agent instances (experiencer, kb-importer) are filtered out
+        to reduce unnecessary SSE traffic.
+
+        Args:
+            instance_data: Full instance info dict with fields:
+                instance_id, agent_id, parent_id, status, project_id,
+                created_at, children, title.
+
+        Returns:
+            Number of clients that received the notification.
+        """
+        # Filter out KB agent instances
+        agent_id = instance_data.get("agent_id", "")
+        if agent_id in KB_AGENT_IDS:
+            logger.debug(f"Skipping instance_created broadcast for KB agent: {agent_id}")
+            return 0
+
+        notification = {
+            "event_type": "instance_created",
+            "data": instance_data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         return await self.emit(notification)

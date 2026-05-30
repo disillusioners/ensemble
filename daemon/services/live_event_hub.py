@@ -205,6 +205,29 @@ class LiveEventHub:
             event["agent_id"] = agent_id
         await self._stream_to_connections(instance_id, event)
 
+    async def stream_instance_created(
+        self,
+        parent_id: str,
+        instance_data: dict[str, Any],
+    ) -> None:
+        """Stream instance_created event to parent instance's connections.
+
+        This is called when a child instance is created, notifying the parent's
+        SSE listeners so they can update the instance tree immediately.
+
+        Args:
+            parent_id: The parent instance ID to stream to.
+            instance_data: Full instance info dict with fields:
+                instance_id, agent_id, parent_id, status, project_id,
+                created_at, children, title.
+        """
+        event: dict[str, Any] = {
+            "instance_id": parent_id,
+            "event_type": "instance_created",
+            "data": instance_data,
+        }
+        await self._stream_to_connections(parent_id, event)
+
     async def stream_lifecycle(
         self,
         instance_id: str,

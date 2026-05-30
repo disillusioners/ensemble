@@ -1,4 +1,7 @@
 import { Injectable, signal, inject, NgZone, OnDestroy } from '@angular/core';
+import type { InstanceInfo } from '../models';
+import { SseService } from './sse.service';
+import { InstanceService } from './instance.service';
 
 // Notification interface matching backend SSE payload
 export interface InstanceNotification {
@@ -18,9 +21,14 @@ export interface Notification extends InstanceNotification {
 // Agents that should NOT trigger notification sounds (visual notifications still shown)
 const SOUND_EXCLUDED_AGENT_IDS = new Set(['kb-import', 'experiencer']);
 
+// KB agent IDs - keep in sync with daemon/repositories/instance/repository.py (KB_AGENT_IDS)
+const KB_AGENT_IDS = new Set(['experiencer', 'kb-importer']);
+
 @Injectable({ providedIn: 'root' })
 export class NotificationService implements OnDestroy {
   private readonly ngZone = inject(NgZone);
+  private readonly sseService = inject(SseService);
+  private readonly instanceService = inject(InstanceService);
   private readonly API_BASE = '/api';
   
   // Signals for reactive state
@@ -105,6 +113,35 @@ export class NotificationService implements OnDestroy {
         try {
           const data: InstanceNotification = JSON.parse(event.data);
           this.addNotification(data);
+        } catch {
+          // Ignore parse errors
+        }
+      });
+    });
+
+    // Handle instance_created events for root instance tree updates
+    this.eventSource.addEventListener('instance_created', (event: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(event.data);
+          // KB filtering: skip if KB agent and showKb is false
+          const agentId = data.data?.agent_id as string;
+          if (!this.instanceService.showKb() && KB_AGENT_IDS.has(agentId)) {
+            return;
+          }
+          // Forward to SSE service signal so InstanceService.effect() picks it up
+          const instanceData: InstanceInfo = {
+            instance_id: data.data.instance_id as string,
+            agent_id: agentId,
+            parent_id: (data.data.parent_id as string) || null,
+            status: data.data.status as InstanceInfo['status'],
+            project_id: data.data.project_id as string | null,
+            title: data.data.title as string | null,
+            children: (data.data.children as string[]) || [],
+            created_at: data.data.created_at as string,
+            updated_at: data.data.created_at as string,
+          };
+          this.sseService.instanceCreated.set(instanceData);
         } catch {
           // Ignore parse errors
         }

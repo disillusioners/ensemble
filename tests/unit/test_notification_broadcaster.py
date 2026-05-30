@@ -268,3 +268,150 @@ class TestSingleton:
         broadcaster1 = get_notification_broadcaster()
         broadcaster2 = get_notification_broadcaster()
         assert broadcaster1 is broadcaster2
+
+
+class TestInstanceCreatedKBFiltering:
+    """Tests for KB agent filtering in emit_instance_created."""
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_broadcasts_normal_agents(self):
+        """emit_instance_created broadcasts for non-KB agents."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-123",
+            "agent_id": "coder",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "Test Instance",
+        }
+
+        delivered = await broadcaster.emit_instance_created(instance_data)
+
+        assert delivered == 1
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert received["event_type"] == "instance_created"
+        assert received["data"]["instance_id"] == "test-123"
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_filters_experiencer(self):
+        """emit_instance_created skips 'experiencer' KB agent."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-kb-1",
+            "agent_id": "experiencer",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "KB Experience",
+        }
+
+        delivered = await broadcaster.emit_instance_created(instance_data)
+
+        assert delivered == 0
+        # Queue should be empty
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_filters_kb_importer(self):
+        """emit_instance_created skips 'kb-importer' KB agent."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-kb-2",
+            "agent_id": "kb-importer",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "KB Import",
+        }
+
+        delivered = await broadcaster.emit_instance_created(instance_data)
+
+        assert delivered == 0
+        # Queue should be empty
+        assert queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_multiple_connections(self):
+        """emit_instance_created broadcasts to all connections for non-KB agents."""
+        broadcaster = NotificationBroadcaster()
+        queue1 = asyncio.Queue()
+        queue2 = asyncio.Queue()
+
+        await broadcaster.add_connection(queue1)
+        await broadcaster.add_connection(queue2)
+        instance_data = {
+            "instance_id": "test-123",
+            "agent_id": "explorer",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "Explorer Instance",
+        }
+
+        delivered = await broadcaster.emit_instance_created(instance_data)
+
+        assert delivered == 2
+        received1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
+        received2 = await asyncio.wait_for(queue2.get(), timeout=1.0)
+        assert received1["event_type"] == "instance_created"
+        assert received2["event_type"] == "instance_created"
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_no_connections_returns_zero(self):
+        """emit_instance_created with no connections returns 0."""
+        broadcaster = NotificationBroadcaster()
+        instance_data = {
+            "instance_id": "test-123",
+            "agent_id": "coder",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "Test",
+        }
+
+        delivered = await broadcaster.emit_instance_created(instance_data)
+
+        assert delivered == 0
+
+    @pytest.mark.asyncio
+    async def test_emit_instance_created_includes_timestamp(self):
+        """emit_instance_created includes timestamp in notification."""
+        broadcaster = NotificationBroadcaster()
+        queue = asyncio.Queue()
+
+        await broadcaster.add_connection(queue)
+        instance_data = {
+            "instance_id": "test-123",
+            "agent_id": "leader",
+            "parent_id": None,
+            "status": "running",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": "Leader Instance",
+        }
+
+        await broadcaster.emit_instance_created(instance_data)
+
+        received = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert "timestamp" in received

@@ -83,6 +83,27 @@ export class InstanceService {
       // Update status (async to fetch created_at for new instances)
       this.updateInstanceStatus(instance_id, status as InstanceStatus);
     });
+
+    // Subscribe to SSE instance_created events for tree updates
+    effect(() => {
+      const newInstance = this.sseService.instanceCreated();
+      if (!newInstance) return;
+
+      // Filter out KB instances when showKb is false
+      if (!this.showKb() && KB_AGENT_IDS.has(newInstance.agent_id)) {
+        this.sseService.instanceCreated.set(null);
+        return;
+      }
+
+      // Capture before resetting
+      const instanceData = newInstance;
+
+      // Reset the SSE signal immediately to allow re-triggering
+      this.sseService.instanceCreated.set(null);
+
+      // Add the new instance with proper tree linking
+      this.addInstanceToTree(instanceData);
+    });
   }
 
   /**
@@ -147,6 +168,39 @@ export class InstanceService {
         );
       }
     }
+  }
+
+  /**
+   * Add a new instance to the tree with proper parent-child linking.
+   */
+  private addInstanceToTree(newInstance: InstanceInfo): void {
+    this.instances.update(instances => {
+      // Check if instance already exists (deduplication)
+      if (instances.some(i => i.instance_id === newInstance.instance_id)) {
+        return instances;
+      }
+
+      let updatedInstances = [...instances];
+
+      if (newInstance.parent_id) {
+        // Try to find and link to parent
+        const parentIdx = updatedInstances.findIndex(i => i.instance_id === newInstance.parent_id);
+        if (parentIdx >= 0) {
+          // Parent exists - add as child and update parent's children array
+          updatedInstances[parentIdx] = {
+            ...updatedInstances[parentIdx],
+            children: [...updatedInstances[parentIdx].children, newInstance.instance_id],
+          };
+        }
+        // If parent not found, the instance will be added as root
+        // The tree builder will reorganize on next poll
+      }
+
+      // Add the new instance (as child if parent found, otherwise as root)
+      updatedInstances = sortByCreatedAtDesc([newInstance, ...updatedInstances]);
+
+      return updatedInstances;
+    });
   }
 
   /**

@@ -67,10 +67,17 @@ async def stream_notifications(request: Request):
                     notification = await asyncio.wait_for(
                         queue.get(), timeout=SSE_TIMEOUT_S
                     )
-                    yield {
-                        "event": "notification",
-                        "data": json.dumps(notification),
-                    }
+                    notification_event = notification.get("event_type")
+                    if notification_event == "instance_created":
+                        yield {
+                            "event": "instance_created",
+                            "data": json.dumps(notification),
+                        }
+                    else:
+                        yield {
+                            "event": "notification",
+                            "data": json.dumps(notification),
+                        }
                 except asyncio.TimeoutError:
                     # No message within timeout, loop continues
                     # sse_starlette handles ping via ping=SSE_PING_INTERVAL parameter

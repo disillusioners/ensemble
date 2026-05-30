@@ -1,5 +1,5 @@
 import { Injectable, NgZone, signal } from '@angular/core';
-import type { Message, SSEEvent, ToolCall } from '../models';
+import type { Message, SSEEvent, ToolCall, InstanceInfo } from '../models';
 
 @Injectable({
   providedIn: 'root'
@@ -20,6 +20,9 @@ export class SseService {
 
   // Status change events for instance updates
   statusChange = signal<{ instance_id: string; status: string; agent_id?: string } | null>(null);
+
+  // Instance created events for tree updates
+  instanceCreated = signal<InstanceInfo | null>(null);
 
   constructor(private ngZone: NgZone) {}
 
@@ -175,6 +178,32 @@ export class SseService {
       });
     });
 
+    // Instance created event
+    eventSource.addEventListener('instance_created', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          console.log('[SSE] instance_created event:', data);
+          this.events.update(evts => [...evts, { type: 'instance_created', data }]);
+          // The instance data is nested in data.data
+          const instanceData: InstanceInfo = {
+            instance_id: data.data.instance_id as string,
+            agent_id: data.data.agent_id as string,
+            parent_id: (data.data.parent_id as string) || null,
+            status: data.data.status as InstanceInfo['status'],
+            project_id: data.data.project_id as string | null,
+            title: data.data.title as string | null,
+            children: (data.data.children as string[]) || [],
+            created_at: data.data.created_at as string,
+            updated_at: data.data.created_at as string,
+          };
+          this.instanceCreated.set(instanceData);
+        } catch (err) {
+          console.error('[SSE] Failed to parse instance_created:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -238,5 +267,6 @@ export class SseService {
     this.latestError.set(null);
     this.messages.set([]);
     this.statusChange.set(null);
+    this.instanceCreated.set(null);
   }
 }

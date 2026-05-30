@@ -332,6 +332,33 @@ class InstanceLifecycleService:
             self._manager._live_hub.stream_status_change(instance_id, "idle", agent_id=resolved_agent_id)
         )
 
+        # Emit instance_created event:
+        # - To parent's stream (if parent exists)
+        # - To NotificationBroadcaster (if root-level, no parent)
+        instance_data = {
+            "instance_id": instance_id,
+            "agent_id": resolved_agent_id,
+            "parent_id": parent_id,
+            "status": "idle",
+            "project_id": project_id,
+            "created_at": created.created_at if created else None,
+            "children": [],
+            "title": None,
+        }
+        if parent_id:
+            # Emit to parent's SSE stream
+            MainLoopBridge.run_async_no_wait(
+                self._manager._live_hub.stream_instance_created(parent_id, instance_data)
+            )
+        else:
+            # Emit to global notification stream for root-level instances
+            # (only if NotificationBroadcaster is initialized)
+            broadcaster = getattr(self._manager, '_notification_broadcaster', None)
+            if broadcaster is not None:
+                MainLoopBridge.run_async_no_wait(
+                    broadcaster.emit_instance_created(instance_data)
+                )
+
         return instance_id
 
     async def terminate_instance(self, instance_id: str) -> bool:
