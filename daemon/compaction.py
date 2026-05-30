@@ -42,6 +42,34 @@ from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_text_from_content(content: str | list) -> str:
+    """Extract text from message content, handling multimodal lists.
+    
+    Args:
+        content: Message content, either a string or a multimodal list
+                 (e.g., [{'type': 'text', 'text': '...'}, {'type': 'image_url', ...}]).
+    
+    Returns:
+        Extracted text string. For multimodal content, joins all text blocks.
+        Skips image_url blocks entirely.
+    """
+    if isinstance(content, str):
+        return content
+    
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_parts.append(block.get("text", ""))
+                # Skip image_url and other non-text blocks
+        return "".join(text_parts)
+    
+    return str(content) if content else ""
+
+
 # Context window sizes for known models (in tokens)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # OpenAI models
@@ -702,10 +730,10 @@ class ContextCompactor:
         for group in batch_groups:
             for msg in group.messages:
                 msg_type = getattr(msg, "type", "unknown")
+                content = _extract_text_from_content(msg.content)
                 if msg_type == "human":
-                    conversation_parts.append(f"User: {msg.content}")
+                    conversation_parts.append(f"User: {content}")
                 elif msg_type == "ai":
-                    content = msg.content or ""
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
                         tool_names = []
                         for tc in msg.tool_calls:
@@ -718,10 +746,9 @@ class ContextCompactor:
                     conversation_parts.append(f"Assistant: {content}")
                 elif msg_type == "tool":
                     tool_name = getattr(msg, "name", "unknown")
-                    content = msg.content or ""
                     conversation_parts.append(f"Tool ({tool_name}): {content}")
                 else:
-                    conversation_parts.append(f"{msg_type}: {msg.content}")
+                    conversation_parts.append(f"{msg_type}: {content}")
         
         conversation_text = "\n".join(conversation_parts)
         

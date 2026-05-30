@@ -327,8 +327,7 @@ def create_agent_node(
         llm_config: Optional LLM config for compaction context.
         retry_config: Optional retry configuration for logging.
         llm_standard: Optional standard LLM bound with tools (for non-vision calls).
-            When provided, vision model is used only for FIRST LLM call with images,
-            then standard model is used for subsequent calls per DEC-003.
+            When provided, vision model is used when images are present.
     """
     
     async def agent_node(state):
@@ -350,18 +349,10 @@ def create_agent_node(
             if has_images:
                 break
         
-        # Per DEC-003: Vision model applies to FIRST LLM call only.
-        # After first call, use standard model to avoid unnecessary vision model cost.
-        # Detect first call by checking if there are any AIMessages in the messages.
-        is_first_call = not any(
-            hasattr(msg, 'type') and msg.type == 'ai' 
-            for msg in messages
-        )
-        
         # Select the appropriate LLM:
-        # - First call with images: use vision model (llm_with_tools which has vision model)
-        # - Subsequent calls OR no images: use standard model if available
-        use_vision_model = is_first_call and has_images and model_vision and llm_standard is not None
+        # - Images present: use vision model (llm_with_tools which has vision model)
+        # - No images: use standard model if available
+        use_vision_model = has_images and model_vision and llm_standard is not None
         current_llm = llm_with_tools if use_vision_model else (llm_standard or llm_with_tools)
         
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
@@ -468,7 +459,7 @@ def build_instance_llms(
     llm_with_tools = None
 
     if model_vision:
-        logger.info(f"[Graph] Vision model configured: {model_vision}, will use for FIRST call only per DEC-003")
+        logger.info(f"[Graph] Vision model configured: {model_vision}")
         # Filter model_vision from config to avoid passing it to the API
         vision_config = {k: v for k, v in llm_config_with_headers.items() if k != "model_vision"}
         vision_config["model"] = model_vision
@@ -552,10 +543,9 @@ def build_instance_graph(
 ):
     """Build and return a compiled instance graph with LLM-level retry.
 
-    Per DEC-003: Vision model applies to FIRST LLM call only.
     When model_vision is configured, we create two LLM instances:
-    - llm_with_tools (vision): Used for first call with images
-    - llm_standard: Used for subsequent calls (text-only)
+    - llm_with_tools (vision): Used when images are present
+    - llm_standard: Used for text-only calls
     """
     # Add proxy header to all LLM requests
     llm_config_with_headers = {
@@ -581,7 +571,7 @@ def build_instance_graph(
 
     graph = StateGraph(SessionState)
 
-    # Add nodes - pass both vision and standard LLM for DEC-003 compliance
+    # Add nodes - pass both vision and standard LLM
     graph.add_node("agent", create_agent_node(
         llm_with_tools,
         system_prompt,
