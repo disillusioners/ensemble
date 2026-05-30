@@ -952,22 +952,22 @@ class JobQueueService:
             job not found, cancelled, or start/lock acquisition failed.
         """
         # [TRACE] Log entry
-        logger.info(f"[TRACE] start_job: called for job_id={job_id[:8]}...")
+        logger.debug(f"[TRACE] start_job: called for job_id={job_id[:8]}...")
         
         job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
-            logger.info(f"[TRACE] start_job: job {job_id[:8]}... not found")
+            logger.debug(f"[TRACE] start_job: job {job_id[:8]}... not found")
             return None
         
         # [TRACE] Log job details
-        logger.info(
+        logger.debug(
             f"[TRACE] start_job: job={job_id[:8]}... status={job.status} "
             f"instance={job.instance_id[:8] if job.instance_id else 'N/A'}... job_type={getattr(job, 'job_type', 'task')}"
         )
         
         # Check if job is still pending (could have been cancelled)
         if job.status != JobStatus.PENDING.value:
-            logger.info(f"[TRACE] start_job: job {job_id[:8]}... SKIP — not PENDING (status={job.status})")
+            logger.debug(f"[TRACE] start_job: job {job_id[:8]}... SKIP — not PENDING (status={job.status})")
             return None
         
         # CENTRALIZED PAUSE CHECK - protects ALL callers
@@ -1081,7 +1081,7 @@ class JobQueueService:
                 )
                 return None
         elif job.project_id:
-            logger.info(f"[TRACE] start_job: acquiring project lock for job {job_id[:8]}...")
+            logger.debug(f"[TRACE] start_job: acquiring project lock for job {job_id[:8]}...")
             lock_acquired = await self._lock_manager.acquire(
                 project_id=job.project_id,
                 job_id=job_id,
@@ -1089,18 +1089,18 @@ class JobQueueService:
             )
             
             if not lock_acquired:
-                logger.info(
+                logger.debug(
                     f"[TRACE] start_job: job {job_id[:8]}... SKIP — project lock NOT acquired"
                 )
                 return None
         
         # Lock acquired (or no locking needed) - now try to start job atomically
-        logger.info(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
+        logger.debug(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
         try:
             started_job = await asyncio.to_thread(
                 self._repository.start_job_atomic, job_id, instance_id
             )
-            logger.info(
+            logger.debug(
                 f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job

@@ -49,31 +49,31 @@ class DispatchEventBus:
             project_id: The project ID that has a new job.
         """
         if project_id is None:
-            logger.info("[TRACE] notify_new_job: SKIP — no project_id provided")
+            logger.debug("[TRACE] notify_new_job: SKIP — no project_id provided")
             return
         
         if self._loop is None:
-            logger.info("[TRACE] notify_new_job: SKIP — event loop not set")
+            logger.debug("[TRACE] notify_new_job: SKIP — event loop not set")
             return
         
         def _set_events():
             event = self._get_or_create_event(project_id)
             event.set()
             self._global_event.set()
-            logger.info(f"[TRACE] notify_new_job: event SET for project {project_id[:8]}...")
+            logger.debug(f"[TRACE] notify_new_job: event SET for project {project_id[:8]}...")
         
         try:
             if self._loop.is_running():
                 self._loop.call_soon_threadsafe(_set_events)
-                logger.info(
+                logger.debug(
                     f"[TRACE] notify_new_job: scheduled via call_soon_threadsafe "
                     f"for project {project_id[:8]}... (loop_running=True)"
                 )
             else:
                 _set_events()
-                logger.info(f"[TRACE] notify_new_job: executed directly for project {project_id[:8]}... (loop_running=False)")
+                logger.debug(f"[TRACE] notify_new_job: executed directly for project {project_id[:8]}... (loop_running=False)")
         except RuntimeError:
-            logger.info("[TRACE] notify_new_job: SKIP — event loop closed")
+            logger.debug("[TRACE] notify_new_job: SKIP — event loop closed")
     
     async def wait_for_job(self, project_id: str | None, timeout: float) -> bool:
         """Wait for a new job event for a project.

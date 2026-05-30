@@ -124,7 +124,7 @@ class JobProcessor:
     
     async def _process_loop(self) -> None:
         """Main processing loop - polls for and processes jobs with optional event-driven wakeup."""
-        logger.info("[TRACE] _process_loop: started")
+        logger.debug("[TRACE] _process_loop: started")
         while self._running:
             try:
                 # Event-driven dispatch: wait for job event with polling fallback
@@ -136,13 +136,13 @@ class JobProcessor:
                     )
                     if event_received:
                         self._jobs_dispatched_immediately += 1
-                        logger.info(
+                        logger.debug(
                             f"[TRACE] _process_loop: woken by event (immediate={self._jobs_dispatched_immediately}, "
                             f"polling={self._jobs_dispatched_polling}), processing next job"
                         )
                     else:
                         self._jobs_dispatched_polling += 1
-                        logger.info(
+                        logger.debug(
                             f"[TRACE] _process_loop: poll timeout, processing next job "
                             f"(immediate={self._jobs_dispatched_immediately}, polling={self._jobs_dispatched_polling})"
                         )
@@ -150,7 +150,7 @@ class JobProcessor:
                     # Fallback: pure polling
                     await asyncio.sleep(self._poll_interval)
                     self._jobs_dispatched_polling += 1
-                    logger.info(
+                    logger.debug(
                         f"[TRACE] _process_loop: pure polling wakeup "
                         f"(polling={self._jobs_dispatched_polling})"
                     )
@@ -176,12 +176,12 @@ class JobProcessor:
         5. Get next pending job for the queue
         6. Acquire per-queue lock and start job
         """
-        logger.info("[TRACE] _process_next_job: waking up to check for jobs")
+        logger.debug("[TRACE] _process_next_job: waking up to check for jobs")
         
         # Get all projects
         projects = await asyncio.to_thread(self._project_repo.list_projects)
         
-        logger.info(f"[TRACE] _process_next_job: checking {len(projects)} project(s)")
+        logger.debug(f"[TRACE] _process_next_job: checking {len(projects)} project(s)")
         
         for project in projects:
             # Level 1 pause check: Master pause (project-level)
@@ -460,15 +460,15 @@ class JobProcessor:
 
                 # Try to start the job (acquires per-queue lock internally)
                 # Note: Instance pause check is in JobQueueService.start_job(), not here
-                logger.info(f"[TRACE] _process_next_job: attempting to start job {job.job_id[:8]}...")
+                logger.debug(f"[TRACE] _process_next_job: attempting to start job {job.job_id[:8]}...")
                 try:
                     started_job = await self._queue_service.start_job(job.job_id)
                     if started_job is None:
                         # Lock acquisition failed or job was cancelled
-                        logger.info(f"[TRACE] _process_next_job: SKIP job {job.job_id[:8]}... — start_job returned None (lock contention or cancelled)")
+                        logger.debug(f"[TRACE] _process_next_job: SKIP job {job.job_id[:8]}... — start_job returned None (lock contention or cancelled)")
                         continue
 
-                    logger.info(
+                    logger.debug(
                         f"[TRACE] _process_next_job: started_job {started_job.job_id[:8]}... "
                         f"instance={started_job.instance_id[:8]}... status={started_job.status}"
                     )
