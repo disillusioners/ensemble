@@ -6,6 +6,8 @@ This is the core intelligence for agent growth. It understands:
 - When to update multiple files together
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from pathlib import Path
 from langchain_core.tools import tool

@@ -176,6 +176,14 @@ class JobQueueService:
                 if status not in watcher.watch_events:
                     continue
                 
+                job_event_data = {
+                    'job_id': job_id,
+                    'status': status,
+                    'agent_id': job.agent_id,
+                    'result': job.result_summary or '',
+                    'error': error,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
                 notification = (
                     f"[JOB_EVENT] Job {job_id[:8]}... reached status '{status}'.\n"
                     f"Agent: {job.agent_id}\n"
@@ -183,14 +191,7 @@ class JobQueueService:
                     f"Error: {error or 'None'}\n"
                     f"\n"
                     f"```json\n"
-                    f"{json.dumps({
-                        'job_id': job_id,
-                        'status': status,
-                        'agent_id': job.agent_id,
-                        'result': job.result_summary or '',
-                        'error': error,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }, ensure_ascii=False)}\n"
+                    f"{json.dumps(job_event_data, ensure_ascii=False)}\n"
                     f"```"
                 )
                 

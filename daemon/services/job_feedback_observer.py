@@ -11,6 +11,9 @@ Key behaviors:
 - Handles race conditions gracefully (e.g., with terminate_instance())
 - Provides health monitoring with periodic logging
 """
+
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timezone
 import logging
