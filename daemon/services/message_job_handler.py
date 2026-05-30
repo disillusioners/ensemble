@@ -156,7 +156,8 @@ class MessageJobHandler:
                 # Use is not None check because empty dict {} is falsy
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
-                if not dispatch_source:
+                # Skip dispatch if no valid external source found (None, empty, or still internal)
+                if not dispatch_source or dispatch_source.startswith("internal_"):
                     logger.debug(
                         f"No original_source found for instance {instance_id[:8]}... "
                         f"(message_source={message_source})"
