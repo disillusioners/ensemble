@@ -64,12 +64,14 @@ class SlackAdapter(MessageSourceAdapter):
         self,
         config: SourceConfig,
         on_message: Callable[[IncomingMessage], Awaitable[None]],
+        manager=None,
     ):
         """Initialize Slack adapter.
 
         Args:
             config: Source configuration with credentials.
             on_message: Callback for incoming messages.
+            manager: InstanceManager for thread management.
         """
         super().__init__(config, on_message)
 
@@ -113,8 +115,10 @@ class SlackAdapter(MessageSourceAdapter):
         self._dm_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # user_id -> (channel_id, timestamp)
         self._dm_cache_guard = asyncio.Lock()
 
-        # Thread manager
+        # Thread manager (initialized with manager reference)
         self._thread_manager: ThreadManager | None = None
+        if manager is not None:
+            self._thread_manager = ThreadManager(manager=manager)
 
         # Reference to source repository (injected by registry)
         self._source_repo: Any = None
@@ -128,6 +132,20 @@ class SlackAdapter(MessageSourceAdapter):
     def workspace_name(self) -> str | None:
         """Get the workspace name."""
         return self._workspace_name
+
+    def _handle_handler_failure(self, task: asyncio.Task) -> None:
+        """Called when the Socket Mode handler task fails.
+
+        Args:
+            task: The completed task that may have failed.
+        """
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(f"Slack Socket Mode handler failed: {exc}")
+                self._status = SourceStatus.ERROR
+        except asyncio.CancelledError:
+            pass
 
     async def _get_channel_lock(self, channel_id: str) -> asyncio.Lock:
         """Get or create per-channel lock for message ordering with LRU eviction.
@@ -175,8 +193,8 @@ class SlackAdapter(MessageSourceAdapter):
             self._handler = AsyncSocketModeHandler(self._app, self._app_token)
 
             # Start handler as background task
-            asyncio.create_task(self._handler.start_async())
-
+            task = asyncio.create_task(self._handler.start_async())
+            task.add_done_callback(self._handle_handler_failure)
             self._status = SourceStatus.RUNNING
             logger.info(f"Slack adapter started: {self.source_id}, workspace: {self._workspace_name}")
 
@@ -190,6 +208,10 @@ class SlackAdapter(MessageSourceAdapter):
     async def stop(self) -> None:
         """Stop the Slack adapter gracefully."""
         logger.info(f"Stopping Slack adapter: {self.source_id}")
+
+        # Shutdown thread manager if initialized
+        if self._thread_manager is not None:
+            await self._thread_manager.shutdown()
 
         await self._cleanup()
 
@@ -372,9 +394,10 @@ class SlackAdapter(MessageSourceAdapter):
             logger.error(f"Failed to parse external_user_id: {e}")
             return False
 
-        # DB lookup for routing (CRITICAL)
+        # DB lookup for routing (CRITICAL) - use asyncio.to_thread to avoid blocking
         try:
-            mapping = self._source_repo.get_instance_mapping(
+            mapping = await asyncio.to_thread(
+                self._source_repo.get_instance_mapping,
                 message.source_id,
                 message.external_user_id
             )

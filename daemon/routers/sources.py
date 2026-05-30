@@ -390,6 +390,12 @@ async def start_source(source_id: str, request: Request):
                     async def on_message(msg):
                         await manager.source_registry._handle_message(source_id, msg)
                     adapter = TelegramAdapter(config, on_message)
+                elif source_type == "slack":
+                    from daemon.sources.adapters.slack import SlackAdapter
+                    async def on_message(msg):
+                        await manager.source_registry._handle_message(source_id, msg)
+                    adapter = SlackAdapter(config, on_message)
+                    adapter._source_repo = manager._source_repository
                 else:
                     raise ValueError(f"Source type '{source_type}' adapter not yet implemented")
                 

@@ -77,14 +77,14 @@ class ThreadManager:
             self._threads[workspace_id] = OrderedDict()
         return self._threads[workspace_id]
 
-    async def register_thread(
+    async def _register_thread_unlocked(
         self,
         workspace_id: str,
         channel_id: str,
         thread_ts: str,
         instance_id: str,
     ) -> ThreadInstance:
-        """Register a thread instance.
+        """Register a thread instance (must hold lock).
 
         Args:
             workspace_id: The Slack workspace ID.
@@ -95,53 +95,61 @@ class ThreadManager:
         Returns:
             The created ThreadInstance.
         """
-        async with self._threads_guard:
-            workspace_threads = self._get_workspace_threads(workspace_id)
-            now = time.monotonic()
+        workspace_threads = self._get_workspace_threads(workspace_id)
+        now = time.monotonic()
 
-            # Check if thread already exists
-            if thread_ts in workspace_threads:
-                thread = workspace_threads[thread_ts]
-                thread.last_accessed = now
-                thread.instance_id = instance_id
-                # Move to end (most recently used)
-                workspace_threads.move_to_end(thread_ts)
-                return thread
-
-            # Evict expired threads first
-            await self._evict_expired_unlocked(workspace_id)
-
-            # Evict oldest if at capacity
-            while len(workspace_threads) >= self._max_threads:
-                await self._evict_oldest_unlocked(workspace_id)
-
-            # Create new thread instance
-            thread = ThreadInstance(
-                thread_ts=thread_ts,
-                channel_id=channel_id,
-                workspace_id=workspace_id,
-                instance_id=instance_id,
-                created_at=now,
-                last_accessed=now,
-            )
-
-            workspace_threads[thread_ts] = thread
+        # Check if thread already exists
+        if thread_ts in workspace_threads:
+            thread = workspace_threads[thread_ts]
+            
+            # Clean up old instance mapping if instance changed
+            if thread.instance_id and thread.instance_id != instance_id:
+                self._instance_to_thread.pop(thread.instance_id, None)
+            
+            thread.last_accessed = now
+            thread.instance_id = instance_id
+            
+            # Add new reverse mapping
             self._instance_to_thread[instance_id] = (workspace_id, thread_ts)
-
-            logger.info(
-                f"Registered thread: workspace={workspace_id}, "
-                f"channel={channel_id}, thread_ts={thread_ts}, "
-                f"instance={instance_id}"
-            )
-
+            
+            # Move to end (most recently used)
+            workspace_threads.move_to_end(thread_ts)
             return thread
 
-    async def get_thread(
+        # Evict expired threads first
+        await self._evict_expired_unlocked(workspace_id)
+
+        # Evict oldest if at capacity
+        while len(workspace_threads) >= self._max_threads:
+            await self._evict_oldest_unlocked(workspace_id)
+
+        # Create new thread instance
+        thread = ThreadInstance(
+            thread_ts=thread_ts,
+            channel_id=channel_id,
+            workspace_id=workspace_id,
+            instance_id=instance_id,
+            created_at=now,
+            last_accessed=now,
+        )
+
+        workspace_threads[thread_ts] = thread
+        self._instance_to_thread[instance_id] = (workspace_id, thread_ts)
+
+        logger.info(
+            f"Registered thread: workspace={workspace_id}, "
+            f"channel={channel_id}, thread_ts={thread_ts}, "
+            f"instance={instance_id}"
+        )
+
+        return thread
+
+    async def _get_thread_unlocked(
         self,
         workspace_id: str,
         thread_ts: str,
     ) -> ThreadInstance | None:
-        """Get a thread instance.
+        """Get a thread instance (must hold lock).
 
         Args:
             workspace_id: The Slack workspace ID.
@@ -150,28 +158,27 @@ class ThreadManager:
         Returns:
             ThreadInstance if found and not expired, None otherwise.
         """
-        async with self._threads_guard:
-            workspace_threads = self._get_workspace_threads(workspace_id)
+        workspace_threads = self._get_workspace_threads(workspace_id)
 
-            if thread_ts not in workspace_threads:
-                return None
+        if thread_ts not in workspace_threads:
+            return None
 
-            thread = workspace_threads[thread_ts]
-            now = time.monotonic()
+        thread = workspace_threads[thread_ts]
+        now = time.monotonic()
 
-            # Check if expired
-            if now - thread.last_accessed > self._ttl_seconds:
-                logger.debug(f"Thread expired: workspace={workspace_id}, thread_ts={thread_ts}")
-                del workspace_threads[thread_ts]
-                if thread.instance_id:
-                    self._instance_to_thread.pop(thread.instance_id, None)
-                return None
+        # Check if expired
+        if now - thread.last_accessed > self._ttl_seconds:
+            logger.debug(f"Thread expired: workspace={workspace_id}, thread_ts={thread_ts}")
+            del workspace_threads[thread_ts]
+            if thread.instance_id:
+                self._instance_to_thread.pop(thread.instance_id, None)
+            return None
 
-            # Update last accessed and move to end (LRU)
-            thread.last_accessed = now
-            workspace_threads.move_to_end(thread_ts)
+        # Update last accessed and move to end (LRU)
+        thread.last_accessed = now
+        workspace_threads.move_to_end(thread_ts)
 
-            return thread
+        return thread
 
     async def get_or_create_instance(
         self,
@@ -191,25 +198,16 @@ class ThreadManager:
         Returns:
             The instance ID.
         """
-        thread = await self.get_thread(workspace_id, thread_ts)
-
-        if thread and thread.instance_id:
-            return thread.instance_id
-
-        # Create new instance
-        instance_id = await self._manager.spawn_instance(
-            agent_id=agent_id,
-        )
-
-        # Register the thread
-        await self.register_thread(
-            workspace_id=workspace_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            instance_id=instance_id,
-        )
-
-        return instance_id
+        async with self._threads_guard:
+            thread = await self._get_thread_unlocked(workspace_id, thread_ts)
+            if thread and thread.instance_id:
+                thread.last_accessed = time.monotonic()
+                self._threads[workspace_id].move_to_end(thread_ts)
+                return thread.instance_id
+            
+            instance_id = await self._manager.spawn_instance(agent_id=agent_id)
+            await self._register_thread_unlocked(workspace_id, channel_id, thread_ts, instance_id)
+            return instance_id
 
     async def _evict_expired_unlocked(self, workspace_id: str) -> list[ThreadInstance]:
         """Evict all expired threads for a workspace (must hold lock).
@@ -234,6 +232,10 @@ class ThreadManager:
             thread = workspace_threads.pop(ts)
             if thread.instance_id:
                 self._instance_to_thread.pop(thread.instance_id, None)
+                try:
+                    await self._manager.terminate_instance(thread.instance_id)
+                except Exception as e:
+                    logger.warning(f"Could not terminate expired instance {thread.instance_id}: {e}")
             evicted.append(thread)
             logger.info(f"Evicted expired thread: workspace={workspace_id}, thread_ts={ts}")
 
@@ -320,3 +322,17 @@ class ThreadManager:
                 workspace_threads = self._get_workspace_threads(workspace_id)
                 workspace_threads.pop(thread_ts, None)
                 logger.debug(f"Cleaned up thread for instance: {instance_id}")
+
+    async def shutdown(self) -> None:
+        """Terminate all tracked instances on adapter shutdown."""
+        async with self._threads_guard:
+            for workspace_id in list(self._threads.keys()):
+                workspace_threads = self._threads[workspace_id]
+                for ts, thread in list(workspace_threads.items()):
+                    if thread.instance_id:
+                        try:
+                            await self._manager.terminate_instance(thread.instance_id)
+                        except Exception as e:
+                            logger.warning(f"Could not terminate instance {thread.instance_id}: {e}")
+                workspace_threads.clear()
+            self._instance_to_thread.clear()

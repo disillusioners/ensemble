@@ -345,7 +345,7 @@ class SourceRegistry:
             return adapter
         elif source_type == "slack":
             from .adapters.slack import SlackAdapter
-            adapter = SlackAdapter(config, on_message)
+            adapter = SlackAdapter(config, on_message, manager=self._manager)
             # Inject source_repo for DB lookup during send()
             adapter._source_repo = self._source_repo
             logger.info(f"SlackAdapter created: default_agent={adapter._default_agent}")
@@ -678,6 +678,11 @@ class SourceRegistry:
                         "slack_workspace_id": slack_meta.get("workspace_id"),
                         "slack_channel_type": slack_meta.get("channel_type"),
                     }
+                else:
+                    logger.warning(
+                        f"Slack message missing metadata for source={source_id}, "
+                        f"user={msg.external_user_id}. Routing may fail."
+                    )
             
             # Get or create the instance
             instance_id = await mapper.get_or_create_instance(

@@ -235,6 +235,11 @@ class SlackTieredRateLimiter:
             Tuple of (success, result) where success is False if
             rate limit couldn't be acquired.
         """
+        # Auto-increase max_wait for Tier 1 methods (1 req/min)
+        tier = self._get_tier(method)
+        if tier == SlackTier.TIER_1:
+            max_wait = max(max_wait, 65.0)  # Ensure at least 65s for Tier 1
+
         # Wait for rate limit
         if not await self.wait_and_acquire(method, max_wait=max_wait):
             logger.warning(f"Rate limit timeout for method={method}")
