@@ -46,6 +46,13 @@ class MessageJobHandler:
             job: JobItem with job_type="message" and instance_id set in column.
         """
         instance_id = job.instance_id
+        
+        # [TRACE] Log job entry
+        logger.info(
+            f"[TRACE] MessageJobHandler.handle: START job={job.job_id[:8]}... "
+            f"instance={instance_id[:8]}... job_type={getattr(job, 'job_type', 'unknown')}"
+        )
+        
         if not instance_id:
             await self._job_service.complete_job(
                 job.job_id,
@@ -66,8 +73,8 @@ class MessageJobHandler:
             # Do NOT fail it — this is a temporary condition.
             # Use atomic_transition (not update()) for race-safety under concurrency.
             logger.info(
-                f"MessageJobHandler: instance {instance_id[:8]}... already has "
-                f"MESSAGE job processing, re-queuing {job.job_id[:8]}..."
+                f"[TRACE] MessageJobHandler.handle: SKIP job {job.job_id[:8]}... — "
+                f"instance {instance_id[:8]}... already has MESSAGE job processing, re-queuing"
             )
             result = await asyncio.to_thread(
                 self._job_repo.atomic_transition, job.job_id,
@@ -90,6 +97,12 @@ class MessageJobHandler:
         # Create CancellationToken for this job
         cts = CancellationTokenSource()
         self._active_tokens[job.job_id] = cts
+
+        # [TRACE] Log before processing
+        logger.info(
+            f"[TRACE] MessageJobHandler: calling _process_message_with_tracking "
+            f"for job={job.job_id[:8]}... instance={instance_id[:8]}..."
+        )
 
         try:
             # Extract params from job metadata

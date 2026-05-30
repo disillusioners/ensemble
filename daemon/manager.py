@@ -1292,6 +1292,10 @@ class InstanceManager:
         Returns:
             AsyncMessageResult with message_id and status.
         """
+        logger.info(
+            f"[TRACE] InstanceManager.enqueue_message_via_jq: called "
+            f"instance={instance_id[:8]}... source={source}"
+        )
         return await self._messaging_service.enqueue_message_via_jq(
             instance_id=instance_id,
             message=message,

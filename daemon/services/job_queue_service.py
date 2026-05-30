@@ -951,20 +951,31 @@ class JobQueueService:
             Updated JobItem if started successfully, None if
             job not found, cancelled, or start/lock acquisition failed.
         """
+        # [TRACE] Log entry
+        logger.info(f"[TRACE] start_job: called for job_id={job_id[:8]}...")
+        
         job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
+            logger.info(f"[TRACE] start_job: job {job_id[:8]}... not found")
             return None
+        
+        # [TRACE] Log job details
+        logger.info(
+            f"[TRACE] start_job: job={job_id[:8]}... status={job.status} "
+            f"instance={job.instance_id[:8] if job.instance_id else 'N/A'}... job_type={getattr(job, 'job_type', 'task')}"
+        )
         
         # Check if job is still pending (could have been cancelled)
         if job.status != JobStatus.PENDING.value:
+            logger.info(f"[TRACE] start_job: job {job_id[:8]}... SKIP — not PENDING (status={job.status})")
             return None
         
         # CENTRALIZED PAUSE CHECK - protects ALL callers
         if self._project_repo is not None and job.project_id:
             project = await asyncio.to_thread(self._project_repo.get, job.project_id)
             if project and project.job_queue_paused:
-                logger.debug(
-                    f"start_job: project {job.project_id[:8]}... is paused, skipping"
+                logger.info(
+                    f"[TRACE] start_job: job {job_id[:8]}... SKIP — project {job.project_id[:8]}... PAUSED"
                 )
                 return None
         
@@ -991,8 +1002,8 @@ class JobQueueService:
                     instance = None
 
                 if instance is None:
-                    logger.warning(
-                        f"start_job: instance {job.instance_id[:8]}... not found, skipping"
+                    logger.info(
+                        f"[TRACE] start_job: job {job_id[:8]}... SKIP — instance {job.instance_id[:8]}... NOT FOUND"
                     )
                     return None
 
@@ -1000,13 +1011,17 @@ class JobQueueService:
                     if job.job_type == "task":
                         # TASK jobs get fresh instances — clear stale ref and allow normal start
                         logger.info(
-                            f"start_job: clearing stale instance_id for TASK job {job.job_id[:8]}... "
+                            f"[TRACE] start_job: clearing stale instance_id for TASK job {job_id[:8]}... "
                             f"(instance {job.instance_id[:8]}... is {instance.status})"
                         )
                         await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
                         # Fall through to normal start logic below (don't return None)
                     else:
                         # MESSAGE: reactivate any terminal instance (COMPLETED/TERMINATED/ERROR/FAILED)
+                        logger.info(
+                            f"[TRACE] start_job: attempting reactivation of {instance.status} instance "
+                            f"{job.instance_id[:8]}... for MESSAGE job {job.job_id[:8]}..."
+                        )
                         await asyncio.to_thread(
                             self._instance_manager._instance_repository.update_status,
                             job.instance_id, InstanceStatus.RUNNING.value
@@ -1024,8 +1039,8 @@ class JobQueueService:
                         # Fall through to normal processing
 
                 if instance.status == InstanceStatus.PAUSED.value:
-                    logger.debug(
-                        f"start_job: instance {job.instance_id[:8]}... is paused, skipping"
+                    logger.info(
+                        f"[TRACE] start_job: job {job_id[:8]}... SKIP — instance {job.instance_id[:8]}... PAUSED"
                     )
                     return None
 
@@ -1034,11 +1049,21 @@ class JobQueueService:
             instance_id = job.instance_id
         else:
             instance_id = str(uuid.uuid4())
+        
+        # [TRACE] Log instance_id being used
+        logger.info(
+            f"[TRACE] start_job: using instance_id={instance_id[:8]}... "
+            f"for job={job_id[:8]}... (job_type={job.job_type})"
+        )
 
         # Acquire lock FIRST - if we can't get it, don't transition the job
         lock_acquired = False
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
+            logger.info(
+                f"[TRACE] start_job: acquiring queue lock for job {job_id[:8]}... "
+                f"queue={job.queue_id[:8]}... concurrency_limit={concurrency_limit}"
+            )
             
             lock_acquired = await self._lock_manager.acquire_queue_lock(
                 project_id=job.project_id,
@@ -1051,8 +1076,12 @@ class JobQueueService:
             if not lock_acquired:
                 # Can't acquire lock - another job is using the concurrency slot
                 # Don't transition the job to avoid the rollback loop
+                logger.info(
+                    f"[TRACE] start_job: job {job_id[:8]}... SKIP — lock NOT acquired (concurrency limit)"
+                )
                 return None
         elif job.project_id:
+            logger.info(f"[TRACE] start_job: acquiring project lock for job {job_id[:8]}...")
             lock_acquired = await self._lock_manager.acquire(
                 project_id=job.project_id,
                 job_id=job_id,
@@ -1060,12 +1089,19 @@ class JobQueueService:
             )
             
             if not lock_acquired:
+                logger.info(
+                    f"[TRACE] start_job: job {job_id[:8]}... SKIP — project lock NOT acquired"
+                )
                 return None
         
         # Lock acquired (or no locking needed) - now try to start job atomically
+        logger.info(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
         try:
             started_job = await asyncio.to_thread(
                 self._repository.start_job_atomic, job_id, instance_id
+            )
+            logger.info(
+                f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job
         except ValueError:

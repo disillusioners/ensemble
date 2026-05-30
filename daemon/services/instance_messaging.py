@@ -1289,7 +1289,14 @@ class InstanceMessagingService:
             },
         )
 
-        logger.debug(f"Enqueued MESSAGE job for message {message_id} via JobQueue for instance {instance_id}")
+        # [TRACE] Log job enqueue
+        instance_status = previous_status if instance else "unknown"
+        logger.info(
+            f"[TRACE] enqueue_message_via_jq: instance={instance_id[:8]} status={instance_status} "
+            f"job_id={job.job_id[:8]}... job_type=message"
+        )
+        # DispatchEventBus notification is sent internally by _job_queue_service.enqueue()
+        logger.info(f"[TRACE] enqueue_message_via_jq: job {job.job_id[:8]}... dispatched via DispatchEventBus")
 
         return AsyncMessageResult(
             message_id=message_id,

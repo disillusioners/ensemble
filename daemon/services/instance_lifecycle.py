@@ -481,6 +481,14 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
 
+        # 7.7. Clean up MessageQueue entries for this instance
+        if hasattr(self._manager, '_queue_repository') and self._manager._queue_repository:
+            try:
+                count = self._manager._queue_repository.delete_by_instance(instance_id)
+                logger.info(f"[TRACE] terminate_instance: removed {count} MessageQueue entries for instance {instance_id[:8]}...")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup MessageQueue entries for instance {instance_id[:8]}...: {e}")
+
         # 8. Publish lifecycle event for terminated instance
         parent_id = meta.parent_id if meta else None
         if self._events_service:
