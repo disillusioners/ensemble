@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 80 packs
-- Unit: 65 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 82 packs
+- Unit: 67 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -106,6 +106,9 @@
 | notification_lifecycle_hook_test | tests/unit/test_notification_lifecycle_hook.py | Lifecycle hook: root instance notification, child exclusion, payload correctness, edge cases, EventBus integration | 2 min | 2026-05-20 | ✅ PASS (15/15, notification system) |
 | live_event_hub_unit_test | tests/unit/test_live_event_hub.py | LiveEventHub: message/checkpoint/status/lifecycle streaming, connection management, KB filtering, **stream_instance_created (4 tests)** | 2 min | 2026-05-30 | ✅ PASS (54/54, instance_created SSE feature, commit 9a6e742) |
 | ready_message_unit_test | tests/unit/test_ready_message_completion_report.py | READY messages blocking completion report: core bug 4, edge cases 3, diagnostic logging 3, force_notify 2 | 2 min | 2026-05-28 | ✅ PASS (12/12, commit 47e1a43, 0 regressions) |
+
+| vision_routing_unit_test | tests/unit/test_vision_routing.py | Vision model routing: images present → vision model, text-only → standard, no model_vision → fallback, no llm_standard → fallback, turn 3+ images, multiple images, mixed content | 2 min | 2026-05-30 | ✅ PASS (13/13, feature/vision-always-on) |
+| compaction_multimodal_unit_test | tests/unit/test_compaction_multimodal.py | Compaction multimodal: emergency_truncate, _truncate_batch_to_fit, ContextCompactor summarization, garbage output prevention, edge cases, integration | 2 min | 2026-05-30 | ✅ PASS (30/30, feature/vision-always-on) |
 
 ---
 
