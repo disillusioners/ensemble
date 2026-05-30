@@ -236,17 +236,20 @@ class ProcessMessageProcessor(BaseProcessor):
             # Dispatch completed message to external sources (Telegram, Discord, etc.)
             # For internal messages (completion reports, etc.), use the original external source
             # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
+            logger.info(f"[DISPATCH] task completed: instance={task.instance_id}, message_source={message_source}, result={'truthy' if result else 'falsy'}")
             dispatch_source = message_source
             is_internal_report = (
                 message_source.startswith("internal_report:") or
                 message_source.startswith("internal_error_report:")
             )
+            logger.info(f"[DISPATCH] is_internal_report={is_internal_report}, dispatch_source={dispatch_source}")
             if is_internal_report:
                 # Retrieve original external source from instance metadata
                 instance_meta = self._manager._instance_repository.get(task.instance_id)
                 # Use is not None check because empty dict {} is falsy
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
+                logger.info(f"[DISPATCH] resolved original_source: {dispatch_source}")
                 if not dispatch_source:
                     logger.warning(
                         f"No original_source found for instance {task.instance_id[:8]}... "
@@ -254,7 +257,12 @@ class ProcessMessageProcessor(BaseProcessor):
                     )
                     dispatch_source = None  # Skip dispatch if no original source
             
-            if self._source_dispatcher and dispatch_source and result:
+            logger.info(f"[DISPATCH] attempting dispatch: source={dispatch_source}, has_dispatcher={self._source_dispatcher is not None}")
+            if not dispatch_source:
+                logger.info("[DISPATCH] SKIPPED: dispatch_source is None or empty")
+            elif not result:
+                logger.info("[DISPATCH] SKIPPED: result is None or empty")
+            elif self._source_dispatcher:
                 try:
                     await self._source_dispatcher.dispatch_completed(
                         instance_id=task.instance_id,

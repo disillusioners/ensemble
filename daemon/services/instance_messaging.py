@@ -779,9 +779,13 @@ class InstanceMessagingService:
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     current = instance_meta.instance_metadata.get("original_source")
                     if not current:
+                        logger.info(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current={current}")
                         self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                    else:
+                        logger.info(f"[DISPATCH] original_source already set: instance={instance_id}, current={current}, skipping source={message_source}")
                 else:
                     # Instance metadata doesn't exist yet, set it directly
+                    logger.info(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current=None")
                     self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
         
         # Project context injection for first message only

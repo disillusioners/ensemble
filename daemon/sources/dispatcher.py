@@ -103,6 +103,8 @@ class ResponseDispatcher:
             metadata: Optional metadata to include.
             reply_to_id: Optional message ID to reply to.
         """
+        logger.info(f"[DISPATCH] dispatch_completed called: source={source}, content_length={len(content) if content else 0}")
+        
         if not self._running:
             logger.debug("ResponseDispatcher not running, skipping dispatch")
             return
@@ -117,6 +119,7 @@ class ResponseDispatcher:
             return
         
         # Skip if source already received progressive messages (last message was already sent)
+        logger.info(f"[DISPATCH] progressive_sent_sources check: source={source}, in_set={source in self._progressive_sent_sources}")
         if source in self._progressive_sent_sources:
             logger.debug(f"Skipping dispatch_completed for source={source} (progressive delivery already sent)")
             self._progressive_sent_sources.discard(source)
@@ -145,18 +148,22 @@ class ResponseDispatcher:
         # Skip adapter lookup for internal sources (not external adapters)
         # C1 fix: Only skip internal_report and internal_error_report, NOT internal_agent
         if source_id in ("internal_report", "internal_error_report"):
+            logger.info("[DISPATCH] SKIPPED: no adapter or source is internal")
             logger.debug(f"Skipping internal report source (no adapter needed): {source_id}")
             return
         
         # Get adapter from registry
         adapter = self._registry.get(source_id)
         if adapter is None:
+            logger.info("[DISPATCH] SKIPPED: no adapter or source is internal")
             if source_id.startswith("internal_"):
                 logger.debug(f"No adapter needed for internal source: {source_id}")
             else:
                 logger.debug(f"No adapter found for source_id={source_id}")
             return
 
+        logger.info(f"[DISPATCH] sending to adapter: source={source}, adapter_type={type(adapter).__name__}")
+        
         # Create OutgoingMessage
         outgoing = OutgoingMessage(
             external_user_id=external_user_id,
