@@ -757,10 +757,7 @@ class InstanceMessagingService:
         # Determine the effective source for progressive dispatch
         dispatch_source: str | None = None
         if message_source:
-            is_internal_report = (
-                message_source.startswith("internal_report:") or
-                message_source.startswith("internal_error_report:")
-            )
+            is_internal_report = message_source.startswith("internal_")
             if is_internal_report:
                 # This is an internal message (completion report, error report, etc.)
                 # Retrieve the original external source from instance metadata
@@ -778,15 +775,16 @@ class InstanceMessagingService:
                 instance_meta = self._manager._instance_repository.get(instance_id)
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     current = instance_meta.instance_metadata.get("original_source")
-                    if not current:
+                    if not current and not message_source.startswith("internal_"):
                         logger.info(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current={current}")
                         self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
                     else:
                         logger.info(f"[DISPATCH] original_source already set: instance={instance_id}, current={current}, skipping source={message_source}")
                 else:
                     # Instance metadata doesn't exist yet, set it directly
-                    logger.info(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current=None")
-                    self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                    if not message_source.startswith("internal_"):
+                        logger.info(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current=None")
+                        self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
         
         # Project context injection for first message only
         if not is_retry:
