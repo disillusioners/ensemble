@@ -485,7 +485,7 @@ class InstanceLifecycleService:
         if hasattr(self._manager, '_queue_repository') and self._manager._queue_repository:
             try:
                 count = self._manager._queue_repository.delete_by_instance(instance_id)
-                logger.info(f"[TRACE] terminate_instance: removed {count} MessageQueue entries for instance {instance_id[:8]}...")
+                logger.debug(f"[TRACE] terminate_instance: removed {count} MessageQueue entries for instance {instance_id[:8]}...")
             except Exception as e:
                 logger.warning(f"Failed to cleanup MessageQueue entries for instance {instance_id[:8]}...: {e}")
 
