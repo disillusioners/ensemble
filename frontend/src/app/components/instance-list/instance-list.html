@@ -147,14 +147,16 @@
       </button>
     }
     
-    <!-- Terminate button -->
-    <button
-      class="terminate-btn"
-      (click)="onTerminateInstance(instance.instance_id, $event)"
-      title="Terminate instance"
-    >
-      <mat-icon>close</mat-icon>
-    </button>
+    @if (!instance.parent_id) {
+      <!-- Terminate button -->
+      <button
+        class="terminate-btn"
+        (click)="onTerminateInstance(instance.instance_id, $event)"
+        title="Terminate instance"
+      >
+        <mat-icon>close</mat-icon>
+      </button>
+    }
   </a>
 
   <!-- Render children recursively when expanded -->
