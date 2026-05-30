@@ -32,6 +32,43 @@ RETRY_BASE_DELAY = 1.0  # seconds
 MAX_CHAT_LOCKS = 1000  # LRU eviction limit for per-chat locks
 
 
+def _strip_llm_artifact_tags(content: str) -> str:
+    """Strip LLM thinking/reasoning artifact tags from content.
+    
+    Some LLMs output tags like <think>...</think>, <reasoning>...</reasoning>
+    which Telegram's HTML parser can't handle.
+    
+    Args:
+        content: Raw message content that may contain artifact tags.
+        
+    Returns:
+        Content with artifact tags removed.
+    """
+    # Known artifact tag names to strip
+    artifact_tags = ["think", "scratchpad", "reflection", "reasoning"]
+    
+    for tag in artifact_tags:
+        # Remove full blocks with content first (more specific, must come before opening tag removal)
+        # Pattern: <tag optional_attrs>content</tag> with case-insensitive matching
+        content = re.sub(
+            rf"<{tag}(?:\s[^>]*)?>.*?</{tag}\s*>",
+            "",
+            content,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        # Remove self-closing tags (e.g., <think/> or <think attr="val" />)
+        content = re.sub(rf"<{tag}(?:\s[^>]*)?\s*/>", "", content, flags=re.IGNORECASE)
+        # Remove orphan opening tags (e.g., <think> or <think attr="val">)
+        content = re.sub(rf"<{tag}(?:\s[^>]*)?>", "", content, flags=re.IGNORECASE)
+        # Remove orphan closing tags (e.g., </think>)
+        content = re.sub(rf"</{tag}\s*>", "", content, flags=re.IGNORECASE)
+    
+    # Clean up empty lines left behind
+    content = re.sub(r"\n{3,}", "\n\n", content)
+    
+    return content.strip()
+
+
 class TelegramAdapter(MessageSourceAdapter):
     """Telegram Bot API adapter.
     
@@ -262,9 +299,12 @@ class TelegramAdapter(MessageSourceAdapter):
         lock = await self._get_chat_lock(reply_chat_id)
         async with lock:
             try:
+                # Sanitize content to remove LLM artifact tags that Telegram's HTML parser can't handle
+                sanitized_content = _strip_llm_artifact_tags(message.content)
+                
                 params = {
                     "chat_id": reply_chat_id,
-                    "text": message.content,
+                    "text": sanitized_content,
                     "parse_mode": message.metadata.get("parse_mode", "HTML"),
                 }
                 
