@@ -858,6 +858,32 @@ class TestExtractTextFromContent:
         assert _extract_text_from_content(123) == "123"
         assert _extract_text_from_content({"key": "value"}) == "{'key': 'value'}"
 
+    def test_dict_block_missing_type_key(self):
+        """Test that dict block missing 'type' key is treated as non-text block (skipped)."""
+        content = [{"text": "hello"}]
+        result = _extract_text_from_content(content)
+        # No block has type="text" → empty string
+        assert result == ""
+
+    def test_dict_block_type_text_missing_text_key(self):
+        """Test that dict block with type='text' but missing 'text' key returns empty string."""
+        content = [{"type": "text"}]
+        result = _extract_text_from_content(content)
+        # block_type == "text" but no "text" key → block.get("text", "") returns ""
+        assert result == ""
+
+    def test_list_with_non_dict_items(self):
+        """Test that list containing non-dict items handles gracefully (skipped, no crash)."""
+        content = [None, "hello", 123]
+        result = _extract_text_from_content(content)
+        # Only dict blocks with type="text" are extracted; non-dict items are skipped
+        assert result == ""
+
+    def test_unicode_content_passthrough(self):
+        """Test that unicode content passes through unchanged."""
+        content = "Hello 🌍 🎉"
+        assert _extract_text_from_content(content) == "Hello 🌍 🎉"
+
 
 class TestCompactionRetrySkip:
     """Tests for compaction skip behavior on retry."""

@@ -67,7 +67,7 @@ def _extract_text_from_content(content: str | list) -> str:
                 # Skip image_url and other non-text blocks
         return "".join(text_parts)
     
-    return str(content) if content else ""
+    return str(content) if content is not None else ""
 
 
 # Context window sizes for known models (in tokens)
@@ -379,7 +379,7 @@ def emergency_truncate(
     truncated = copy.deepcopy(messages)
     for msg in truncated:
         if getattr(msg, "type", "") == "tool":
-            content = msg.content or ""
+            content = _extract_text_from_content(msg.content)
             if len(content) > max_tool_response_chars:
                 msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
     
@@ -389,7 +389,7 @@ def emergency_truncate(
     # Pass 2: Truncate human messages
     for msg in truncated:
         if getattr(msg, "type", "") == "human":
-            content = msg.content or ""
+            content = _extract_text_from_content(msg.content)
             if len(content) > max_human_message_chars:
                 msg.content = content[:max_human_message_chars] + "\n[...truncated]"
     
@@ -398,7 +398,7 @@ def emergency_truncate(
     
     # Pass 3: Progressive halving of large content
     for msg in truncated:
-        content = msg.content or ""
+        content = _extract_text_from_content(msg.content)
         if len(content) > 500:
             while len(content) > 500 and estimate_fn(truncated) > max_tokens:
                 half_len = len(content) // 2
@@ -453,7 +453,7 @@ def _truncate_batch_to_fit(
         # Truncate tool responses
         for msg in group_copy.messages:
             if getattr(msg, "type", "") == "tool":
-                content = msg.content or ""
+                content = _extract_text_from_content(msg.content)
                 if len(content) > max_tool_response_chars:
                     msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
         
@@ -470,7 +470,7 @@ def _truncate_batch_to_fit(
         [msg for g in truncated_groups for msg in g.messages]
     ) > max_tokens:
         for msg in truncated_groups[0].messages:
-            content = getattr(msg, "content", "") or ""
+            content = _extract_text_from_content(getattr(msg, "content", ""))
             if len(content) > max_tool_response_chars:
                 msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
     
@@ -882,16 +882,7 @@ class ContextCompactor:
         )
         
         content = response.content
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    text_parts.append(block.get("text", ""))
-                else:
-                    text_parts.append(str(block))
-            return "\n".join(text_parts)
-        
-        return str(content)
+        return _extract_text_from_content(content)
     
     @staticmethod
     def _build_replacement_messages(
