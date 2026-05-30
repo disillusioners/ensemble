@@ -21,8 +21,8 @@ export class SseService {
   // Status change events for instance updates
   statusChange = signal<{ instance_id: string; status: string; agent_id?: string } | null>(null);
 
-  // Instance created events for tree updates
-  instanceCreated = signal<InstanceInfo | null>(null);
+  // Instance created events for tree updates (queue to handle rapid spawning)
+  instanceCreatedQueue = signal<InstanceInfo[]>([]);
 
   constructor(private ngZone: NgZone) {}
 
@@ -197,7 +197,7 @@ export class SseService {
             created_at: data.data.created_at as string,
             updated_at: data.data.created_at as string,
           };
-          this.instanceCreated.set(instanceData);
+          this.instanceCreatedQueue.update(q => [...q, instanceData]);
         } catch (err) {
           console.error('[SSE] Failed to parse instance_created:', err);
         }
@@ -267,6 +267,6 @@ export class SseService {
     this.latestError.set(null);
     this.messages.set([]);
     this.statusChange.set(null);
-    this.instanceCreated.set(null);
+    this.instanceCreatedQueue.set([]);
   }
 }

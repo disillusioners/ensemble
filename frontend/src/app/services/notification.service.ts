@@ -141,7 +141,7 @@ export class NotificationService implements OnDestroy {
             created_at: data.data.created_at as string,
             updated_at: data.data.created_at as string,
           };
-          this.sseService.instanceCreated.set(instanceData);
+          this.sseService.instanceCreatedQueue.update(q => [...q, instanceData]);
         } catch {
           // Ignore parse errors
         }

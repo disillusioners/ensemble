@@ -86,23 +86,25 @@ export class InstanceService {
 
     // Subscribe to SSE instance_created events for tree updates
     effect(() => {
-      const newInstance = this.sseService.instanceCreated();
-      if (!newInstance) return;
+      const queue = this.sseService.instanceCreatedQueue();
+      if (queue.length === 0) return;
 
       // Filter out KB instances when showKb is false
-      if (!this.showKb() && KB_AGENT_IDS.has(newInstance.agent_id)) {
-        this.sseService.instanceCreated.set(null);
-        return;
+      const filteredQueue = this.showKb()
+        ? queue
+        : queue.filter(i => !KB_AGENT_IDS.has(i.agent_id));
+
+      // Clear the queue immediately to allow new events to queue up
+      this.sseService.instanceCreatedQueue.set([]);
+
+      // Process all queued instances with error handling
+      for (const instanceData of filteredQueue) {
+        try {
+          this.addInstanceToTree(instanceData);
+        } catch (err) {
+          console.error('[InstanceService] Failed to add instance to tree:', err);
+        }
       }
-
-      // Capture before resetting
-      const instanceData = newInstance;
-
-      // Reset the SSE signal immediately to allow re-triggering
-      this.sseService.instanceCreated.set(null);
-
-      // Add the new instance with proper tree linking
-      this.addInstanceToTree(instanceData);
     });
   }
 
@@ -174,6 +176,11 @@ export class InstanceService {
    * Add a new instance to the tree with proper parent-child linking.
    */
   private addInstanceToTree(newInstance: InstanceInfo): void {
+    // Ignore instances from other projects when filtering by project
+    if (this._currentProjectId && newInstance.project_id !== this._currentProjectId) {
+      return;
+    }
+
     this.instances.update(instances => {
       // Check if instance already exists (deduplication)
       if (instances.some(i => i.instance_id === newInstance.instance_id)) {
@@ -186,10 +193,10 @@ export class InstanceService {
         // Try to find and link to parent
         const parentIdx = updatedInstances.findIndex(i => i.instance_id === newInstance.parent_id);
         if (parentIdx >= 0) {
-          // Parent exists - add as child and update parent's children array
+          // Parent exists - add as child and update parent's children array (deduplicated)
           updatedInstances[parentIdx] = {
             ...updatedInstances[parentIdx],
-            children: [...updatedInstances[parentIdx].children, newInstance.instance_id],
+            children: [...new Set([...updatedInstances[parentIdx].children, newInstance.instance_id])],
           };
         }
         // If parent not found, the instance will be added as root
