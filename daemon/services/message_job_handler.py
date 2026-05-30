@@ -146,10 +146,7 @@ class MessageJobHandler:
             # Dispatch completed message to external sources (Telegram, Discord, etc.)
             # For internal messages (completion reports, etc.), use the original external source
             dispatch_source = message_source
-            is_internal_report = (
-                message_source.startswith("internal_report:") or
-                message_source.startswith("internal_error_report:")
-            )
+            is_internal_report = message_source.startswith("internal_")
             if is_internal_report:
                 # Retrieve original external source from instance metadata
                 instance_meta = await asyncio.to_thread(self._manager._instance_repository.get, instance_id)
