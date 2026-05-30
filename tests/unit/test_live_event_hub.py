@@ -474,6 +474,78 @@ class TestLifecycleEvents:
         assert event2["event_type"] == "status_change"
 
 
+    @pytest.mark.asyncio
+    async def test_stream_instance_created(self):
+        """Instance created events are delivered to parent instance connections."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+        instance_data = {
+            "instance_id": "child-123",
+            "agent_id": "coder",
+            "parent_id": "parent-456",
+            "status": "idle",
+            "project_id": "proj-1",
+            "created_at": "2024-01-01T00:00:00Z",
+            "children": [],
+            "title": None,
+        }
+
+        await hub.add_connection("parent-456", queue)
+        await hub.stream_instance_created("parent-456", instance_data)
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "parent-456"
+        assert event["event_type"] == "instance_created"
+        assert event["data"]["instance_id"] == "child-123"
+        assert event["data"]["agent_id"] == "coder"
+
+    @pytest.mark.asyncio
+    async def test_stream_instance_created_no_connections(self):
+        """Instance created events are silently dropped when no connections exist."""
+        hub = LiveEventHub()
+        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+
+        # Should not raise
+        await hub.stream_instance_created("nonexistent-parent", instance_data)
+
+    @pytest.mark.asyncio
+    async def test_stream_instance_created_to_parent_only(self):
+        """Instance created events are only sent to parent, not other instances."""
+        hub = LiveEventHub()
+        parent_queue = asyncio.Queue()
+        other_queue = asyncio.Queue()
+        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+
+        await hub.add_connection("parent-456", parent_queue)
+        await hub.add_connection("other-instance", other_queue)
+        await hub.stream_instance_created("parent-456", instance_data)
+
+        # Parent should receive the event
+        event = await asyncio.wait_for(parent_queue.get(), timeout=1.0)
+        assert event["data"]["instance_id"] == "child-123"
+
+        # Other instance should NOT receive the event
+        assert other_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_stream_instance_created_multiple_connections_same_parent(self):
+        """Instance created events reach all connections for the parent instance."""
+        hub = LiveEventHub()
+        queue1 = asyncio.Queue()
+        queue2 = asyncio.Queue()
+        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+
+        await hub.add_connection("parent-456", queue1)
+        await hub.add_connection("parent-456", queue2)
+        await hub.stream_instance_created("parent-456", instance_data)
+
+        event1 = await asyncio.wait_for(queue1.get(), timeout=1.0)
+        event2 = await asyncio.wait_for(queue2.get(), timeout=1.0)
+
+        assert event1["data"]["instance_id"] == "child-123"
+        assert event2["data"]["instance_id"] == "child-123"
+
+
 # ============================================================================
 # Test KB Agent Filtering
 # ============================================================================
