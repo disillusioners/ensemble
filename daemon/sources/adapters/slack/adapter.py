@@ -1,9 +1,7 @@
 """Slack adapter using Socket Mode for real-time messaging."""
 
 import asyncio
-import base64
 import logging
-import re
 import time
 from collections import OrderedDict
 from typing import Any, Callable, Awaitable
@@ -19,13 +17,18 @@ from daemon.sources.base import (
     SourceConfig,
     SourceStatus,
 )
-from daemon.sources.circuit_breaker import CircuitBreaker, CircuitState
+from daemon.sources.circuit_breaker import CircuitBreaker
 
 from .rate_limiter import SlackTieredRateLimiter
 from .thread_manager import ThreadManager
 from .blocks import markdown_to_slack_blocks
 
 logger = logging.getLogger(__name__)
+
+# Constants
+MAX_CHANNEL_LOCKS = 100
+BLOCKS_CONTENT_THRESHOLD = 400
+TEXT_FALLBACK_MAX_LENGTH = 500
 
 
 class CircuitOpenError(Exception):
@@ -97,6 +100,8 @@ class SlackAdapter(MessageSourceAdapter):
         self._handler: AsyncSocketModeHandler | None = None
         self._workspace_id: str | None = None
         self._workspace_name: str | None = None
+        self._bot_user_id: str | None = None
+        self._bot_name: str | None = None
 
         # Tiered rate limiter for Slack API
         self._rate_limiter = SlackTieredRateLimiter()
@@ -162,7 +167,7 @@ class SlackAdapter(MessageSourceAdapter):
                 return self._channel_locks[channel_id]
 
             # Evict oldest if at capacity
-            while len(self._channel_locks) >= 100:
+            while len(self._channel_locks) >= MAX_CHANNEL_LOCKS:
                 self._channel_locks.popitem(last=False)
 
             lock = asyncio.Lock()
@@ -292,9 +297,6 @@ class SlackAdapter(MessageSourceAdapter):
 
         # Use the app's client
         client = self._app.client
-
-        # Build method name for SDK (conversations.list -> conversations_list)
-        sdk_method = method.replace(".", "_")
 
         try:
             # Call using Slack SDK
@@ -441,7 +443,7 @@ class SlackAdapter(MessageSourceAdapter):
             try:
                 # Prepare message parameters
                 # Use blocks for longer/formatted content (>400 chars or contains code blocks)
-                if len(message.content) > 400 or "```" in message.content:
+                if len(message.content) > BLOCKS_CONTENT_THRESHOLD or "```" in message.content:
                     blocks = markdown_to_slack_blocks(message.content)
                     if blocks:
                         params = {
@@ -449,7 +451,7 @@ class SlackAdapter(MessageSourceAdapter):
                             "blocks": blocks,
                         }
                         # Include text fallback for notifications
-                        params["text"] = message.content[:500] if message.content else "..."
+                        params["text"] = message.content[:TEXT_FALLBACK_MAX_LENGTH] if message.content else "..."
 
                         if reply_ts:
                             params["thread_ts"] = reply_ts
@@ -515,8 +517,6 @@ class SlackAdapter(MessageSourceAdapter):
         Returns:
             Tuple of (success, message).
         """
-        import aiohttp
-
         bot_token = config.credentials.get("bot_token")
         app_token = config.credentials.get("app_token")
 
@@ -578,7 +578,7 @@ class SlackAdapter(MessageSourceAdapter):
             return False
 
         # Ignore channel join/leave messages
-        subtype = event.get("subtype", "file_comment")
+        subtype = event.get("subtype")
         if subtype in ("channel_join", "channel_leave", "group_join", "group_leave"):
             return False
 
@@ -823,37 +823,3 @@ class SlackAdapter(MessageSourceAdapter):
         ]
         for user_id in expired:
             del self._dm_cache[user_id]
-
-    async def _download_files(self, files: list[dict]) -> list[str]:
-        """Download files as base64.
-
-        Args:
-            files: List of Slack file objects.
-
-        Returns:
-            List of base64-encoded file contents.
-        """
-        results = []
-
-        for file_info in files:
-            try:
-                url_private = file_info.get("url_private")
-                if not url_private:
-                    continue
-
-                # Download file
-                headers = {"Authorization": f"Bearer {self._bot_token}"}
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url_private, headers=headers) as resp:
-                        if resp.status == 200:
-                            content = await resp.read()
-                            b64 = base64.b64encode(content).decode("utf-8")
-                            results.append(b64)
-                        else:
-                            logger.warning(f"Failed to download file: {resp.status}")
-
-            except Exception as e:
-                logger.error(f"Error downloading file: {e}")
-
-        return results

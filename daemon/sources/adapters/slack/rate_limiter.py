@@ -148,8 +148,6 @@ class SlackTieredRateLimiter:
             for tier, config in TIER_CONFIGS.items()
         }
         self._lock = asyncio.Lock()
-        self._in_flight: dict[str, asyncio.Event] = {}
-        self._in_flight_guard = asyncio.Lock()
 
     def _get_tier(self, method: str) -> SlackTier:
         """Get the tier for a Slack API method.

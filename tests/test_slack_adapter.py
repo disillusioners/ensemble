@@ -1,8 +1,8 @@
 """Tests for SlackAdapter implementation."""
 
 import pytest
+import time as time_module
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
-import sys
 
 from daemon.sources.adapters.slack.adapter import (
     SlackAdapter,
@@ -1284,9 +1284,6 @@ class TestSlackAdapterNewCommand:
 
 
 # ==================== DM Cache Tests ====================
-
-
-import time as time_module
 
 
 class TestSlackAdapterDMCache:
