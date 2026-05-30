@@ -7,6 +7,18 @@ This skill controls **Orchestrator** (oh-my-opencode-slim) via the web API using
 1.  **Binary**: Use `opencode_skill` for all interactions. Ensure it is in your PATH (e.g., `~/bin/opencode_skill`).
 2.  **Session Initialization**: You **MUST** initialize a session with a target working directory before sending commands. The session remembers this directory, so you do not need to be in the project root when running subsequent commands.
 
+## Context Before Delegation
+
+> **Before sending any task to an external system, gather and share relevant context first.**
+
+External agents (opencode sessions) start with zero knowledge of your session. They depend entirely on what you tell them. Before delegating:
+
+1. **Gather context** — Use your available tools to understand the task (explore knowledge, read files, review prior results)
+2. **Share context in your prompt** — Include relevant findings, constraints, and background in the message you send
+3. **Check shared context directory** — If `shared_context_dir` is available (from your system prompt), reference it so the external system can read accumulated context
+
+**Why:** External agents perform significantly better with context. A 30-second context gathering step before delegation saves minutes of back-and-forth later.
+
 ## Usage
 
 ### 1. Initialize a Session
