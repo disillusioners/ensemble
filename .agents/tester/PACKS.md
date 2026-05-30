@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 79 packs
-- Unit: 64 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 80 packs
+- Unit: 65 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -49,6 +49,7 @@
 | memory_integration_test | tests/test_memory_integration.py | Integration: full lifecycle, compound requests, concurrent writes, RAG redirect, edge cases, regression | 2 min | 2026-05-19 | ✅ PASS (28 tests, feature/unified-memory-architecture) |
 | tree_traversal_unit_test | tests/unit/test_tree_traversal.py | Repository tree traversal: get_tree_root_id, get_tree_ids, get_ancestor_ids (real in-memory SQLite) | 2 min | 2026-05-28 | ✅ PASS (23/23, regression for resume-child-notification) |
 | tree_aware_cascade_unit_test | tests/unit/test_tree_aware_pause_resume.py | Cascade pause/resume: waiting_for semantics, full-tree behavior, router silent flag, edge cases | 2 min | 2026-05-28 | ✅ PASS (27/27, regression for resume-child-notification) |
+| explorer_auto_save_unit_test | tests/unit/test_explorer_auto_save.py | Explorer auto-save: _save_explorer_result (14 tests), append_context_key placeholder resolution (7 tests), integration (6 tests) | 2 min | 2026-05-30 | ✅ PASS (27/27, context-aware explorer auto-save, 0 regressions) |
 | memory_edge_cases_test | tests/unit/tools/test_memory_edge_cases.py | Edge cases: path traversal, symlinks, rate limiting, compaction boundaries, concurrent writes, collision, unicode | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
 | cn_tools_unit_test | tests/unit/tools/test_critical_notes.py | Critical Notes tools: add (validation, categories, priorities), merge (keyword overlap, shorter summary), eviction (priority order, max capacity), list, remove | 2 min | 2026-05-20 | ✅ PASS (36 tests, feature/critical-notes Phase 5) |
 | cn_injection_unit_test | tests/unit/test_critical_notes_injection.py | format_project_context injection: CN section formatting, priority icons, deduplication, non-dict skip, reference handling | 2 min | 2026-05-20 | ✅ PASS (14 tests, feature/critical-notes Phase 5) |

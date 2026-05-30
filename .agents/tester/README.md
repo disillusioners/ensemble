@@ -60,7 +60,15 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-30 instance_created-sse)
+## Test Results (Latest: 2026-05-30 explorer-auto-save)
+
+### Context-Aware Explorer Auto-Save Feature (2026-05-30)
+- **New Tests**: 27/27 PASS (`tests/unit/test_explorer_auto_save.py`)
+- **Regression**: 284 passed, 1 pre-existing failure, 0 regressions
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Coverage**: _save_explorer_result (14), placeholder resolution (7), integration (6)
+- **Source Modifications**: None — implementation was correct
+- **Status**: ✅ READY
 
 ### instance_created SSE Event Feature (2026-05-30)
 - **Backend**: 4931/4935 PASS (4 pre-existing failures, 0 regressions)

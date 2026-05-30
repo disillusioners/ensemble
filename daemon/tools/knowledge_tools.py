@@ -203,15 +203,18 @@ def _save_explorer_result(
 ) -> None:
     """Auto-save explorer result to shared context directory. Fire-and-forget."""
     try:
-        slug = re.sub(r'[^a-z0-9]+', '-', query.lower())[:80]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.now()
+        slug = re.sub(r'[^a-z0-9]+', '-', query.lower()).strip('-')[:80]
+        if not slug:
+            slug = "query"
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
         dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
         file_path = dir_path / f"{slug}_{timestamp}.md"
-        
+
         dir_path.mkdir(parents=True, exist_ok=True)
-        
-        iso_ts = datetime.now().isoformat()
-        
+
+        iso_ts = now.isoformat()
+
         content = (
             f"# Explorer Result: {query}\n"
             f"**Time**: {iso_ts}\n"
@@ -219,7 +222,7 @@ def _save_explorer_result(
             f"**Mode**: {mode}\n\n"
             f"{result}"
         )
-        
+
         file_path.write_text(content, encoding="utf-8")
     except Exception as e:
         logger.debug("Failed to save explorer result to shared context: %s", e)
