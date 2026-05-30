@@ -7,7 +7,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from langgraph.graph.state import CompiledStateGraph
 
@@ -33,6 +33,37 @@ logger = logging.getLogger(__name__)
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
+
+
+def append_context_key(
+    system_prompt: str,
+    instance_id: str,
+    instance_repository: "SQLModelInstanceRepository",
+    parent_id: Optional[str] = None,
+) -> str:
+    """Append the CONTEXT_KEY (root parent instance ID) to a system prompt.
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        instance_id: The instance ID to find the root for.
+        instance_repository: Repository for tree operations.
+        parent_id: Optional parent instance ID. If provided, finds root via parent.
+
+    Returns:
+        The system prompt with CONTEXT_KEY section appended.
+    """
+    # Determine root_id based on whether this is a root or child instance
+    if parent_id is None:
+        # This IS a root instance
+        root_id = instance_id
+    else:
+        # This is a child instance - find root via parent (which exists in DB)
+        root_id = instance_repository.get_tree_root_id(parent_id)
+        if root_id is None:
+            root_id = parent_id  # Fallback to parent_id if not found
+
+    context_section = f"\n---\n\n## Context Key\n\nCONTEXT_KEY: {root_id}\n"
+    return system_prompt + context_section
 
 
 class InstanceLifecycleService:
@@ -213,6 +244,9 @@ class InstanceLifecycleService:
         from ..manager import load_and_cache_prompt
         agent_path = Path(resolved_agent_dir)
         system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
+
+        # Append CONTEXT_KEY (root parent instance ID) to system prompt
+        system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
@@ -775,6 +809,9 @@ class InstanceLifecycleService:
         from ..manager import load_and_cache_prompt
         agent_path = Path(meta.agent_dir)
         system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, prompt_cache, mcp_tool_names)
+
+        # Append CONTEXT_KEY (root parent instance ID) to system prompt
+        system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
