@@ -5,6 +5,8 @@ Provides utilities for mapping external user identities to agent instances,
 validating input, and preventing duplicate message processing.
 """
 
+from __future__ import annotations
+
 import logging
 import re
 import uuid

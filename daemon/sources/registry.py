@@ -1,5 +1,7 @@
 """Source registry for managing message source adapters."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import random

@@ -1,5 +1,7 @@
 """Scheduler adapter for triggering agents on schedule."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import uuid

@@ -1,5 +1,7 @@
 """Base interfaces and dataclasses for pluggable message sources."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable, Tuple

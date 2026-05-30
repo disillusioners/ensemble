@@ -1,5 +1,7 @@
 """Thread manager for Slack channel threads with TTL and LRU eviction."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time

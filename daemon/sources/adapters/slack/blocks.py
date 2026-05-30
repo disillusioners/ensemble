@@ -1,5 +1,7 @@
 """Slack Block Kit utilities for formatting messages."""
 
+from __future__ import annotations
+
 import re
 from typing import Any
 

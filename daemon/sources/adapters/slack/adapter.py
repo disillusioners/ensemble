@@ -1,5 +1,7 @@
 """Slack adapter using Socket Mode for real-time messaging."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time

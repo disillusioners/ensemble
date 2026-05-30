@@ -1,5 +1,7 @@
 """Periodic cleanup for source-related database tables."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta

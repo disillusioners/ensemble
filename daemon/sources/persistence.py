@@ -2,6 +2,8 @@
 Database operations for source configs, instance mappings, and deduplication.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import sqlite3

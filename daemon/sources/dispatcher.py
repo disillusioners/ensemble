@@ -5,6 +5,8 @@ and routes responses to external sources (Telegram, Discord, etc.) using
 per-user ordering locks for guaranteed delivery ordering.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re

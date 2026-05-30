@@ -4,6 +4,8 @@ Implements both polling (for development) and webhook (for production)
 modes for receiving messages from Telegram.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import re
