@@ -260,7 +260,10 @@ class SourceRegistry:
         
         # Create callback wrapper that includes source_id
         async def on_message(msg):
-            priority = msg.metadata.get("priority", 1) if msg.metadata else 1
+            try:
+                priority = int(msg.metadata.get("priority", 1))
+            except (ValueError, TypeError):
+                priority = 1
             await self._handle_message(source_id, msg, priority=priority)
         
         # Create the appropriate adapter

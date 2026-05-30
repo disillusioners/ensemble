@@ -19,6 +19,7 @@ class IncomingMessage:
     """Normalized incoming message from any source."""
     external_user_id: str       # Telegram chat_id, webhook client_id
     content: str                # Message text/content
+    images: list[str] | None = None
     source_id: str              # Which source adapter this came from
     metadata: dict = field(default_factory=dict)
     message_type: str = "text"  # "text", "image", "command"
