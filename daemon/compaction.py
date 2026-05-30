@@ -42,6 +42,34 @@ from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_text_from_content(content: str | list) -> str:
+    """Extract text from message content, handling multimodal lists.
+    
+    Args:
+        content: Message content, either a string or a multimodal list
+                 (e.g., [{'type': 'text', 'text': '...'}, {'type': 'image_url', ...}]).
+    
+    Returns:
+        Extracted text string. For multimodal content, joins all text blocks.
+        Skips image_url blocks entirely.
+    """
+    if isinstance(content, str):
+        return content
+    
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type == "text":
+                    text_parts.append(block.get("text", ""))
+                # Skip image_url and other non-text blocks
+        return "".join(text_parts)
+    
+    return str(content) if content is not None else ""
+
+
 # Context window sizes for known models (in tokens)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # OpenAI models
@@ -331,8 +359,9 @@ def emergency_truncate(
     max_tool_response_chars: int = 2000,
     max_human_message_chars: int = 4000
 ) -> list[BaseMessage]:
-    """Emergency truncation with 3-pass approach to fit within token limit.
+    """Emergency truncation with 4-pass approach to fit within token limit.
     
+    Pass 0: Convert all multimodal content to clean strings
     Pass 1: Truncate tool responses to max_tool_response_chars
     Pass 2: Truncate human messages to max_human_message_chars
     Pass 3: Progressive halving of content > 500 chars until under limit
@@ -347,13 +376,23 @@ def emergency_truncate(
     Returns:
         Truncated list of messages (deep copied).
     """
-    # Pass 1: Deep copy and truncate tool responses
+    # Pass 0: Deep copy and convert all multimodal content to clean strings
     truncated = copy.deepcopy(messages)
     for msg in truncated:
+        if isinstance(msg.content, list):
+            msg.content = _extract_text_from_content(msg.content)
+    
+    if estimate_fn(truncated) <= max_tokens:
+        return truncated
+    
+    # Pass 1: Truncate tool responses
+    for msg in truncated:
         if getattr(msg, "type", "") == "tool":
-            content = msg.content or ""
+            content = _extract_text_from_content(msg.content)
             if len(content) > max_tool_response_chars:
                 msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
+            else:
+                msg.content = content  # Ensure string
     
     if estimate_fn(truncated) <= max_tokens:
         return truncated
@@ -361,16 +400,18 @@ def emergency_truncate(
     # Pass 2: Truncate human messages
     for msg in truncated:
         if getattr(msg, "type", "") == "human":
-            content = msg.content or ""
+            content = _extract_text_from_content(msg.content)
             if len(content) > max_human_message_chars:
                 msg.content = content[:max_human_message_chars] + "\n[...truncated]"
+            else:
+                msg.content = content  # Ensure string
     
     if estimate_fn(truncated) <= max_tokens:
         return truncated
     
     # Pass 3: Progressive halving of large content
     for msg in truncated:
-        content = msg.content or ""
+        content = _extract_text_from_content(msg.content)
         if len(content) > 500:
             while len(content) > 500 and estimate_fn(truncated) > max_tokens:
                 half_len = len(content) // 2
@@ -401,7 +442,8 @@ def _truncate_batch_to_fit(
 ) -> list[MessageGroup]:
     """Truncate a batch of groups to fit within token limit.
     
-    First truncates tool responses, then drops oldest groups if still over limit.
+    First converts all multimodal content to strings, then truncates tool responses,
+    then drops oldest groups if still over limit.
     
     Args:
         batch_groups: Groups to truncate.
@@ -412,7 +454,7 @@ def _truncate_batch_to_fit(
     Returns:
         Truncated list of groups (deep copied).
     """
-    # Deep copy groups
+    # Deep copy groups and convert all multimodal content to strings
     truncated_groups = []
     for group in batch_groups:
         group_copy = MessageGroup(
@@ -422,12 +464,16 @@ def _truncate_batch_to_fit(
             group_type=group.group_type
         )
         
-        # Truncate tool responses
+        # Convert all multimodal content to clean strings first
+        for msg in group_copy.messages:
+            if isinstance(msg.content, list):
+                msg.content = _extract_text_from_content(msg.content)
+        
+        # Truncate tool responses if over limit
         for msg in group_copy.messages:
             if getattr(msg, "type", "") == "tool":
-                content = msg.content or ""
-                if len(content) > max_tool_response_chars:
-                    msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
+                if len(msg.content) > max_tool_response_chars:
+                    msg.content = msg.content[:max_tool_response_chars] + "\n[...truncated]"
         
         truncated_groups.append(group_copy)
     
@@ -438,6 +484,7 @@ def _truncate_batch_to_fit(
         truncated_groups.pop(0)
     
     # W3: If single remaining group still exceeds max_tokens, truncate its messages
+    # At this point, all content is already converted to strings
     if len(truncated_groups) == 1 and tokenizer_fn(
         [msg for g in truncated_groups for msg in g.messages]
     ) > max_tokens:
@@ -445,7 +492,7 @@ def _truncate_batch_to_fit(
             content = getattr(msg, "content", "") or ""
             if len(content) > max_tool_response_chars:
                 msg.content = content[:max_tool_response_chars] + "\n[...truncated]"
-    
+
     return truncated_groups
 
 
@@ -702,10 +749,10 @@ class ContextCompactor:
         for group in batch_groups:
             for msg in group.messages:
                 msg_type = getattr(msg, "type", "unknown")
+                content = _extract_text_from_content(msg.content)
                 if msg_type == "human":
-                    conversation_parts.append(f"User: {msg.content}")
+                    conversation_parts.append(f"User: {content}")
                 elif msg_type == "ai":
-                    content = msg.content or ""
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
                         tool_names = []
                         for tc in msg.tool_calls:
@@ -718,10 +765,9 @@ class ContextCompactor:
                     conversation_parts.append(f"Assistant: {content}")
                 elif msg_type == "tool":
                     tool_name = getattr(msg, "name", "unknown")
-                    content = msg.content or ""
                     conversation_parts.append(f"Tool ({tool_name}): {content}")
                 else:
-                    conversation_parts.append(f"{msg_type}: {msg.content}")
+                    conversation_parts.append(f"{msg_type}: {content}")
         
         conversation_text = "\n".join(conversation_parts)
         
@@ -855,16 +901,7 @@ class ContextCompactor:
         )
         
         content = response.content
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    text_parts.append(block.get("text", ""))
-                else:
-                    text_parts.append(str(block))
-            return "\n".join(text_parts)
-        
-        return str(content)
+        return _extract_text_from_content(content)
     
     @staticmethod
     def _build_replacement_messages(
@@ -893,9 +930,13 @@ class ContextCompactor:
         # Add summary
         replacement.append(summary)
         
-        # Add preserved groups
+        # Add preserved groups with multimodal content converted to strings
         for group in preserved_groups:
-            replacement.extend(group.messages)
+            for msg in group.messages:
+                # Convert multimodal content to clean string
+                if isinstance(msg.content, list):
+                    msg.content = _extract_text_from_content(msg.content)
+                replacement.append(msg)
         
         return replacement
     
@@ -923,7 +964,11 @@ class ContextCompactor:
                     replacement.append(RemoveMessage(id=msg.id))
         
         for group in preserved:
-            replacement.extend(group.messages)
+            for msg in group.messages:
+                # Convert multimodal content to clean string
+                if isinstance(msg.content, list):
+                    msg.content = _extract_text_from_content(msg.content)
+                replacement.append(msg)
         
         return replacement, "truncation"
     

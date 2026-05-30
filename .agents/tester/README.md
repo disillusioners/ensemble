@@ -60,7 +60,16 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-30 explorer-auto-save)
+## Test Results (Latest: 2026-05-30 vision-always-on)
+
+### Vision Always-On + Compaction Multimodal Fix (2026-05-30)
+- **Branch**: `feature/vision-always-on`
+- **New Tests**: 43/43 PASS (13 vision routing + 30 compaction multimodal)
+- **Regression**: 142/142 affected tests, 0 regressions
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 1 (compaction incomplete multimodal conversion, commit `0244021`)
+- **Coverage**: Vision routing (13), compaction multimodal (30), _extract_text_from_content (11)
+- **Status**: ✅ READY
 
 ### Context-Aware Explorer Auto-Save Feature (2026-05-30)
 - **New Tests**: 27/27 PASS (`tests/unit/test_explorer_auto_save.py`)

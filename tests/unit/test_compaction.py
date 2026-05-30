@@ -22,11 +22,12 @@ from daemon.compaction import (
     CompactionResult,
     ContextCompactor,
     MessageGroup,
+    _extract_text_from_content,
+    _truncate_batch_to_fit,
     emergency_truncate,
     get_model_context_limit,
     identify_boundary_groups,
     select_compactable_groups,
-    _truncate_batch_to_fit,
 )
 from daemon.config import CompactionConfig as CompactionConfigModel
 from daemon.loader import estimate_messages_tokens
@@ -816,6 +817,72 @@ class TestCompactState:
         for msg in truncated_msgs:
             if hasattr(msg, "id") and msg.id:
                 assert msg.id.startswith("truncated-")
+
+
+class TestExtractTextFromContent:
+    """Tests for _extract_text_from_content function."""
+
+    def test_string_content_returns_as_is(self):
+        """Test that string content is returned unchanged."""
+        assert _extract_text_from_content("Hello world") == "Hello world"
+
+    def test_empty_list_returns_empty_string(self):
+        """Test that empty list returns empty string."""
+        assert _extract_text_from_content([]) == ""
+
+    def test_list_with_text_block_only(self):
+        """Test that list with text block returns the text."""
+        content = [{"type": "text", "text": "Hello"}]
+        assert _extract_text_from_content(content) == "Hello"
+
+    def test_list_with_image_url_only(self):
+        """Test that list with image_url block returns empty string."""
+        content = [{"type": "image_url", "image_url": {"url": "http://example.com/image.png"}}]
+        assert _extract_text_from_content(content) == ""
+
+    def test_list_with_mixed_text_and_image_url(self):
+        """Test that mixed list returns only text parts."""
+        content = [
+            {"type": "text", "text": "Hello "},
+            {"type": "image_url", "image_url": {"url": "http://example.com/image.png"}},
+            {"type": "text", "text": "World"},
+        ]
+        assert _extract_text_from_content(content) == "Hello World"
+
+    def test_none_returns_empty_string(self):
+        """Test that None returns empty string."""
+        assert _extract_text_from_content(None) == ""
+
+    def test_other_non_list_non_str_type(self):
+        """Test that non-list, non-str types are converted to string."""
+        assert _extract_text_from_content(123) == "123"
+        assert _extract_text_from_content({"key": "value"}) == "{'key': 'value'}"
+
+    def test_dict_block_missing_type_key(self):
+        """Test that dict block missing 'type' key is treated as non-text block (skipped)."""
+        content = [{"text": "hello"}]
+        result = _extract_text_from_content(content)
+        # No block has type="text" → empty string
+        assert result == ""
+
+    def test_dict_block_type_text_missing_text_key(self):
+        """Test that dict block with type='text' but missing 'text' key returns empty string."""
+        content = [{"type": "text"}]
+        result = _extract_text_from_content(content)
+        # block_type == "text" but no "text" key → block.get("text", "") returns ""
+        assert result == ""
+
+    def test_list_with_non_dict_items(self):
+        """Test that list containing non-dict items handles gracefully (skipped, no crash)."""
+        content = [None, "hello", 123]
+        result = _extract_text_from_content(content)
+        # Only dict blocks with type="text" are extracted; non-dict items are skipped
+        assert result == ""
+
+    def test_unicode_content_passthrough(self):
+        """Test that unicode content passes through unchanged."""
+        content = "Hello 🌍 🎉"
+        assert _extract_text_from_content(content) == "Hello 🌍 🎉"
 
 
 class TestCompactionRetrySkip:
