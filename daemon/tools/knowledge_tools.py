@@ -4,6 +4,9 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -191,6 +194,37 @@ async def _enqueue_experience_job(
         logger.warning("Failed to enqueue experiencer job: %s", e)
 
 
+def _save_explorer_result(
+    query: str,
+    result: str,
+    context_key: str,
+    project_name: str | None = None,
+    mode: str = "hybrid",
+) -> None:
+    """Auto-save explorer result to shared context directory. Fire-and-forget."""
+    try:
+        slug = re.sub(r'[^a-z0-9]+', '-', query.lower())[:80]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
+        file_path = dir_path / f"{slug}_{timestamp}.md"
+        
+        dir_path.mkdir(parents=True, exist_ok=True)
+        
+        iso_ts = datetime.now().isoformat()
+        
+        content = (
+            f"# Explorer Result: {query}\n"
+            f"**Time**: {iso_ts}\n"
+            f"**Project**: {project_name or 'unknown'}\n"
+            f"**Mode**: {mode}\n\n"
+            f"{result}"
+        )
+        
+        file_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.debug("Failed to save explorer result to shared context: %s", e)
+
+
 def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
     """Create knowledge management tools with injected manager reference.
 
@@ -288,6 +322,27 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
 
         # Strip the Need Update KB heading from the response before returning to caller
         result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
+
+        # Auto-save explorer result to shared context directory (fire-and-forget)
+        try:
+            root_id = manager._instance_repository.get_tree_root_id(current_instance_id)
+            context_key = root_id or current_instance_id or "default"
+            project_name = None
+            if pid and hasattr(manager, '_project_repository'):
+                try:
+                    proj = manager._project_repository.get(pid)
+                    project_name = proj.name if proj else None
+                except Exception:
+                    pass
+            _save_explorer_result(
+                query=query,
+                result=result,
+                context_key=context_key,
+                project_name=project_name,
+                mode=mode,
+            )
+        except Exception as e:
+            logger.debug("Failed to save explorer result to shared context: %s", e)
 
         return result
 
