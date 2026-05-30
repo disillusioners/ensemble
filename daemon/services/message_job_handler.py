@@ -26,17 +26,19 @@ class MessageJobHandler:
     - Calls _process_message_with_tracking() as-is (no modifications)
     """
 
-    def __init__(self, manager, job_queue_service, job_repository):
+    def __init__(self, manager, job_queue_service, job_repository, source_dispatcher=None):
         """Initialize the MessageJobHandler.
 
         Args:
             manager: InstanceManager facade with _process_message_with_tracking method.
             job_queue_service: JobQueueService for completing jobs.
             job_repository: JobRepository for DB queries.
+            source_dispatcher: Optional ResponseDispatcher for external routing.
         """
         self._manager = manager
         self._job_service = job_queue_service
         self._job_repo = job_repository
+        self._source_dispatcher = source_dispatcher
         self._active_tokens: dict[str, CancellationTokenSource] = {}  # job_id → CTS
 
     async def handle(self, job) -> None:
@@ -140,6 +142,39 @@ class MessageJobHandler:
                     logger.warning(
                         f"Failed to mark message {message_id} as completed: {e}"
                     )
+
+            # Dispatch completed message to external sources (Telegram, Discord, etc.)
+            # For internal messages (completion reports, etc.), use the original external source
+            dispatch_source = message_source
+            is_internal_report = (
+                message_source.startswith("internal_report:") or
+                message_source.startswith("internal_error_report:")
+            )
+            if is_internal_report:
+                # Retrieve original external source from instance metadata
+                instance_meta = await asyncio.to_thread(self._manager._instance_repository.get, instance_id)
+                # Use is not None check because empty dict {} is falsy
+                if instance_meta is not None and instance_meta.instance_metadata is not None:
+                    dispatch_source = instance_meta.instance_metadata.get("original_source")
+                if not dispatch_source:
+                    logger.debug(
+                        f"No original_source found for instance {instance_id[:8]}... "
+                        f"(message_source={message_source})"
+                    )
+                    dispatch_source = None  # Skip dispatch if no original source
+
+            if self._source_dispatcher and dispatch_source and result:
+                try:
+                    await self._source_dispatcher.dispatch_completed(
+                        instance_id=instance_id,
+                        message_id=message_id,
+                        source=dispatch_source,
+                        content=result.content or "",
+                        message_type="final",
+                    )
+                except Exception as e:
+                    logger.error(f"Error dispatching to external source: {e}", exc_info=True)
+                    # Don't fail the task - dispatch is best-effort
 
             # Check if this instance is a child that has completed all work.
             # This may create a completion report task for the parent.

@@ -93,6 +93,7 @@ class JobProcessor:
                 manager=self._instance_manager,
                 job_queue_service=self._queue_service,
                 job_repository=self._queue_service._repository,
+                source_dispatcher=self._instance_manager.source_dispatcher,
             )
             self._queue_service._message_job_handler = self._message_job_handler
     
