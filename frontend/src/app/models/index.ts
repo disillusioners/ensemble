@@ -124,7 +124,8 @@ export type SseEventType =
   | 'assistant_message'
   | 'thinking'
   | 'tool_call'
-  | 'status_change';
+  | 'status_change'
+  | 'instance_created';
 
 export interface SSEEvent {
   type: SseEventType;
