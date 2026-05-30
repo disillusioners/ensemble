@@ -778,11 +778,12 @@ class InstanceMessagingService:
                 instance_meta = self._manager._instance_repository.get(instance_id)
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     current = instance_meta.instance_metadata.get("original_source")
-                    if not current:
+                    if not current and not message_source.startswith("internal_"):
                         self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
                 else:
                     # Instance metadata doesn't exist yet, set it directly
-                    self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                    if not message_source.startswith("internal_"):
+                        self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
         
         # Project context injection for first message only
         if not is_retry:
