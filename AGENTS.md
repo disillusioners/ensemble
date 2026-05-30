@@ -166,6 +166,7 @@ persistence:
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...   # Optional
 LOG_LEVEL=INFO
+LOG_LEVEL_DAEMON=DEBUG
 ```
 
 ---

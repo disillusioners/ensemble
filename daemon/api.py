@@ -17,6 +17,7 @@ import time
 import logging
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
@@ -25,15 +26,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import AsyncGenerator
 from pathlib import Path
 
-# Configure logging for daemon modules
-# This ensures our logs are visible when running via uvicorn
+_LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
+_daemon_log_level = os.environ.get("LOG_LEVEL_DAEMON", "info").upper()
+_root_log_level = getattr(logging, _LOG_LEVEL, logging.INFO)
+_daemon_log_level = getattr(logging, _daemon_log_level, logging.INFO)
+
+# Root logger: level set by LOG_LEVEL (libs like http, sql stay at info unless overridden)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_root_log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
 
-# Suppress uvicorn INFO-level access logs (our SelectiveAccessLogMiddleware handles selective logging)
+# Daemon logger hierarchy: respects LOG_LEVEL_DAEMON for our app logs
+daemon_logger = logging.getLogger("daemon")
+daemon_logger.setLevel(_daemon_log_level)
+
+# Suppress uvicorn access logs by default (our SelectiveAccessLogMiddleware handles selective logging)
 uvicorn_access = logging.getLogger("uvicorn.access")
 uvicorn_access.setLevel(logging.WARNING)
 

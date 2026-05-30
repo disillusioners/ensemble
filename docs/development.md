@@ -445,7 +445,8 @@ make stop    # Kill process on port 8088
 | `DATA_DIR` | `./data_dev` (dev) | Database directory |
 | `PERSISTENCE_DB_PATH` | `$DATA_DIR/instances.db` | Instance database path |
 | `PERSISTENCE_CHECKPOINTER_DB_PATH` | `$DATA_DIR/checkpoints.db` | Checkpoint database path |
-| `LOG_LEVEL` | `info` | Logging level (debug, info, warning, error) |
+| `LOG_LEVEL` | `info` | Logging level for third-party libs (debug, info, warning, error) |
+| `LOG_LEVEL_DAEMON` | `info` | Logging level for daemon modules (debug, info, warning, error) |
 | `USE_WORKER_POOL` | `true` | Enable/disable worker pool |
 
 ### MCP Configuration
@@ -461,7 +462,7 @@ make stop    # Kill process on port 8088
 ### Running with Debug Logging
 
 ```bash
-LOG_LEVEL=debug ./dev.sh
+LOG_LEVEL=info LOG_LEVEL_DAEMON=debug ./dev.sh
 ```
 
 ### Checking API Documentation
