@@ -101,6 +101,14 @@ install: pyinstaller
 		sleep 1; \
 	} || echo "$(GREEN)Port $(PROD_PORT) is available.$(NC)"
 	
+	# Clean up old backups (keep only 2 most recent)
+	@echo "$(YELLOW)Cleaning up old backups...$(NC)"; \
+	cd $(INSTALL_DIR) && { \
+		ls -dt backup-$(BINARY_NAME)-*.bak 2>/dev/null | tail -n +3 | xargs rm -f 2>/dev/null || true; \
+		ls -dt data-backup/data-* 2>/dev/null | tail -n +3 | xargs rm -rf 2>/dev/null || true; \
+	}; \
+	echo "$(GREEN)Cleanup complete.$(NC)"
+	
 	# Backup existing binary if present
 	@if [ -f "$(INSTALL_DIR)/$(BINARY_NAME)" ]; then \
 		echo "$(YELLOW)Backing up existing $(BINARY_NAME)...$(NC)"; \
