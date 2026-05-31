@@ -1,8 +1,8 @@
-"""Tests for paused instance TTL functionality.
+"""Tests for instance cache TTL functionality.
 
-Tests the TTL-based release of in-memory graphs for paused instances, including:
-- release_paused_instance() behavior
-- _cleanup_paused_instances() background task
+Tests the TTL-based release of in-memory graphs for cached instances, including:
+- _release_cached_instance() behavior
+- _cleanup_cached_instances() background task
 - Hot vs cold resume scenarios
 """
 
@@ -14,12 +14,12 @@ from datetime import datetime, timedelta
 from daemon.cancellation import CancellationReason
 
 
-class TestReleasePausedInstance:
-    """Tests for release_paused_instance() method."""
+class TestReleaseCachedInstance:
+    """Tests for _release_cached_instance() method."""
 
     @pytest.fixture
     def mock_manager(self):
-        """Create a mock manager for testing release_paused_instance."""
+        """Create a mock manager for testing _release_cached_instance."""
         manager = MagicMock()
         manager.instances = {}  # Maps instance_id -> (graph, agent_dir)
         manager._graph_tasks = {}  # Maps instance_id -> asyncio.Task
@@ -27,13 +27,13 @@ class TestReleasePausedInstance:
         manager._request_registry.cancel_by_instance = MagicMock(return_value=0)
         return manager
 
-    def _call_release_paused_instance(self, manager, instance_id):
-        """Import and call release_paused_instance directly."""
+    def _call_release_cached_instance(self, manager, instance_id):
+        """Import and call _release_cached_instance directly."""
         from daemon.manager import InstanceManager
-        return InstanceManager.release_paused_instance(manager, instance_id)
+        return InstanceManager._release_cached_instance(manager, instance_id)
 
-    def test_release_paused_instance_removes_from_memory(self, mock_manager):
-        """Verify that release_paused_instance() removes the instance from self.instances dict."""
+    def test_release_cached_instance_removes_from_memory(self, mock_manager):
+        """Verify that _release_cached_instance() removes the instance from self.instances dict."""
         instance_id = "test-instance-123"
         mock_graph = MagicMock()
         mock_agent_dir = "/agents/test"
@@ -43,12 +43,12 @@ class TestReleasePausedInstance:
         assert instance_id in mock_manager.instances
         
         # Call release
-        self._call_release_paused_instance(mock_manager, instance_id)
+        self._call_release_cached_instance(mock_manager, instance_id)
         
         # Post-condition: instance removed from memory
         assert instance_id not in mock_manager.instances
 
-    def test_release_paused_instance_cancels_graph_task(self, mock_manager):
+    def test_release_cached_instance_cancels_graph_task(self, mock_manager):
         """Verify lingering graph task is cancelled."""
         instance_id = "test-instance-123"
         
@@ -58,13 +58,13 @@ class TestReleasePausedInstance:
         mock_manager._graph_tasks[instance_id] = mock_task
         
         # Call release
-        self._call_release_paused_instance(mock_manager, instance_id)
+        self._call_release_cached_instance(mock_manager, instance_id)
         
         # Verify task was cancelled and removed
         mock_task.cancel.assert_called_once()
         assert instance_id not in mock_manager._graph_tasks
 
-    def test_release_paused_instance_idempotent(self, mock_manager):
+    def test_release_cached_instance_idempotent(self, mock_manager):
         """Calling on already-released instance should not error."""
         instance_id = "test-instance-123"
         
@@ -72,14 +72,14 @@ class TestReleasePausedInstance:
         assert instance_id not in mock_manager.instances
         
         # Should not raise any exception
-        self._call_release_paused_instance(mock_manager, instance_id)
+        self._call_release_cached_instance(mock_manager, instance_id)
 
-    def test_release_paused_instance_cancels_requests(self, mock_manager):
+    def test_release_cached_instance_cancels_requests(self, mock_manager):
         """Verify request registry cancel is called with correct reason."""
         instance_id = "test-instance-123"
         
         # Call release
-        self._call_release_paused_instance(mock_manager, instance_id)
+        self._call_release_cached_instance(mock_manager, instance_id)
         
         # Verify cancel_by_instance was called with SESSION_TERMINATED
         mock_manager._request_registry.cancel_by_instance.assert_called_once_with(
@@ -87,7 +87,7 @@ class TestReleasePausedInstance:
             CancellationReason.SESSION_TERMINATED
         )
 
-    def test_release_paused_instance_skips_done_task(self, mock_manager):
+    def test_release_cached_instance_skips_done_task(self, mock_manager):
         """Verify that already-done tasks are not cancelled."""
         instance_id = "test-instance-123"
         
@@ -97,7 +97,7 @@ class TestReleasePausedInstance:
         mock_manager._graph_tasks[instance_id] = mock_task
         
         # Call release
-        self._call_release_paused_instance(mock_manager, instance_id)
+        self._call_release_cached_instance(mock_manager, instance_id)
         
         # Task should NOT be cancelled (it's already done)
         mock_task.cancel.assert_not_called()
@@ -105,8 +105,8 @@ class TestReleasePausedInstance:
         assert instance_id not in mock_manager._graph_tasks
 
 
-class TestCleanupPausedInstances:
-    """Tests for _cleanup_paused_instances() background task."""
+class TestCleanupCachedInstances:
+    """Tests for _cleanup_cached_instances() background task."""
 
     @pytest.fixture
     def mock_manager(self):
@@ -120,44 +120,45 @@ class TestCleanupPausedInstances:
         manager._instance_repository = MagicMock()
         return manager
 
-    def _make_paused_instance(self, instance_id: str, updated_at: str | None) -> MagicMock:
-        """Create a mock paused instance with specified updated_at."""
+    def _make_cached_instance(self, instance_id: str, updated_at: str | None, status: str = "paused", paused_at: str | None = None) -> MagicMock:
+        """Create a mock cached instance with specified timestamps."""
         instance = MagicMock()
         instance.instance_id = instance_id
         instance.updated_at = updated_at
-        instance.status = "paused"
+        instance.paused_at = paused_at
+        instance.status = status
         return instance
 
     @pytest.mark.asyncio
     async def test_cleanup_calculates_expired_instances_correctly(self, mock_manager):
         """Verify cleanup correctly identifies expired instances by time comparison."""
-        from daemon.manager import InstanceManager, PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import InstanceManager, INSTANCE_CACHE_TTL_HOURS
         
         # This test verifies the core TTL calculation logic works correctly
         # by directly testing the datetime comparison that drives the cleanup
         
         instance_id = "test-instance"
-        ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
+        ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         
-        # Case 1: Instance paused just under TTL - should NOT be released
+        # Case 1: Instance cached just under TTL - should NOT be released
         almost_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 1)).isoformat()
-        almost_expired_instance = self._make_paused_instance(instance_id, almost_expired_time)
-        paused_at = datetime.fromisoformat(almost_expired_instance.updated_at)
-        diff_under_ttl = (datetime.utcnow() - paused_at).total_seconds()
+        almost_expired_instance = self._make_cached_instance(instance_id, almost_expired_time)
+        cached_at = datetime.fromisoformat(almost_expired_instance.updated_at)
+        diff_under_ttl = (datetime.utcnow() - cached_at).total_seconds()
         assert diff_under_ttl < ttl_seconds, "Instance under TTL should have diff < ttl"
         
-        # Case 2: Instance paused just over TTL - SHOULD be released
+        # Case 2: Instance cached just over TTL - SHOULD be released
         just_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 1)).isoformat()
-        just_expired_instance = self._make_paused_instance(instance_id, just_expired_time)
-        paused_at = datetime.fromisoformat(just_expired_instance.updated_at)
-        diff_over_ttl = (datetime.utcnow() - paused_at).total_seconds()
+        just_expired_instance = self._make_cached_instance(instance_id, just_expired_time)
+        cached_at = datetime.fromisoformat(just_expired_instance.updated_at)
+        diff_over_ttl = (datetime.utcnow() - cached_at).total_seconds()
         assert diff_over_ttl > ttl_seconds, "Instance over TTL should have diff > ttl"
         
-        # Case 3: Instance paused well over TTL - SHOULD be released
-        long_expired_time = (datetime.utcnow() - timedelta(minutes=60)).isoformat()
-        long_expired_instance = self._make_paused_instance(instance_id, long_expired_time)
-        paused_at = datetime.fromisoformat(long_expired_instance.updated_at)
-        diff_long_expired = (datetime.utcnow() - paused_at).total_seconds()
+        # Case 3: Instance cached well over TTL - SHOULD be released
+        long_expired_time = (datetime.utcnow() - timedelta(hours=10)).isoformat()
+        long_expired_instance = self._make_cached_instance(instance_id, long_expired_time)
+        cached_at = datetime.fromisoformat(long_expired_instance.updated_at)
+        diff_long_expired = (datetime.utcnow() - cached_at).total_seconds()
         assert diff_long_expired > ttl_seconds, "Long expired instance should have diff > ttl"
 
     @pytest.mark.asyncio
@@ -165,58 +166,58 @@ class TestCleanupPausedInstances:
         """Verify cleanup correctly identifies and releases expired instances.
         
         This test verifies the core cleanup loop logic: expired instances
-        (paused > TTL ago) should be identified for release.
+        (cached > TTL ago) should be identified for release.
         We verify this by checking the time comparison logic.
         """
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
+        ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         instance_id = "expired-instance"
         
-        # Create instance that was paused >TTL ago
+        # Create instance that was cached >TTL ago
         expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).isoformat()
-        mock_instance = self._make_paused_instance(instance_id, expired_time)
+        mock_instance = self._make_cached_instance(instance_id, expired_time)
         
         # Verify the instance would be considered expired
-        paused_at = datetime.fromisoformat(mock_instance.updated_at)
-        diff = (datetime.utcnow() - paused_at).total_seconds()
+        cached_at = datetime.fromisoformat(mock_instance.updated_at)
+        diff = (datetime.utcnow() - cached_at).total_seconds()
         assert diff > ttl_seconds, "Instance should be considered expired"
         
         # The cleanup loop should identify this instance as needing release
 
     @pytest.mark.asyncio
     async def test_cleanup_skips_recent_paused_instances(self, mock_manager):
-        """Verify instances paused <30 min are NOT released."""
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        """Verify instances cached <4h are NOT released."""
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
+        ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         instance_id = "recent-instance"
         
         # Create instance that's in memory
         mock_graph = MagicMock()
         mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
         
-        # Create paused instance that was paused only 10 minutes ago
+        # Create cached instance that was updated only 10 minutes ago
         recent_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 600)).isoformat()
-        mock_instance = self._make_paused_instance(instance_id, recent_time)
+        mock_instance = self._make_cached_instance(instance_id, recent_time)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
         # Verify the instance would NOT be considered expired
-        paused_at = datetime.fromisoformat(mock_instance.updated_at)
-        diff = (datetime.utcnow() - paused_at).total_seconds()
+        cached_at = datetime.fromisoformat(mock_instance.updated_at)
+        diff = (datetime.utcnow() - cached_at).total_seconds()
         assert diff < ttl_seconds, "Instance should NOT be considered expired"
         
         # Run cleanup once - instance should remain in memory
         mock_manager._shutting_down = True
         from daemon.manager import InstanceManager
-        await InstanceManager._cleanup_paused_instances(mock_manager)
+        await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # Verify instance was NOT released (still in memory)
         assert instance_id in mock_manager.instances
 
     @pytest.mark.asyncio
     async def test_cleanup_skips_recent_paused_instances_with_explicit_time(self, mock_manager):
-        """Verify instances paused <30 min are NOT released using explicit time."""
+        """Verify instances cached <4h are NOT released using explicit time."""
         from daemon.manager import InstanceManager
         
         instance_id = "recent-instance"
@@ -225,21 +226,21 @@ class TestCleanupPausedInstances:
         mock_graph = MagicMock()
         mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
         
-        # Create paused instance that was paused only 10 minutes ago
+        # Create cached instance that was updated only 10 minutes ago
         recent_time = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
-        mock_instance = self._make_paused_instance(instance_id, recent_time)
+        mock_instance = self._make_cached_instance(instance_id, recent_time)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
         # Run cleanup once
         mock_manager._shutting_down = True
-        await InstanceManager._cleanup_paused_instances(mock_manager)
+        await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # Verify instance was NOT released (still in memory)
         assert instance_id in mock_manager.instances
 
     @pytest.mark.asyncio
     async def test_cleanup_skips_instances_not_in_memory(self, mock_manager):
-        """Paused instances without in-memory graph are skipped."""
+        """Cached instances without in-memory graph are skipped."""
         from daemon.manager import InstanceManager
         
         instance_id = "not-in-memory-instance"
@@ -247,14 +248,14 @@ class TestCleanupPausedInstances:
         # Instance is NOT in memory (already cleaned up or never loaded)
         assert instance_id not in mock_manager.instances
         
-        # Create paused instance that was paused 31 minutes ago
-        expired_time = (datetime.utcnow() - timedelta(minutes=31)).isoformat()
-        mock_instance = self._make_paused_instance(instance_id, expired_time)
+        # Create cached instance that was updated 5 hours ago
+        expired_time = (datetime.utcnow() - timedelta(hours=5)).isoformat()
+        mock_instance = self._make_cached_instance(instance_id, expired_time)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
         # Run cleanup once
         mock_manager._shutting_down = True
-        await InstanceManager._cleanup_paused_instances(mock_manager)
+        await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # No crash - instances not in memory are skipped
 
@@ -264,13 +265,13 @@ class TestCleanupPausedInstances:
         from daemon.manager import InstanceManager
         
         # Create multiple instances with various invalid updated_at values
-        valid_instance = self._make_paused_instance(
+        valid_instance = self._make_cached_instance(
             "valid-instance",
-            (datetime.utcnow() - timedelta(minutes=31)).isoformat()
+            (datetime.utcnow() - timedelta(hours=5)).isoformat()
         )
-        none_instance = self._make_paused_instance("none-instance", None)
-        empty_instance = self._make_paused_instance("empty-instance", "")
-        invalid_instance = self._make_paused_instance("invalid-instance", "not-a-date")
+        none_instance = self._make_cached_instance("none-instance", None)
+        empty_instance = self._make_cached_instance("empty-instance", "")
+        invalid_instance = self._make_cached_instance("invalid-instance", "not-a-date")
         
         # Only the valid instance is in memory
         mock_manager.instances["valid-instance"] = (MagicMock(), "/agents/test")
@@ -283,7 +284,7 @@ class TestCleanupPausedInstances:
         # Run cleanup once
         mock_manager._shutting_down = True
         # Should not raise any exception
-        await InstanceManager._cleanup_paused_instances(mock_manager)
+        await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # Only valid instance should have been processed
         assert "valid-instance" in mock_manager.instances  # Still there (within TTL check passes)
@@ -296,18 +297,18 @@ class TestCleanupPausedInstances:
         
         We verify the time comparison logic works correctly for different ages.
         """
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        ttl_seconds = PAUSED_INSTANCE_TTL_MINUTES * 60
+        ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         
-        # Create instances with different pause times
+        # Create instances with different update times
         expired_time1 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 300)).isoformat()
         expired_time2 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 600)).isoformat()
-        recent_time = (datetime.utcnow() - timedelta(seconds=300)).isoformat()
+        recent_time = (datetime.utcnow() - timedelta(minutes=30)).isoformat()
         
-        instance1 = self._make_paused_instance("expired-1", expired_time1)
-        instance2 = self._make_paused_instance("expired-2", expired_time2)
-        recent_instance = self._make_paused_instance("recent", recent_time)
+        instance1 = self._make_cached_instance("expired-1", expired_time1)
+        instance2 = self._make_cached_instance("expired-2", expired_time2)
+        recent_instance = self._make_cached_instance("recent", recent_time)
         
         # Verify time comparisons
         diff1 = (datetime.utcnow() - datetime.fromisoformat(expired_time1)).total_seconds()
@@ -320,14 +321,14 @@ class TestCleanupPausedInstances:
 
     @pytest.mark.asyncio
     async def test_cleanup_handles_empty_list(self, mock_manager):
-        """Verify cleanup handles empty paused instances list gracefully."""
+        """Verify cleanup handles empty instances list gracefully."""
         from daemon.manager import InstanceManager
         
         mock_manager._instance_repository.list.return_value = ([], 0)
         
         # Run cleanup once
         mock_manager._shutting_down = True
-        await InstanceManager._cleanup_paused_instances(mock_manager)
+        await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # No crash - just empty iteration
 
@@ -339,31 +340,31 @@ class TestHotColdResume:
         """Pausing and quickly resuming uses in-memory graph."""
         # This tests the conceptual behavior - within TTL the graph
         # should remain in memory for fast hot resume
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        # TTL should be 30 minutes
-        assert PAUSED_INSTANCE_TTL_MINUTES == 30
+        # TTL should be 4 hours
+        assert INSTANCE_CACHE_TTL_HOURS == 4
 
     def test_cold_resume_after_ttl_concept(self):
         """After TTL release, resuming the instance works (graph rebuilt from checkpoint)."""
         # This is a conceptual test - the actual cold resume behavior
         # involves the checkpointer and is tested elsewhere.
         # We verify the TTL constant is defined correctly.
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        assert PAUSED_INSTANCE_TTL_MINUTES == 30
+        assert INSTANCE_CACHE_TTL_HOURS == 4
 
 
 class TestTTLConstants:
     """Tests for TTL-related constants."""
 
-    def test_paused_instance_ttl_minutes(self):
+    def test_instance_cache_ttl_hours(self):
         """Verify TTL constant is defined and reasonable."""
-        from daemon.manager import PAUSED_INSTANCE_TTL_MINUTES
+        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        assert PAUSED_INSTANCE_TTL_MINUTES == 30
-        assert PAUSED_INSTANCE_TTL_MINUTES > 0
-        assert PAUSED_INSTANCE_TTL_MINUTES < 1440  # Less than 24 hours
+        assert INSTANCE_CACHE_TTL_HOURS == 4
+        assert INSTANCE_CACHE_TTL_HOURS > 0
+        assert INSTANCE_CACHE_TTL_HOURS < 168  # Less than 1 week
 
 
 class TestColdResume:
@@ -419,10 +420,10 @@ class TestColdResume:
 
         return manager
 
-    def _call_release_paused_instance(self, manager, instance_id):
-        """Import and call release_paused_instance directly."""
+    def _call_release_cached_instance(self, manager, instance_id):
+        """Import and call _release_cached_instance directly."""
         from daemon.manager import InstanceManager
-        return InstanceManager.release_paused_instance(manager, instance_id)
+        return InstanceManager._release_cached_instance(manager, instance_id)
 
     @pytest.mark.asyncio
     async def test_cold_resume_flow_end_to_end(self, mock_manager):
@@ -430,7 +431,7 @@ class TestColdResume:
 
         This test verifies the complete flow:
         1. Instance exists in memory (hot path)
-        2. release_paused_instance() removes it from memory
+        2. _release_cached_instance() removes it from memory
         3. get_instance() triggers cold resume (restores from checkpoint)
         4. Instance is back in memory
         """
@@ -451,8 +452,8 @@ class TestColdResume:
         mock_instance_meta.paused_at = "2024-01-01T00:00:00"
         mock_manager._instance_repository.get.return_value = mock_instance_meta
 
-        # Step 3: Call release_paused_instance to remove from memory
-        self._call_release_paused_instance(mock_manager, instance_id)
+        # Step 3: Call _release_cached_instance to remove from memory
+        self._call_release_cached_instance(mock_manager, instance_id)
 
         # Step 4: Verify instance is NO LONGER in memory
         assert instance_id not in mock_manager.instances
