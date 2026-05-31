@@ -1201,42 +1201,31 @@ class TestSlackAdapterNewCommand:
     """Tests for _handle_new_command method."""
 
     @pytest.mark.asyncio
-    async def test_new_command_calls_ack_sync(self, mock_slack_adapter):
-        """ack() should be called synchronously (not awaited)."""
-        ack_mock = MagicMock()
+    async def test_new_command_awaits_ack(self, mock_slack_adapter):
+        """ack() should be awaited in async slack-bolt."""
+        ack_mock = AsyncMock()
 
-        # Create valid event
         body = {
-            "event": {
-                "channel": "C123456",
-                "channel_type": "channel",
-                "user": "U654321",
-                "text": "/new start a task",
-                "ts": "1234567890.123456",
-            }
+            "user_id": "U654321",
+            "channel_id": "C123456",
+            "team_id": "T111111",
+            "text": "/new start a task",
+            "user_name": "alice",
         }
 
-        # Call the handler
         await mock_slack_adapter._handle_new_command(ack_mock, body, None)
 
-        # Verify ack was called (not awaited)
-        ack_mock.assert_called_once()
+        ack_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_new_command_validates_message(self, mock_slack_adapter):
-        """Should validate message via _is_valid_message."""
-        ack_mock = MagicMock()
+    async def test_new_command_missing_user_id(self, mock_slack_adapter):
+        """Should return early if user_id is missing."""
+        ack_mock = AsyncMock()
 
-        # Create a bot message (should be rejected)
         body = {
-            "event": {
-                "channel": "C123456",
-                "channel_type": "channel",
-                "user": "U654321",
-                "text": "/new task",
-                "ts": "1234567890.123456",
-                "bot_id": "B123456",  # Bot message - should be rejected
-            }
+            "channel_id": "C123456",
+            "team_id": "T111111",
+            "text": "/new task",
         }
 
         emit_called = []
@@ -1248,24 +1237,18 @@ class TestSlackAdapterNewCommand:
 
         await mock_slack_adapter._handle_new_command(ack_mock, body, None)
 
-        # ack should still be called
-        ack_mock.assert_called_once()
-        # emit should NOT be called for invalid message
+        ack_mock.assert_awaited_once()
         assert len(emit_called) == 0
 
     @pytest.mark.asyncio
-    async def test_new_command_emits_with_force_new_instance(self, mock_slack_adapter):
-        """Emitted message should have force_new_instance metadata."""
-        ack_mock = MagicMock()
+    async def test_new_command_missing_channel_id(self, mock_slack_adapter):
+        """Should return early if channel_id is missing."""
+        ack_mock = AsyncMock()
 
         body = {
-            "event": {
-                "channel": "C123456",
-                "channel_type": "channel",
-                "user": "U654321",
-                "text": "/new start a new task",
-                "ts": "1234567890.123456",
-            }
+            "user_id": "U654321",
+            "team_id": "T111111",
+            "text": "/new task",
         }
 
         emit_called = []
@@ -1277,10 +1260,69 @@ class TestSlackAdapterNewCommand:
 
         await mock_slack_adapter._handle_new_command(ack_mock, body, None)
 
-        ack_mock.assert_called_once()
+        ack_mock.assert_awaited_once()
+        assert len(emit_called) == 0
+
+    @pytest.mark.asyncio
+    async def test_new_command_emits_with_correct_fields(self, mock_slack_adapter):
+        """Emitted message should have correct fields and metadata."""
+        ack_mock = AsyncMock()
+
+        body = {
+            "user_id": "U654321",
+            "channel_id": "C123456",
+            "team_id": "T111111",
+            "text": "/new start a new task",
+            "user_name": "alice",
+        }
+
+        emit_called = []
+
+        async def capture_emit(msg):
+            emit_called.append(msg)
+
+        mock_slack_adapter._emit_message = capture_emit
+
+        await mock_slack_adapter._handle_new_command(ack_mock, body, None)
+
+        ack_mock.assert_awaited_once()
         assert len(emit_called) == 1
-        assert emit_called[0].metadata.get("force_new_instance") is True
-        assert emit_called[0].metadata.get("command") == "/new"
+
+        msg = emit_called[0]
+        assert msg.content == "/new start a new task"
+        assert msg.message_type == "command"
+        assert msg.external_user_id == "T111111:C123456"
+        assert msg.metadata.get("force_new_instance") is True
+        assert msg.metadata.get("command") == "/new"
+        assert msg.metadata["slack"]["channel_id"] == "C123456"
+        assert msg.metadata["slack"]["workspace_id"] == "T111111"
+        assert msg.metadata["slack"]["user_id"] == "U654321"
+        assert msg.metadata["slack"]["user_name"] == "alice"
+
+    @pytest.mark.asyncio
+    async def test_new_command_empty_text_defaults_to_slash(self, mock_slack_adapter):
+        """When text is empty, content should default to '/new'."""
+        ack_mock = AsyncMock()
+
+        body = {
+            "user_id": "U654321",
+            "channel_id": "C123456",
+            "team_id": "T111111",
+            "text": "",
+            "user_name": "bob",
+        }
+
+        emit_called = []
+
+        async def capture_emit(msg):
+            emit_called.append(msg)
+
+        mock_slack_adapter._emit_message = capture_emit
+
+        await mock_slack_adapter._handle_new_command(ack_mock, body, None)
+
+        assert len(emit_called) == 1
+        assert emit_called[0].content == "/new"
 
 
 # ==================== DM Cache Tests ====================

@@ -746,27 +746,42 @@ class SlackAdapter(MessageSourceAdapter):
         """Handle /new slash command.
 
         Args:
-            ack: Acknowledge function (sync in slack-bolt - must not be awaited).
-            body: Command payload.
+            ack: Acknowledge function (AsyncAck in slack-bolt - must be awaited).
+            body: Command payload (flat structure, no 'event' key).
             client: Slack client instance.
         """
-        ack()  # Sync call - do not await
+        await ack()
 
-        # Extract event from body
-        event = body.get("event", {})
+        user_id = body.get("user_id", "")
+        channel_id = body.get("channel_id", "")
+        team_id = body.get("team_id", "")
+        text = body.get("text", "")
 
-        if not self._is_valid_message(event):
+        if not user_id or not channel_id:
+            logger.warning("Slash command missing user_id or channel_id")
             return
 
-        # Process and emit
-        incoming = await self._process_event(event)
+        external_user_id = f"{team_id}:{channel_id}"
 
-        if incoming:
-            # Add force_new_instance to metadata
-            incoming.metadata["force_new_instance"] = True
-            incoming.metadata["command"] = "/new"
+        incoming = IncomingMessage(
+            source_id=self.source_id,
+            external_user_id=external_user_id,
+            content=text or "/new",
+            message_type="command",
+            metadata={
+                "slack": {
+                    "channel_id": channel_id,
+                    "workspace_id": team_id,
+                    "channel_type": "command",
+                    "user_id": user_id,
+                    "user_name": body.get("user_name", ""),
+                },
+                "force_new_instance": True,
+                "command": "/new",
+            },
+        )
 
-            await self._emit_message(incoming)
+        await self._emit_message(incoming)
 
     async def _resolve_dm_channel(self, user_id: str) -> str | None:
         """Resolve DM channel ID for a user, with caching.
