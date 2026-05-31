@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-31 maintenance-checkpoint-cleanup)
+## Test Results (Latest: 2026-05-31 context-auto-inject)
+
+### Explorer Context Auto-Injection Feature (2026-05-31)
+- **Branch**: `feature/context-auto-inject`
+- **Unit Tests**: 50/50 PASS (context_injection service: tokenization, scoring, parsing, formatting, public API)
+- **Integration Tests**: 7/7 PASS (explore() wiring: injection, fallback, non-blocking, thread pool)
+- **Smoke Test**: PASS (get_shared_context() direct call with temp context dir)
+- **Regression**: 4,715/4,724 PASS, 9 pre-existing failures, 34 skipped, **0 regressions**
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 0 (none needed)
+- **Files Changed**: `daemon/services/context_injection.py` (new), `daemon/tools/knowledge_tools.py` (modified), agent markdown files (modified)
+- **Status**: ✅ READY
 
 ### MaintenanceService + CheckpointCleanup Feature (2026-05-31)
 - **Branch**: `feature/checkpoint-cleanup`
