@@ -186,7 +186,7 @@ class TestIntegration:
         result = subprocess.run(
             [".venv/bin/python", "-m", "pytest", 
              "tests/test_manager.py::TestSpawnInstance::test_spawn_instance_generates_id",
-             "tests/test_manager.py::TestSpawnInstance::test_spawn_instance_max_instances_limit",
+             "tests/test_manager.py::TestSpawnInstance::test_spawn_instance_max_children_limit",
              "tests/test_manager.py::TestSpawnInstance::test_spawn_instance_creates_graph",
              "-v", "--tb=short"],
             capture_output=True,
