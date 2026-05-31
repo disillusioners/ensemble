@@ -224,7 +224,8 @@ class InstanceLifecycleService:
         prompt_cache = self._manager.prompt_cache
         
         # Check max_children_per_instance limit if parent_id is provided (root instances skip the check)
-        if parent_id is not None:
+        # Use truthy check to handle both None and empty string cases
+        if parent_id:
             child_count = instance_repository.count_children(parent_id)
             if child_count >= self._config.limits.max_children_per_instance:
                 raise ValueError(

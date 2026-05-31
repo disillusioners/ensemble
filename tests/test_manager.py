@@ -68,7 +68,6 @@ def mock_config():
             temperature=0.7
         ),
         limits=LimitsConfig(
-            max_instances=5,
             max_children_per_instance=3,
             instance_timeout_minutes=60,
             message_rate_limit=60

@@ -277,7 +277,6 @@ daemon:
   port: 8079
 
 limits:
-  max_instances: 100
   max_children_per_instance: 50
   instance_timeout_minutes: 60
   message_rate_limit: 60
@@ -308,7 +307,7 @@ daemon:
   port: ${DAEMON_PORT:-8079}
 
 limits:
-  max_instances: ${MAX_INSTANCES:-100}
+  max_children_per_instance: 50
 """
 
 
