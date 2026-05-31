@@ -127,7 +127,11 @@ def _extract_slug_from_filename(filename: str) -> str:
     """
     # Pattern: _YYYYMMDD_HHMMSS.md
     pattern = r"_\d{8}_\d{6}\.md$"
-    return re.sub(pattern, "", filename)
+    slug = re.sub(pattern, "", filename)
+    # Fallback: strip .md if still present (for non-timestamp filenames)
+    if slug.endswith(".md"):
+        slug = slug.removesuffix(".md")
+    return slug
 
 
 def _parse_sections(content: str) -> dict[str, str]:
@@ -258,6 +262,8 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
             # Extract slug and compute score
             slug = _extract_slug_from_filename(file_path.name)
             slug_tokens = _tokenize_slug(slug)
+            if not slug_tokens:
+                continue
             score = _match_score(query_tokens, slug_tokens)
 
             # Skip if below low tier threshold
@@ -265,7 +271,7 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
                 continue
 
             # Read content
-            content = file_path.read_text(errors="replace")
+            content = file_path.read_text(encoding="utf-8", errors="replace")
 
             # Parse sections
             sections = _parse_sections(content)
@@ -335,11 +341,7 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
                     TOKEN_LIMIT_HIGH
                 )
             else:
-                # Use entire content if no Answer section
-                content = _truncate_to_tokens(
-                    matched.sections.get("", ""),
-                    TOKEN_LIMIT_HIGH
-                )
+                continue
             limit = TOKEN_LIMIT_HIGH
         elif matched.score >= TIER_MEDIUM:
             if "Concise" in matched.sections:
@@ -347,11 +349,10 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
                     matched.sections["Concise"],
                     TOKEN_LIMIT_MEDIUM
                 )
+            elif matched.first_sentence:
+                content = matched.first_sentence
             else:
-                content = _truncate_to_tokens(
-                    matched.sections.get("", ""),
-                    TOKEN_LIMIT_MEDIUM
-                )
+                continue
             limit = TOKEN_LIMIT_MEDIUM
         elif matched.score >= TIER_LOW:
             # First sentence only, char limit only
@@ -384,10 +385,10 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
         entries.append(f"### {matched.slug} ({score_pct}% match)\n{content}\n")
         remaining_budget -= estimated_tokens
 
-        # Add to file index (up to 30 files)
-        if len(file_index_entries) < 30:
-            summary = matched.first_sentence[:80]
-            file_index_entries.append(f"| {matched.filename} | {summary} |")
+    # Build file index from ALL matched files (up to 30) - independent of injection loop
+    for matched in matched_files[:30]:
+        summary = matched.first_sentence[:80] if matched.first_sentence else matched.slug
+        file_index_entries.append(f"| {matched.filename} | {summary} |")
 
     if not entries:
         return ""
@@ -405,7 +406,7 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
         lines.append("|------|----------|\n")
         lines.extend(file_index_entries)
 
-    return "\n".join(lines)
+    return "".join(lines)
 
 
 def get_shared_context(context_key: str, query: str) -> str | None:
