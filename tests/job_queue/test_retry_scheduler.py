@@ -11,6 +11,7 @@ import pytest
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daemon.services.retry_scheduler import (

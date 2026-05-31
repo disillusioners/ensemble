@@ -65,8 +65,9 @@ class LimitsConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LIMITS_")
 
+    # Unused: global limit removed, per-parent limit used instead
     max_instances: int = Field(default=100)
-    max_children_per_instance: int = Field(default=10)
+    max_children_per_instance: int = Field(default=50)
     instance_timeout_minutes: int = Field(default=60)
     message_rate_limit: int = Field(default=60)
     graph_recursion_limit: int = Field(default=100)

@@ -1167,7 +1167,7 @@ class InstanceManager:
             The instance_id of the newly created instance.
 
         Raises:
-            ValueError: If max_instances or max_children_per_instance limit is exceeded,
+            ValueError: If max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
         return self._lifecycle_service.spawn_instance(

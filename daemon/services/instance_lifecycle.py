@@ -194,7 +194,7 @@ class InstanceLifecycleService:
             The instance_id of the newly created instance.
 
         Raises:
-            ValueError: If max_instances or max_children_per_instance limit is exceeded,
+            ValueError: If max_children_per_instance limit is exceeded,
                 or if agent_id is not found.
         """
         # Normalize project_id: accept "null"/"none"/""/None as system default
@@ -223,23 +223,14 @@ class InstanceLifecycleService:
         project_repository = self._manager._project_repository
         prompt_cache = self._manager.prompt_cache
         
-        # Check max_instances limit
-        current_instance_count = len(self._manager.instances)
-        if current_instance_count >= self._config.limits.max_instances:
-            raise ValueError(
-                f"Max instances limit reached: {self._config.limits.max_instances}"
-            )
-
-        # Check max_children_per_instance limit if parent_id is provided
+        # Check max_children_per_instance limit if parent_id is provided (root instances skip the check)
         if parent_id is not None:
-            parent_meta = instance_repository.get(parent_id)
-            if parent_meta and parent_meta.children:
-                child_count = len(parent_meta.children)
-                if child_count >= self._config.limits.max_children_per_instance:
-                    raise ValueError(
-                        f"Max children per instance limit reached: "
-                        f"{self._config.limits.max_children_per_instance}"
-                    )
+            child_count = instance_repository.count_children(parent_id)
+            if child_count >= self._config.limits.max_children_per_instance:
+                raise ValueError(
+                    f"Max children limit reached for parent {parent_id}: "
+                    f"{self._config.limits.max_children_per_instance}"
+                )
 
         # Load MCP tool names for prompt generation (needed before creating tools)
         # This gets the tool names from the MCP service cache (pre-loaded by spawn_instance_with_mcp)

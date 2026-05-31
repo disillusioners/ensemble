@@ -292,7 +292,7 @@ class TestLimitsConfig:
         config = LimitsConfig()
         
         assert config.max_instances == 100
-        assert config.max_children_per_instance == 10
+        assert config.max_children_per_instance == 50
         assert config.instance_timeout_minutes == 60
         assert config.message_rate_limit == 60
         assert config.graph_recursion_limit == 100

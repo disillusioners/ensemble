@@ -278,7 +278,7 @@ daemon:
 
 limits:
   max_instances: 100
-  max_children_per_instance: 10
+  max_children_per_instance: 50
   instance_timeout_minutes: 60
   message_rate_limit: 60
 

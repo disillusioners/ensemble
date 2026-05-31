@@ -174,49 +174,25 @@ class TestSpawnInstance:
             
             assert instance_id == "550e8400-e29b-41d4-a716-446655440000"
 
-    def test_spawn_instance_max_instances_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that max_instances limit is enforced."""
-        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
-            
-            # Set max_instances to 2 for this test
-            mock_config.limits.max_instances = 2
-            
-            manager = InstanceManager(mock_config)
-            manager._instance_repository = mock_instance_repository
-            
-            # Create 2 instances (reaching the limit)
-            with patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
-                 patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
-                 patch('daemon.manager.create_instance_tools', return_value=[]):
-                
-                manager.spawn_instance(agent_id="coder", instance_id="instance-1")
-                manager.spawn_instance(agent_id="coder", instance_id="instance-2")
-                
-                # Third instance should raise ValueError
-                with pytest.raises(ValueError, match="Max instances limit reached"):
-                    manager.spawn_instance(agent_id="coder", instance_id="instance-3")
-
     def test_spawn_instance_max_children_limit(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test that max_children_per_instance limit is enforced."""
+        """Test that max_children_per_instance limit is enforced via DB query."""
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache):
             
             # Set max_children_per_instance to 2 for this test
             mock_config.limits.max_children_per_instance = 2
             
+            # Mock count_children to return 2 (at limit)
+            mock_instance_repository.count_children.return_value = 2
+            
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            
-            # Parent instance with 2 children should reach the limit
-            mock_parent_instance = MagicMock()
-            mock_parent_instance.children = ["child1", "child2"]
-            mock_instance_repository.get.return_value = mock_parent_instance
             
             with patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
                  patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
                  patch('daemon.manager.create_instance_tools', return_value=[]):
                 
-                # Third child should raise ValueError
-                with pytest.raises(ValueError, match="Max children per instance limit reached"):
+                # Third child should raise ValueError (limit is 2, already at limit)
+                with pytest.raises(ValueError, match="Max children limit reached"):
                     manager.spawn_instance(agent_id="coder", parent_id="parent-instance")
 
     def test_spawn_instance_creates_graph(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):

@@ -184,6 +184,21 @@ class SQLModelInstanceRepository:
                 return None
         return self.get(instance.parent_id)
 
+    def count_children(self, parent_id: str) -> int:
+        """Count direct children of an instance from the hierarchy table.
+        
+        Args:
+            parent_id: The parent instance ID.
+            
+        Returns:
+            Number of direct children.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(func.count()).select_from(InstanceHierarchy).where(
+                InstanceHierarchy.parent_id == parent_id
+            )
+            return db_session.exec(stmt).one()
+
     # --------------------------------------------------------
     # TREE TRAVERSAL
     # --------------------------------------------------------

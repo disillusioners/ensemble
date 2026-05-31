@@ -390,7 +390,7 @@ class TestArchiveMemoryFile:
         assert not source_file.exists()
         # Archive directory should exist with the file
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archived_file = memories_dir / "archive" / now_year / now_month / "20260401_1430-test-memory.md"
         assert archived_file.exists()
 
@@ -410,7 +410,7 @@ class TestArchiveMemoryFile:
 
         # Check that archive/YYYY/MM structure was created
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archive_dir = memories_dir / "archive" / now_year / now_month
         assert archive_dir.exists()
         assert archive_dir.is_dir()
@@ -438,7 +438,7 @@ class TestArchiveMemoryFile:
         memories_dir.mkdir()
 
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archive_dir = memories_dir / "archive" / now_year / now_month
         archive_dir.mkdir(parents=True)
 
@@ -476,7 +476,7 @@ class TestArchiveMemoryFile:
         _archive_memory_file(agent_dir, "important-memory.md")
 
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archived_file = memories_dir / "archive" / now_year / now_month / "important-memory.md"
 
         assert archived_file.read_text() == original_content
@@ -679,7 +679,7 @@ class TestArchiveLifecycleIntegration:
 
         # Step 4: Verify file is in archive directory
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archive_file = memories_dir / "archive" / now_year / now_month / "lifecycle-test.md"
         assert archive_file.exists()
         assert archive_file.read_text() == "# Lifecycle Test\n\nMemory created for lifecycle test."
@@ -760,7 +760,7 @@ class TestArchiveLifecycleIntegration:
 
         # Verify it's in the archive with correct structure
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archived = memories_dir / "archive" / now_year / now_month / "manual-archive.md"
         assert archived.exists()
         assert "Manual Archive" in archived.read_text()
@@ -790,7 +790,7 @@ class TestArchiveLifecycleIntegration:
 
         # Verify all are archived
         now_year = str(__import__("datetime").datetime.now().year)
-        now_month = f"{__import__("datetime").datetime.now().month:02d}"
+        now_month = f"{__import__('datetime').datetime.now().month:02d}"
         archive_dir = memories_dir / "archive" / now_year / now_month
 
         for name, content in files_content.items():

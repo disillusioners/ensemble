@@ -127,6 +127,7 @@ class TestContextKeyInjection:
 
         # Configure manager mock
         mock_manager._instance_repository = mock_instance_repository
+        mock_instance_repository.count_children.return_value = 0  # Below limit
         mock_manager._project_repository = mock_project_repository
         mock_manager._engine = MagicMock()
         mock_manager._live_hub = MagicMock()
