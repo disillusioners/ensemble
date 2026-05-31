@@ -239,20 +239,20 @@ _mock_modules = {
     "slack_sdk": mock_slack_sdk,
 }
 
-# Inject mocks into sys.modules BEFORE any test imports happen
+# Inject mocks into sys.modules BEFORE any test imports happen.
+# Always inject (no guard) so mocks replace any real modules that may have
+# been imported during pytest collection or from prior test runs.
 for key, mock_mod in _mock_modules.items():
-    if key not in sys.modules:
-        sys.modules[key] = mock_mod
+    sys.modules[key] = mock_mod
 
 
 def pytest_collection_modifyitems(items):
     """Only apply mocks for unit tests, not integration tests."""
     for item in items:
         if "integration" not in item.fspath.strpath:
-            # Ensure mocks are applied for unit tests
+            # Ensure mocks are applied for unit tests (always inject to override any real modules)
             for key in _mock_modules:
-                if key not in sys.modules:
-                    sys.modules[key] = _mock_modules[key]
+                sys.modules[key] = _mock_modules[key]
         else:
             # Restore real modules for integration tests
             for key in _mock_modules:
