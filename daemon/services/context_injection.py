@@ -343,6 +343,9 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
             else:
                 continue
             limit = TOKEN_LIMIT_HIGH
+        elif matched.score >= TIER_HIGH:
+            # Skip HIGH tier files beyond the limit
+            continue
         elif matched.score >= TIER_MEDIUM:
             if "Concise" in matched.sections:
                 content = _truncate_to_tokens(

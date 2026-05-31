@@ -20,6 +20,7 @@ from daemon.tools.knowledge_tools import (
     _SHOULD_UPDATE_KB_PATTERN,
     create_knowledge_tools,
 )
+from daemon.services.context_injection import get_shared_context
 
 
 # =============================================================================
@@ -885,8 +886,198 @@ class TestExploreJobEnqueue:
 
 
 # =============================================================================
-# Conditional Creation Tests (for instance.py integration)
+# Explore Auto-Injection Tests
 # =============================================================================
+
+
+class TestExploreAutoInjection:
+    """Tests for explore() context auto-injection via get_shared_context."""
+
+    @pytest.fixture
+    def mock_manager_for_injection(self, configured_env, mock_manager):
+        """Mock manager with tree_root_id support for injection tests."""
+        # Set up instance metadata with project_id
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Set up get_tree_root_id to return a valid context key
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(
+            return_value="tree-root-instance-id"
+        )
+
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_explore_injects_context_into_message(
+        self, mock_manager_for_injection
+    ):
+        """When get_shared_context returns injection text, message includes it."""
+        injection_text = "## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here."
+
+        with patch(
+            "daemon.tools.knowledge_tools.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=injection_text,
+        ) as mock_to_thread:
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value="Explorer result.",
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager_for_injection, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                result = await explore_tool.ainvoke({"query": "What is X?"})
+
+                # Verify asyncio.to_thread was called with get_shared_context
+                mock_to_thread.assert_called_once()
+                call_args = mock_to_thread.call_args
+                assert call_args[0][0] == get_shared_context
+                assert call_args[0][1] == "tree-root-instance-id"
+                assert call_args[0][2] == "What is X?"
+
+                # Verify message sent to invoke_agent_and_wait includes injection
+                mock_invoke.assert_called_once()
+                message = mock_invoke.call_args.kwargs["message"]
+                assert injection_text in message
+                assert "## Pre-loaded Context" in message
+
+                # Verify final result is returned
+                assert result == "Explorer result."
+
+    @pytest.mark.asyncio
+    async def test_explore_no_injection_when_service_returns_none(
+        self, mock_manager_for_injection
+    ):
+        """When get_shared_context returns None, message has no injection."""
+        with patch(
+            "daemon.tools.knowledge_tools.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value="Explorer result.",
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager_for_injection, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                result = await explore_tool.ainvoke({"query": "Test query"})
+
+                # Verify message does NOT contain injection text
+                mock_invoke.assert_called_once()
+                message = mock_invoke.call_args.kwargs["message"]
+                assert "Pre-loaded Context" not in message
+
+                # Verify explore still works
+                assert result == "Explorer result."
+
+    @pytest.mark.asyncio
+    async def test_explore_falls_back_to_current_instance_id_when_tree_root_empty(
+        self, configured_env, mock_manager
+    ):
+        """When get_tree_root_id returns empty, uses current_instance_id as fallback."""
+        # Set up instance metadata
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Set up get_tree_root_id to return empty string (falsy)
+        # This causes fallback to current_instance_id which is truthy
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(return_value="")
+
+        with patch(
+            "daemon.tools.knowledge_tools.asyncio.to_thread",
+            new_callable=AsyncMock,
+            return_value="Fallback injection text",
+        ) as mock_to_thread:
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value="Explorer result.",
+            ) as mock_invoke:
+                tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                result = await explore_tool.ainvoke({"query": "Test"})
+
+                # Verify asyncio.to_thread was called with get_shared_context
+                mock_to_thread.assert_called_once()
+                # Verify the fallback context_key (current_instance_id) was used
+                call_args = mock_to_thread.call_args
+                assert call_args[0][0] == get_shared_context
+                assert call_args[0][1] == "parent-instance-id"
+
+                # Verify message includes the injection
+                message = mock_invoke.call_args.kwargs["message"]
+                assert "Fallback injection text" in message
+
+                assert result == "Explorer result."
+
+    @pytest.mark.asyncio
+    async def test_explore_injection_failure_is_nonblocking(
+        self, mock_manager_for_injection
+    ):
+        """If get_shared_context raises, explore still works."""
+        async def raise_error(func, *args, **kwargs):
+            raise OSError("Disk error")
+
+        with patch(
+            "daemon.tools.knowledge_tools.asyncio.to_thread",
+            side_effect=raise_error,
+        ):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value="Explorer succeeded despite injection failure.",
+            ) as mock_invoke:
+                tools = create_knowledge_tools(
+                    mock_manager_for_injection, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                # This should NOT raise - failure should be non-blocking
+                result = await explore_tool.ainvoke({"query": "Test query"})
+
+                # Verify explore still completed successfully
+                mock_invoke.assert_called_once()
+                assert "succeeded" in result
+
+    @pytest.mark.asyncio
+    async def test_explore_injection_uses_thread_pool(
+        self, mock_manager_for_injection
+    ):
+        """Verify asyncio.to_thread is used for get_shared_context."""
+        mock_to_thread = AsyncMock(return_value="## Pre-loaded Context\nContent.")
+
+        with patch("daemon.tools.knowledge_tools.asyncio.to_thread", mock_to_thread):
+            with patch(
+                "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                new_callable=AsyncMock,
+                return_value="Result",
+            ):
+                tools = create_knowledge_tools(
+                    mock_manager_for_injection, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "Test"})
+
+                # Verify asyncio.to_thread was called
+                mock_to_thread.assert_called_once()
+                # First positional arg should be get_shared_context
+                call_args = mock_to_thread.call_args
+                assert call_args[0][0] == get_shared_context  # The actual function
+                assert call_args[0][1] == "tree-root-instance-id"
+                assert call_args[0][2] == "Test"
 
 
 class TestKnowledgeToolsConditionalCreation:

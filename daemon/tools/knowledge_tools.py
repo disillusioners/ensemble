@@ -13,6 +13,7 @@ from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
 from daemon.rag.config import is_rag_enabled
+from daemon.services.context_injection import get_shared_context
 from daemon.utils import invoke_agent_and_wait
 
 if TYPE_CHECKING:
@@ -288,8 +289,21 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         except Exception:
             context_key = current_instance_id
         if context_key:
-            context_dir = str(Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key)
-            explorer_message += f"\nShared context dir: {context_dir}"
+            context_dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
+            explorer_message += f"\nShared context dir: {str(context_dir_path)}"
+
+            # Auto-inject relevant context files via reusable service
+            # Run on thread pool to avoid blocking the async event loop with sync I/O
+            try:
+                injection = await asyncio.to_thread(get_shared_context, context_key, query)
+                if injection:
+                    explorer_message += f"\n\n{injection}"
+                    logger.debug(
+                        "Context auto-injection: matched files for query '%s'",
+                        query[:50],
+                    )
+            except Exception as e:
+                logger.debug("Context auto-injection failed (non-critical): %s", e)
 
         try:
             result = await invoke_agent_and_wait(
