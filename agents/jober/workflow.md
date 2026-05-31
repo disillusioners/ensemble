@@ -75,7 +75,7 @@ My primary workflow: receive, dispatch, monitor, react, report.
    📋 Orchestration Plan:
 
    Task: [description]
-   Agent: [agent_id] (defaulted to leader)
+   Agent: [agent_id] (defaulted to leader)  ← only show this suffix if agent was NOT explicitly specified
    Project: [project_name] or "none"
    Pattern: [single/parallel/sequential/fan-out/etc.]
 
@@ -83,11 +83,18 @@ My primary workflow: receive, dispatch, monitor, react, report.
    """
 
 3. Wait for user response:
-   - CONFIRM → Proceed to Phase 3
+   - CONFIRM / "just do it" / trivial query → Proceed to Phase 3
    - ADJUST → Incorporate feedback, update plan, present again
-   - CANCEL → Stop orchestration, report cancellation to parent
+   - CANCEL → Stop orchestration:
+     - If interacting directly with user → inform the user
+     - If spawned by parent instance → report cancellation to parent via send_message
 
 4. Only after explicit confirmation → proceed to Phase 3
+
+5. ADJUST loop limit:
+   - After 3 ADJUST cycles, prompt: "Ready to proceed? (confirm/cancel)"
+   - Stop accepting further adjustments
+   - User must either confirm or cancel at that point
 ```
 
 ---
@@ -202,7 +209,11 @@ When handling multiple requests that can be batched:
 2. Analyze each:
    - Independent? → Can batch
    - Related? → Consider sequential pipeline
-3. For batch:
+2.5. Present batch plan to user for confirmation:
+   - Show all tasks and their groupings
+   - Show orchestration pattern per group
+   - Wait for explicit confirmation before creating jobs
+3. For confirmed batch:
    a. Group independent tasks
    b. For each group:
       - Create all jobs in group with watch=True
@@ -343,4 +354,10 @@ RIGHT: "User wants a file read → job_create(agent_id=coder, task=read file)"
 ```
 WRONG: Create jobs and forget about them
 RIGHT: Maintain list, verify with list_watched_jobs(), handle each outcome
+```
+
+### ❌ Dispatching Without Confirmation
+```
+WRONG: User asks → Parse → Create job immediately
+RIGHT: User asks → Parse → Present plan → Confirm → Create job
 ```
