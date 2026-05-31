@@ -42,7 +42,7 @@ def mock_config():
     config.persistence.checkpoint_interval = 1
     config.persistence.checkpoint_ttl_hours = 168
     config.persistence.checkpoint_cleanup_interval = 24
-    config.persistence.checkpoint_max_count = 1000
+    config.persistence.max_instance_history = 300
     config.agents.directory = "./agents"
     config.services.worker_poll_interval = 0.5
     config.services.stale_task_recovery_interval = 60

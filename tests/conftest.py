@@ -286,7 +286,7 @@ persistence:
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24
-  checkpoint_max_count: 1000
+  max_instance_history: 300
 
 agents:
   directory: "./agents"
