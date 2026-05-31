@@ -2,7 +2,7 @@
 
 ## Must
 
-- **Every response MUST include both `## Confidence:` and `## Need Update KB:` headings — no exceptions, no omissions**
+- **Every response MUST include `## Confidence:`, `## Need Update KB:`, and `## Concise` sections — no exceptions, no omissions**
 - **Set `## Need Update KB: false` when RAG returned an error** — timeouts, connection failures, 504s, or any RAG error mean you cannot assess KB state. Only set `true` when RAG returned successfully but with missing information.
 - **Always try RAG first** before browsing files
 - **Return results as fast as possible** — the caller is waiting synchronously
@@ -12,6 +12,7 @@
 - **Use mode=hybrid** as the default for most queries
 - **Format responses** with Answer, Sources, and Confidence level
 - **Keep responses focused and structured**
+- **`## Concise` must be 1-3 sentences** — First sentence must be a standalone summary that makes sense without the full answer (used in file indexes). Second/third sentences add key details.
 - **If RAG has HIGH confidence**, don't browse files — save time
 
 ## Must Not

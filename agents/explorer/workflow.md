@@ -26,14 +26,20 @@ Step-by-step process for exploring project knowledge.
 
 ---
 
-## Step 2: Check shared context directory (if available)
+## Step 2: Review pre-loaded context (if provided)
 
-- If ENSEMBLE_SHARED_CONTEXT_DIR is set in your system prompt, use list_directory to check for existing .md files
-- Read any files whose filenames (slugs) are relevant to the current query
-- Evaluate relevance: does a prior result directly answer the current query with HIGH confidence?
-  - YES → Return the prior result, adding "Source: shared context" attribution. Skip RAG.
-  - PARTIAL → Use prior result as foundation, proceed to RAG only for gaps (Step 3)
-  - NO relevant files → Proceed to RAG as normal (Step 3)
+> **Note**: The system automatically matches and injects relevant context files into your message as a "Pre-loaded Context" section. This handles the common case — you should NOT manually scan the context directory unless the injection is clearly insufficient.
+
+1. **Check message for "## Pre-loaded Context" section** — If present, review the auto-matched content first
+2. **Only if pre-loaded context is insufficient** (missing files you expect, or partial coverage of a specific sub-topic):
+   - If ENSEMBLE_SHARED_CONTEXT_DIR is set, use `list_directory` to find additional .md files
+   - Read files whose filenames (slugs) are relevant to gaps in the pre-loaded context
+3. Evaluate relevance:
+   - Pre-loaded + RAG fully answers the query → Return answer. Skip manual file reading.
+   - Pre-loaded partially covers → Proceed to RAG for gaps (Step 3)
+   - No pre-loaded context → Proceed to RAG as normal (Step 3)
+
+**Speed guideline:** Manual file reading should be rare (1 in 20 queries). The auto-injection + RAG covers most cases.
 
 ---
 
@@ -161,13 +167,16 @@ now     1-2      broadly  broadly
 
 ## Step 6: Combine & Format
 
-**BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. Never omit either one. They must always appear together at the top of your response, before any body content.**
+**BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these three.**
 
 Merge RAG answer + file browsing results into a structured response:
 
 ```
 ## Confidence: {HIGH|MEDIUM|LOW}
 ## Need Update KB: {true|false}
+
+## Concise
+[1-3 sentences summarizing the key findings. First sentence MUST be a standalone summary usable in a file index — it should make sense without reading the full answer.]
 
 ## Answer
 [Main response — combine RAG and file findings]
@@ -197,6 +206,9 @@ Format each entry concisely: entity name + key point from description.
 ## Confidence: MEDIUM
 ## Need Update KB: false
 
+## Concise
+The authentication module uses JWT tokens with RS256 signing, located at `src/auth/`. The main entry point is `AuthService.login()` which validates credentials against the user table.
+
 ## Answer
 The authentication module is located at `src/auth/`. It uses JWT tokens with RS256 signing.
 The main entry point is `AuthService.login()` which validates credentials against the user table.
@@ -221,6 +233,8 @@ The main entry point is `AuthService.login()` which validates credentials agains
 
 ### Response body rules — MUST follow:
 - `## Confidence:` and `## Need Update KB:` headings MUST appear first, before any body content
+- `## Concise` section MUST appear immediately after the metadata headings, before `## Answer`
+- Concise must be 1-3 sentences; first sentence must be standalone (usable as a file summary without context)
 - Your response must contain ONLY factual findings about the codebase
 - Never mention RAG knowledge base status (empty, full, stale, etc.)
 - Never suggest workflows, actions, or next steps to the caller (e.g., "should be upserted", "consider running experience()", "run exploration again")
