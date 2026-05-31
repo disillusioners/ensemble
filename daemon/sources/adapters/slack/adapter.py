@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 import aiohttp
 from slack_bolt.async_app import AsyncApp
@@ -287,7 +287,7 @@ class SlackAdapter(MessageSourceAdapter):
         return result
 
     async def _do_api_call(self, method: str, **kwargs) -> dict:
-        """Perform actual API call using Slack SDK.
+        """Perform actual API call using Slack SDK typed methods.
 
         Args:
             method: Slack API method name.
@@ -299,15 +299,21 @@ class SlackAdapter(MessageSourceAdapter):
         if not self._app:
             raise RuntimeError("Adapter not started - no Slack app")
 
-        # Use the app's AsyncWebClient (awaitable)
         client = self._app.client
 
         try:
-            # AsyncWebClient.api_call() returns a coroutine
-            response = await client.api_call(
-                api_method=method,
-                **kwargs
-            )
+            # Use typed async methods instead of generic api_call()
+            # Convert "chat.postMessage" -> client.chat_postMessage()
+            typed_method = method.replace(".", "_")
+            if hasattr(client, typed_method):
+                api_method = getattr(client, typed_method)
+                response = await api_method(**kwargs)
+            else:
+                # Fallback: use params dict for methods without typed wrappers
+                response = await client.api_call(
+                    api_method=method,
+                    params=kwargs
+                )
 
             if not response.get("ok"):
                 error = response.get("error", "unknown_error")
