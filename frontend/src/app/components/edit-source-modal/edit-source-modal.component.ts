@@ -99,6 +99,13 @@ export class EditSourceModalComponent implements OnInit {
         { key: 'guild_id', label: 'Server ID (Guild)', type: 'text', placeholder: '987654321', hint: 'Optional: Restrict to specific server', section: 'config' },
       ]
     },
+    slack: {
+      fields: [
+        { key: 'bot_token', label: 'Bot Token', type: 'password', placeholder: 'Enter bot token (leave empty to keep current)', hint: 'Slack Bot User OAuth Token', required: false, section: 'credentials' },
+        { key: 'app_token', label: 'App Token', type: 'password', placeholder: 'Enter app token (leave empty to keep current)', hint: 'Slack App-Level Token (for Socket Mode)', required: false, section: 'credentials' },
+        { key: 'default_agent', label: 'Default Agent', type: 'select', placeholder: 'Select an agent...', hint: 'Agent to handle incoming messages', section: 'config', options: [] },
+      ]
+    },
     scheduler: {
       fields: [
         { key: 'schedule_type', label: 'Schedule Type', type: 'select', placeholder: 'Select type...', hint: 'How to schedule the job', section: 'config', options: [
@@ -175,7 +182,8 @@ export class EditSourceModalComponent implements OnInit {
     { value: 'telegram', label: 'Telegram', icon: 'telegram', description: 'Receive messages from Telegram bots' },
     { value: 'webhook', label: 'Webhook', icon: 'webhook', description: 'Receive HTTP POST requests' },
     { value: 'whatsapp', label: 'WhatsApp', icon: 'whatsapp', description: 'Connect via WhatsApp Business API' },
-    { value: 'discord', label: 'Discord', icon: 'discord', description: 'Receive messages from Discord bots' }
+    { value: 'discord', label: 'Discord', icon: 'discord', description: 'Receive messages from Discord bots' },
+    { value: 'slack', label: 'Slack', icon: 'slack', description: 'Connect via Slack Socket Mode with real-time messaging' }
   ];
 
   constructor(

@@ -29,6 +29,7 @@ export class SourceCardComponent {
     webhook: { type: 'webhook', label: 'Webhook', icon: 'webhook', color: '#10b981' },
     whatsapp: { type: 'whatsapp', label: 'WhatsApp', icon: 'whatsapp', color: '#25D366' },
     discord: { type: 'discord', label: 'Discord', icon: 'discord', color: '#5865F2' },
+    slack: { type: 'slack', label: 'Slack', icon: 'slack', color: '#4A154B' },
     scheduler: { type: 'scheduler', label: 'Scheduler', icon: 'scheduler', color: '#6366f1' }
   };
 
