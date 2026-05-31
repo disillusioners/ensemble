@@ -330,17 +330,29 @@ Medium
         assert "This is the answer section" in result[0].first_sentence
 
     def test_corrupt_file_skipped_gracefully(self, tmp_path):
-        """One bad file doesn't stop the scan of other files."""
-        # Create good file
+        """One file with OSError doesn't stop scan of other files."""
+        # Create good file that matches query
         good_file = tmp_path / "auth-module_20260531_231255.md"
         good_file.write_text("## Answer\nAuth content.\n")
-        # Create bad file
-        bad_file = tmp_path / "bad-file_20260531_231255.md"
-        bad_file.write_text("corrupt content")
+        # Create corrupt file with a slug that would match by score
+        corrupt_file = tmp_path / "auth-something_20260531_231255.md"
+        corrupt_file.write_text("## Answer\nCorrupt content.\n")
 
-        result = _match_context_files("auth", tmp_path)
-        # Good file should still be found (though slug is "bad-file" for the bad file)
-        assert len(result) >= 1
+        # Force read_text to raise OSError only for the corrupt file
+        original_read_text = Path.read_text
+
+        def mock_read_text(self, encoding=None, errors=None):
+            if "auth-something" in str(self):
+                raise OSError("Simulated read error")
+            return original_read_text(self, encoding=encoding, errors=errors)
+
+        with patch("pathlib.Path.read_text", mock_read_text):
+            result = _match_context_files("auth module", tmp_path)
+
+        # Good file should be matched despite corrupt file failing
+        assert len(result) == 1
+        assert result[0].slug == "auth-module"
+        assert result[0].score >= TIER_LOW
 
     def test_short_query_matches_long_slug(self, tmp_path):
         """Short 2-token query matches 4-token slug with full recall."""
@@ -440,9 +452,9 @@ class TestFormatInjection:
         assert "| auth-module_20260531.md |" in result
         assert "| other-file_20260531.md |" in result
 
-    def test_global_token_cap_enforced(self):
-        """When 5 high-tier files exist, output is capped."""
-        # Create 5 high-tier matches
+    def test_high_tier_file_limit_enforced(self):
+        """When more than MAX_HIGH_TIER_FILES exist, output is capped by file count."""
+        # Create 5 high-tier matches with short content
         matched = []
         for i in range(5):
             matched.append(
@@ -450,7 +462,7 @@ class TestFormatInjection:
                     filename=f"file{i}_20260531.md",
                     slug=f"file{i}",
                     score=0.90,  # High tier
-                    sections={"Answer": "This is answer number " + str(i) + ". " * 100},
+                    sections={"Answer": "This is answer number " + str(i) + "."},
                     first_sentence="Answer sentence.",
                 )
             )
@@ -460,6 +472,30 @@ class TestFormatInjection:
         # But limited by MAX_HIGH_TIER_FILES = 3
         entries = result.count("### file")  # Count file entries
         assert entries <= MAX_HIGH_TIER_FILES
+
+    def test_global_token_cap_enforced(self):
+        """When total content exceeds INJECTION_TOKEN_CAP, output is truncated."""
+        # Create files with large content (~2500+ tokens each)
+        # "Word " * 4000 = ~20000 chars ~= 2500 tokens per file
+        large_content = "Word " * 4000
+        matched = []
+        for i in range(4):
+            matched.append(
+                MatchedFile(
+                    filename=f"large{i}_20260531.md",
+                    slug=f"large{i}",
+                    score=0.85,
+                    sections={"Answer": large_content},
+                    first_sentence="Large content file.",
+                )
+            )
+        result = _format_injection(matched)
+        # Total ~10000 tokens exceeds 2000 cap, output should be truncated
+        assert "## Pre-loaded Context" in result
+        # Not all 4 files should appear in full - content is too large
+        # Check that result is smaller than sum of all inputs
+        total_input = sum(len(m.sections["Answer"]) for m in matched)
+        assert len(result) < total_input
 
 
 # ─── TestGetSharedContext (PUBLIC API) ──────────────────────────────────────────
