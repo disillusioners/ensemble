@@ -103,7 +103,11 @@ class TokenBucket:
             return self._try_acquire_unlocked()
 
     def _try_acquire_unlocked(self) -> bool:
-        """Non-blocking acquire (must hold lock)."""
+        """Non-blocking acquire without lock.
+
+        Safe to call directly since there are no await points between
+        the token check and the decrement - execution is atomic.
+        """
         now = time.monotonic()
         elapsed = now - self._last_refill
 
@@ -119,20 +123,28 @@ class TokenBucket:
             return True
         return False
 
-    async def wait_and_acquire(self, max_wait: float = 5.0) -> bool:
+    async def wait_and_acquire(self, max_wait: float | None = None) -> bool:
         """Wait up to max_wait for a token.
 
         Args:
-            max_wait: Maximum seconds to wait.
+            max_wait: Maximum seconds to wait. Defaults to 60s or 2x refill
+                interval, whichever is longer.
 
         Returns:
             True if token acquired, False if timeout.
         """
+        # Calculate sensible default based on bucket rate
+        refill_interval = 60.0 / self._rate.requests_per_minute
+        if max_wait is None:
+            max_wait = max(60.0, refill_interval * 2)
         deadline = time.monotonic() + max_wait
+        # Sleep interval based on bucket refill rate
+        sleep_interval = min(0.1, refill_interval / 4)
         while time.monotonic() < deadline:
-            if await self.acquire():
+            # Use _try_acquire_unlocked directly to avoid double-check bug
+            if self._try_acquire_unlocked():
                 return True
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(sleep_interval)
         return False
 
 
@@ -149,7 +161,6 @@ class SlackTieredRateLimiter:
             tier: TokenBucket(config)
             for tier, config in TIER_CONFIGS.items()
         }
-        self._lock = asyncio.Lock()
 
     def _get_tier(self, method: str) -> SlackTier:
         """Get the tier for a Slack API method.
@@ -201,8 +212,8 @@ class SlackTieredRateLimiter:
 
         # Calculate appropriate sleep interval based on tier
         if tier == SlackTier.TIER_1:
-            sleep_interval = 1.0  # 1 req/min = wait up to 60s
-            max_wait = min(max_wait, 60.0)
+            sleep_interval = 1.0  # 1 req/min = wait up to 60s for token refill
+            # Don't clamp max_wait here - let acquire_and_execute set the floor
         elif tier == SlackTier.TIER_2:
             sleep_interval = 0.5  # 5 req/min
             max_wait = min(max_wait, 15.0)
@@ -211,7 +222,9 @@ class SlackTieredRateLimiter:
 
         deadline = time.monotonic() + max_wait
         while time.monotonic() < deadline:
-            if await bucket.acquire():
+            # Use _try_acquire_unlocked directly to avoid consuming tokens
+            # on each retry attempt (bucket.acquire() would decrement on success)
+            if bucket._try_acquire_unlocked():
                 return True
             await asyncio.sleep(sleep_interval)
         return False
