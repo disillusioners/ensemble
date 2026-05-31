@@ -370,33 +370,21 @@ class TestCheckpointCleanupJobOrphans:
             )
         )
 
+        # Mock checkpointer.conn and lock for Operation A
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+
+        # Cursor returns checkpoint threads: thread-1, thread-2, thread-3
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[("thread-1",), ("thread-2",), ("thread-3",)])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
-
-            async def mock_execute(sql, params=None):
-                return mock_cursor
-
-            async def mock_fetchall():
-                # Return row-like objects that work with row["thread_id"]
-                # Use a simple dict-like object for subscript access
-                class RowLike:
-                    def __init__(self, thread_id):
-                        self._data = {"thread_id": thread_id}
-                    def __getitem__(self, key):
-                        return self._data[key]
-
-                # Threads exist in checkpoint DB: thread-1, thread-2, thread-3
-                # Only thread-3 is orphaned (not in instance repo)
-                return [RowLike(tid) for tid in ["thread-1", "thread-2", "thread-3"]]
-
-            mock_cursor.fetchall = mock_fetchall
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            await job._cleanup_orphaned_threads()
+        await job._cleanup_orphaned_threads()
 
         # Verify adelete_thread was called exactly once for orphaned thread-3
         checkpointer.adelete_thread.assert_awaited_once_with("thread-3")
@@ -419,29 +407,20 @@ class TestCheckpointCleanupJobOrphans:
             )
         )
 
+        # Mock checkpointer.conn and lock
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[("thread-1",), ("thread-2",)])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
-            # Simulate rows being subscriptable
-            async def mock_execute(sql, params=None):
-                return mock_cursor
-
-            async def mock_fetchall():
-                # Return rows that look like aiosqlite.Row
-                rows = []
-                for tid in ["thread-1", "thread-2"]:
-                    row = MagicMock()
-                    row.__getitem__ = lambda s, key: tid if key == "thread_id" else None
-                    rows.append(row)
-                return rows
-
-            mock_cursor.fetchall = mock_fetchall
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            await job._cleanup_orphaned_threads()
+        await job._cleanup_orphaned_threads()
 
         # No deletion when no orphans
         checkpointer.adelete_thread.assert_not_called()
@@ -619,51 +598,58 @@ class TestCheckpointCleanupJobPerThreadPruning:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
+        # Mock checkpointer.conn and lock
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
+        # Track execute calls to return appropriate cursors
+        execute_results = []
+
+        # First query result: threads with excess checkpoints
+        # Returns (thread_id, checkpoint_ns, count)
+        excess_cursor = AsyncMock()
+        excess_cursor.fetchall = AsyncMock(
+            return_value=[("thread-excess", "", 100)]  # thread_id, checkpoint_ns, cnt
+        )
+        execute_results.append(excess_cursor)
+
+        # Second query result: checkpoint IDs to keep for thread-excess
+        keep_cursor = AsyncMock()
+        keep_cursor.fetchall = AsyncMock(
+            return_value=[(f"keep-{i:032d}",) for i in range(50)]
+        )
+        execute_results.append(keep_cursor)
+
+        # Third query result: delete from checkpoints (returns rowcount)
+        delete_checkpoint_cursor = AsyncMock()
+        delete_checkpoint_cursor.rowcount = 50
+        execute_results.append(delete_checkpoint_cursor)
+
+        # Fourth query result: delete from writes (returns rowcount)
+        delete_writes_cursor = AsyncMock()
+        delete_writes_cursor.rowcount = 100
+        execute_results.append(delete_writes_cursor)
+
+        call_idx = [0]
+
+        async def mock_execute(sql, params=None):
+            cursor = execute_results[call_idx[0]]
+            call_idx[0] += 1
+            return cursor
+
+        mock_conn.execute = mock_execute
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
+        # Method runs and returns None (no explicit return)
+        result = await job._prune_per_thread_checkpoints()
 
-            # First query: threads with excess checkpoints
-            # Second query: checkpoint IDs to keep
-            # Third query: delete old checkpoints
-            call_count = [0]
-
-            async def mock_execute(sql, params=None):
-                call_count[0] += 1
-                if "GROUP BY" in sql:
-                    # Threads with excess checkpoints
-                    return MagicMock(
-                        fetchall=AsyncMock(
-                            return_value=[
-                                ("thread-excess",),
-                                ("thread-normal",),  # Not actually excess, mocked
-                            ]
-                        )
-                    )
-                elif "ORDER BY checkpoint_id DESC" in sql:
-                    # IDs to keep
-                    return MagicMock(
-                        fetchall=AsyncMock(
-                            return_value=[(f"keep-{i}",) for i in range(50)]
-                        )
-                    )
-                else:
-                    # Delete old checkpoints
-                    return MagicMock(
-                        rowcount=100,
-                        execute=AsyncMock(),
-                        commit=AsyncMock(),
-                    )
-
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            await job._prune_per_thread_checkpoints()
-
-        # Should have called prune for excess thread
-        # Note: The actual implementation uses direct SQL, so we verify it ran
+        # Method returns None (no explicit return in production code)
+        assert result is None
+        # Verify execute was called multiple times (find excess + 3 queries for pruning)
+        assert call_idx[0] >= 4  # At least 4 SQL operations
 
     @pytest.mark.asyncio
     async def test_prune_no_excess_threads(self):
@@ -672,22 +658,23 @@ class TestCheckpointCleanupJobPerThreadPruning:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
+        # Mock checkpointer.conn and lock
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
+        # First query returns empty (no excess threads)
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
+        result = await job._prune_per_thread_checkpoints()
 
-            async def mock_execute(sql, params=None):
-                if "GROUP BY" in sql:
-                    # No threads with excess checkpoints
-                    return MagicMock(fetchall=AsyncMock(return_value=[]))
-                return mock_cursor
-
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            await job._prune_per_thread_checkpoints()
+        # No deletions when no excess threads - method returns None
+        assert result is None
 
 
 class TestCheckpointCleanupJobErrorIsolation:
@@ -704,25 +691,19 @@ class TestCheckpointCleanupJobErrorIsolation:
         )
         instance_repo = MagicMock()
 
+        # Mock checkpointer.conn and lock for queries
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        # All operations should still run despite errors
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
-
-            async def mock_execute(sql, params=None):
-                return mock_cursor
-
-            async def mock_fetchall():
-                return []
-
-            mock_cursor.fetchall = mock_fetchall
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            # Should not raise - errors are caught internally
-            await job.execute()
+        # Should not raise - errors are caught internally
+        await job.execute()
 
     @pytest.mark.asyncio
     async def test_operation_a_error_does_not_prevent_b(self):
@@ -731,28 +712,24 @@ class TestCheckpointCleanupJobErrorIsolation:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
-        # Operation A fails
+        # Operation A fails - instance repo raises error
         instance_repo.list = MagicMock(side_effect=RuntimeError("Repo error"))
+
+        # Mock checkpointer.conn and lock
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        # Operation B should still try to run
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
+        # Operation B should still run (cleanup_expired_terminal catches its own errors)
+        # Should not raise overall - operation A's error is caught
+        await job.execute()
 
-            async def mock_execute(sql, params=None):
-                return mock_cursor
-
-            async def mock_fetchall():
-                return []
-
-            mock_cursor.fetchall = mock_fetchall
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            # Should not raise - errors are caught internally
-            await job.execute()
+        # adelete_thread may or may not be called depending on instance_repo errors
+        # but execute() should complete without raising
+        assert True  # If we get here, error isolation worked
 
 
 class TestCheckpointCleanupJobExecute:
@@ -760,32 +737,33 @@ class TestCheckpointCleanupJobExecute:
 
     @pytest.mark.asyncio
     async def test_execute_all_operations(self):
-        """Full execute() runs all 4 operations."""
+        """Full execute() runs all 4 operations without error."""
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
+        # Mock checkpointer.conn and lock for all operations
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
+        # Return empty results for all queries (no orphans, no excess)
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+
+        # instance_repo returns empty list for all status queries
+        instance_repo.list = MagicMock(return_value=([], 0))
+
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        with patch("aiosqlite.connect") as mock_connect:
-            mock_db = AsyncMock()
-            mock_cursor = AsyncMock()
+        await job.execute()
 
-            async def mock_execute(sql, params=None):
-                return mock_cursor
-
-            async def mock_fetchall():
-                return []
-
-            mock_cursor.fetchall = mock_fetchall
-            mock_db.execute = mock_execute
-            mock_connect.return_value.__aenter__.return_value = mock_db
-
-            await job.execute()
-
-        # Verify all 4 operations were attempted
-        # (operations may not call adelete_thread if no data, but they should run)
-        # The key is that execute() completes without error
+        # Verify adelete_thread was not called (no data to clean up)
+        checkpointer.adelete_thread.assert_not_called()
+        # Verify SQL queries were executed (at least for Operations A and D)
+        assert mock_conn.execute.call_count >= 2
 
 
 # ==================== Integration-style Tests ====================
