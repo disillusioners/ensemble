@@ -708,28 +708,39 @@ class TestCheckpointCleanupJobErrorIsolation:
     @pytest.mark.asyncio
     async def test_operation_a_error_does_not_prevent_b(self):
         """Operation A error should not prevent Operation B from running."""
+        from datetime import datetime
+
         config = PersistenceConfig(checkpoint_ttl_hours=1)
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
-        # Operation A fails - instance repo raises error
-        instance_repo.list = MagicMock(side_effect=RuntimeError("Repo error"))
+        # Track calls to adelete_thread to verify Operation B ran
+        deleted_threads: list[str] = []
+        checkpointer.adelete_thread = AsyncMock(side_effect=lambda tid: deleted_threads.append(tid))
 
-        # Mock checkpointer.conn and lock
-        mock_lock = asyncio.Lock()
+        # Operation A fails when querying checkpoint DB for orphaned threads
+        # (Operation B doesn't use conn.execute, so it won't be affected)
         mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(side_effect=RuntimeError("Checkpoint DB error"))
+
+        # Operation A fails before calling instance_repo.list, so we only need
+        # instance_repo.list to return data for Operation B (expired terminal instances)
+        expired_instance = MagicMock()
+        expired_instance.instance_id = "expired-instance-123"
+        expired_instance.updated_at = "2020-01-01T00:00:00"
+        instance_repo.list = MagicMock(return_value=([expired_instance], 1))
+
         checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
+        checkpointer.lock = asyncio.Lock()
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
-        # Operation B should still run (cleanup_expired_terminal catches its own errors)
-        # Should not raise overall - operation A's error is caught
+        # Execute should not raise despite Operation A failing
         await job.execute()
 
-        # adelete_thread may or may not be called depending on instance_repo errors
-        # but execute() should complete without raising
-        assert True  # If we get here, error isolation worked
+        # Verify Operation B (_cleanup_expired_terminal) ran by checking
+        # that adelete_thread was called for the expired instance
+        assert "expired-instance-123" in deleted_threads
 
 
 class TestCheckpointCleanupJobExecute:

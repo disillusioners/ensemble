@@ -12,7 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
-    CHECKPOINT_MAX_COUNT,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
 )
@@ -92,7 +91,6 @@ class PersistenceConfig(BaseSettings):
     checkpoint_interval: int = Field(default=1)
     checkpoint_ttl_hours: int = Field(default=CHECKPOINT_TTL_HOURS)
     checkpoint_cleanup_interval: int = Field(default=CHECKPOINT_CLEANUP_INTERVAL_HOURS)
-    checkpoint_max_count: int = Field(default=CHECKPOINT_MAX_COUNT)
     maintenance_check_interval_minutes: int = Field(default=MAINTENANCE_CHECK_INTERVAL_MINUTES)
     max_instance_history: int = Field(default=MAX_INSTANCE_HISTORY)
 

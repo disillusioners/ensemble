@@ -63,7 +63,6 @@ DB_BUSY_TIMEOUT_S: int = 30  # SQLite busy timeout
 CHECKPOINT_INTERVAL: int = 1  # Checkpoint interval (messages)
 CHECKPOINT_TTL_HOURS: int = 168  # Checkpoint TTL (7 days)
 CHECKPOINT_CLEANUP_INTERVAL_HOURS: int = 24  # Checkpoint cleanup interval
-CHECKPOINT_MAX_COUNT: int = 1000  # Max checkpoints to list
 CHECKPOINT_MAX_PER_THREAD: int = 50  # Max checkpoints per thread (preserves parent chain)
 MAX_INSTANCE_HISTORY: int = 300  # Max terminal instances to keep checkpoint data for
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
